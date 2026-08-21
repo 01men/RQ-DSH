@@ -32,6 +32,12 @@ export interface Collection<T extends RecordBase> {
   replaceAll(records: T[]): void
   count(): number
   onChange(cb: (change: CollectionChange<T>) => void): () => void
+  /**
+   * 声明业务唯一约束（模拟数据库部分唯一索引）。
+   * 之后 insert/update 违反约束将直接抛错——「先查后插」被引擎级兜底取代，
+   * 并发与竞态下不再可能产生重复数据（红线来自 auth-identity 模块设计）。
+   */
+  uniqueOn(label: string, keyOf: (record: T) => string): void
 }
 
 export interface StorageConfig {
@@ -42,6 +48,7 @@ export interface StorageConfig {
 class CollectionImpl<T extends RecordBase> implements Collection<T> {
   private records = new Map<string, T>()
   private listeners = new Set<(change: CollectionChange<T>) => void>()
+  private uniques: Array<{ label: string; keyOf: (record: T) => string }> = []
 
   readonly name: string
   private readonly persist: (name: string) => void
@@ -49,6 +56,24 @@ class CollectionImpl<T extends RecordBase> implements Collection<T> {
   constructor(name: string, persist: (name: string) => void) {
     this.name = name
     this.persist = persist
+  }
+
+  uniqueOn(label: string, keyOf: (record: T) => string): void {
+    if (this.uniques.some((unique) => unique.label === label)) return
+    this.uniques.push({ label, keyOf })
+  }
+
+  /** 校验唯一约束：返回既有冲突记录（不含自身）。 */
+  private conflictOf(record: T, selfId?: string): { label: string; existing: T } | undefined {
+    for (const unique of this.uniques) {
+      const key = unique.keyOf(record)
+      if (key === '' || key === undefined) continue
+      for (const other of this.records.values()) {
+        if (selfId !== undefined && other.id === selfId) continue
+        if (unique.keyOf(other) === key) return { label: unique.label, existing: other }
+      }
+    }
+    return undefined
   }
 
   all(): T[] {
@@ -74,6 +99,8 @@ class CollectionImpl<T extends RecordBase> implements Collection<T> {
     const now = new Date().toISOString()
     const record = { createdAt: now, updatedAt: now, ...data, updatedAt: now } as T
     if (this.records.has(record.id)) throw new Error(`[storage] 集合 ${this.name} 中已存在 id=${record.id}`)
+    const conflict = this.conflictOf(record)
+    if (conflict) throw new Error(`[storage] 唯一约束冲突（${conflict.label}）：与既有记录 ${conflict.existing.id} 重复`)
     this.records.set(record.id, record)
     this.emit({ kind: 'insert', record })
     this.persist(this.name)
@@ -84,6 +111,8 @@ class CollectionImpl<T extends RecordBase> implements Collection<T> {
     const current = this.records.get(id)
     if (!current) throw new Error(`[storage] 集合 ${this.name} 中不存在 id=${id}`)
     const next = { ...current, ...patch, id: current.id, createdAt: current.createdAt, updatedAt: new Date().toISOString() } as T
+    const conflict = this.conflictOf(next, id)
+    if (conflict) throw new Error(`[storage] 唯一约束冲突（${conflict.label}）：与既有记录 ${conflict.existing.id} 重复`)
     this.records.set(id, next)
     this.emit({ kind: 'update', record: next })
     this.persist(this.name)

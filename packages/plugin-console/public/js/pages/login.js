@@ -52,21 +52,42 @@ export function renderLogin(app) {
         </form>
 
         <form class="login-form" id="login-form-dingtalk" style="display:none">
-          <div style="text-align:center;padding:10px 0 6px">
-            <div style="width:180px;height:180px;margin:0 auto;border-radius:16px;background:
-              radial-gradient(120px 120px at 30% 25%, #e0e7ff, transparent),
-              radial-gradient(120px 120px at 75% 80%, #ede9fe, transparent), #f8f9fb;
-              border:1px solid var(--border);display:grid;place-items:center;position:relative">
-              <div style="color:var(--brand-500)">${icon('fingerprint', 64)}</div>
-              <div style="position:absolute;bottom:12px;font-size:12px;color:var(--text-3)">模拟扫码（输入工号即可）</div>
+          <div id="ding-step-authorize">
+            <div style="text-align:center;padding:10px 0 6px">
+              <div style="width:180px;height:180px;margin:0 auto;border-radius:16px;background:
+                radial-gradient(120px 120px at 30% 25%, #e0e7ff, transparent),
+                radial-gradient(120px 120px at 75% 80%, #ede9fe, transparent), #f8f9fb;
+                border:1px solid var(--border);display:grid;place-items:center;position:relative">
+                <div style="color:var(--brand-500)">${icon('fingerprint', 64)}</div>
+                <div style="position:absolute;bottom:12px;font-size:12px;color:var(--text-3)">模拟扫码（输入工号即授权码）</div>
+              </div>
             </div>
+            <div class="form-item" style="margin-top:16px">
+              <label class="form-label">钉钉工号 / 三方身份</label>
+              <input class="input input-lg" id="login-ding-code" placeholder="如 DD0002（已绑定）或 DD0003（未绑定）" value="DD0002">
+              <div class="form-hint">走完整 OAuth2 链路：authorize 签发 state → code 换令牌 → unionId 归一化。code 5 分钟内仅可消费一次。</div>
+            </div>
+            <button class="btn btn-primary btn-lg btn-block" id="login-ding-submit" type="submit">免密登录</button>
           </div>
-          <div class="form-item" style="margin-top:16px">
-            <label class="form-label">钉钉工号 / 三方身份</label>
-            <input class="input input-lg" id="login-ding-code" placeholder="如 DD0002（林小满）" value="DD0002">
-            <div class="form-hint">演示环境模拟 OAuth2 回调：code = 工号或三方 unionId</div>
+          <div id="ding-step-pending" style="display:none">
+            <div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--brand-200);background:var(--brand-50)">
+              ${icon('info', 15)}<span>首次使用该钉钉身份（<b id="ding-pending-name"></b>）。按「一人一号」原则，请绑定已有平台账号，或注册新账号。</span>
+            </div>
+            <div class="tabs" style="margin-bottom:16px">
+              <div class="tab active" data-ptab="bind">绑定已有账号</div>
+              <div class="tab" data-ptab="register">注册新账号</div>
+            </div>
+            <div id="ding-bind-panel">
+              <div class="form-item"><label class="form-label">平台用户名</label><input class="input input-lg" id="ding-bind-username" placeholder="如 dev"></div>
+              <div class="form-item"><label class="form-label">密码</label><input class="input input-lg" id="ding-bind-password" type="password" placeholder="平台账号密码"></div>
+              <button class="btn btn-primary btn-lg btn-block" id="ding-bind-submit">验证并绑定</button>
+            </div>
+            <div id="ding-register-panel" style="display:none">
+              <div class="form-hint" style="margin-bottom:12px">将以三方身份自动注册平台账号（默认进入首个组织），并建立身份链接。</div>
+              <button class="btn btn-primary btn-lg btn-block" id="ding-register-submit">注册并登录</button>
+            </div>
+            <button class="btn btn-ghost btn-block mt-8" id="ding-pending-back">返回重试</button>
           </div>
-          <button class="btn btn-primary btn-lg btn-block" id="login-ding-submit" type="submit">免密登录</button>
         </form>
 
         <div class="login-demo-tip">
@@ -93,6 +114,7 @@ export function renderLogin(app) {
     try {
       const result = await api.post(path, payload)
       session.save(result.token, result.user)
+      if (result.refreshToken) session.saveRefresh(result.refreshToken)
       toast(`欢迎回来，${result.user.displayName}`)
       location.hash = '#/dashboard'
       window.dispatchEvent(new HashChangeEvent('hashchange'))
@@ -107,8 +129,68 @@ export function renderLogin(app) {
     e.preventDefault()
     void doLogin({ username: $('#login-username').value.trim(), password: $('#login-password').value }, '/api/auth/login')
   }
-  tabDing.onsubmit = (e) => {
+  let dingTicket = ''
+  tabDing.onsubmit = async (e) => {
     e.preventDefault()
-    void doLogin({ provider: 'dingtalk', code: $('#login-ding-code').value.trim() }, '/api/auth/sso')
+    const btn = $('#login-ding-submit')
+    btn.classList.add('btn-loading')
+    try {
+      const code = $('#login-ding-code').value.trim()
+      const auth = await api.post('/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr' })
+      const result = await api.post('/api/auth/sso', { provider: 'dingtalk', code, state: auth.state })
+      if (result.kind === 'pending') {
+        dingTicket = result.pendingTicket
+        $('#ding-pending-name').textContent = result.profileName
+        $('#ding-step-authorize').style.display = 'none'
+        $('#ding-step-pending').style.display = ''
+        return
+      }
+      finishLogin(result)
+    } catch (error) {
+      toast(error.message, 'error')
+    } finally {
+      btn.classList.remove('btn-loading')
+    }
+  }
+
+  const finishLogin = (result) => {
+    session.save(result.token, result.user)
+    if (result.refreshToken) session.saveRefresh(result.refreshToken)
+    toast(`欢迎回来，${result.user.displayName}`)
+    location.hash = '#/dashboard'
+    window.dispatchEvent(new HashChangeEvent('hashchange'))
+  }
+
+  app.querySelectorAll('#login-form-dingtalk .tab[data-ptab]').forEach((el) => {
+    el.onclick = () => {
+      app.querySelectorAll('#login-form-dingtalk .tab[data-ptab]').forEach((t) => t.classList.remove('active'))
+      el.classList.add('active')
+      $('#ding-bind-panel').style.display = el.dataset.ptab === 'bind' ? '' : 'none'
+      $('#ding-register-panel').style.display = el.dataset.ptab === 'register' ? '' : 'none'
+    }
+  })
+  $('#ding-bind-submit').onclick = async () => {
+    const btn = $('#ding-bind-submit')
+    btn.classList.add('btn-loading')
+    try {
+      const result = await api.post('/api/auth/sso/bind', {
+        pendingTicket: dingTicket,
+        username: $('#ding-bind-username').value.trim(),
+        password: $('#ding-bind-password').value,
+      })
+      finishLogin(result)
+    } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
+  }
+  $('#ding-register-submit').onclick = async () => {
+    const btn = $('#ding-register-submit')
+    btn.classList.add('btn-loading')
+    try {
+      const result = await api.post('/api/auth/sso/register', { pendingTicket: dingTicket })
+      finishLogin(result)
+    } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
+  }
+  $('#ding-pending-back').onclick = () => {
+    $('#ding-step-pending').style.display = 'none'
+    $('#ding-step-authorize').style.display = ''
   }
 }

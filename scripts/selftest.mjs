@@ -90,8 +90,50 @@ try {
   const admin = adminLogin.data.token
   check('登录返回权限点（含 *）', adminLogin.data.user.permissions.includes('*'))
 
-  const sso = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0002' } })
-  check('钉钉免密登录（三方绑定）', sso.ok && sso.data.user.username === 'linxm')
+  // 三方登录完整链路（IdentityProviderAdapter：authorize → state → code → normalize）
+  const authorize = await api('POST', '/api/auth/sso/authorize', { body: { provider: 'dingtalk', scene: 'web_qr' } })
+  check('SSO 发起授权（签发 state）', authorize.ok && authorize.data.state.length >= 32)
+  const sso = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0002', state: authorize.data.state } })
+  check('钉钉免密登录（身份链接命中）', sso.ok && sso.data.kind === 'hit' && sso.data.user.username === 'linxm')
+  check('登录返回 refresh token（7d 轮转链）', typeof sso.data.refreshToken === 'string' && sso.data.refreshToken.startsWith('dstr_'))
+
+  // 攻击演练 1：state 重放拒绝
+  const stateReplay = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0002', state: authorize.data.state } })
+  check('state 重放被拒绝（防 CSRF）', stateReplay.status === 401)
+
+  // 攻击演练 2：伪造 state 拒绝
+  const stateForged = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0002', state: 'forged-state-000' } })
+  check('伪造 state 被拒绝', stateForged.status === 401)
+
+  // 攻击演练 3：code 重放拒绝（5 分钟窗口内单次消费）
+  const authorize2 = await api('POST', '/api/auth/sso/authorize', { body: { provider: 'dingtalk', scene: 'web_qr' } })
+  await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0004', state: authorize2.data.state } }).catch(() => null)
+  const codeReplayAuth = await api('POST', '/api/auth/sso/authorize', { body: { provider: 'dingtalk', scene: 'web_qr' } })
+  const codeReplay = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0004', state: codeReplayAuth.data.state } })
+  check('code 重放被拒绝（单次消费）', codeReplay.status === 401)
+
+  // 未命中 → 待绑定票据 → 绑定已有账号
+  const authorize3 = await api('POST', '/api/auth/sso/authorize', { body: { provider: 'dingtalk', scene: 'h5' } })
+  const pending = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0003', state: authorize3.data.state } })
+  check('未命中身份签发待绑定票据', pending.ok && pending.data.kind === 'pending' && pending.data.profileName === '周既白')
+  const bindWrong = await api('POST', '/api/auth/sso/bind', { body: { pendingTicket: pending.data.pendingTicket, username: 'dev', password: 'wrong' } })
+  check('绑定校验密码（错误拒绝）', bindWrong.status === 401)
+  const bindOk = await api('POST', '/api/auth/sso/bind', { body: { pendingTicket: pending.data.pendingTicket, username: 'dev', password: 'Ybk@2026' } })
+  check('绑定已有账号并登录', bindOk.ok && bindOk.data.user.username === 'dev')
+
+  // 唯一约束：已绑定的三方身份（dd_u003→dev）再绑定他人 → 引擎级拒绝
+  const opsUser = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('韩若飞'), { token: admin })).data.users[0]
+  const dupBind = await api('POST', `/api/iam/users/${opsUser.id}/bindings`, {
+    token: admin,
+    body: { provider: 'dingtalk', unionId: 'dd_u003', displayName: '周既白', verifyCode: '123456' },
+  })
+  check('一人一号：身份绑定第二个账号被拒（引擎唯一约束）', !dupBind.ok && JSON.stringify(dupBind.error).includes('唯一约束'))
+
+  // 未命中 → 注册新账号分支
+  const authorize5 = await api('POST', '/api/auth/sso/authorize', { body: { provider: 'dingtalk', scene: 'web_qr' } })
+  const pending3 = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0006', state: authorize5.data.state } })
+  const register = await api('POST', '/api/auth/sso/register', { body: { pendingTicket: pending3.data.pendingTicket } })
+  check('三方身份注册新账号并登录', register.ok && register.data.user.username === 'dingtalk_dd_u006')
 
   const devLogin = await api('POST', '/api/auth/login', { body: { username: 'dev', password: 'Ybk@2026' } })
   check('开发者登录', devLogin.ok)
@@ -173,6 +215,19 @@ try {
   check('冻结后令牌立即失效（401）', revokedCheck.status === 401)
   const frozenLogin = await api('POST', '/api/auth/login', { body: { username: 'selftester', password: 'Ybk@2026' } })
   check('冻结账号无法登录', frozenLogin.status === 401)
+
+  // ================================================================ refresh 轮转链
+  section('refresh token 轮转与重放防护')
+  const rl = await api('POST', '/api/auth/login', { body: { username: 'ops', password: 'Ybk@2026' } })
+  check('登录返回令牌对', rl.ok && rl.data.refreshToken)
+  const rotated = await api('POST', '/api/auth/refresh', { body: { refreshToken: rl.data.refreshToken } })
+  check('refresh 轮转签发新对', rotated.ok && rotated.data.refreshToken !== rl.data.refreshToken)
+  const newMe = await api('GET', '/api/auth/me', { token: rotated.data.token })
+  check('轮转后新 access 可用', newMe.ok)
+  const oldReplay = await api('POST', '/api/auth/refresh', { body: { refreshToken: rl.data.refreshToken } })
+  check('旧 refresh 重放被拒绝', oldReplay.status === 401)
+  const chainKilled = await api('GET', '/api/auth/me', { token: rotated.data.token })
+  check('重放触发整链吊销（新 access 一并失效）', chainKilled.status === 401)
 
   // ================================================================ Authn
   section('统一认证（机器身份 / 令牌）')

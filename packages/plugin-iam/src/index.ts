@@ -11,6 +11,7 @@ import {
   type Collection, type RecordBase,
 } from '@dsh-ops/platform-core'
 import * as iamTools from './tools.ts'
+import { DingTalkAuthAdapter, type IdentityProviderAdapter } from './providers.ts'
 
 // ---------------------------------------------------------------------------
 // 数据模型
@@ -87,6 +88,21 @@ export interface ConnectorConfigRecord extends RecordBase {
   conflictStrategy: 'third_party_wins' | 'platform_wins' | 'manual'
   lastSyncAt?: string
   lastSyncResult?: { ok: boolean; created: number; updated: number; conflicts: number; message: string }
+}
+
+/**
+ * 三方身份链接（融合 auth-identity 的 user_identity_links 设计）。
+ * 活跃链接在 (provider, providerUserId) 上引擎级唯一——「一人一号」由唯一约束兜底，
+ * 禁止以「先查后插」替代约束（红线）。解绑即物理删除记录（等价 WHERE unlinked_at IS NULL 的部分唯一索引）。
+ */
+export interface IdentityLinkRecord extends RecordBase {
+  provider: 'dingtalk' | 'feishu' | 'wecom'
+  providerUserId: string
+  corpId: string
+  userId: string
+  displayName: string
+  linkedAt: string
+  linkedBy: string
 }
 
 export interface SyncConflictRecord extends RecordBase {
@@ -219,15 +235,76 @@ export class IamService extends Service {
   static readonly provide = 'iam'
 
   private connectors = new Map<string, OrgConnector>()
+  private authProviders = new Map<string, IdentityProviderAdapter>()
 
   constructor(ctx: Context) {
     super(ctx, 'iam')
     this.registerConnector(new DingTalkConnector())
+    this.registerAuthProvider(new DingTalkAuthAdapter())
   }
 
   registerConnector(connector: OrgConnector): () => void {
     this.connectors.set(connector.provider, connector)
     return () => this.connectors.delete(connector.provider)
+  }
+
+  /** 注册身份源 Adapter：登录主流程面向接口编程，新增平台零侵入。 */
+  registerAuthProvider(adapter: IdentityProviderAdapter): () => void {
+    this.authProviders.set(adapter.type, adapter)
+    return () => this.authProviders.delete(adapter.type)
+  }
+
+  getAuthProvider(type: string): IdentityProviderAdapter {
+    const adapter = this.authProviders.get(type)
+    if (!adapter) throw new Error(`未注册的身份源：${type}`)
+    return adapter
+  }
+
+  /** 三方身份链接集合（活跃唯一约束：同一三方身份只能映射一个平台账号）。 */
+  identityLinks(): Collection<IdentityLinkRecord> {
+    const collection = this.ctx.storage.collection<IdentityLinkRecord>('iam:identityLinks')
+    collection.uniqueOn('identity_link_active', (record) => `${record.provider}|${record.providerUserId}`)
+    return collection
+  }
+
+  /** 命中查找：按归一化档案定位已绑定的平台账号。 */
+  findLinkByProfile(provider: string, providerUserId: string): IdentityLinkRecord | undefined {
+    return this.identityLinks().findOne((link) => link.provider === provider && link.providerUserId === providerUserId)
+  }
+
+  /** 建立身份链接（唯一约束兜底；user.bindings 保持为投影，便于列表展示）。 */
+  linkIdentity(userId: string, profile: { provider: IdentityLinkRecord['provider']; providerUserId: string; corpId: string; displayName: string }, actor: string): IdentityLinkRecord {
+    const user = this.users().get(userId)
+    if (!user) throw new Error(`账号不存在：${userId}`)
+    const link = this.identityLinks().insert({
+      id: newId('idl'),
+      provider: profile.provider,
+      providerUserId: profile.providerUserId,
+      corpId: profile.corpId,
+      userId,
+      displayName: profile.displayName,
+      linkedAt: new Date().toISOString(),
+      linkedBy: actor,
+    })
+    // 投影同步（bindings 仅作展示，事实源是 identityLinks）
+    if (!user.bindings.some((item) => item.provider === profile.provider)) {
+      this.users().update(userId, {
+        bindings: [...user.bindings, { provider: profile.provider, unionId: profile.providerUserId, displayName: profile.displayName, boundAt: link.linkedAt }],
+      })
+    }
+    return link
+  }
+
+  /** 解除身份链接（同时清理投影）。 */
+  unlinkIdentity(userId: string, provider: IdentityLinkRecord['provider']): boolean {
+    const link = this.identityLinks().findOne((item) => item.userId === userId && item.provider === provider)
+    if (!link) return false
+    this.identityLinks().remove(link.id)
+    const user = this.users().get(userId)
+    if (user) {
+      this.users().update(userId, { bindings: user.bindings.filter((item) => item.provider !== provider) })
+    }
+    return true
   }
 
   connectorProviders(): Array<{ provider: string; label: string }> {
@@ -237,11 +314,15 @@ export class IamService extends Service {
   // -- 集合 ---------------------------------------------------------------
 
   orgs(): Collection<OrgRecord> {
-    return this.ctx.storage.collection<OrgRecord>('iam:orgs')
+    const collection = this.ctx.storage.collection<OrgRecord>('iam:orgs')
+    collection.uniqueOn('org_same_level_name', (org) => `${org.parentId ?? '-'}|${org.name}`)
+    return collection
   }
 
   users(): Collection<UserRecord> {
-    return this.ctx.storage.collection<UserRecord>('iam:users')
+    const collection = this.ctx.storage.collection<UserRecord>('iam:users')
+    collection.uniqueOn('user_username', (user) => user.username)
+    return collection
   }
 
   roles(): Collection<RoleRecord> {
@@ -438,7 +519,8 @@ export class IamService extends Service {
     return this.users().remove(id)
   }
 
-  bindThirdParty(id: string, binding: { provider: ThirdPartyBinding['provider']; unionId: string; displayName: string; verifyCode?: string }): UserRecord {
+  /** 绑定三方身份：事实源为 identityLinks（引擎级唯一约束），user.bindings 为投影。 */
+  bindThirdParty(id: string, binding: { provider: ThirdPartyBinding['provider']; unionId: string; displayName: string; corpId?: string; verifyCode?: string }): UserRecord {
     const user = this.requireUser(id)
     if (binding.verifyCode !== '000000' && binding.verifyCode !== undefined && binding.verifyCode.length !== 6) {
       throw new Error('二次验证码格式不正确')
@@ -446,23 +528,21 @@ export class IamService extends Service {
     if (user.bindings.some((item) => item.provider === binding.provider)) {
       throw new Error(`该账号已绑定${binding.provider}身份，请先解绑`)
     }
-    const conflict = this.users().findOne((candidate) =>
-      candidate.id !== id && candidate.bindings.some((item) => item.provider === binding.provider && item.unionId === binding.unionId))
-    if (conflict) throw new Error(`该三方身份已被 ${conflict.displayName} 绑定（一人一号原则）`)
-    return this.users().update(id, {
-      bindings: [...user.bindings, {
-        provider: binding.provider,
-        unionId: binding.unionId,
-        displayName: binding.displayName,
-        boundAt: new Date().toISOString(),
-      }],
-    })
+    // 唯一约束冲突由存储引擎兜底（同一 provider|unionId 只能映射一个账号）
+    this.linkIdentity(id, {
+      provider: binding.provider,
+      providerUserId: binding.unionId,
+      corpId: binding.corpId ?? '',
+      displayName: binding.displayName,
+    }, 'console')
+    return this.users().get(id)!
   }
 
   unbindThirdParty(id: string, provider: ThirdPartyBinding['provider'], verifyCode: string): UserRecord {
     const user = this.requireUser(id)
     if (!verifyCode || verifyCode.length !== 6) throw new Error('解绑需二次验证（6 位验证码）')
-    return this.users().update(id, { bindings: user.bindings.filter((item) => item.provider !== provider) })
+    this.unlinkIdentity(id, provider)
+    return this.users().get(id)!
   }
 
   verifyPassword(username: string, password: string): UserRecord {
@@ -703,17 +783,17 @@ export class IamService extends Service {
           email: remoteUser.email,
           jobNumber: remoteUser.jobNumber,
         })
-        this.users().update(record.id, {
-          status: 'active',
-          bindings: [{ provider, unionId: remoteUser.remoteId, displayName: remoteUser.name, boundAt: new Date().toISOString() }],
-        })
+        this.users().update(record.id, { status: 'active' })
+        this.linkIdentity(record.id, { provider, providerUserId: remoteUser.remoteId, corpId: config.corpId, displayName: remoteUser.name }, 'connector-sync')
         created++
         continue
       }
       if (!local.bindings.some((binding) => binding.provider === provider)) {
-        this.users().update(local.id, {
-          bindings: [...local.bindings, { provider, unionId: remoteUser.remoteId, displayName: remoteUser.name, boundAt: new Date().toISOString() }],
-        })
+        try {
+          this.linkIdentity(local.id, { provider, providerUserId: remoteUser.remoteId, corpId: config.corpId, displayName: remoteUser.name }, 'connector-sync')
+        } catch {
+          // 唯一约束冲突：该三方身份已绑定其他账号（一人一号），跳过并保留冲突语义
+        }
       }
       if (!remoteUser.active) {
         if (local.status === 'active' || local.status === 'pending') {

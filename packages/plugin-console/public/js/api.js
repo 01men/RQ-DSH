@@ -1,10 +1,13 @@
 /** API 客户端：令牌管理 + 统一请求封装。 */
 
 const TOKEN_KEY = 'heng_ops_token'
+const REFRESH_KEY = 'heng_ops_refresh'
 const USER_KEY = 'heng_ops_user'
 
 export const session = {
   get token() { return localStorage.getItem(TOKEN_KEY) ?? '' },
+  get refreshToken() { return localStorage.getItem(REFRESH_KEY) ?? '' },
+  saveRefresh(token) { localStorage.setItem(REFRESH_KEY, token) },
   get user() {
     try { return JSON.parse(localStorage.getItem(USER_KEY) ?? 'null') } catch { return null }
   },
@@ -14,6 +17,7 @@ export const session = {
   },
   clear() {
     localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(REFRESH_KEY)
     localStorage.removeItem(USER_KEY)
   },
   get permissions() { return this.user?.permissions ?? [] },
@@ -29,7 +33,35 @@ export class ApiError extends Error {
   }
 }
 
-async function request(method, path, body) {
+let refreshing = null
+
+/** access token 过期时静默续期（refresh 轮转链），失败才回落登录页。 */
+async function tryRefresh() {
+  if (!session.refreshToken) return false
+  if (!refreshing) {
+    refreshing = (async () => {
+      try {
+        const response = await fetch('/api/auth/refresh', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ refreshToken: session.refreshToken }),
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok || payload?.ok === false) return false
+        localStorage.setItem(TOKEN_KEY, payload.data.token)
+        localStorage.setItem(REFRESH_KEY, payload.data.refreshToken)
+        return true
+      } catch {
+        return false
+      } finally {
+        setTimeout(() => { refreshing = null }, 50)
+      }
+    })()
+  }
+  return refreshing
+}
+
+async function request(method, path, body, retried = false) {
   const headers = { 'content-type': 'application/json' }
   if (session.token) headers.authorization = `Bearer ${session.token}`
   const response = await fetch(path, {
@@ -39,9 +71,12 @@ async function request(method, path, body) {
   })
   let payload = null
   try { payload = await response.json() } catch { /* non-json */ }
+  if (response.status === 401 && !retried && !PUBLIC_TOKEN_PATHS.has(path) && await tryRefresh()) {
+    return request(method, path, body, true)
+  }
   if (!response.ok || payload?.ok === false) {
     const err = payload?.error ?? {}
-    if (response.status === 401 && !path.startsWith('/api/auth/login')) {
+    if (response.status === 401 && !path.startsWith('/api/auth/')) {
       session.clear()
       if (!location.hash.startsWith('#/login')) location.hash = '#/login'
     }
@@ -49,6 +84,8 @@ async function request(method, path, body) {
   }
   return payload?.data
 }
+
+const PUBLIC_TOKEN_PATHS = new Set(['/api/auth/login', '/api/auth/refresh', '/api/auth/sso', '/api/auth/sso/authorize', '/api/auth/sso/bind', '/api/auth/sso/register', '/api/auth/client-credentials'])
 
 export const api = {
   get: (path) => request('GET', path),

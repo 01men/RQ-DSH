@@ -33,6 +33,10 @@ interface CallerInfo {
 const PUBLIC_PATHS = new Set([
   '/api/auth/login',
   '/api/auth/sso',
+  '/api/auth/sso/authorize',
+  '/api/auth/sso/bind',
+  '/api/auth/sso/register',
+  '/api/auth/refresh',
   '/api/auth/client-credentials',
   '/api/health',
 ])
@@ -130,6 +134,7 @@ export function apply(ctx: Context) {
       const user = ctx.iam.users().get(result.userId)!
       exchange.ok({
         token: result.token,
+        refreshToken: result.refreshToken,
         expiresAt: result.record.expiresAt,
         user: {
           id: user.id, username: user.username, displayName: user.displayName,
@@ -144,14 +149,35 @@ export function apply(ctx: Context) {
     }
   })
 
-  http.register('POST', '/api/auth/sso', async (exchange) => {
-    const { provider, code } = body<{ provider: string; code: string }>(exchange)
+  // -- 三方登录（IdentityProviderAdapter 链路） ------------------------------
+  http.register('POST', '/api/auth/sso/authorize', async (exchange) => {
+    const { provider, scene } = body<{ provider: string; scene?: 'web_qr' | 'h5' | 'in_app' }>(exchange)
     try {
-      const result = ctx.authn.loginByThirdParty(provider ?? 'dingtalk', code)
+      exchange.ok(ctx.authn.beginSso(provider ?? 'dingtalk', scene ?? 'web_qr'))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      exchange.fail(400, 'SSO_AUTHORIZE_FAILED', message)
+    }
+  })
+
+  http.register('POST', '/api/auth/sso', async (exchange) => {
+    const { provider, code, state } = body<{ provider: string; code: string; state: string }>(exchange)
+    if (!code || !state) {
+      exchange.fail(400, 'BAD_REQUEST', 'code 与 state 必填（先调 /api/auth/sso/authorize 获取 state）')
+      return
+    }
+    try {
+      const result = await ctx.authn.completeSso(provider ?? 'dingtalk', code, state)
+      if (result.kind === 'pending') {
+        exchange.ok({ kind: 'pending', pendingTicket: result.pendingTicket, profileName: result.profileName })
+        return
+      }
       const user = ctx.iam.users().get(result.userId)!
       exchange.ok({
-        token: result.token,
-        expiresAt: result.record.expiresAt,
+        kind: 'hit',
+        token: result.session.token,
+        refreshToken: result.session.refreshToken,
+        expiresAt: result.session.access.expiresAt,
         user: {
           id: user.id, username: user.username, displayName: user.displayName,
           orgId: user.orgId, roleIds: user.roleIds,
@@ -162,6 +188,65 @@ export function apply(ctx: Context) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(401, 'SSO_FAILED', message)
+    }
+  })
+
+  http.register('POST', '/api/auth/sso/bind', async (exchange) => {
+    const { pendingTicket, username, password } = body<{ pendingTicket: string; username: string; password: string }>(exchange)
+    try {
+      const result = ctx.authn.ssoBindExisting(pendingTicket, username, password)
+      const user = ctx.iam.users().get(result.userId)!
+      exchange.ok({
+        token: result.session.token,
+        refreshToken: result.session.refreshToken,
+        expiresAt: result.session.access.expiresAt,
+        user: {
+          id: user.id, username: user.username, displayName: user.displayName,
+          orgId: user.orgId, roleIds: user.roleIds,
+          roles: user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.name).filter(Boolean),
+          permissions: ctx.iam.userPermissions(user.id),
+        },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      exchange.fail(401, 'SSO_BIND_FAILED', message)
+    }
+  })
+
+  http.register('POST', '/api/auth/sso/register', async (exchange) => {
+    const { pendingTicket } = body<{ pendingTicket: string }>(exchange)
+    try {
+      const result = ctx.authn.ssoRegister(pendingTicket)
+      const user = ctx.iam.users().get(result.userId)!
+      exchange.ok({
+        token: result.session.token,
+        refreshToken: result.session.refreshToken,
+        expiresAt: result.session.access.expiresAt,
+        user: {
+          id: user.id, username: user.username, displayName: user.displayName,
+          orgId: user.orgId, roleIds: user.roleIds,
+          roles: user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.name).filter(Boolean),
+          permissions: ctx.iam.userPermissions(user.id),
+        },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      exchange.fail(401, 'SSO_REGISTER_FAILED', message)
+    }
+  })
+
+  http.register('POST', '/api/auth/refresh', async (exchange) => {
+    const { refreshToken } = body<{ refreshToken: string }>(exchange)
+    if (!refreshToken) {
+      exchange.fail(400, 'BAD_REQUEST', 'refreshToken 必填')
+      return
+    }
+    try {
+      const result = ctx.authn.refreshSession(refreshToken)
+      exchange.ok({ token: result.token, refreshToken: result.refreshToken })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      exchange.fail(401, 'REFRESH_FAILED', message)
     }
   })
 
@@ -191,10 +276,18 @@ export function apply(ctx: Context) {
   http.register('POST', '/api/auth/logout', (exchange) => {
     const header = String(exchange.headers['authorization'] ?? '')
     const token = header.slice(7)
+    const refreshToken = body<{ refreshToken?: string }>(exchange).refreshToken
     try {
       const verified = ctx.authn.verify(token)
-      ctx.authn.revokeToken(verified.token.jti, '用户主动登出')
+      if (verified.token.sid) {
+        ctx.authn.revokeSession(verified.token.sid, '用户主动登出')
+      } else {
+        ctx.authn.revokeToken(verified.token.jti, '用户主动登出')
+      }
     } catch { /* 令牌已失效也允许登出 */ }
+    if (refreshToken) {
+      try { ctx.authn.refreshSession(refreshToken) } catch { /* 已失效 */ }
+    }
     exchange.ok()
   })
 

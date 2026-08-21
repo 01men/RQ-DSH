@@ -39,11 +39,9 @@ export async function seedAll(ctx: Context): Promise<void> {
   const orgAdmin = mkUser('hr', '顾星阑', prodDept.id, '组织管理员', [roleOrgAdmin.id])
   const dev1 = mkUser('dev', '陈默', aiDept.id, '算法工程师', [roleDev.id])
   const dev2 = mkUser('linxm', '林小满', aiDept.id, '算法工程师', [roleDev.id])
-  // 预置三方绑定（演示钉钉免密登录）
-  ctx.iam.users().update(dev2.id, {
-    jobNumber: 'DD0002',
-    bindings: [{ provider: 'dingtalk', unionId: 'dd_u002', displayName: '林小满', boundAt: new Date().toISOString() }],
-  })
+  // 预置三方身份链接（演示钉钉免密登录；事实源为 identityLinks）
+  ctx.iam.users().update(dev2.id, { jobNumber: 'DD0002' })
+  ctx.iam.linkIdentity(dev2.id, { provider: 'dingtalk', providerUserId: 'dd_u002', corpId: 'ding-yuanbingke', displayName: '林小满' }, 'seed')
   const auditor = mkUser('audit', '楚天阔', root.id, '审计专员', [roleAuditor.id])
   mkUser('suyq', '苏砚秋', beDept.id, '后端工程师', [roleDev.id])
   mkUser('heqw', '何青梧', feDept.id, '前端工程师', [roleDev.id])

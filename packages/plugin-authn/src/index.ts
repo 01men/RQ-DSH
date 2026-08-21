@@ -52,6 +52,31 @@ export interface TokenRecord extends RecordBase {
   revokedAt?: string
   revokedReason?: string
   issuedBy: string
+  /** 会话 id：封禁/改密/解绑按会话即时吊销（auth-identity docs/06）。 */
+  sid?: string
+  /** 刷新链 id：refresh token 重放时按链吊销全部令牌。 */
+  chainId?: string
+  /** refresh token 的 SHA-256 哈希（原文不落库，仅签发时返回一次）。 */
+  refreshHash?: string
+  /** 已被轮转的时间：再次出现即判定重放。 */
+  rotatedAt?: string
+}
+
+/** OAuth state 记录（防 CSRF，一次性消费）。 */
+export interface OAuthStateRecord extends RecordBase {
+  provider: string
+  scene: string
+  createdAt: string
+  consumedAt?: string
+}
+
+/** 三方登录未命中的待绑定票据。 */
+export interface SsoTicketRecord extends RecordBase {
+  provider: string
+  profile: Record<string, string>
+  createdAt: string
+  expiresAt: string
+  usedAt?: string
 }
 
 export interface VerifiedPrincipal {
@@ -64,6 +89,10 @@ export interface VerifiedPrincipal {
 // ---------------------------------------------------------------------------
 // 服务
 // ---------------------------------------------------------------------------
+
+/** 令牌生命周期基线（auth-identity docs/06）：access 30min + refresh 7d 轮转。 */
+const ACCESS_TTL_MS = 30 * 60_000
+const REFRESH_TTL_MS = 7 * 24 * 3600_000
 
 export class AuthnService extends Service {
   static readonly provide = 'authn'
@@ -96,6 +125,207 @@ export class AuthnService extends Service {
 
   principals(): Collection<PrincipalRecord> {
     return this.ctx.storage.collection<PrincipalRecord>('authn:principals')
+  }
+
+  /** OAuth state（防 CSRF，一次性消费，10 分钟有效）。 */
+  oauthStates(): Collection<OAuthStateRecord> {
+    return this.ctx.storage.collection<OAuthStateRecord>('authn:oauthStates')
+  }
+
+  /** 三方登录未命中时的待绑定票据（5 分钟有效，一次性）。 */
+  ssoTickets(): Collection<SsoTicketRecord> {
+    return this.ctx.storage.collection<SsoTicketRecord>('authn:ssoTickets')
+  }
+
+  // -- 会话令牌对（access + refresh 轮转链） --------------------------------
+
+  /** 签发会话令牌对：access（30min）+ refresh（7d，仅存哈希，单次轮转）。 */
+  issueSessionPair(principalId: string, options: { sid?: string; chainId?: string; issuedBy: string }): { token: string; refreshToken: string; access: TokenRecord; sid: string } {
+    const sid = options.sid ?? newId('sid')
+    const chainId = options.chainId ?? newId('chn')
+    const access = this.issueToken(principalId, {
+      kind: 'access',
+      ttlHours: ACCESS_TTL_MS / 3600_000,
+      issuedBy: options.issuedBy,
+      sid,
+      chainId,
+    })
+    const refreshRaw = 'dstr_' + randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')
+    const refreshJti = randomUUID()
+    this.tokens().insert({
+      id: refreshJti,
+      jti: refreshJti,
+      principalId,
+      kind: 'refresh',
+      scopes: [],
+      actChain: [],
+      issuedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + REFRESH_TTL_MS).toISOString(),
+      issuedBy: options.issuedBy,
+      sid,
+      chainId,
+      refreshHash: sha256Hex(refreshRaw),
+    })
+    return { token: access.token, refreshToken: refreshRaw, access: access.record, sid }
+  }
+
+  /** 刷新会话：校验 refresh 哈希 → 重放检测（已轮转的 refresh 再现 → 吊销整链）。 */
+  refreshSession(refreshToken: string): { token: string; refreshToken: string; sid: string } {
+    const hash = sha256Hex(refreshToken)
+    const record = this.tokens().findOne((item) => item.kind === 'refresh' && item.refreshHash === hash)
+    if (!record) throw new Error('refresh token 无效')
+    if (record.revokedAt) throw new Error('refresh token 已吊销：' + (record.revokedReason ?? ''))
+    if (new Date(record.expiresAt).getTime() < Date.now()) throw new Error('refresh token 已过期，请重新登录')
+    if (record.rotatedAt) {
+      this.revokeChain(record.chainId ?? '', 'refresh token 重放检测（原轮转于 ' + record.rotatedAt + '）')
+      throw new Error('检测到 refresh token 重放：该会话整链已吊销，请重新登录')
+    }
+    this.tokens().update(record.id, { rotatedAt: new Date().toISOString() })
+    return this.issueSessionPair(record.principalId, {
+      sid: record.sid,
+      chainId: record.chainId,
+      issuedBy: 'refresh-rotation',
+    })
+  }
+
+  /** 按链吊销全部令牌。 */
+  revokeChain(chainId: string, reason: string): number {
+    let count = 0
+    for (const token of this.tokens().find((item) => item.chainId === chainId && !item.revokedAt)) {
+      this.revokeToken(token.jti, reason)
+      count++
+    }
+    return count
+  }
+
+  /** 按会话吊销（登出/封禁/改密即时生效）。 */
+  revokeSession(sid: string, reason: string): number {
+    let count = 0
+    for (const token of this.tokens().find((item) => item.sid === sid && !item.revokedAt)) {
+      this.revokeToken(token.jti, reason)
+      count++
+    }
+    return count
+  }
+
+  // -- 三方登录（IdentityProviderAdapter 链路，融合 auth-identity docs/03/04）--
+
+  /** 发起三方授权：生成一次性 state，返回（模拟）授权地址。 */
+  beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app'): { authorizeUrl: string | null; state: string } {
+    const adapter = this.ctx.iam.getAuthProvider(provider)
+    const state = randomUUID().replace(/-/g, '')
+    this.oauthStates().insert({
+      id: state,
+      createdAt: new Date().toISOString(),
+      provider,
+      scene,
+    })
+    const redirectUri = '/api/auth/sso'
+    return { authorizeUrl: adapter.buildAuthorizeUrl(scene, state, redirectUri), state }
+  }
+
+  /**
+   * 完成三方登录：state 一次性消费 → Adapter 链（exchangeCode/getUserInfo/normalizeProfile）
+   * → 命中身份链接直接登录；未命中签发待绑定票据（绑定已有账号 / 注册新账号两分支）。
+   */
+  async completeSso(provider: string, code: string, state: string): Promise<{ kind: 'hit'; session: { token: string; refreshToken: string; access: TokenRecord; sid: string }; userId: string } | { kind: 'pending'; pendingTicket: string; profileName: string }> {
+    const adapter = this.ctx.iam.getAuthProvider(provider)
+    const stateRecord = this.oauthStates().get(state)
+    if (!stateRecord) throw new Error('state 无效（未发起授权或已消费）')
+    if (stateRecord.consumedAt) throw new Error('state 已被使用（防重放）')
+    if (Date.now() - new Date(stateRecord.createdAt).getTime() > 10 * 60_000) throw new Error('state 已过期')
+    this.oauthStates().update(state, { consumedAt: new Date().toISOString() })
+
+    const tokenSet = await adapter.exchangeCode(code) // code 一次性，重放抛 ProviderAuthError
+    const raw = await adapter.getUserInfo(tokenSet)
+    const profile = adapter.normalizeProfile(raw)
+
+    const link = this.ctx.iam.findLinkByProfile(provider, profile.providerUserId)
+    if (link) {
+      const user = this.ctx.iam.users().get(link.userId)
+      if (!user) throw new Error('身份链接指向的账号不存在')
+      if (user.status !== 'active') throw new Error('账号状态异常，无法登录')
+      const principal = this.ensureHumanPrincipal(user.id, user.displayName)
+      const session = this.issueSessionPair(principal.id, { issuedBy: 'sso:' + provider })
+      this.ctx.iam.markLogin(user.id)
+      this.ctx.platformBus.emit(PlatformEvents.TokenIssued, { jti: session.access.jti, principalId: principal.id, kind: 'access' })
+      return { kind: 'hit', session, userId: user.id }
+    }
+    const ticket = newId('tkt')
+    this.ssoTickets().insert({
+      id: ticket,
+      provider,
+      profile: {
+        providerUserId: profile.providerUserId,
+        corpId: profile.corpId,
+        name: profile.name,
+        ...(profile.email !== undefined ? { email: profile.email } : {}),
+      },
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    })
+    return { kind: 'pending', pendingTicket: ticket, profileName: profile.name }
+  }
+
+  /** 待绑定票据 → 绑定已有平台账号（校验密码）→ 建立身份链接并登录。 */
+  ssoBindExisting(pendingTicket: string, username: string, password: string): { session: { token: string; refreshToken: string; access: TokenRecord; sid: string }; userId: string } {
+    const ticket = this.peekTicket(pendingTicket)
+    const user = this.ctx.iam.verifyPassword(username, password)
+    this.ctx.iam.linkIdentity(user.id, {
+      provider: ticket.provider as 'dingtalk',
+      providerUserId: ticket.profile['providerUserId'] ?? '',
+      corpId: ticket.profile['corpId'] ?? '',
+      displayName: ticket.profile['name'] ?? '',
+    }, 'sso-bind:' + username)
+    this.consumeTicket(pendingTicket)
+    const principal = this.ensureHumanPrincipal(user.id, user.displayName)
+    const session = this.issueSessionPair(principal.id, { issuedBy: 'sso-bind:' + ticket.provider })
+    this.ctx.iam.markLogin(user.id)
+    return { session, userId: user.id }
+  }
+
+  /** 待绑定票据 → 注册新账号（默认落入首个组织）→ 建立身份链接并登录。 */
+  ssoRegister(pendingTicket: string): { session: { token: string; refreshToken: string; access: TokenRecord; sid: string }; userId: string } {
+    const ticket = this.consumeTicket(pendingTicket)
+    void ticket
+    const defaultOrg = this.ctx.iam.orgs().all()[0]
+    if (!defaultOrg) throw new Error('平台尚未初始化组织，无法注册')
+    const username = ticket.provider + '_' + (ticket.profile['providerUserId'] ?? '')
+    const user = this.ctx.iam.createUser({
+      username,
+      displayName: ticket.profile['name'] ?? username,
+      orgId: defaultOrg.id,
+      email: ticket.profile['email'],
+    })
+    this.ctx.iam.activateUser(user.id)
+    this.ctx.iam.linkIdentity(user.id, {
+      provider: ticket.provider as 'dingtalk',
+      providerUserId: ticket.profile['providerUserId'] ?? '',
+      corpId: ticket.profile['corpId'] ?? '',
+      displayName: ticket.profile['name'] ?? '',
+    }, 'sso-register')
+    const principal = this.ensureHumanPrincipal(user.id, user.displayName)
+    const session = this.issueSessionPair(principal.id, { issuedBy: 'sso-register:' + ticket.provider })
+    this.ctx.iam.markLogin(user.id)
+    return { session, userId: user.id }
+  }
+
+  /** 读取票据（不消费）。 */
+  private peekTicket(pendingTicket: string): { provider: string; profile: Record<string, string> } {
+    const ticket = this.ssoTickets().get(pendingTicket)
+    if (!ticket) throw new Error('待绑定票据无效')
+    if (ticket.usedAt) throw new Error('票据已被使用')
+    if (new Date(ticket.expiresAt).getTime() < Date.now()) throw new Error('票据已过期，请重新发起授权')
+    return { provider: ticket.provider, profile: ticket.profile }
+  }
+
+  private consumeTicket(pendingTicket: string): { provider: string; profile: Record<string, string> } {
+    const ticket = this.ssoTickets().get(pendingTicket)
+    if (!ticket) throw new Error('待绑定票据无效')
+    if (ticket.usedAt) throw new Error('票据已被使用')
+    if (new Date(ticket.expiresAt).getTime() < Date.now()) throw new Error('票据已过期，请重新发起授权')
+    this.ssoTickets().update(pendingTicket, { usedAt: new Date().toISOString() })
+    return { provider: ticket.provider, profile: ticket.profile }
   }
 
   tokens(): Collection<TokenRecord> {
@@ -184,37 +414,13 @@ export class AuthnService extends Service {
 
   // -- 登录 ---------------------------------------------------------------
 
-  login(username: string, password: string): { token: string; record: TokenRecord; principal: PrincipalRecord; userId: string } {
+  login(username: string, password: string): { token: string; refreshToken: string; sid: string; record: TokenRecord; principal: PrincipalRecord; userId: string } {
     const user = this.ctx.iam.verifyPassword(username, password)
     const principal = this.ensureHumanPrincipal(user.id, user.displayName)
-    const { token, record } = this.issueToken(principal.id, {
-      kind: 'access',
-      ttlHours: 2,
-      scopes: [],
-      issuedBy: `password:${username}`,
-    })
+    const session = this.issueSessionPair(principal.id, { issuedBy: `password:${username}` })
     this.ctx.iam.markLogin(user.id)
-    this.ctx.platformBus.emit(PlatformEvents.TokenIssued, { jti: record.jti, principalId: principal.id, kind: 'access' })
-    return { token, record, principal, userId: user.id }
-  }
-
-  /** 三方扫码/免密登录（演示：code = 三方 unionId 或工号）。 */
-  loginByThirdParty(provider: string, code: string): { token: string; record: TokenRecord; principal: PrincipalRecord; userId: string } {
-    const user = this.ctx.iam.users().findOne((candidate) =>
-      candidate.bindings.some((binding) => binding.provider === provider && (binding.unionId === code || binding.displayName === code))
-      || candidate.jobNumber === code)
-    if (!user) throw new Error(`${provider} 免密登录失败：未找到绑定 ${code} 的平台账号（首次使用请先在个人中心绑定）`)
-    if (user.status !== 'active') throw new Error('账号状态异常，无法登录')
-    const principal = this.ensureHumanPrincipal(user.id, user.displayName)
-    const { token, record } = this.issueToken(principal.id, {
-      kind: 'access',
-      ttlHours: 2,
-      scopes: [],
-      issuedBy: `sso:${provider}`,
-    })
-    this.ctx.iam.markLogin(user.id)
-    this.ctx.platformBus.emit(PlatformEvents.TokenIssued, { jti: record.jti, principalId: principal.id, kind: 'access' })
-    return { token, record, principal, userId: user.id }
+    this.ctx.platformBus.emit(PlatformEvents.TokenIssued, { jti: session.access.jti, principalId: principal.id, kind: 'access' })
+    return { token: session.token, refreshToken: session.refreshToken, sid: session.sid, record: session.access, principal, userId: user.id }
   }
 
   clientCredentialsLogin(clientId: string, clientSecret: string): { token: string; record: TokenRecord; principal: PrincipalRecord } {
@@ -241,6 +447,8 @@ export class AuthnService extends Service {
     scopes?: string[]
     actChain?: ActEntry[]
     issuedBy?: string
+    sid?: string
+    chainId?: string
   }): { token: string; record: TokenRecord } {
     const principal = this.principals().get(principalId)
     if (!principal) throw new Error(`身份不存在：${principalId}`)
@@ -257,6 +465,7 @@ export class AuthnService extends Service {
       exp: Math.floor(expiresAt.getTime() / 1000),
       scope: options.scopes ?? [],
       act: options.actChain ?? [],
+      ...(options.sid !== undefined ? { sid: options.sid } : {}),
     }
     const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
     const sig = createHmac('sha256', this.signingSecret).update(body).digest('base64url')
@@ -271,6 +480,8 @@ export class AuthnService extends Service {
       issuedAt: issuedAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
       issuedBy: options.issuedBy ?? 'api',
+      ...(options.sid !== undefined ? { sid: options.sid } : {}),
+      ...(options.chainId !== undefined ? { chainId: options.chainId } : {}),
     })
     return { token, record }
   }

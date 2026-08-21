@@ -10,6 +10,8 @@ endpoints:
   - GET/POST/PATCH/DELETE /api/iam/groups
   - GET/PUT /api/iam/connectors/:provider · POST .../test · POST .../sync
   - GET /api/iam/conflicts · POST /api/iam/conflicts/:id/resolve
+  # v1.1（融合 auth-identity）：IdentityProviderAdapter + 身份链接事实源
+  - identityLinks 集合（provider+providerUserId 引擎级唯一）；bindThirdParty 走链接层
 tools:
   - iam_org_tree
   - iam_org_create

@@ -68,11 +68,22 @@ node cli/dshctl.mjs help    # CLI 帮助
 pnpm dsh web --patch <PROJECT_ROOT>/cordis.yml
 ```
 
+### 已融合 OS-skill 模块设计（v1.1）
+
+选择性吸收了 [01men/OS-skill](https://github.com/01men/OS-skill) 两个模块中具有长远价值的设计（决策全记录见 [docs/roadmap.md](docs/roadmap.md)）：
+
+- **IdentityProviderAdapter 统一身份源抽象**（auth-identity docs/03）：三方登录主流程面向接口编程，钉钉/飞书/企微差异收敛在 Adapter 内
+- **引擎级唯一约束**（红线工程化）：`collection.uniqueOn()` 模拟数据库部分唯一索引，「一人一号」等业务唯一性由存储引擎兜底，取代「先查后插」
+- **refresh_token 轮转链 + sid 会话**（docs/06）：access 30min + refresh 7d 仅存哈希、单次轮转，重放即整链吊销；前端 401 静默续期
+- **state 防 CSRF + code 一次性消费 + 未命中绑定/注册分支**（docs/04/05/07）：完整的三方登录产品化流程
+- 自测新增 15 项安全攻击演练（state/code/refresh 重放、唯一约束冲突），**97/97 通过**
+
 ## 三、目录结构（插件标准解剖）
 
 ```
 packages/
   platform-core/            基础层插件
+  plugin-iam/src/providers.ts  IdentityProviderAdapter 统一身份源抽象
   plugin-<name>/            每个业务插件：
     plugin.yaml             声明：id/version/depends/permissions
     manifest/
@@ -85,7 +96,8 @@ packages/
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（82 项断言）
+scripts/selftest.mjs        功能自测（97 项断言，含安全攻击演练）
+docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
 cordis.yml                  dsh 接入 overlay
@@ -138,10 +150,10 @@ curl localhost:7300/api/overview -H "authorization: Bearer <token>"
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **82 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **97 项端到端断言**：
 登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
-审计四类日志与筛选、告警、成本穿透、工具桥执行。
+审计四类日志与筛选、告警、成本穿透、工具桥执行；安全演练（state/code/refresh 重放、一人一号唯一约束、未命中绑定分支）。
 
 ## 八、说明与边界
 
