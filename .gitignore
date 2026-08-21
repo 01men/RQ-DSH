@@ -3,3 +3,6 @@ data/
 data-*/
 boot.log
 *.tmp
+
+# 本地服务运行日志
+service.log
