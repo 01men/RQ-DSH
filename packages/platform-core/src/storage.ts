@@ -225,8 +225,13 @@ export class StorageService extends Service {
     let records: T[] = []
     try {
       const raw = await readFile(file, 'utf8')
-      records = JSON.parse(raw) as T[]
-      if (!Array.isArray(records)) throw new Error('集合文件顶层不是数组')
+      const parsed: unknown = JSON.parse(raw)
+      if (!Array.isArray(parsed)) {
+        // 平台级文件（如 oidc-keys.json 密钥对象）不是集合：静默跳过，不算损坏
+        records = []
+      } else {
+        records = parsed as T[]
+      }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code === 'ENOENT') {
