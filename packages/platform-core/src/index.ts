@@ -12,12 +12,16 @@ import { StorageService } from './storage.ts'
 import { PlatformBusService } from './bus.ts'
 import { ToolRuntimeLite } from './tools-lite.ts'
 import { HttpServerService } from './http.ts'
+import { SqliteTxnService } from './sqlite.ts'
 
 export * from './storage.ts'
 export * from './bus.ts'
 export * from './tools-lite.ts'
 export * from './http.ts'
 export * from './ids.ts'
+export * from './sqlite.ts'
+export * from './yaml.ts'
+export * from './plugin-ctx.ts'
 
 export interface PlatformCoreConfig {
   dataDir?: string
@@ -33,6 +37,7 @@ export const name = 'platform-core'
 export function apply(ctx: Context, config: PlatformCoreConfig = {}) {
   ctx.plugin(StorageService, { dataDir: config.dataDir })
   ctx.plugin(PlatformBusService)
+  ctx.plugin(SqliteTxnService, { dataDir: config.dataDir })
   if (config.provideToolRuntime !== false) {
     ctx.plugin(ToolRuntimeLite)
   }

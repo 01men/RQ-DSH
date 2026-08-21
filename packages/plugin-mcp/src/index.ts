@@ -54,6 +54,8 @@ export interface McpServiceRecord extends RecordBase {
   /** 模拟稳定性 0-1（演示数据用）。 */
   stability: number
   rateLimitPerMin: number
+  /** 执行层：real=真实 HTTP 传输；demo=确定性模拟（显式降级，SLO/计费不统计）。 */
+  exec: 'real' | 'demo'
 }
 
 export interface ToolPolicy {
@@ -86,6 +88,8 @@ export interface McpCallRecord {
   latencyMs: number
   tokens: number
   error?: string
+  /** 该调用走真实传输还是演示模拟（SLO/计费报表只统计 real）。 */
+  exec: 'real' | 'demo'
 }
 
 export interface InvokeCaller {
@@ -152,6 +156,8 @@ export class McpService extends Service {
     owner: string
     tools?: McpToolSpec[]
     stability?: number
+    /** 显式声明 demo 才使用模拟执行层；缺省一律 real（生态设计 v1.2 第 0 步）。 */
+    exec?: 'real' | 'demo'
   }): McpServiceRecord {
     if (!input.name?.trim()) throw new Error('服务名称不能为空')
     const slug = input.slug ?? input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
@@ -177,6 +183,7 @@ export class McpService extends Service {
       health: { status: 'unknown', consecutiveFails: 0, breakerOpen: false },
       stability: input.stability ?? 0.97,
       rateLimitPerMin: 60,
+      exec: input.exec ?? 'real',
     })
   }
 
@@ -188,14 +195,16 @@ export class McpService extends Service {
     return this.services().update(id, patch)
   }
 
-  /** 测试环境验证：校验 endpoint 可达（演示为模拟探测）。 */
+  /** 测试环境验证：real 服务做真实 initialize 探测；demo 服务模拟探测。 */
   async verifyService(id: string): Promise<McpServiceRecord> {
     const service = this.requireService(id)
     if (service.status !== 'draft') throw new Error('仅草稿状态可执行测试验证')
     this.services().update(id, { status: 'verifying' })
-    await sleep(300)
-    // 测试环境恒可达（运行期健康由探活负责）
-    const latency = 60 + Math.floor(Math.random() * 200)
+    const latency = service.exec === 'real' ? await this.realProbe(service) : 200
+    if (latency < 0) {
+      this.services().update(id, { status: 'draft' })
+      throw new Error(`测试验证失败：endpoint ${service.endpoint} 不可达`)
+    }
     return this.services().update(id, { health: { lastProbeAt: now(), status: 'healthy', latencyMs: latency, consecutiveFails: 0, breakerOpen: false } })
   }
 
@@ -267,7 +276,13 @@ export class McpService extends Service {
     if (service.status === 'offline' || service.status === 'draft') {
       return { status: 'unknown', latencyMs: 0 }
     }
-    const latency = probeLatency(service)
+    // real：真实 HTTP 探测（POST initialize，测往返与延迟）；demo（含存量无标记）：确定性模拟
+    let latency: number
+    if (service.exec === 'real') {
+      latency = await this.realProbe(service)
+    } else {
+      latency = probeLatency(service)
+    }
     const ok = latency > 0
     const fails = ok ? 0 : service.health.consecutiveFails + 1
     const breakerOpen = fails >= 3
@@ -298,6 +313,31 @@ export class McpService extends Service {
 
   async healthCheck(id: string): Promise<{ status: string; latencyMs: number }> {
     return this.probeService(id)
+  }
+
+  /** 真实探活：MCP initialize 握手，返回延迟（ms）；失败返回 -1。 */
+  private async realProbe(service: McpServiceRecord): Promise<number> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REAL_PROBE_TIMEOUT_MS)
+    const started = Date.now()
+    try {
+      const response = await fetch(service.endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: `probe-${Date.now()}`,
+          method: 'initialize',
+          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'dsh-ops-probe', version: '1.0' } },
+        }),
+        signal: controller.signal,
+      })
+      return response.ok ? Date.now() - started : -1
+    } catch {
+      return -1
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   // -- 权限组 -------------------------------------------------------------
@@ -408,18 +448,69 @@ export class McpService extends Service {
       ? (service.versions.find((item) => item.status === 'previous')?.version ?? service.currentVersion)
       : service.currentVersion
 
-    // 模拟执行传输层
-    await sleep(simulateLatency(service))
-    const success = Math.random() < service.stability
-    if (!success) {
-      return fail('error', 'MCP 服务执行超时/内部错误')
+    // 执行传输层：real = 真实 HTTP JSON-RPC；demo = 确定性模拟（显式降级）。
+    // 存量演示数据（无 exec 字段）按 demo 兜底——新建服务缺省一律 real。
+    let tokens = 0
+    let result: unknown
+    if (service.exec !== 'real') {
+      await sleep(simulateLatency(service))
+      if (Math.random() >= service.stability) {
+        return fail('error', 'MCP 服务执行超时/内部错误（demo 传输层）')
+      }
+      tokens = 200 + (Number.parseInt(sha256Hex(JSON.stringify(args)).slice(0, 6), 16) % 1800)
+      result = mockToolResult(service, toolName, args)
+    } else {
+      const transportResult = await this.realTransport(service, toolName, args)
+      if (!transportResult.ok) {
+        return fail('error', transportResult.error ?? 'MCP 服务调用失败')
+      }
+      result = transportResult.result
+      tokens = transportResult.tokens
     }
-
-    const tokens = 200 + (Number.parseInt(sha256Hex(JSON.stringify(args)).slice(0, 6), 16) % 1800)
-    const result = mockToolResult(service, toolName, args)
     const latencyMs = Date.now() - started
     this.recordCall(service, toolName, caller, { ok: true, status: 'ok', latencyMs, version, tokens })
     return { ok: true, status: 'ok', latencyMs, version, result }
+  }
+
+  /**
+   * 真实执行传输层：按 endpoint 发起 MCP streamable-http 形态的 JSON-RPC tools/call。
+   * 真实延迟/错误全量计量；token 消耗从响应 usage 字段读取（缺省 0，不伪造）。
+   */
+  private async realTransport(service: McpServiceRecord, toolName: string, args: Record<string, unknown>): Promise<{ ok: true; result: unknown; tokens: number } | { ok: false; error: string }> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REAL_TRANSPORT_TIMEOUT_MS)
+    try {
+      const response = await fetch(service.endpoint, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: `dsh-${Date.now()}`,
+          method: 'tools/call',
+          params: { name: toolName, arguments: args },
+        }),
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        return { ok: false, error: `MCP 服务 HTTP ${response.status}：${(await response.text()).slice(0, 200)}` }
+      }
+      const payload = (await response.json()) as {
+        error?: { message?: string }
+        result?: { isError?: boolean; content?: unknown; usage?: { totalTokens?: number } }
+      }
+      if (payload.error) {
+        return { ok: false, error: `MCP 服务返回错误：${payload.error.message ?? JSON.stringify(payload.error).slice(0, 200)}` }
+      }
+      if (payload.result?.isError) {
+        return { ok: false, error: 'MCP 工具执行返回错误（isError=true）' }
+      }
+      return { ok: true, result: payload.result?.content ?? payload.result ?? null, tokens: payload.result?.usage?.totalTokens ?? 0 }
+    } catch (error) {
+      const message = error instanceof Error ? (error.name === 'AbortError' ? `MCP 服务调用超时（${REAL_TRANSPORT_TIMEOUT_MS}ms）` : error.message) : String(error)
+      return { ok: false, error: message }
+    } finally {
+      clearTimeout(timer)
+    }
   }
 
   private recordCall(service: McpServiceRecord, tool: string, caller: InvokeCaller, outcome: {
@@ -446,6 +537,7 @@ export class McpService extends Service {
       status: outcome.status,
       latencyMs: outcome.latencyMs,
       tokens: outcome.tokens ?? 0,
+      exec: service.exec,
       ...(outcome.error !== undefined ? { error: outcome.error } : {}),
     }
     this.calls().insert(record)
@@ -460,14 +552,23 @@ export class McpService extends Service {
       ok: outcome.ok, latencyMs: outcome.latencyMs, tokens: record.tokens,
       actChain: caller.actChain,
     })
-    if (record.tokens > 0) {
-      this.ctx.audit.addCost({
-        date: now().slice(0, 10),
-        mcpServiceId: service.id,
-        llmTokens: 0,
-        toolCalls: 1,
-        costYuan: round3(record.tokens * 0.000002),
-      })
+    // 计量管道（v1.2 第 2 步）：real 传输调用进入 usage 事件（demo 演示流量不计费不计 SLO）
+    if (service.exec === 'real') {
+      try {
+        this.ctx.usage.record({
+          org: service.orgId,
+          subject: `${caller.type}:${caller.id}`,
+          principal: `org:${service.orgId}`,
+          resource: `mcp:${service.slug}`,
+          meters: [
+            { key: 'calls', value: 1, unit: 'call' },
+            ...(record.tokens > 0 ? [{ key: 'tokens', value: record.tokens, unit: 'token' }] : []),
+          ],
+          idempotency_key: `mcp:${record.id}`,
+        })
+      } catch (error) {
+        this.ctx.logger('mcp').warn('usage 计量登记失败', error)
+      }
     }
   }
 
@@ -574,8 +675,13 @@ export class McpService extends Service {
 }
 
 // ---------------------------------------------------------------------------
-// 模拟传输层辅助（确定性伪随机）
+// 传输层辅助（real = 真实 HTTP；demo = 确定性伪随机，仅演示）
 // ---------------------------------------------------------------------------
+
+/** real 调用超时（ms）。 */
+const REAL_TRANSPORT_TIMEOUT_MS = 10_000
+/** real 探活超时（ms）。 */
+const REAL_PROBE_TIMEOUT_MS = 5_000
 
 function probeLatency(service: McpServiceRecord): number {
   const seed = Number.parseInt(sha256Hex(`${service.id}:${Math.floor(Date.now() / 30_000)}`).slice(0, 8), 16) % 1000
@@ -642,7 +748,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'mcp'
-export const inject = ['storage', 'platformBus', 'iam', 'audit']
+export const inject = ['storage', 'platformBus', 'iam', 'audit', 'usage']
 
 export function apply(ctx: Context) {
   const registry = new McpService(ctx)

@@ -7,11 +7,15 @@ import * as platformCore from '@dsh-ops/platform-core'
 import * as resourceCore from '@dsh-ops/plugin-resource-core'
 import * as iam from '@dsh-ops/plugin-iam'
 import * as authn from '@dsh-ops/plugin-authn'
+import * as usage from '@dsh-ops/plugin-usage'
+import * as billing from '@dsh-ops/plugin-billing'
+import * as audit from '@dsh-ops/plugin-audit'
+import * as market from '@dsh-ops/plugin-market'
+import * as modelgw from '@dsh-ops/plugin-modelgw'
 import * as mcp from '@dsh-ops/plugin-mcp'
 import * as skillhub from '@dsh-ops/plugin-skillhub'
 import * as agent from '@dsh-ops/plugin-agent'
 import * as app from '@dsh-ops/plugin-app'
-import * as audit from '@dsh-ops/plugin-audit'
 import * as consolePlugin from '@dsh-ops/plugin-console'
 
 export interface BootOptions {
@@ -28,10 +32,14 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   await ctx.plugin(resourceCore)
   await ctx.plugin(iam)
   await ctx.plugin(authn)
+  await ctx.plugin(usage)
+  await ctx.plugin(billing)
   await ctx.plugin(audit)
+  await ctx.plugin(market)
   await ctx.plugin(mcp)
   await ctx.plugin(skillhub)
   await ctx.plugin(agent)
   await ctx.plugin(app)
+  await ctx.plugin(modelgw)
   await ctx.plugin(consolePlugin)
 }

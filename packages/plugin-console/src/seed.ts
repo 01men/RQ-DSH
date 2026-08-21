@@ -78,9 +78,9 @@ export async function seedAll(ctx: Context): Promise<void> {
     callbackUrl: 'https://ops.yuanbingke.com/api/callback/dingtalk',
   })
 
-  // -- MCP 服务 ------------------------------------------------------------
+  // -- MCP 服务（演示数据：exec 显式 demo，SLO/计费不统计） --------------------
   const mkMcp = (input: Parameters<typeof ctx.mcpRegistry.createService>[0]) => {
-    const service = ctx.mcpRegistry.createService(input)
+    const service = ctx.mcpRegistry.createService({ ...input, exec: 'demo' })
     return ctx.mcpRegistry.services().get(service.id)!
   }
 
@@ -429,6 +429,7 @@ export async function seedAll(ctx: Context): Promise<void> {
           ok, status: ok ? 'ok' : 'error',
           latencyMs: 40 + Math.floor(rand() * 500),
           tokens: ok ? 200 + Math.floor(rand() * 1500) : 0,
+          exec: 'demo',
         })
       }
     }

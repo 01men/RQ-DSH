@@ -16,6 +16,9 @@ import {
   type Collection, type RecordBase,
 } from '@dsh-ops/platform-core'
 import * as authnTools from './tools.ts'
+import { OidcService } from './oidc.ts'
+
+export * from './oidc.ts'
 
 // ---------------------------------------------------------------------------
 // 数据模型
@@ -45,6 +48,8 @@ export interface TokenRecord extends RecordBase {
   principalId: string
   kind: 'access' | 'machine' | 'refresh'
   scopes: string[]
+  /** 受众声明：该令牌只对指定服务/插件有效（生态设计 v1.2 第 1 步收紧）。 */
+  audience?: string
   actChain: ActEntry[]
   issuedAt: string
   expiresAt: string
@@ -445,6 +450,7 @@ export class AuthnService extends Service {
     kind: TokenRecord['kind']
     ttlHours?: number
     scopes?: string[]
+    audience?: string
     actChain?: ActEntry[]
     issuedBy?: string
     sid?: string
@@ -453,6 +459,14 @@ export class AuthnService extends Service {
     const principal = this.principals().get(principalId)
     if (!principal) throw new Error(`身份不存在：${principalId}`)
     if (principal.status !== 'active') throw new Error('身份已禁用，无法签发令牌')
+    // 插件受众收敛面（v1.2 第 1 步）：aud 为 plugin:<id> 时，scope 必须全部落在该插件命名空间内
+    if (options.audience?.startsWith('plugin:')) {
+      const namespace = `${options.audience}:`
+      const offender = (options.scopes ?? []).find((scope) => scope !== '*' && !scope.startsWith(namespace))
+      if (offender !== undefined) {
+        throw new Error(`插件令牌 scope 越界：${offender} 不在命名空间 ${namespace} 内`)
+      }
+    }
     const jti = randomUUID()
     const issuedAt = new Date()
     const expiresAt = new Date(issuedAt.getTime() + (options.ttlHours ?? 2) * 3600_000)
@@ -465,6 +479,7 @@ export class AuthnService extends Service {
       exp: Math.floor(expiresAt.getTime() / 1000),
       scope: options.scopes ?? [],
       act: options.actChain ?? [],
+      ...(options.audience !== undefined ? { aud: options.audience } : {}),
       ...(options.sid !== undefined ? { sid: options.sid } : {}),
     }
     const body = Buffer.from(JSON.stringify(payload)).toString('base64url')
@@ -476,6 +491,7 @@ export class AuthnService extends Service {
       principalId,
       kind: options.kind,
       scopes: options.scopes ?? [],
+      ...(options.audience !== undefined ? { audience: options.audience } : {}),
       actChain: options.actChain ?? [],
       issuedAt: issuedAt.toISOString(),
       expiresAt: expiresAt.toISOString(),
@@ -503,7 +519,11 @@ export class AuthnService extends Service {
     })
   }
 
-  verify(tokenString: string): VerifiedPrincipal {
+  /**
+   * 校验令牌。options.audience 指定时执行受众校验：令牌 aud 不匹配即拒绝
+   * （v1.2 第 1 步：一个泄漏的插件令牌拿不到平台其它服务）。
+   */
+  verify(tokenString: string, options: { audience?: string } = {}): VerifiedPrincipal {
     const parts = tokenString.split('.')
     if (parts.length !== 3 || parts[0] !== 'dst1') throw new Error('令牌格式不合法')
     const expected = createHmac('sha256', this.signingSecret).update(parts[1]!).digest('base64url')
@@ -516,6 +536,10 @@ export class AuthnService extends Service {
     }
     if (payload.exp * 1000 < Date.now()) throw new Error('令牌已过期')
     if (this.revocations.has(payload.jti)) throw new Error('令牌已被吊销')
+    if (options.audience !== undefined) {
+      if (payload.aud === undefined) throw new Error('令牌未绑定受众（aud），目标服务要求受众校验')
+      if (payload.aud !== options.audience) throw new Error(`令牌受众不匹配：期望 ${options.audience}，实际 ${payload.aud}`)
+    }
     const record = this.tokens().get(payload.jti)
     if (!record) throw new Error('令牌不存在或已被清理')
     if (record.revokedAt) throw new Error(`令牌已被吊销：${record.revokedReason ?? '策略吊销'}`)
@@ -578,9 +602,10 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'authn'
-export const inject = ['storage', 'platformBus', 'iam']
+export const inject = ['storage', 'platformBus', 'iam', 'httpServer']
 
 export function apply(ctx: Context) {
   ctx.plugin(AuthnService)
+  ctx.plugin(OidcService)
   ctx.plugin(authnTools)
 }

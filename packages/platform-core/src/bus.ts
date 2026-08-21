@@ -1,6 +1,13 @@
 /**
  * 平台事件总线：插件协作的唯一胶水。
  * 原则：状态变更必发事件；跨插件联动只许通过事件或扩展点，禁止直连对方数据。
+ *
+ * 事件源校验（生态设计 v1.2 第 3 步，S3/F3 消解）：
+ *   - 平台命名空间事件（iam.* / authn.* / mcp.* …）只允许平台内部发射——
+ *     携带 plugin: 来源的发射一律拒绝，杜绝第三方插件伪造平台事件；
+ *   - 第三方插件事件必须收敛在 plugin:<id>: 前缀内，且 source 必须与插件身份一致；
+ *   - 校验落点在本总线（独立自实现 pub/sub，不经 cordis 事件系统），
+ *     配合轻量代理 ctx（plugin-ctx.ts）与 lint/静态扫描三层防线。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
@@ -10,6 +17,8 @@ export interface PlatformEvent {
   name: string
   payload: unknown
   at: string
+  /** 事件来源：缺省=平台内部；plugin:<id>=第三方插件（强制与事件名前缀一致）。 */
+  source?: string
 }
 
 export type BusListener = (payload: unknown, event: PlatformEvent) => void
@@ -40,7 +49,19 @@ export const PlatformEvents = {
   ApprovalDecided: 'approval.decided',
   AlertFired: 'audit.alert.fired',
   ConnectorSynced: 'iam.connector.synced',
+  PluginSubmitted: 'market.plugin.submitted',
+  PluginListed: 'market.plugin.listed',
+  PluginInstalledEvent: 'market.plugin.installed',
+  WalletChanged: 'wallet.balance.changed',
+  LedgerSettled: 'billing.ledger.settled',
 } as const
+
+/** 平台保留命名空间：第三方插件（source=plugin:*）禁止发射。 */
+const PLATFORM_RESERVED_PREFIXES = [
+  'iam.', 'authn.', 'mcp.', 'audit.', 'skill.', 'agent.', 'app.',
+  'usage.', 'billing.', 'model.', 'market.', 'developer.', 'wallet.',
+  'platform.', 'approval.', 'connector.', 'console.',
+]
 
 export class PlatformBusService extends Service {
   static readonly provide = 'platformBus'
@@ -66,8 +87,22 @@ export class PlatformBusService extends Service {
     return () => this.wildcard.delete(cb)
   }
 
-  emit(name: string, payload: unknown): PlatformEvent {
-    const event: PlatformEvent = { id: ++this.seq, name, payload, at: new Date().toISOString() }
+  emit(name: string, payload: unknown, options: { source?: string } = {}): PlatformEvent {
+    const source = options.source
+    if (source !== undefined && source.startsWith('plugin:')) {
+      // 第三方发射：事件必须收敛在该插件命名空间，且不得触碰平台保留命名空间
+      if (!name.startsWith(`${source}:`)) {
+        throw new Error(`[bus] 插件 ${source} 不得发射非自有命名空间事件：${name}（允许前缀 ${source}:）`)
+      }
+      if (PLATFORM_RESERVED_PREFIXES.some((prefix) => name.startsWith(prefix))) {
+        throw new Error(`[bus] 插件 ${source} 不得发射平台保留命名空间事件：${name}`)
+      }
+    } else if (name.startsWith('plugin:')) {
+      // plugin: 命名空间事件必须有对应插件来源
+      const pluginId = name.slice(0, name.indexOf(':', 8) === -1 ? name.length : name.indexOf(':', 8))
+      throw new Error(`[bus] 插件命名空间事件 ${name} 必须携带来源（source: plugin:…，期望 ${pluginId}）`)
+    }
+    const event: PlatformEvent = { id: ++this.seq, name, payload, at: new Date().toISOString(), ...(source !== undefined ? { source } : {}) }
     this.ring.push(event)
     if (this.ring.length > 300) this.ring.shift()
     for (const cb of this.listeners.get(name) ?? []) {

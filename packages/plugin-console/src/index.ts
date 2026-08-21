@@ -12,13 +12,15 @@ import { fileURLToPath } from 'node:url'
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '@dsh-ops/platform-core'
+import { createPluginContext } from '@dsh-ops/platform-core'
 import { PermissionCatalog } from '@dsh-ops/plugin-iam'
 import { seedAll } from './seed.ts'
 
 export const name = 'console'
 export const inject = [
   'httpServer', 'storage', 'platformBus', 'tools',
-  'iam', 'authn', 'audit', 'mcpRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry',
+  'iam', 'authn', 'oidc', 'audit', 'usage', 'billing', 'market', 'modelGateway',
+  'mcpRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry',
 ]
 
 interface CallerInfo {
@@ -39,6 +41,8 @@ const PUBLIC_PATHS = new Set([
   '/api/auth/refresh',
   '/api/auth/client-credentials',
   '/api/health',
+  '/api/market/developers/register',
+  '/api/market/developers/login',
 ])
 
 export function apply(ctx: Context) {
@@ -482,7 +486,7 @@ export function apply(ctx: Context) {
   }))
 
   guarded('PUT', '/api/iam/connectors/:provider', 'iam.connector.write', (exchange) => {
-    const input = body<{ corpId: string; appKey: string; appSecret?: string; enabled?: boolean; syncOrgRoot?: string; intervalMinutes?: number; callbackUrl?: string; loginEnabled?: boolean; conflictStrategy?: 'third_party_wins' | 'platform_wins' | 'manual' }>(exchange)
+    const input = body<{ corpId: string; appKey: string; appSecret?: string; enabled?: boolean; syncOrgRoot?: string; intervalMinutes?: number; callbackUrl?: string; loginEnabled?: boolean; conflictStrategy?: 'third_party_wins' | 'platform_wins' | 'manual'; mode?: 'real' | 'mock'; apiBase?: string }>(exchange)
     const config = ctx.iam.upsertConnectorConfig({ provider: exchange.params['provider']! as 'dingtalk', ...input })
     changeLog(exchange, 'iam.connector.update', 'connector', config.id, config.provider)
     const { secretActual, ...safe } = config
@@ -549,17 +553,38 @@ export function apply(ctx: Context) {
   })
 
   guarded('POST', '/api/authn/tokens', 'authn.token.issue', (exchange) => {
-    const input = body<{ principalId: string; ttlHours?: number; reason?: string }>(exchange)
+    const input = body<{ principalId: string; ttlHours?: number; reason?: string; audience?: string; scopes?: string[] }>(exchange)
     const principal = ctx.authn.principals().get(input.principalId)
     if (!principal) throw new Error(`身份不存在：${input.principalId}`)
     const { token, record } = ctx.authn.issueToken(input.principalId, {
       kind: 'access',
       ttlHours: input.ttlHours,
-      scopes: principal.scopes,
+      scopes: input.scopes ?? principal.scopes,
+      ...(input.audience !== undefined ? { audience: input.audience } : {}),
       issuedBy: `console:${caller(exchange).name}`,
     })
     changeLog(exchange, 'authn.token.issue', 'token', record.jti, record.jti, input.reason ?? '')
     return { token, jti: record.jti, expiresAt: record.expiresAt }
+  })
+
+  // 受众校验自检（令牌内省：验证 aud 收紧语义，供运维与联调使用）
+  http.register('POST', '/api/authn/verify-audience', async (exchange) => {
+    const info = caller(exchange)
+    if (!info.permissions.includes('*') && !info.permissions.includes('authn.principal.read')) {
+      exchange.fail(403, 'FORBIDDEN', '缺少权限点 authn.principal.read')
+      return
+    }
+    const input = body<{ token: string; audience: string }>(exchange)
+    if (!input.token || !input.audience) {
+      exchange.fail(400, 'BAD_REQUEST', 'token 与 audience 必填')
+      return
+    }
+    try {
+      const verified = ctx.authn.verify(input.token, { audience: input.audience })
+      exchange.ok({ valid: true, principalId: verified.principal.id, scopes: verified.scopes })
+    } catch (error) {
+      exchange.ok({ valid: false, reason: error instanceof Error ? error.message : String(error) })
+    }
   })
 
   guarded('DELETE', '/api/authn/tokens/:jti', 'authn.token.revoke', (exchange) => {
@@ -574,6 +599,19 @@ export function apply(ctx: Context) {
     changeLog(exchange, 'authn.secret.rotate', 'platform', 'signing-secret', '', '签名密钥轮换，全部存量令牌失效')
     return { rotated: true }
   })
+
+  // OIDC 客户端登记（模式 B：外部应用以平台为 IdP）
+  guarded('POST', '/api/authn/oidc/clients', 'authn.principal.write', (exchange) => {
+    const input = body<{ name: string; redirectUris: string[] }>(exchange)
+    if (!input.name || !Array.isArray(input.redirectUris) || input.redirectUris.length === 0) {
+      throw new Error('name 与 redirectUris（至少一个回调地址）必填')
+    }
+    const created = ctx.oidc.createClient({ name: input.name, redirectUris: input.redirectUris })
+    changeLog(exchange, 'authn.oidc.client.create', 'oidc_client', created.client.id, created.client.name)
+    return { clientId: created.client.clientId, clientSecret: created.clientSecret, redirectUris: created.client.redirectUris, note: 'clientSecret 仅此一次返回' }
+  })
+
+  guarded('GET', '/api/authn/oidc/discovery', 'authn.principal.read', () => ctx.oidc.discovery())
 
   // -- MCP ----------------------------------------------------------------
   guarded('GET', '/api/mcp/services', 'mcp.service.read', () => ({
@@ -995,6 +1033,338 @@ export function apply(ctx: Context) {
     }
   })
 
+  // -- 租户（多租户最小集，v1.2 第 2 步） ------------------------------------
+  guarded('GET', '/api/iam/tenants', 'iam.org.read', () => ({
+    tenants: ctx.iam.tenants().all(),
+  }))
+
+  guarded('POST', '/api/iam/tenants', 'iam.org.write', (exchange) => {
+    const input = body<{ name: string; plan?: 'trial' | 'standard' | 'enterprise' }>(exchange)
+    const tenant = ctx.iam.createTenant(input)
+    changeLog(exchange, 'iam.tenant.create', 'tenant', tenant.id, tenant.name)
+    return tenant
+  })
+
+  // -- 计量（usage 管道，v1.2 第 2 步） --------------------------------------
+  guarded('GET', '/api/usage/events', 'usage.read', (exchange) => {
+    return ctx.usage.query({
+      ...(exchange.query.get('tenant_id') ? { tenant_id: exchange.query.get('tenant_id')! } : {}),
+      ...(exchange.query.get('principal') ? { principal: exchange.query.get('principal')! } : {}),
+      ...(exchange.query.get('resource') ? { resource: exchange.query.get('resource')! } : {}),
+      ...(exchange.query.get('from') ? { from: exchange.query.get('from')! } : {}),
+      ...(exchange.query.get('to') ? { to: exchange.query.get('to')! } : {}),
+      ...(exchange.query.get('limit') ? { limit: Number(exchange.query.get('limit')) } : {}),
+    })
+  })
+
+  guarded('GET', '/api/usage/totals', 'usage.read', (exchange) => {
+    return ctx.usage.totals({
+      ...(exchange.query.get('tenant_id') ? { tenant_id: exchange.query.get('tenant_id')! } : {}),
+      ...(exchange.query.get('principal') ? { principal: exchange.query.get('principal')! } : {}),
+      ...(exchange.query.get('from') ? { from: exchange.query.get('from')! } : {}),
+    })
+  })
+
+  guarded('POST', '/api/usage/record', 'usage.write', (exchange) => {
+    const input = body<{ org: string; subject: string; principal: string; resource: string; meters: Array<{ key: string; value: number; unit: string }>; tenant_id?: string; trace_id?: string; idempotency_key?: string }>(exchange)
+    const event = ctx.usage.record(input)
+    changeLog(exchange, 'usage.record', 'usage_event', event.event_id, event.resource, `${event.meters.map((meter) => `${meter.key}=${meter.value}`).join(',')} charge=${event.pricing.charge_cents}分`)
+    return event
+  })
+
+  guarded('GET', '/api/usage/price-book', 'usage.admin', () => ({
+    entries: ctx.usage.priceBook().all(),
+  }))
+
+  guarded('PUT', '/api/usage/price-book', 'usage.admin', (exchange) => {
+    const input = body<{ pattern: string; meter_key: string; list_cents_per_unit: number; cost_cents_per_unit: number; units_per_step: number; tax_rate?: number; currency?: string; rate_version?: string }>(exchange)
+    const entry = ctx.usage.upsertPrice({ tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08', ...input })
+    changeLog(exchange, 'usage.price.upsert', 'price_entry', entry.id, entry.pattern)
+    return entry
+  })
+
+  guarded('POST', '/api/usage/reconcile', 'usage.admin', (exchange) => {
+    const since = exchange.query.get('from') ?? undefined
+    const reconciliation = ctx.usage.reconcile(since)
+    const drift = ctx.usage.capabilityDrift(since)
+    changeLog(exchange, 'usage.reconcile', 'usage', 'reconcile', '', `mismatch=${reconciliation.mismatch} drift=${drift.drift.length}`)
+    return { reconciliation, drift }
+  })
+
+  guarded('GET', '/api/usage/dead-letters', 'usage.admin', () => ({
+    items: ctx.usage.deadLetters().all(),
+  }))
+
+  guarded('POST', '/api/usage/replay', 'usage.admin', (exchange) => {
+    const { from } = body<{ from: string }>(exchange)
+    return ctx.usage.replay(from)
+  })
+
+  guarded('PUT', '/api/usage/capability-grants', 'usage.admin', (exchange) => {
+    const input = body<{ principal: string; capabilities: string[]; source?: string }>(exchange)
+    return ctx.usage.grantCapabilities(input.principal, input.capabilities, input.source ?? 'console')
+  })
+
+  // -- 第三方插件市场（v1.2 第 3/5/7 步） ------------------------------------
+
+  // 开发者自助注册（独立身份域，M2）：Ed25519 公钥 + 密码
+  http.register('POST', '/api/market/developers/register', async (exchange) => {
+    const input = body<{ username: string; displayName: string; email: string; password: string; publicKey: string; company?: string; payoutAccount?: string }>(exchange)
+    try {
+      const result = ctx.market.registerDeveloper(input)
+      const { passwordHash, passwordSalt, ...safe } = result.developer
+      void passwordHash
+      void passwordSalt
+      exchange.ok({ developer: safe, token: result.token })
+    } catch (error) {
+      exchange.fail(400, 'DEVELOPER_REGISTER_FAILED', error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  http.register('POST', '/api/market/developers/login', async (exchange) => {
+    const input = body<{ username: string; password: string }>(exchange)
+    try {
+      const result = ctx.market.loginDeveloper(input.username, input.password)
+      exchange.ok({ developer: { id: result.developer.id, username: result.developer.username, displayName: result.developer.displayName }, token: result.token })
+    } catch (error) {
+      exchange.fail(401, 'DEVELOPER_LOGIN_FAILED', error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  /** 开发者身份解析：机器主体 refId=developerId（独立身份域，与 iam 员工域分离）。 */
+  const developerCaller = (exchange: HttpExchange) => {
+    const info = caller(exchange)
+    if (info.permissions.includes('*')) return undefined // 管理员走管理路由
+    const developer = ctx.market.developerOfPrincipal(info.principalId)
+    if (!developer) throw new Error('当前令牌不是开发者身份（请用 /api/market/developers/login）')
+    return developer
+  }
+
+  http.register('POST', '/api/market/submit', async (exchange) => {
+    try {
+      const developer = developerCaller(exchange)
+      if (!developer) {
+        exchange.fail(403, 'FORBIDDEN', '插件提交仅限开发者身份')
+        return
+      }
+      const input = body<{ files: Record<string, string>; signature: string }>(exchange)
+      const record = ctx.market.submit(developer, input.files ?? {}, input.signature ?? '')
+      changeLog(exchange, 'market.plugin.submit', 'plugin_submission', record.id, `${record.pluginId}@${record.version}`)
+      const { files, parsed, ...safe } = record
+      void files
+      void parsed
+      exchange.ok(safe)
+    } catch (error) {
+      exchange.fail(400, 'MARKET_SUBMIT_FAILED', error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  guarded('GET', '/api/market/submissions/mine', 'market.developer', (exchange) => {
+    const developer = developerCaller(exchange)
+    return { submissions: ctx.market.submissions().find((item) => item.developerId === developer?.id) }
+  })
+
+  guarded('GET', '/api/market/submissions', 'market.approve', (exchange) => ({
+    submissions: ctx.market.submissions().find((item) =>
+      exchange.query.get('status') ? item.status === exchange.query.get('status') : true),
+  }))
+
+  guarded('POST', '/api/market/submissions/:id/approve', 'market.approve', (exchange) => {
+    const info = caller(exchange)
+    const { opinion } = body<{ opinion?: string }>(exchange)
+    const record = ctx.market.approve(exchange.params['id']!, info.name, opinion ?? '审核通过')
+    changeLog(exchange, 'market.plugin.approve', 'plugin_submission', record.id, `${record.pluginId}@${record.version}`)
+    return record
+  })
+
+  guarded('POST', '/api/market/submissions/:id/reject', 'market.approve', (exchange) => {
+    const info = caller(exchange)
+    const { reason } = body<{ reason?: string }>(exchange)
+    return ctx.market.reject(exchange.params['id']!, info.name, reason ?? '不通过')
+  })
+
+  guarded('GET', '/api/market/plugins', 'market.read', () => ({
+    plugins: ctx.market.listed().map((item) => ({
+      id: item.id, pluginId: item.pluginId, version: item.version, developer: item.developerName,
+      capabilities: item.parsed.capabilities_request, permissions: item.parsed.permissions.requested,
+      billing: item.parsed.billing, installs: item.installs, contentHash: item.contentHash,
+    })),
+  }))
+
+  guarded('POST', '/api/market/plugins/:pluginId/install', 'market.install', (exchange) => {
+    const info = caller(exchange)
+    const input = body<{ orgId: string; tenantId?: string; approvedCapabilities: string[]; approvedPermissions?: string[] }>(exchange)
+    const org = ctx.iam.orgs().get(input.orgId)
+    if (!org) throw new Error(`组织不存在：${input.orgId}`)
+    const tenantId = input.tenantId ?? org.tenantId ?? 't_default'
+    const record = ctx.market.install({
+      pluginId: exchange.params['pluginId']!,
+      orgId: input.orgId,
+      tenantId,
+      approvedCapabilities: input.approvedCapabilities ?? [],
+      approvedPermissions: input.approvedPermissions ?? [],
+      installedBy: info.name,
+    })
+    changeLog(exchange, 'market.plugin.install', 'plugin_install', record.id, record.pluginId, `能力审批：${record.capabilities.join(',')}`)
+    return record
+  })
+
+  guarded('GET', '/api/market/installed', 'market.read', (exchange) => ({
+    installs: ctx.market.installs().find((item) => {
+      const orgId = exchange.query.get('orgId')
+      return orgId ? item.orgId === orgId : true
+    }),
+  }))
+
+  guarded('POST', '/api/market/plugins/:pluginId/uninstall', 'market.install', (exchange) => {
+    const info = caller(exchange)
+    const { orgId } = body<{ orgId: string }>(exchange)
+    const record = ctx.market.uninstall(exchange.params['pluginId']!, orgId, info.name)
+    changeLog(exchange, 'market.plugin.uninstall', 'plugin_install', record.id, record.pluginId)
+    return record
+  })
+
+  guarded('GET', '/api/market/subscriptions', 'market.read', () => ({
+    subscriptions: ctx.market.subscriptions().all(),
+  }))
+
+  guarded('GET', '/api/market/prompts', 'market.read', (exchange) => {
+    const orgId = exchange.query.get('orgId') ?? ''
+    return { prompts: ctx.market.promptPacks(orgId) }
+  })
+
+  guarded('POST', '/api/market/prompts/use', 'market.read', (exchange) => {
+    const info = caller(exchange)
+    const input = body<{ orgId: string; pluginId: string; promptName: string }>(exchange)
+    ctx.market.meterPromptUse(input.orgId, input.pluginId, input.promptName, info.kind === 'human' ? `user:${info.userId ?? info.principalId}` : `app:${info.principalId}`)
+    return { metered: true }
+  })
+
+  // 沙箱边界自检：轻量代理 ctx + 总线 source 校验的强制语义（插件开发者联调用）
+  guarded('POST', '/api/market/sandbox-check', 'market.read', (exchange) => {
+    const input = body<{ pluginId?: string; capabilities?: string[] }>(exchange)
+    const pluginId = input.pluginId ?? 'com.selftest.probe'
+    const capabilities = input.capabilities ?? ['knowledgebase.read']
+    const results: Record<string, string> = {}
+    const pctx = createPluginContext(ctx, { pluginId, capabilities })
+    try { pctx.platformBus.emit(`plugin:${pluginId}:probe`, { check: true }); results.emitOwnNamespace = 'ok' } catch (error) { results.emitOwnNamespace = `blocked:${error instanceof Error ? error.message : String(error)}` }
+    try { pctx.platformBus.emit('iam.user.frozen', { check: true }); results.emitPlatformViaProxy = 'UNEXPECTEDLY_ALLOWED' } catch { results.emitPlatformViaProxy = 'blocked' }
+    try { ctx.platformBus.emit('iam.user.frozen', { check: true }, { source: `plugin:${pluginId}` }); results.directEmitReserved = 'UNEXPECTEDLY_ALLOWED' } catch { results.directEmitReserved = 'blocked' }
+    try { ctx.platformBus.emit(`plugin:${pluginId}:forged`, { check: true }); results.pluginEventWithoutSource = 'UNEXPECTEDLY_ALLOWED' } catch { results.pluginEventWithoutSource = 'blocked' }
+    try { pctx.service('usage'); results.serviceWithoutCapability = 'UNEXPECTEDLY_ALLOWED' } catch { results.serviceWithoutCapability = 'blocked' }
+    const pctxGranted = createPluginContext(ctx, { pluginId, capabilities: [...capabilities, 'usage.meter'] })
+    try { pctxGranted.service('usage'); results.serviceWithCapability = 'ok' } catch (error) { results.serviceWithCapability = `blocked:${error instanceof Error ? error.message : String(error)}` }
+    return { pluginId, capabilities, results }
+  })
+
+  // -- 钱包与计费（v1.2 第 5/8 步） -----------------------------------------
+  guarded('GET', '/api/billing/wallets/:ownerType/:ownerId', 'billing.read', (exchange) => ({
+    ownerType: exchange.params['ownerType'],
+    ownerId: exchange.params['ownerId'],
+    balanceCents: ctx.billing.balance(exchange.params['ownerType']! as 'org', exchange.params['ownerId']!),
+    monthSpentCents: exchange.params['ownerType'] === 'org' ? ctx.billing.monthSpent(exchange.params['ownerId']!) : undefined,
+  }))
+
+  guarded('POST', '/api/billing/recharge', 'billing.write', (exchange) => {
+    const info = caller(exchange)
+    const input = body<{ ownerType?: 'org' | 'developer' | 'platform'; ownerId: string; tenantId?: string; amountCents: number; channelRef: string; idempotencyKey: string }>(exchange)
+    const result = ctx.billing.recharge({
+      ownerType: input.ownerType ?? 'org',
+      ownerId: input.ownerId,
+      ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
+      amountCents: input.amountCents,
+      channelRef: input.channelRef,
+      idempotencyKey: input.idempotencyKey,
+      actor: info.name,
+    })
+    changeLog(exchange, 'billing.recharge', 'wallet', `${input.ownerType ?? 'org'}:${input.ownerId}`, '', `+${input.amountCents} 分（${input.channelRef}）`)
+    return result
+  })
+
+  guarded('GET', '/api/billing/journal', 'billing.read', (exchange) => ({
+    entries: ctx.billing.journal({
+      ...(exchange.query.get('ownerType') ? { ownerType: exchange.query.get('ownerType')! } : {}),
+      ...(exchange.query.get('ownerId') ? { ownerId: exchange.query.get('ownerId')! } : {}),
+      ...(exchange.query.get('limit') ? { limit: Number(exchange.query.get('limit')) } : {}),
+    }),
+  }))
+
+  guarded('POST', '/api/billing/verify', 'billing.read', () => ctx.billing.verifyIntegrity())
+
+  guarded('PUT', '/api/billing/budgets/:orgId', 'billing.write', (exchange) => {
+    const info = caller(exchange)
+    const { monthlyCents } = body<{ monthlyCents: number }>(exchange)
+    const record = ctx.billing.setBudget(exchange.params['orgId']!, monthlyCents, info.name)
+    changeLog(exchange, 'billing.budget.set', 'budget', record.orgId, '', `${monthlyCents} 分/月`)
+    return record
+  })
+
+  guarded('GET', '/api/billing/budgets/:orgId', 'billing.read', (exchange) => ({
+    orgId: exchange.params['orgId'],
+    budget: ctx.billing.budgets().findOne((item) => item.orgId === exchange.params['orgId']) ?? null,
+    monthSpentCents: ctx.billing.monthSpent(exchange.params['orgId']!),
+  }))
+
+  guarded('POST', '/api/billing/settle', 'billing.admin', (exchange) => {
+    const info = caller(exchange)
+    const { period } = body<{ period: string }>(exchange)
+    const result = ctx.billing.settle(period, info.name)
+    changeLog(exchange, 'billing.ledger.settle', 'ledger', period, '', `分录 ${result.entries} 条，借=${result.debitCents} 贷=${result.creditCents}`)
+    return result
+  })
+
+  guarded('GET', '/api/billing/ledger', 'billing.read', (exchange) => {
+    const period = exchange.query.get('period') ?? undefined
+    return { entries: ctx.billing.ledger(period), trial: period ? ctx.billing.trialBalance(period) : undefined }
+  })
+
+  guarded('POST', '/api/billing/ledger/reverse', 'billing.admin', (exchange) => {
+    const info = caller(exchange)
+    const { period, reason } = body<{ period: string; reason: string }>(exchange)
+    const result = ctx.billing.reverse(period, reason, info.name)
+    changeLog(exchange, 'billing.ledger.reverse', 'ledger', period, '', `红字冲正：${reason}`)
+    return result
+  })
+
+  // -- 模型网关（v1.2 第 5 步：L1 模型转售） ---------------------------------
+  guarded('GET', '/api/modelgw/models', 'modelgw.read', () => ({
+    models: ctx.modelGateway.models().all().map((item) => ({ ...item, apiKey: item.apiKey.startsWith('env:') ? item.apiKey : '***' })),
+  }))
+
+  guarded('POST', '/api/modelgw/models', 'modelgw.admin', (exchange) => {
+    const input = body<{ slug: string; displayName?: string; provider?: string; endpoint: string; apiKey?: string; listCentsPerKTokens: number; costCentsPerKTokens?: number; status?: 'online' | 'offline' }>(exchange)
+    const model = ctx.modelGateway.upsertModel({
+      slug: input.slug,
+      displayName: input.displayName ?? input.slug,
+      provider: input.provider ?? 'external',
+      endpoint: input.endpoint,
+      apiKey: input.apiKey ?? 'env:MODEL_API_KEY',
+      listCentsPerKTokens: input.listCentsPerKTokens,
+      costCentsPerKTokens: input.costCentsPerKTokens ?? Math.floor(input.listCentsPerKTokens / 2),
+      status: input.status ?? 'online',
+    })
+    changeLog(exchange, 'modelgw.model.upsert', 'model', model.id, model.slug)
+    return model
+  })
+
+  guarded('POST', '/api/modelgw/invoke', 'modelgw.invoke', async (exchange) => {
+    const info = caller(exchange)
+    const input = body<{ model: string; messages: Array<{ role: string; content: string }>; orgId?: string; maxTokens?: number; temperature?: number }>(exchange)
+    // 默认计费组织：调用者所属组织（人）或凭证组织（机器）
+    const orgId = input.orgId
+      ?? (info.kind === 'human' && info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined)
+    if (!orgId) throw new Error('未指定计费组织（orgId），且调用者无可归属组织')
+    const subject = info.kind === 'human' ? `user:${info.userId ?? info.principalId}` : `app:${info.principalId}`
+    return await ctx.modelGateway.invoke({
+      model: input.model,
+      messages: input.messages,
+      orgId,
+      subject,
+      ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+      ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+    })
+  })
+
   guarded('GET', '/api/approvals', 'approval.read', () => ({
     approvals: ctx.audit.approvals().all().sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
   }))
@@ -1009,7 +1379,7 @@ export function apply(ctx: Context) {
   // -- 平台信息与工具桥 -----------------------------------------------------
   guarded('GET', '/api/platform/info', 'console.login', () => {
     const plugins = [
-      'platform-core', 'resource-core', 'iam', 'authn', 'audit', 'mcp', 'skillhub', 'agent', 'app', 'console',
+      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'skillhub', 'agent', 'app', 'console',
     ]
     return {
       name: '企业 AI 资源统一管理平台',

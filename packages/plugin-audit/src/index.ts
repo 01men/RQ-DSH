@@ -183,6 +183,27 @@ export class AuditService extends Service {
         read: false,
       })
     })
+
+    // 计量管道消费（v1.2 第 2 步）：usage.recorded → 财务口径投影 + 真实成本归集。
+    // 消费幂等由 usage 事件 idempotency_key 保障（at-least-once 投递 + 幂等消费）。
+    ctx.usage.consume('audit', (event) => {
+      ctx.usage.project('audit', event)
+      const agentId = event.subject.startsWith('agent:') ? event.subject.slice(6) : undefined
+      const appId = event.principal.startsWith('app:') ? event.principal.slice(4) : undefined
+      const mcpServiceId = event.resource.startsWith('mcp:') ? event.resource.slice(4) : undefined
+      const tokens = event.meters
+        .filter((meter) => meter.key === 'input_tokens' || meter.key === 'output_tokens' || meter.key === 'tokens')
+        .reduce((sum, meter) => sum + meter.value, 0)
+      this.addCost({
+        date: event.occurred_at.slice(0, 10),
+        ...(agentId !== undefined ? { agentId } : {}),
+        ...(appId !== undefined ? { appId } : {}),
+        ...(mcpServiceId !== undefined ? { mcpServiceId } : {}),
+        llmTokens: event.resource.startsWith('model:') ? tokens : 0,
+        toolCalls: event.resource.startsWith('mcp:') ? 1 : 0,
+        costYuan: Math.round(event.pricing.charge_cents) / 100,
+      })
+    })
   }
 
   // -- 集合 ---------------------------------------------------------------
@@ -406,7 +427,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'audit'
-export const inject = ['storage', 'platformBus', 'resourceCore', 'iam']
+export const inject = ['storage', 'platformBus', 'resourceCore', 'iam', 'usage']
 
 export function apply(ctx: Context) {
   ctx.plugin(AuditService)

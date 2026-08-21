@@ -6,8 +6,15 @@
  * 用法：npm run selftest
  */
 import { spawn } from 'node:child_process'
+import { createServer } from 'node:http'
 import { rm, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
+
+const readBody = (req) => new Promise((resolve) => {
+  const chunks = []
+  req.on('data', (c) => chunks.push(c))
+  req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+})
 
 const PORT = 7311
 const BASE = `http://127.0.0.1:${PORT}`
@@ -137,7 +144,7 @@ try {
 
   const devLogin = await api('POST', '/api/auth/login', { body: { username: 'dev', password: 'Ybk@2026' } })
   check('开发者登录', devLogin.ok)
-  const dev = devLogin.data.token
+  let dev = devLogin.data.token
 
   // ================================================================ RBAC
   section('RBAC 权限模型')
@@ -251,9 +258,287 @@ try {
   const revokedUse = await api('GET', '/api/auth/me', { token: issueToken.data.token })
   check('吊销后令牌失效', revokedUse.status === 401)
 
+  // ================================================================ 第 1 步：受众与插件命名空间
+  section('第 1 步：令牌受众（aud）与插件命名空间收敛')
+  const audPrincipal = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'billing-svc', refType: 'external', scopes: ['audit.read'] } })
+  const audToken = await api('POST', '/api/authn/tokens', { token: admin, body: { principalId: audPrincipal.data.principalId, audience: 'billing', ttlHours: 1, reason: '受限受众令牌' } })
+  check('签发带受众（aud）的令牌', audToken.ok)
+
+  const audOk = await api('POST', '/api/authn/verify-audience', { token: admin, body: { token: audToken.data.token, audience: 'billing' } })
+  check('受众匹配 → 校验通过', audOk.data.valid === true)
+  const audMismatch = await api('POST', '/api/authn/verify-audience', { token: admin, body: { token: audToken.data.token, audience: 'market' } })
+  check('受众不匹配 → 拒绝', audMismatch.data.valid === false && String(audMismatch.data.reason).includes('受众'))
+
+  const noAudToken = await api('POST', '/api/authn/tokens', { token: admin, body: { principalId: audPrincipal.data.principalId, ttlHours: 1 } })
+  const noAudCheck = await api('POST', '/api/authn/verify-audience', { token: admin, body: { token: noAudToken.data.token, audience: 'billing' } })
+  check('无受众令牌访问受众服务被拒', noAudCheck.data.valid === false)
+
+  const pluginScopeOk = await api('POST', '/api/authn/tokens', { token: admin, body: { principalId: audPrincipal.data.principalId, audience: 'plugin:com.demo.kb', scopes: ['plugin:com.demo.kb:read'], ttlHours: 1 } })
+  check('插件令牌命名空间内 scope 放行', pluginScopeOk.ok)
+  const pluginScopeBad = await api('POST', '/api/authn/tokens', { token: admin, body: { principalId: audPrincipal.data.principalId, audience: 'plugin:com.demo.kb', scopes: ['mcp.invoke'], ttlHours: 1 } })
+  check('插件令牌跨命名空间 scope 被拒（唯一收敛面）', !pluginScopeBad.ok && JSON.stringify(pluginScopeBad.error).includes('越界'))
+
+  // ================================================================ 第 2 步：租户最小集 + usage 管道
+  section('第 2 步：多租户最小集与 usage 计量管道')
+  const tenants = await api('GET', '/api/iam/tenants', { token: admin })
+  check('默认租户兜底（存量数据落 t_default）', tenants.ok && tenants.data.tenants.some((t) => t.id === 't_default'))
+  const newTenant = await api('POST', '/api/iam/tenants', { token: admin, body: { name: '磁姆科技', plan: 'enterprise' } })
+  check('创建租户', newTenant.ok && newTenant.data.id.startsWith('t_'))
+  const tenantOrg = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '磁姆中国区', tenantId: newTenant.data.id } })
+  check('组织挂载租户', tenantOrg.ok && tenantOrg.data.tenantId === newTenant.data.id)
+
+  const meterInput = { org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 5000, unit: 'token' }], idempotency_key: 'test-usage-001' }
+  const meterA = await api('POST', '/api/usage/record', { token: admin, body: meterInput })
+  check('计量事件登记（价格簿计价 + 租户解析）', meterA.ok && meterA.data.pricing.charge_cents === 150 && meterA.data.tenant_id === newTenant.data.id && meterA.data.schema_version === 1)
+  const meterDup = await api('POST', '/api/usage/record', { token: admin, body: meterInput })
+  check('幂等键重复投递不重复计量', meterDup.ok && meterDup.data.event_id === meterA.data.event_id)
+  const meterTotals = await api('GET', '/api/usage/totals?principal=' + encodeURIComponent(`org:${tenantOrg.data.id}`), { token: admin })
+  check('租户隔离的计量总额（只计一次）', meterTotals.ok && meterTotals.data.count === 1 && meterTotals.data.charge_cents === 150)
+  const meterConflict = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, meters: [{ key: 'tokens', value: 999, unit: 'token' }] } })
+  check('同幂等键不同内容被拒（防篡改）', !meterConflict.ok && JSON.stringify(meterConflict.error).includes('冲突'))
+  const badResource = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, idempotency_key: 'test-usage-002', resource: 'not-a-resource' } })
+  check('schema v1 校验（resource 格式拒绝）', !badResource.ok)
+  const noPrice = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, idempotency_key: 'test-usage-003', resource: 'model:no-such-model' } })
+  check('无计价规则拒绝登记（不免费放行）', !noPrice.ok && JSON.stringify(noPrice.error).includes('计价'))
+
+  const reconcile1 = await api('POST', '/api/usage/reconcile', { token: admin })
+  check('三方对账：usage 口径 = audit 投影（全量比对）', reconcile1.ok
+    && reconcile1.data.reconciliation.mismatch === false
+    && reconcile1.data.reconciliation.projections.some((p) => p.consumer === 'audit' && p.count === reconcile1.data.reconciliation.usage.count && p.charge_cents === reconcile1.data.reconciliation.usage.charge_cents))
+  check('运行时对账检出未声明能力（M5 漂移）', reconcile1.data.drift.drift.length >= 1)
+  const grant = await api('PUT', '/api/usage/capability-grants', { token: admin, body: { principal: `org:${tenantOrg.data.id}`, capabilities: ['mcp:*'] } })
+  const reconcile2 = await api('POST', '/api/usage/reconcile', { token: admin })
+  const tenantStillDrift = reconcile2.data.drift.drift.find((d) => d.principal === `org:${tenantOrg.data.id}`)
+  check('授权后该主体能力漂移消除', grant.ok && tenantStillDrift === undefined)
+  const driftAlerts = await api('GET', '/api/audit/alerts', { token: admin })
+  check('能力漂移已入告警中心', driftAlerts.ok && JSON.stringify(driftAlerts.data.alerts).includes('能力漂移'))
+
+  // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
+  section('第 3 步：契约五面 / 事件源校验 / 代理 ctx / L0 市场')
+
+  const sandbox = await api('POST', '/api/market/sandbox-check', { token: admin, body: {} })
+  const sb = sandbox.data?.results ?? {}
+  check('代理 ctx：自有命名空间事件放行', sb.emitOwnNamespace === 'ok')
+  check('代理 ctx：平台事件被拦（前缀强制）', sb.emitPlatformViaProxy === 'blocked')
+  check('总线：plugin 来源直发保留命名空间被拦', sb.directEmitReserved === 'blocked')
+  check('总线：plugin 命名空间无来源被拦', sb.pluginEventWithoutSource === 'blocked')
+  check('代理 ctx：未授权服务访问被拦（能力裁剪）', sb.serviceWithoutCapability === 'blocked')
+  check('代理 ctx：授权能力内服务放行', sb.serviceWithCapability === 'ok')
+
+  const { generateKeyPairSync, createHash, sign: edSign } = await import('node:crypto')
+  const devKeys = generateKeyPairSync('ed25519')
+  const devPub = devKeys.publicKey.export({ format: 'der', type: 'spki' }).toString('base64')
+  const devReg = await api('POST', '/api/market/developers/register', { body: { username: 'acme-dev', displayName: '磁姆开发者', email: 'dev@acme.com', password: 'Acme@20260', publicKey: devPub, company: '磁姆科技', payoutAccount: '待登记（资金通道依赖清单）' } })
+  check('开发者注册（Ed25519 发布者公钥）', devReg.ok && devReg.data.developer.username === 'acme-dev')
+  const devPortalLogin = await api('POST', '/api/market/developers/login', { body: { username: 'acme-dev', password: 'Acme@20260' } })
+  check('开发者登录（独立身份域）', devPortalLogin.ok && devPortalLogin.data.token.startsWith('dst1.'))
+  const devToken2 = devPortalLogin.data.token
+  const devBadLogin = await api('POST', '/api/market/developers/login', { body: { username: 'acme-dev', password: 'wrong-pass' } })
+  check('开发者密码错误被拒', devBadLogin.status === 401)
+
+  const pluginYaml = (opts = {}) => [
+    `id: ${opts.id ?? 'com.acme.hello'}`,
+    'version: 1.0.0',
+    `publisher: ${opts.publisher ?? 'acme-dev'}`,
+    'depends:',
+    '  - dsh-plugin-platform-core: ^1.0',
+    'capabilities_request:',
+    '  - knowledgebase.read',
+    `sandbox: ${opts.sandbox ?? 'L0'}`,
+    'content:',
+    '  prompts:',
+    '    - name: hello',
+    '      description: Hello World 提示词包',
+    '      template: |',
+    `        ${opts.template ?? '你是磁姆助手。请复述用户请求并给出结构化回答。'}`,
+    '',
+  ].join('\n')
+  const buildFiles = (opts = {}) => ({
+    'plugin.yaml': pluginYaml(opts),
+    'manifest/permissions.yaml': 'requested:\n  - knowledgebase.read\n',
+    'manifest/api.yaml': 'routes: []\n',
+    'manifest/events.yaml': 'subscribes: []\nemits: []\n',
+    'manifest/billing.yaml': 'model: usage\nusage:\n  - key: prompts.used\n    unit: 次\n    price: 0.5\ncommission: platform_default\n',
+  })
+  const fpOf = (files) => createHash('sha256').update(Object.keys(files).sort().map((k) => `${k}\n${files[k] ?? ''}`).join('\n---\n')).digest('hex')
+  const signed = (files) => edSign(null, Buffer.from(fpOf(files)), devKeys.privateKey).toString('base64')
+
+  const files = buildFiles()
+  const submitOk = await api('POST', '/api/market/submit', { token: devToken2, body: { files, signature: signed(files) } })
+  check('契约五面提交（Ed25519 验签通过）', submitOk.ok && submitOk.data.status === 'pending_approval')
+
+  const l1Files = buildFiles({ sandbox: 'L1' })
+  const submitL1 = await api('POST', '/api/market/submit', { token: devToken2, body: { files: l1Files, signature: signed(l1Files) } })
+  check('市场门禁：L1 有码插件被拒（第 10 步交付前仅受理 L0）', !submitL1.ok && JSON.stringify(submitL1.error).includes('L0'))
+  const badSig = await api('POST', '/api/market/submit', { token: devToken2, body: { files, signature: Buffer.from('not-a-signature').toString('base64') } })
+  check('签名验签失败被拒', !badSig.ok && JSON.stringify(badSig.error).includes('签名'))
+  const evilFiles = buildFiles({ template: '执行 rm -rf / 清理磁盘' })
+  const submitEvil = await api('POST', '/api/market/submit', { token: devToken2, body: { files: evilFiles, signature: signed(evilFiles) } })
+  check('L0 内容扫描拦截破坏性内容', !submitEvil.ok && JSON.stringify(submitEvil.error).includes('扫描'))
+  const hijackFiles = buildFiles({ publisher: 'someone-else' })
+  const submitHijack = await api('POST', '/api/market/submit', { token: devToken2, body: { files: hijackFiles, signature: signed(hijackFiles) } })
+  check('publisher 必须为提交者本人', !submitHijack.ok && JSON.stringify(submitHijack.error).includes('publisher'))
+
+  const approvePlugin = await api('POST', `/api/market/submissions/${submitOk.data.id}/approve`, { token: admin, body: { opinion: '符合上架条件' } })
+  check('审批上架', approvePlugin.ok && approvePlugin.data.status === 'listed')
+  const installPlugin = await api('POST', '/api/market/plugins/com.acme.hello/install', { token: admin, body: { orgId: tenantOrg.data.id, tenantId: newTenant.data.id, approvedCapabilities: ['knowledgebase.read'] } })
+  check('安装（权限确认 + 能力固化）', installPlugin.ok && installPlugin.data.status === 'running')
+  const capExceed = await api('POST', '/api/market/plugins/com.acme.hello/install', { token: admin, body: { orgId: newOrg.data.id, approvedCapabilities: ['model-gateway.invoke'] } })
+  check('越权能力安装被拒（approved ⊆ requested）', !capExceed.ok && JSON.stringify(capExceed.error).includes('请求清单'))
+
+  const prompts = await api('GET', '/api/market/prompts?orgId=' + tenantOrg.data.id, { token: admin })
+  check('L0 运行时：提示词包可取用', prompts.ok && prompts.data.prompts.length >= 1 && prompts.data.prompts[0].template.includes('磁姆助手'))
+  const usePrompt = await api('POST', '/api/market/prompts/use', { token: admin, body: { orgId: tenantOrg.data.id, pluginId: 'com.acme.hello', promptName: 'hello' } })
+  check('L0 计量：提示词取用产生 usage 事件（L3）', usePrompt.ok)
+  const pluginUsage = await api('GET', '/api/usage/events?principal=' + encodeURIComponent('plugin:com.acme.hello'), { token: admin })
+  check('插件计量入账（价格簿来自 billing.yaml：0.5 元/次）', pluginUsage.ok && pluginUsage.data.total >= 1 && pluginUsage.data.items[0].pricing.charge_cents === 50 && pluginUsage.data.items[0].tenant_id === newTenant.data.id)
+
+  // app 复合验收（F5 修正：以覆盖面而非复杂度为由）
+  const seededApps = (await api('GET', '/api/apps', { token: admin })).data.apps
+  const anyApp = seededApps[0]
+  const compoundAppDetail = await api('GET', `/api/apps/${anyApp.id}`, { token: admin })
+  const chainTotals = await api('GET', '/api/usage/totals', { token: admin })
+  check('app 复合验收：拓扑 + 成本穿透 + 计量管道三链齐备', compoundAppDetail.ok && compoundAppDetail.data.topology.children.length >= 1 && compoundAppDetail.data.cost.length >= 1 && chainTotals.ok && chainTotals.data.count >= 2, JSON.stringify({ app: compoundAppDetail.ok ? { topo: compoundAppDetail.data.topology.children.length, cost: compoundAppDetail.data.cost.length } : compoundAppDetail, totals: chainTotals }))
+
+  // dshctl plugin init 脚手架（真实生成文件）
+  const { execFile } = await import('node:child_process')
+  const scaffoldDir = join(DATA_DIR, 'scaffold-plugin')
+  await new Promise((resolve) => execFile(process.execPath, ['cli/dshctl.mjs', 'plugin', 'init', '--id=com.selftest.scaffold', `--dir=${scaffoldDir}`], { cwd: process.cwd() }, (error) => { void error; resolve() }))
+  const { existsSync: existsFile, readFileSync } = await import('node:fs')
+  const SCAFFOLD_FILES = ['plugin.yaml', 'manifest/permissions.yaml', 'manifest/api.yaml', 'manifest/events.yaml', 'manifest/billing.yaml']
+  check('dshctl plugin init 脚手架五面生成', SCAFFOLD_FILES.every((f) => existsFile(join(scaffoldDir, f))))
+  const scaffoldYaml = existsFile(join(scaffoldDir, 'plugin.yaml')) ? readFileSync(join(scaffoldDir, 'plugin.yaml'), 'utf8') : ''
+  check('脚手架默认 L0 + Hello World + 发布者密钥对', scaffoldYaml.includes('sandbox: L0') && scaffoldYaml.includes('hello') && existsFile(join(scaffoldDir, 'publisher-private-key.pem')))
+
+  // ================================================================ 第 5 步：钱包 / 资金流水 / 模型转售
+  section('第 5 步：钱包资金流水（只追加+幂等）与模型转售网关')
+
+  const walletKey = { ownerType: 'org', ownerId: tenantOrg.data.id, tenantId: newTenant.data.id }
+  const recharge1 = await api('POST', '/api/billing/recharge', { token: admin, body: { ...walletKey, amountCents: 100_000, channelRef: 'BANK-20260821-001', idempotencyKey: 'rc-test-001' } })
+  check('充值入账（资金通道未就位→管理员手工录入流水）', recharge1.ok && recharge1.data.balanceCents === 100_000 && recharge1.data.duplicated === false)
+  const rechargeDup = await api('POST', '/api/billing/recharge', { token: admin, body: { ...walletKey, amountCents: 100_000, channelRef: 'BANK-20260821-001', idempotencyKey: 'rc-test-001' } })
+  check('充值幂等（同渠道单号重复录入不重复入账）', rechargeDup.ok && rechargeDup.data.duplicated === true && rechargeDup.data.balanceCents === 100_000)
+  const badRecharge = await api('POST', '/api/billing/recharge', { token: admin, body: { ...walletKey, amountCents: -5, channelRef: 'x', idempotencyKey: 'rc-test-002' } })
+  check('负数充值被拒', !badRecharge.ok)
+
+  // 模型转售：OpenAI 兼容真实 stub
+  const modelStub = createServer(async (req, res) => {
+    if (req.url.endsWith('/chat/completions')) {
+      await readBody(req)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        choices: [{ message: { role: 'assistant', content: '你好，这是来自真实模型 stub 的回答。' } }],
+        usage: { prompt_tokens: 120, completion_tokens: 1500 },
+      }))
+      return
+    }
+    res.writeHead(404).end('{}')
+  })
+  await new Promise((resolve) => modelStub.listen(0, '127.0.0.1', resolve))
+  const modelPort = modelStub.address().port
+
+  const noEndpointModel = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ghost-model', endpoint: '', listCentsPerKTokens: 10 } })
+  const ghostInvoke = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'ghost-model', messages: [{ role: 'user', content: 'hi' }], orgId: tenantOrg.data.id } })
+  check('未配置 endpoint 的模型拒绝调用（不生成假 completion）', noEndpointModel.ok && !ghostInvoke.ok && JSON.stringify(ghostInvoke.error).includes('endpoint'))
+
+  const modelReg = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ds-stub', displayName: 'DeepSeek（stub 验证）', provider: 'deepseek', endpoint: `http://127.0.0.1:${modelPort}/v1`, apiKey: 'stub-key', listCentsPerKTokens: 10, costCentsPerKTokens: 5 } })
+  check('模型目录登记（价格簿自动登记）', modelReg.ok)
+
+  const modelInvoke = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'ds-stub', messages: [{ role: 'user', content: '真实链路测试' }], orgId: tenantOrg.data.id } })
+  check('模型调用真实往返 + 实测 tokens 计量', modelInvoke.ok && modelInvoke.data.content.includes('真实模型') && modelInvoke.data.inputTokens === 120 && modelInvoke.data.outputTokens === 1500)
+  check('按价格簿扣费（1500 tokens × 10分/千 = 15 分）', modelInvoke.ok && modelInvoke.data.chargeCents === 15 && modelInvoke.data.balanceAfterCents === 100_000 - 15, JSON.stringify(modelInvoke))
+
+  const modelUsageEvents = await api('GET', '/api/usage/events?resource=model:ds-stub', { token: admin })
+  check('模型计量事件含 input/output meters + 租户维度', modelUsageEvents.ok && modelUsageEvents.data.total >= 1 && modelUsageEvents.data.items[0].meters.length === 2 && modelUsageEvents.data.items[0].tenant_id === newTenant.data.id)
+
+  const walletAfter = await api('GET', `/api/billing/wallets/org/${tenantOrg.data.id}`, { token: admin })
+  check('钱包余额与流水一致（扣费经计量管道）', walletAfter.ok && walletAfter.data.balanceCents === 100_000 - 15 && walletAfter.data.monthSpentCents === 15, JSON.stringify(walletAfter))
+
+  // 预算/限额
+  await api('PUT', `/api/billing/budgets/${tenantOrg.data.id}`, { token: admin, body: { monthlyCents: 30 } })
+  const budgetBlock = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'ds-stub', messages: [{ role: 'user', content: '再试一次' }], orgId: tenantOrg.data.id } })
+  check('月度预算限额拦截（quota.exceeded，不计费）', !budgetBlock.ok && JSON.stringify(budgetBlock.error).includes('预算'))
+  const balanceAfterBlock = await api('GET', `/api/billing/wallets/org/${tenantOrg.data.id}`, { token: admin })
+  check('被拒调用不产生扣费', balanceAfterBlock.data.balanceCents === 100_000 - 15)
+
+  const poorOrg = await api('POST', '/api/billing/recharge', { token: admin, body: { ownerType: 'org', ownerId: newOrg.data.id, amountCents: 10, channelRef: 'BANK-POOR', idempotencyKey: 'rc-poor-001' } })
+  const poorInvoke = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'ds-stub', messages: [{ role: 'user', content: '余额不足测试' }], orgId: newOrg.data.id } })
+  check('余额不足预检拦截（先检后用）', poorOrg.ok && !poorInvoke.ok && JSON.stringify(poorInvoke.error).includes('余额不足'))
+
+  const integrity = await api('POST', '/api/billing/verify', { token: admin })
+  check('资金完整性：余额 ≡ Σ流水（全量重放）', integrity.ok && integrity.data.ok === true && integrity.data.wallets >= 2)
+  modelStub.close()
+
+  // ================================================================ 第 6 步：OIDC Provider（RS256/JWKS）
+  section('第 6 步：OIDC Provider（RS256 / JWKS / 用户状态联动）')
+  const rawApi = async (method, path, { token: bearer, body: reqBody } = {}) => {
+    const headers = { 'content-type': 'application/json' }
+    if (bearer) headers.authorization = `Bearer ${bearer}`
+    const response = await fetch(`${BASE}${path}`, { method, headers, body: reqBody === undefined ? undefined : JSON.stringify(reqBody) })
+    let json = null
+    try { json = await response.json() } catch { /* ignore */ }
+    return { status: response.status, json }
+  }
+
+  const discovery = await rawApi('GET', '/.well-known/openid-configuration')
+  check('OIDC 发现文档暴露（含 jwks_uri / 端点）', discovery.status === 200 && discovery.json.jwks_uri.includes('/.well-known/jwks.json') && discovery.json.id_token_signing_alg_values_supported.includes('RS256'))
+  const jwks = await rawApi('GET', '/.well-known/jwks.json')
+  check('JWKS 暴露公钥（kid/kty/n）', jwks.status === 200 && jwks.json.keys[0].kty === 'RSA' && jwks.json.keys[0].kid.length === 16 && Boolean(jwks.json.keys[0].n))
+
+  const oidcClient = await api('POST', '/api/authn/oidc/clients', { token: admin, body: { name: '外部 CRM 应用', redirectUris: ['https://crm.partner.example/cb'] } })
+  check('登记 OIDC 客户端（secret 一次性返回）', oidcClient.ok && oidcClient.data.clientId.startsWith('oc-'))
+  const oidcAuthorize = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, redirectUri: 'https://crm.partner.example/cb', state: 'st-xyz', username: 'admin', password: 'Ybk@2026' } })
+  check('授权码签发（一次性 code）', oidcAuthorize.status === 200 && oidcAuthorize.json.code.length >= 32 && oidcAuthorize.json.state === 'st-xyz')
+  const oidcToken = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: oidcAuthorize.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret } })
+  check('code 换 RS256 令牌对（access + id_token）', oidcToken.status === 200 && oidcToken.json.access_token.split('.').length === 3 && oidcToken.json.id_token.split('.').length === 3)
+  const oidcCodeReplay = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: oidcAuthorize.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret } })
+  check('授权码重放被拒（单次消费）', oidcCodeReplay.status === 401)
+  const badSecret = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: 'whatever', client_id: oidcClient.data.clientId, client_secret: 'wrong' } })
+  check('client_secret 错误被拒', badSecret.status === 401)
+
+  // 客户端本地验签（用 JWKS 公钥验证 RS256 签名 —— 外部应用真实姿势）
+  const { createPublicKey: cpk, verify: rsVerify } = await import('node:crypto')
+  const jwkKey = cpk({ key: { kty: jwks.json.keys[0].kty, n: jwks.json.keys[0].n, e: jwks.json.keys[0].e }, format: 'jwk' })
+  const [jwtH, jwtP, jwtS] = oidcToken.json.access_token.split('.')
+  const sigValid = rsVerify('RSA-SHA256', Buffer.from(`${jwtH}.${jwtP}`), jwkKey, Buffer.from(jwtS, 'base64url'))
+  const jwtClaims = JSON.parse(Buffer.from(jwtP, 'base64url').toString('utf8'))
+  check('外部应用以 JWKS 公钥本地验签通过', sigValid === true && jwtClaims.aud === oidcClient.data.clientId && jwtClaims.iss.includes('127.0.0.1'))
+
+  const userInfo = await rawApi('GET', '/oauth/userinfo', { token: oidcToken.json.access_token })
+  check('userinfo 返回 NormalizedProfile（org/角色/租户）', userInfo.status === 200 && userInfo.json.sub === adminLogin.data.user.id && userInfo.json.org !== null && Array.isArray(userInfo.json.roles) && userInfo.json.roles.includes('super_admin'))
+
+  // 冻结联动：OIDC 令牌即时失效（无需等过期）
+  const devAuth = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, state: 'st-dev', username: 'dev', password: 'Ybk@2026' } })
+  const devTokenOidc = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: devAuth.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret } })
+  const devUserFull = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('陈默'), { token: admin })).data.users[0]
+  await api('POST', `/api/iam/users/${devUserFull.id}/freeze`, { token: admin, body: { reason: '第 6 步：验证 OIDC 离职/冻结联动' } })
+  const frozenInfo = await rawApi('GET', '/oauth/userinfo', { token: devTokenOidc.json.access_token })
+  check('账号冻结 → OIDC 令牌即时失效（卖点闭环）', frozenInfo.status === 401)
+  // 解冻并重登：后续 MCP/Skill 段仍需 dev 令牌（冻结已即时吊销旧令牌）
+  await api('POST', `/api/iam/users/${devUserFull.id}/unfreeze`, { token: admin })
+  const devRelogin = await api('POST', '/api/auth/login', { body: { username: 'dev', password: 'Ybk@2026' } })
+  dev = devRelogin.data.token
+
+  // ================================================================ 第 7 步：L0 市场 beta（自营供给 + 订阅代收）
+  section('第 7 步：L0 市场 beta（自营供给 / 订阅代收 / 卸载联动）')
+  const marketList = await api('GET', '/api/market/plugins', { token: admin })
+  check('自营首批供给上架（3 个标杆 L0）', marketList.ok && marketList.data.plugins.filter((p) => p.pluginId.startsWith('com.platform.')).length === 3, JSON.stringify(marketList).slice(0, 400))
+  const officialInstall = await api('POST', '/api/market/plugins/com.platform.contract-review/install', { token: admin, body: { orgId: newOrg.data.id, approvedCapabilities: ['knowledgebase.read'] } })
+  check('安装自营插件', officialInstall.ok && officialInstall.data.status === 'running')
+  const subs = await api('GET', '/api/market/subscriptions', { token: admin })
+  const subEntry = subs.data.subscriptions.find((s) => s.pluginId === 'com.platform.contract-review' && s.orgId === newOrg.data.id)
+  check('L3 订阅代收登记（hybrid 999 元/月，人工对账过渡）', Boolean(subEntry) && subEntry.monthlyCents === 99900 && subEntry.channel === 'manual-settlement')
+  const officialPrompts = await api('GET', '/api/market/prompts?orgId=' + newOrg.data.id, { token: admin })
+  check('自营插件提示词包可取用', officialPrompts.ok && JSON.stringify(officialPrompts.data.prompts).includes('合同审查'))
+
+  const uninstall = await api('POST', '/api/market/plugins/com.acme.hello/uninstall', { token: admin, body: { orgId: tenantOrg.data.id } })
+  check('卸载联动（运行态回收）', uninstall.ok && uninstall.data.status === 'uninstalled')
+  const promptsAfterUninstall = await api('GET', '/api/market/prompts?orgId=' + tenantOrg.data.id, { token: admin })
+  check('卸载后提示词包不再提供', promptsAfterUninstall.ok && !JSON.stringify(promptsAfterUninstall.data.prompts).includes('磁姆助手'))
+
   // ================================================================ MCP
   section('MCP 部署服务')
-  const svcCreate = await api('POST', '/api/mcp/services', { token: admin, body: { name: '自测检索服务', slug: 'selftest-search', orgId: newOrg.data.id, description: '自测用', transport: 'http', mode: 'hosted' } })
+  const svcCreate = await api('POST', '/api/mcp/services', { token: admin, body: { name: '自测检索服务', slug: 'selftest-search', orgId: newOrg.data.id, description: '自测用（演示传输层）', transport: 'http', mode: 'hosted', exec: 'demo' } })
   check('注册 MCP 服务（草稿）', svcCreate.ok && svcCreate.data.status === 'draft')
   const svcId = svcCreate.data.id
 
@@ -277,7 +562,7 @@ try {
 
   // 网关鉴权：未授权主体
   const invokeDenied = await api('POST', '/api/mcp/invoke', { token: dev, body: { serviceId: svcId, tool: 'selftest-search_search', args: { query: 'hi' } } })
-  check('未授权主体被网关拒绝', invokeDenied.ok && invokeDenied.data.status === 'denied')
+  check('未授权主体被网关拒绝', invokeDenied.ok && invokeDenied.data.status === 'denied', JSON.stringify(invokeDenied).slice(0, 300))
 
   // 权限组授权后放行
   const pg = await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
@@ -289,12 +574,12 @@ try {
   const devUser = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('陈默'), { token: admin })).data.users[0]
   await api('PATCH', '/api/iam/groups/' + groupCreate.data.id, { token: admin, body: { memberIds: [devUser.id] } })
   const invokeOk = await api('POST', '/api/mcp/invoke', { token: dev, body: { serviceId: svcId, tool: 'selftest-search_search', args: { query: '自测' } } })
-  check('授权后调用成功（只读工具放行）', invokeOk.ok && invokeOk.data.ok === true)
+  check('授权后调用成功（只读工具放行）', invokeOk.ok && invokeOk.data.ok === true, JSON.stringify(invokeOk).slice(0, 300))
 
   const writeTool = (await api('GET', '/api/mcp/services', { token: admin })).data.services.find((s) => s.id === svcId).tools.find((t) => t.riskLevel !== 'read')
   if (writeTool) {
     const invokeWrite = await api('POST', '/api/mcp/invoke', { token: dev, body: { serviceId: svcId, tool: writeTool.name } })
-    check('只读约束拦截写工具', invokeWrite.data.status === 'denied' && String(invokeWrite.data.error).includes('只读'))
+    check('只读约束拦截写工具', invokeWrite.data?.status === 'denied' && String(invokeWrite.data.error).includes('只读'), JSON.stringify(invokeWrite).slice(0, 300))
   }
 
   const metrics = await api('GET', `/api/mcp/services/${svcId}/metrics`, { token: admin })
@@ -302,6 +587,150 @@ try {
 
   const healthProbe = await api('POST', `/api/mcp/services/${svcId}/health`, { token: admin })
   check('健康探测', healthProbe.ok && ['healthy', 'degraded'].includes(healthProbe.data.status))
+
+  // ================================================================ 第 0 步：执行层/连接器真实化
+  section('第 0 步：真实传输层与真实连接器')
+  // -- MCP 真实 stub（JSON-RPC over HTTP） ---------------------------------
+  const mcpStub = createServer(async (req, res) => {
+    const raw = await readBody(req)
+    let msg = {}
+    try { msg = JSON.parse(raw) } catch { /* ignore */ }
+    if (msg.method === 'initialize') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: {} } }))
+      return
+    }
+    if (msg.method === 'tools/call') {
+      if (msg.params?.name === 'boom') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: '故意失败' } }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        jsonrpc: '2.0', id: msg.id,
+        result: { content: [{ type: 'text', text: `real-echo:${msg.params?.name}` }], usage: { totalTokens: 4321 } },
+      }))
+      return
+    }
+    res.writeHead(404).end('{}')
+  })
+  await new Promise((resolve) => mcpStub.listen(0, '127.0.0.1', resolve))
+  const mcpPort = mcpStub.address().port
+
+  const realSvc = await api('POST', '/api/mcp/services', { token: admin, body: { name: '真实后端服务', slug: 'real-backend', orgId: newOrg.data.id, endpoint: `http://127.0.0.1:${mcpPort}/mcp`, transport: 'http', mode: 'external', exec: 'real', tools: [
+    { name: 'real_query', description: '真实查询', inputSchema: { type: 'object' }, riskLevel: 'read' },
+    { name: 'boom', description: '总是失败', inputSchema: { type: 'object' }, riskLevel: 'read' },
+  ] } })
+  check('注册 real 服务（默认真实传输）', realSvc.ok && realSvc.data.exec === 'real')
+  const realId = realSvc.data.id
+  await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
+    name: 'real 全放行', policies: { [realId]: { allowedTools: '*', constraints: {} } },
+    subjects: [{ type: 'user', id: adminLogin.data.user.id, name: 'admin' }],
+  } })
+  const realVerify = await api('POST', `/api/mcp/services/${realId}/verify`, { token: admin })
+  check('real 服务测试验证（真实 initialize 探测）', realVerify.ok && realVerify.data.health.status === 'healthy')
+  await api('POST', `/api/mcp/services/${realId}/deploy`, { token: admin, body: { version: '1.0.0', changelog: '真实首发' } })
+
+  const realInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: realId, tool: 'real_query', args: { q: '真实链路' } } })
+  check('real 调用真实往返（stub 内容透传）', realInvoke.ok && JSON.stringify(realInvoke.data.result).includes('real-echo:real_query'))
+
+  const boomInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: realId, tool: 'boom', args: {} } })
+  check('real 错误路径（isError → status error）', boomInvoke.data.status === 'error')
+  const realCalls = (await api('GET', `/api/mcp/calls?serviceId=${realId}`, { token: admin })).data.items
+  const okRealCall = realCalls.find((c) => c.tool === 'real_query')
+  const boomRealCall = realCalls.find((c) => c.tool === 'boom')
+  check('real 计量来自响应 usage（tokens=4321，非伪造）', okRealCall && okRealCall.tokens === 4321 && okRealCall.exec === 'real')
+  check('real 失败调用同样标记 exec=real', boomRealCall && boomRealCall.exec === 'real' && boomRealCall.ok === false)
+
+  const mcpUsage = await api('GET', '/api/usage/events?resource=mcp:real-backend', { token: admin })
+  check('MCP real 调用自动进入计量管道（含失败调用）', mcpUsage.ok && mcpUsage.data.total >= 2
+    && mcpUsage.data.items.every((e) => typeof e.tenant_id === 'string' && e.tenant_id.length > 0 && e.principal.startsWith('org:')), JSON.stringify((mcpUsage.data?.items ?? []).map((e) => ({ t: e.tenant_id, p: e.principal, r: e.resource }))))
+
+  const deadSvc = await api('POST', '/api/mcp/services', { token: admin, body: { name: '不可达服务', slug: 'dead-backend', orgId: newOrg.data.id, endpoint: 'http://127.0.0.1:1/mcp', mode: 'external', exec: 'real', tools: [{ name: 'x', description: 'x', inputSchema: { type: 'object' }, riskLevel: 'read' }] } })
+  const deadVerify = await api('POST', `/api/mcp/services/${deadSvc.data.id}/verify`, { token: admin })
+  check('real 验证不可达 endpoint 被拒（不再恒可达）', !deadVerify.ok)
+
+  // -- 钉钉真实 stub（复刻 OpenAPI 形状） ---------------------------------
+  const ddUsers = {
+    dd_u002: { unionId: 'dd_u002', userId: 'u002', name: '林小满', email: 'linxm@yuanbingke.com' },
+    dd_u020: { unionId: 'dd_u020', userId: 'u020', name: '真实连接用户', jobNumber: 'DD0020', title: '真实目录工程师', email: 'real@yuanbingke.com', active: true },
+  }
+  const ddStub = createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://stub')
+    const raw = await readBody(req)
+    const jsonReply = (code, payload) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)) }
+    if (url.pathname === '/v1.0/oauth2/accessToken') {
+      const body = JSON.parse(raw || '{}')
+      if (body.appKey === 'stub-key' && body.appSecret === 'stub-secret') return jsonReply(200, { accessToken: 'corp-token-stub', expireIn: 7200 })
+      return jsonReply(400, { code: 'invalid.credentials' })
+    }
+    if (url.pathname === '/v1.0/oauth2/userAccessToken') {
+      const body = JSON.parse(raw || '{}')
+      if (typeof body.code === 'string' && body.code.startsWith('STUB-')) return jsonReply(200, { accessToken: `ut-${body.code}`, expireIn: 7200, corpId: 'ding-real' })
+      return jsonReply(400, { code: 'invalid.code' })
+    }
+    if (url.pathname === '/v1.0/contact/users/me') {
+      const token = req.headers['x-acs-dingtalk-access-token']
+      if (token !== 'ut-STUB-OK') return jsonReply(401, { code: 'invalid.token' })
+      return jsonReply(200, { ...ddUsers.dd_u002, corpId: 'ding-real' })
+    }
+    if (url.pathname === '/v1.0/contact/departments/listByParent') {
+      if (req.headers['x-acs-dingtalk-access-token'] !== 'corp-token-stub') return jsonReply(401, { code: 'invalid.token' })
+      return jsonReply(200, { result: [{ deptId: 500, name: '真实连接器部门' }] })
+    }
+    if (url.pathname === '/v1.0/contact/users/findByDept') {
+      if (req.headers['x-acs-dingtalk-access-token'] !== 'corp-token-stub') return jsonReply(401, { code: 'invalid.token' })
+      if (url.searchParams.get('deptId') !== '500') return jsonReply(200, { result: [], hasMore: false })
+      return jsonReply(200, { result: [{ ...ddUsers.dd_u020, deptId: 500 }], hasMore: false })
+    }
+    res.writeHead(404).end('{}')
+  })
+  await new Promise((resolve) => ddStub.listen(0, '127.0.0.1', resolve))
+  const ddPort = ddStub.address().port
+
+  const putConnector = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-real', appKey: 'stub-key', appSecret: 'stub-secret', mode: 'real', apiBase: `http://127.0.0.1:${ddPort}`, enabled: true, conflictStrategy: 'manual' } })
+  check('连接器切换真实模式', putConnector.ok && putConnector.data.mode === 'real')
+  const connTest = await api('POST', '/api/iam/connectors/dingtalk/test', { token: admin })
+  check('真实连接器健康检查（mock:false）', connTest.ok && connTest.data.ok === true && connTest.data.mock === false)
+
+  const realAuth = await api('POST', '/api/auth/sso/authorize', { body: { provider: 'dingtalk', scene: 'web_qr' } })
+  const realSso = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'STUB-OK', state: realAuth.data.state } })
+  check('真实 OpenAPI 登录链路（token→userinfo→命中）', realSso.ok && realSso.data.kind === 'hit' && realSso.data.user.username === 'linxm')
+
+  const realSync = await api('POST', '/api/iam/connectors/dingtalk/sync', { token: admin })
+  check('真实目录同步（OpenAPI 分页拉取）', realSync.ok && realSync.data.created >= 1)
+  const syncedUser = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('真实连接用户'), { token: admin })).data.users[0]
+  check('真实同步新建账号落库', Boolean(syncedUser) && syncedUser.status === 'active')
+
+  // 降级回归：切回 mock 后显式标注
+  const mockBack = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-yuanbingke', appKey: 'demo-app-key', appSecret: 'demo-secret-do-not-use', mode: 'mock', enabled: true } })
+  check('切回降级模式（显式标注 mock）', mockBack.ok && mockBack.data.mode === 'mock')
+
+  // 事务存储落位（计量/资金类数据库文件创建）
+  const { existsSync } = await import('node:fs')
+  check('SQLite 事务存储已就位（txnstore.db）', existsSync(join(DATA_DIR, 'txnstore.db')))
+
+  mcpStub.close()
+  ddStub.close()
+
+  // ================================================================ 第 8 步：复式分账 ledger
+  section('第 8 步：复式分账 ledger（账期汇总结转 / 试算平衡 / 红字冲正）')
+  const arrearsAlerts = await api('GET', '/api/audit/alerts', { token: admin })
+  check('事后扣费失败触发欠费告警（预检兜底之外的防线）', arrearsAlerts.ok && JSON.stringify(arrearsAlerts.data.alerts).includes('欠费'))
+  const month = new Date().toISOString().slice(0, 7)
+  const settle = await api('POST', '/api/billing/settle', { token: admin, body: { period: month } })
+  check('账期汇总结转（一借多贷复合分录）', settle.ok && settle.data.entries >= 4 && settle.data.debitCents > 0)
+  check('试算平衡（借方合计 = 贷方合计）', settle.data.balanced === true && settle.data.debitCents === settle.data.creditCents)
+  const ledgerRows = (await api('GET', `/api/billing/ledger?period=${month}`, { token: admin })).data
+  const devCredit = ledgerRows.entries.find((e) => e.account.startsWith('developer:') && e.direction === 'credit' && e.amount_cents === 10)
+  check('开发者分成入账（50 分 × 20% 平台默认费率，费率版本快照）', Boolean(devCredit) && devCredit.rate_version === 'v2026.08')
+  const dupSettle = await api('POST', '/api/billing/settle', { token: admin, body: { period: month } })
+  check('账期重复结转被拒（调整走红字冲正）', !dupSettle.ok)
+  const reverse = await api('POST', '/api/billing/ledger/reverse', { token: admin, body: { period: month, reason: '自测冲正演练' } })
+  check('红字冲正（负数分录引用原分录，试算仍平衡）', reverse.ok && reverse.data.balanced === true)
+  const trialAfter = (await api('GET', `/api/billing/ledger?period=${month}`, { token: admin })).data.trial
+  check('冲正后期间净额归零（借=贷）', trialAfter.debitCents === trialAfter.creditCents && trialAfter.debitCents === 0)
 
   // ================================================================ Skill 市场
   section('Skill 市场流水线')

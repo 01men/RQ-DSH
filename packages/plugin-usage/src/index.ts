@@ -1,0 +1,489 @@
+/**
+ * @dsh-ops/plugin-usage —— usage 计量管道（生态设计 v1.2 第 2 步）。
+ *
+ * 全平台唯一的资源消耗计量入口：
+ *   资源消耗方（MCP 网关 / 模型网关 / 插件运行时）
+ *     → usage.record()（schema v1 校验 → SQLite 先写后发 → platformBus 广播）
+ *     → 订阅方（audit 成本归集 / billing 扣费 / market 分成 / 对账引擎）
+ *
+ * schema 语义（定版 additive-only）：
+ *   - usage.recorded schema_version=1：字段只增不改不删；新字段只能以可选形式随 minor 版本加入；
+ *   - 消费端必须容忍未知新字段（前向兼容义务）；
+ *   - 弃用字段走 platform.schema.deprecated 事件，历史数据不迁移不重算。
+ * 投递语义（M8）：at-least-once + 消费端按 idempotency_key 幂等；先落库后分发（宕机不丢）；
+ *   消费异常重试 3 次入死信集合并告警；支持按时间窗重放。
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { Service } from '@deepseek-ai/cordis'
+import { newId, type Collection, type RecordBase } from '@dsh-ops/platform-core'
+import * as usageTools from './tools.ts'
+
+// ---------------------------------------------------------------------------
+// schema v1（定版）
+// ---------------------------------------------------------------------------
+
+export const USAGE_SCHEMA = 'usage.recorded'
+export const USAGE_SCHEMA_VERSION = 1
+
+/** 可扩展计量字典条目：替代固定 token 三件套，L3 自定义计量同结构接入。 */
+export interface UsageMeter {
+  key: string
+  value: number
+  unit: string
+}
+
+/** 价格快照（计费时点冻结，历史可复算）。 */
+export interface UsagePricingSnapshot {
+  currency: string
+  /** 本事件应收（列表价口径，含税）。 */
+  charge_cents: number
+  /** 本事件平台成本（口径：L1 采购成本）。 */
+  cost_cents: number
+  /** 计价明细快照（费率 + 计量键），分账/审计复算依据。 */
+  rate: { pattern: string; meter_key: string; list_cents_per_unit: number; cost_cents_per_unit: number; units_per_step: number; tax_rate: number }
+}
+
+/** usage.recorded v1 事件（只追加，禁改版；扩展仅允许新增可选字段）。 */
+export interface UsageEvent {
+  schema: typeof USAGE_SCHEMA
+  schema_version: number
+  event_id: string
+  idempotency_key: string
+  trace_id?: string
+  occurred_at: string
+  tenant_id: string
+  org: string
+  /** 最终用户/Agent（on-behalf-of 终点）：user:<id> | agent:<id> */
+  subject: string
+  /** 计费责任主体：org:<id> | plugin:<id> | app:<id> | platform */
+  principal: string
+  /** 资源：model:<slug> | plugin:<id> | mcp:<slug> */
+  resource: string
+  meters: UsageMeter[]
+  pricing: UsagePricingSnapshot
+}
+
+/** 计量事件登记入参（schema 校验后由 record() 补全派生字段）。 */
+export interface UsageRecordInput {
+  org: string
+  subject: string
+  principal: string
+  resource: string
+  meters: UsageMeter[]
+  tenant_id?: string
+  trace_id?: string
+  /** 幂等键：调用方自带（推荐，如 <producer>:<业务单号>）；缺省按主体+资源+窗口+序号生成。 */
+  idempotency_key?: string
+  occurred_at?: string
+}
+
+/** 价格簿条目：resource 模式（精确 → 前缀匹配）→ 计量键与费率。 */
+export interface PriceBookEntry extends RecordBase {
+  pattern: string
+  meter_key: string
+  list_cents_per_unit: number
+  cost_cents_per_unit: number
+  units_per_step: number
+  tax_rate: number
+  currency: string
+  /** 费率版本（分录快照引用，历史可复算）。 */
+  rate_version: string
+}
+
+/** 能力授权登记（M5 运行时对账基线）：market 安装插件时写入。 */
+export interface CapabilityGrantRecord extends RecordBase {
+  principal: string
+  capabilities: string[]
+  source: string
+}
+
+/** 死信（消费 3 次失败的事件）。 */
+export interface DeadLetterRecord extends RecordBase {
+  event_id: string
+  consumer: string
+  error: string
+  attempts: number
+}
+
+export type UsageConsumer = (event: UsageEvent) => void
+
+// ---------------------------------------------------------------------------
+// 服务
+// ---------------------------------------------------------------------------
+
+const DEFAULT_TENANT = 't_default'
+const WINDOW_MS = 60_000
+
+export class UsageService extends Service {
+  static readonly provide = 'usage'
+
+  private consumers = new Map<string, { handler: UsageConsumer; attempts: Map<string, number> }>()
+  private seq = 0
+
+  constructor(ctx: Context) {
+    super(ctx, 'usage')
+    ctx.txnStore.ensureTable('usage_events', {
+      id: 'TEXT',
+      idempotency_key: 'TEXT NOT NULL',
+      schema_version: 'INTEGER NOT NULL',
+      occurred_at: 'TEXT NOT NULL',
+      tenant_id: 'TEXT NOT NULL',
+      org: "TEXT NOT NULL DEFAULT ''",
+      subject: "TEXT NOT NULL DEFAULT ''",
+      principal: 'TEXT NOT NULL',
+      resource: 'TEXT NOT NULL',
+      meters_json: 'TEXT NOT NULL',
+      pricing_json: 'TEXT NOT NULL',
+      trace_id: "TEXT NOT NULL DEFAULT ''",
+    }, { uniques: [['idempotency_key']], indexes: [['occurred_at'], ['principal'], ['tenant_id']] })
+    this.ensureDefaultPriceBook()
+  }
+
+  // -- 登记与分发 -----------------------------------------------------------
+
+  /** 全平台唯一计量入口：校验 → 计价 → 落库（幂等）→ 总线分发。 */
+  record(input: UsageRecordInput): UsageEvent {
+    this.validate(input)
+    const tenant = input.tenant_id ?? this.resolveTenant(input.org)
+    const price = this.priceOf(input.resource)
+    const meter = input.meters.find((item) => item.key === price.meter_key) ?? { key: price.meter_key, value: 0, unit: 'unit' }
+    const charge = Math.round((meter.value / price.units_per_step) * price.list_cents_per_unit)
+    const cost = Math.round((meter.value / price.units_per_step) * price.cost_cents_per_unit)
+    const event: UsageEvent = {
+      schema: USAGE_SCHEMA,
+      schema_version: USAGE_SCHEMA_VERSION,
+      event_id: newId('uevt'),
+      idempotency_key: input.idempotency_key ?? this.autoIdempotencyKey(input),
+      ...(input.trace_id !== undefined ? { trace_id: input.trace_id } : {}),
+      occurred_at: input.occurred_at ?? new Date().toISOString(),
+      tenant_id: tenant,
+      org: input.org,
+      subject: input.subject,
+      principal: input.principal,
+      resource: input.resource,
+      meters: input.meters,
+      pricing: {
+        currency: price.currency,
+        charge_cents: charge,
+        cost_cents: cost,
+        rate: {
+          pattern: price.pattern,
+          meter_key: price.meter_key,
+          list_cents_per_unit: price.list_cents_per_unit,
+          cost_cents_per_unit: price.cost_cents_per_unit,
+          units_per_step: price.units_per_step,
+          tax_rate: price.tax_rate,
+        },
+      },
+    }
+    const inserted = this.ctx.txnStore.insertOrIgnore('usage_events', usageRow(event))
+    if (!inserted) {
+      const existing = this.ctx.txnStore.one<UsageRow>('usage_events', { idempotency_key: event.idempotency_key })
+      if (!existing) throw new Error(`幂等键异常：${event.idempotency_key} 已占用但记录缺失`)
+      const sameContent = existing.org === event.org
+        && existing.subject === event.subject
+        && existing.principal === event.principal
+        && existing.resource === event.resource
+        && existing.meters_json === JSON.stringify(event.meters)
+      if (!sameContent) {
+        throw new Error(`幂等键冲突：${event.idempotency_key} 已绑定事件 ${existing.id}，同键不同内容被拒绝`)
+      }
+      // 幂等重放：返回既有事件（计价快照以首次登记为准，不随费率变动重算）
+      return rowToEvent(existing)
+    }
+    this.dispatch(event)
+    return event
+  }
+
+  /** 注册消费方（at-least-once；3 次失败入死信）。 */
+  consume(consumerId: string, handler: UsageConsumer): () => void {
+    this.consumers.set(consumerId, { handler, attempts: new Map() })
+    return () => this.consumers.delete(consumerId)
+  }
+
+  private dispatch(event: UsageEvent): void {
+    this.ctx.platformBus.emit(USAGE_SCHEMA, event)
+    for (const [consumerId, entry] of this.consumers) {
+      const key = `${consumerId}:${event.event_id}`
+      try {
+        entry.handler(event)
+        entry.attempts.delete(key)
+      } catch (error) {
+        const attempts = (entry.attempts.get(key) ?? 0) + 1
+        entry.attempts.set(key, attempts)
+        if (attempts >= 3) {
+          entry.attempts.delete(key)
+          this.deadLetters().insert({
+            id: newId('dlq'), event_id: event.event_id, consumer: consumerId,
+            error: error instanceof Error ? error.message : String(error), attempts,
+          })
+          this.ctx.platformBus.emit('audit.alert.fired', {
+            id: newId('alt'), severity: 'critical', title: 'usage 消费死信',
+            message: `消费方 ${consumerId} 处理事件 ${event.event_id} 连续失败 ${attempts} 次，已入死信`,
+          })
+        }
+      }
+    }
+  }
+
+  /** 重放窗口内事件（消费端按幂等键去重，重复消费无害）。 */
+  replay(sinceIso: string): { replayed: number } {
+    const rows = this.ctx.txnStore.sql<UsageRow>(
+      'SELECT * FROM usage_events WHERE occurred_at >= ? ORDER BY occurred_at',
+      [sinceIso],
+    )
+    for (const row of rows) this.dispatch(rowToEvent(row))
+    return { replayed: rows.length }
+  }
+
+  // -- 查询 -----------------------------------------------------------------
+
+  query(filter: { tenant_id?: string; principal?: string; resource?: string; from?: string; to?: string; limit?: number } = {}): { total: number; items: UsageEvent[] } {
+    const conditions: string[] = []
+    const params: Array<string | number> = []
+    if (filter.tenant_id) { conditions.push('tenant_id = ?'); params.push(filter.tenant_id) }
+    if (filter.principal) { conditions.push('principal = ?'); params.push(filter.principal) }
+    if (filter.resource) { conditions.push('resource = ?'); params.push(filter.resource) }
+    if (filter.from) { conditions.push('occurred_at >= ?'); params.push(filter.from) }
+    if (filter.to) { conditions.push('occurred_at <= ?'); params.push(filter.to) }
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
+    const rows = this.ctx.txnStore.sql<UsageRow>(`SELECT * FROM usage_events${where} ORDER BY occurred_at DESC LIMIT ?`, [...params, Math.min(filter.limit ?? 100, 1000)])
+    const total = Number((this.ctx.txnStore.sql<{ n: number }>(`SELECT COUNT(*) AS n FROM usage_events${where}`, params)[0] ?? { n: 0 }).n)
+    return { total, items: rows.map(rowToEvent) }
+  }
+
+  totals(filter: { tenant_id?: string; principal?: string; from?: string; to?: string } = {}): { count: number; charge_cents: number; cost_cents: number } {
+    const conditions: string[] = []
+    const params: Array<string | number> = []
+    if (filter.tenant_id) { conditions.push('tenant_id = ?'); params.push(filter.tenant_id) }
+    if (filter.principal) { conditions.push('principal = ?'); params.push(filter.principal) }
+    if (filter.from) { conditions.push('occurred_at >= ?'); params.push(filter.from) }
+    if (filter.to) { conditions.push('occurred_at <= ?'); params.push(filter.to) }
+    const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
+    const row = this.ctx.txnStore.sql<{ n: number; charge: number; cost: number }>(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge, COALESCE(SUM(CAST(json_extract(pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost FROM usage_events${where}`,
+      params,
+    )[0] ?? { n: 0, charge: 0, cost: 0 }
+    return { count: Number(row.n), charge_cents: Number(row.charge), cost_cents: Number(row.cost) }
+  }
+
+  // -- 价格簿 ---------------------------------------------------------------
+
+  priceBook(): Collection<PriceBookEntry> {
+    return this.ctx.storage.collection<PriceBookEntry>('usage:priceBook')
+  }
+
+  upsertPrice(entry: Omit<PriceBookEntry, 'id' | 'createdAt' | 'updatedAt'>): PriceBookEntry {
+    const existing = this.priceBook().findOne((item) => item.pattern === entry.pattern)
+    if (existing) return this.priceBook().update(existing.id, { ...entry })
+    return this.priceBook().insert({ id: newId('rate'), ...entry })
+  }
+
+  private priceOf(resource: string): PriceBookEntry {
+    const book = this.priceBook().all()
+    const exact = book.find((item) => item.pattern === resource)
+    if (exact) return exact
+    const prefix = book.filter((item) => item.pattern.endsWith(':*')).sort((a, b) => b.pattern.length - a.pattern.length)
+      .find((item) => resource.startsWith(item.pattern.slice(0, -1)))
+    if (prefix) return prefix
+    throw new Error(`资源 ${resource} 无计价规则：请先在价格簿登记（usage 价格簿）`)
+  }
+
+  private ensureDefaultPriceBook(): void {
+    if (this.priceBook().count() > 0) return
+    this.upsertPrice({ pattern: 'mcp:*', meter_key: 'tokens', list_cents_per_unit: 30, cost_cents_per_unit: 15, units_per_step: 1000, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' })
+    this.upsertPrice({ pattern: 'platform:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' })
+  }
+
+  // -- 对账（三方口径比对） -----------------------------------------------
+
+  /**
+   * 对账：usage 口径（事件流水）vs 已登记消费方投影口径，全量比对。
+   * 消费方通过 consume() 挂载时同步登记投影集合 usage:projection:<consumerId>。
+   */
+  reconcile(windowFromIso?: string): {
+    usage: { count: number; charge_cents: number }
+    projections: Array<{ consumer: string; count: number; charge_cents: number; mismatch: boolean }>
+    mismatch: boolean
+  } {
+    const usageTotals = this.totals(windowFromIso ? { from: windowFromIso } : {})
+    const projections: Array<{ consumer: string; count: number; charge_cents: number; mismatch: boolean }> = []
+    for (const consumerId of this.consumers.keys()) {
+      const rows = this.ctx.storage.collection<ProjectionRow>(`usage:projection:${consumerId}`).all()
+        .filter((row) => (windowFromIso ? row.window >= windowFromIso.slice(0, 10) : true))
+      const count = rows.reduce((sum, row) => sum + row.count, 0)
+      const charge = rows.reduce((sum, row) => sum + row.charge_cents, 0)
+      projections.push({
+        consumer: consumerId,
+        count,
+        charge_cents: charge,
+        mismatch: count !== usageTotals.count || charge !== usageTotals.charge_cents,
+      })
+    }
+    const mismatch = projections.some((item) => item.mismatch)
+    if (mismatch) {
+      this.ctx.platformBus.emit('audit.alert.fired', {
+        id: newId('alt'), severity: 'critical', title: 'usage 对账不平',
+        message: `usage 口径 count=${usageTotals.count} charge=${usageTotals.charge_cents} 分；消费方投影存在偏差：${JSON.stringify(projections)}`,
+      })
+    }
+    return { usage: { count: usageTotals.count, charge_cents: usageTotals.charge_cents }, projections, mismatch }
+  }
+
+  /** 消费方投影累加（供 consume() 回调内部调用）。 */
+  project(consumerId: string, event: UsageEvent): void {
+    const collection = this.ctx.storage.collection<ProjectionRow>(`usage:projection:${consumerId}`)
+    const day = event.occurred_at.slice(0, 10)
+    const existing = collection.findOne((row) => row.window === day)
+    if (existing) {
+      collection.update(existing.id, { count: existing.count + 1, charge_cents: existing.charge_cents + event.pricing.charge_cents })
+    } else {
+      collection.insert({ id: newId('prj'), window: day, count: 1, charge_cents: event.pricing.charge_cents })
+    }
+  }
+
+  // -- 运行时对账（M5：声明 vs 行为） --------------------------------------
+
+  capabilityGrants(): Collection<CapabilityGrantRecord> {
+    return this.ctx.storage.collection<CapabilityGrantRecord>('usage:capabilityGrants')
+  }
+
+  grantCapabilities(principal: string, capabilities: string[], source: string): CapabilityGrantRecord {
+    const existing = this.capabilityGrants().findOne((item) => item.principal === principal)
+    if (existing) return this.capabilityGrants().update(existing.id, { capabilities, source })
+    return this.capabilityGrants().insert({ id: newId('cap'), principal, capabilities, source })
+  }
+
+  /** 能力漂移检测：窗口内实际消耗的资源 vs 声明授权；未声明的实际消耗即告警。 */
+  capabilityDrift(sinceIso?: string): { drift: Array<{ principal: string; consumed: string[]; granted: string[]; ungranted: string[] }> } {
+    const { items } = this.query({ from: sinceIso, limit: 1000 })
+    const consumedByPrincipal = new Map<string, Set<string>>()
+    for (const event of items) {
+      const set = consumedByPrincipal.get(event.principal) ?? new Set<string>()
+      set.add(event.resource)
+      consumedByPrincipal.set(event.principal, set)
+    }
+    const drift: Array<{ principal: string; consumed: string[]; granted: string[]; ungranted: string[] }> = []
+    for (const [principal, consumedSet] of consumedByPrincipal) {
+      const grant = this.capabilityGrants().findOne((item) => item.principal === principal)
+      const granted = grant?.capabilities ?? []
+      const ungranted = [...consumedSet].filter((resource) => !granted.some((cap) =>
+        cap === '*' || cap === resource || (cap.endsWith(':*') && resource.startsWith(cap.slice(0, -1))),
+      ))
+      if (ungranted.length > 0) {
+        drift.push({ principal, consumed: [...consumedSet], granted, ungranted })
+        this.ctx.platformBus.emit('audit.alert.fired', {
+          id: newId('alt'), severity: 'critical', title: 'usage 能力漂移',
+          message: `主体 ${principal} 实际消耗了未声明授权的资源：${ungranted.join(', ')}（运行时对账 M5）`,
+          resourceType: 'usage_capability', resourceId: principal,
+        })
+      }
+    }
+    return { drift }
+  }
+
+  deadLetters(): Collection<DeadLetterRecord> {
+    return this.ctx.storage.collection<DeadLetterRecord>('usage:deadLetters')
+  }
+
+  // -- 内部 -----------------------------------------------------------------
+
+  private validate(input: UsageRecordInput): void {
+    if (!input.org?.trim()) throw new Error('usage 事件 org 必填')
+    if (!input.subject?.trim()) throw new Error('usage 事件 subject 必填（user:<id> / agent:<id>）')
+    if (!input.principal?.trim()) throw new Error('usage 事件 principal 必填（org:<id> / plugin:<id> / platform）')
+    if (!input.resource?.trim() || !/^[a-z]+:[A-Za-z0-9._-]+$/.test(input.resource)) {
+      throw new Error(`usage 事件 resource 格式非法：${input.resource}（应为 model:<slug> / mcp:<slug> / plugin:<id>）`)
+    }
+    if (!Array.isArray(input.meters) || input.meters.length === 0) throw new Error('usage 事件 meters 至少一项')
+    for (const meter of input.meters) {
+      if (!meter.key || !/^[a-z][a-z0-9_.]*$/.test(meter.key)) throw new Error(`计量键非法：${meter.key}（^[a-z][a-z0-9_.]*$）`)
+      if (!Number.isFinite(meter.value) || meter.value < 0) throw new Error(`计量值非法：${meter.key}=${meter.value}`)
+    }
+  }
+
+  /** 租户解析：org → tenant（多租户最小集，v1.2 第 2 步）。 */
+  private resolveTenant(orgId: string): string {
+    if (!orgId || orgId === '') return DEFAULT_TENANT
+    return this.ctx.iam.orgs().get(orgId)?.tenantId ?? DEFAULT_TENANT
+  }
+
+  private autoIdempotencyKey(input: UsageRecordInput): string {
+    const window = new Date().toISOString().slice(0, 16)
+    return `usage:${input.principal}:${input.resource}:${window}:${++this.seq}`
+  }
+}
+
+interface ProjectionRow extends RecordBase {
+  window: string
+  count: number
+  charge_cents: number
+}
+
+interface UsageRow {
+  id: string
+  idempotency_key: string
+  schema_version: number
+  occurred_at: string
+  tenant_id: string
+  org: string
+  subject: string
+  principal: string
+  resource: string
+  meters_json: string
+  pricing_json: string
+  trace_id: string
+}
+
+function usageRow(event: UsageEvent): Record<string, string | number> {
+  return {
+    id: event.event_id,
+    idempotency_key: event.idempotency_key,
+    schema_version: event.schema_version,
+    occurred_at: event.occurred_at,
+    tenant_id: event.tenant_id,
+    org: event.org,
+    subject: event.subject,
+    principal: event.principal,
+    resource: event.resource,
+    meters_json: JSON.stringify(event.meters),
+    pricing_json: JSON.stringify(event.pricing),
+    trace_id: event.trace_id ?? '',
+  }
+}
+
+function rowToEvent(row: UsageRow): UsageEvent {
+  return {
+    schema: USAGE_SCHEMA,
+    schema_version: row.schema_version,
+    event_id: row.id,
+    idempotency_key: row.idempotency_key,
+    ...(row.trace_id !== '' ? { trace_id: row.trace_id } : {}),
+    occurred_at: row.occurred_at,
+    tenant_id: row.tenant_id,
+    org: row.org,
+    subject: row.subject,
+    principal: row.principal,
+    resource: row.resource,
+    meters: JSON.parse(row.meters_json) as UsageMeter[],
+    pricing: JSON.parse(row.pricing_json) as UsagePricingSnapshot,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 插件
+// ---------------------------------------------------------------------------
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    usage: UsageService
+  }
+}
+
+export const name = 'usage'
+export const inject = ['storage', 'platformBus', 'txnStore', 'iam']
+
+export function apply(ctx: Context) {
+  ctx.plugin(UsageService)
+  ctx.plugin(usageTools)
+}

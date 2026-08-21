@@ -21,8 +21,14 @@
       name: '<PROJECT_ROOT>/packages/plugin-iam/src/index.ts'
     - id: ops-authn
       name: '<PROJECT_ROOT>/packages/plugin-authn/src/index.ts'
+    - id: ops-usage
+      name: '<PROJECT_ROOT>/packages/plugin-usage/src/index.ts'
+    - id: ops-billing
+      name: '<PROJECT_ROOT>/packages/plugin-billing/src/index.ts'
     - id: ops-audit
       name: '<PROJECT_ROOT>/packages/plugin-audit/src/index.ts'
+    - id: ops-market
+      name: '<PROJECT_ROOT>/packages/plugin-market/src/index.ts'
     - id: ops-mcp
       name: '<PROJECT_ROOT>/packages/plugin-mcp/src/index.ts'
     - id: ops-skillhub
@@ -31,3 +37,5 @@
       name: '<PROJECT_ROOT>/packages/plugin-agent/src/index.ts'
     - id: ops-app
       name: '<PROJECT_ROOT>/packages/plugin-app/src/index.ts'
+    - id: ops-modelgw
+      name: '<PROJECT_ROOT>/packages/plugin-modelgw/src/index.ts'

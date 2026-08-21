@@ -3,8 +3,10 @@
  *
  * 登录主流程只面向本接口编程，不感知钉钉/飞书/企微差异；
  * 新增身份源 = 新增一个 Adapter 实现 + 连接器配置插一行。
- * 演示环境内置钉钉 Mock Adapter：接口与官方 OpenAPI 归一化抽象对齐，
- * 接入真实环境时仅替换 exchangeCode/getUserInfo 的 HTTP 实现与凭证配置。
+ *
+ * 双模式（生态设计 v1.2 第 0 步，M7 消解）：
+ *   - real ：配置 appKey/appSecret 后走真实钉钉 OpenAPI（可指定 apiBase 指向代理/专有部署）。
+ *   - mock ：未配置凭证时的显式降级——内置演示目录，healthCheck 标注 mock:true，禁止冒充真实。
  */
 
 /** 登录场景：四种形态归一为三类（auth-identity docs/04）。 */
@@ -40,6 +42,8 @@ export class ProviderAuthError extends Error {
 export interface IdentityProviderAdapter {
   readonly type: 'dingtalk' | 'feishu' | 'wecom'
   readonly label: string
+  /** 当前是否为降级 mock 模式（IdP 对外卖点禁止使用 mock 数据）。 */
+  readonly mock: boolean
   /** 构造授权跳转 URL 或二维码内容（in_app 场景可返回 null，由前端 SDK 取 code）。 */
   buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string): Promise<string | null>
   /** code → 平台令牌。code 单次消费，失败/过期抛 ProviderAuthError。 */
@@ -50,7 +54,16 @@ export interface IdentityProviderAdapter {
   normalizeProfile(raw: unknown): NormalizedProfile
 }
 
-/** 钉钉模拟目录（与 OrgConnector 共享同一份远端数据）。 */
+/** 钉钉连接器凭证（真实模式必需；缺省降级 mock）。 */
+export interface DingTalkCredentials {
+  corpId: string
+  appKey: string
+  appSecret: string
+  /** OpenAPI 基址（默认 https://api.dingtalk.com；测试/专有部署可指向本地 stub）。 */
+  apiBase?: string
+}
+
+/** 钉钉演示目录（mock 模式与 OrgConnector 共享同一份远端数据）。 */
 export const DINGTALK_DIRECTORY = {
   corpId: 'ding-yuanbingke',
   users: [
@@ -67,10 +80,11 @@ export const DINGTALK_DIRECTORY = {
 /** code 一次性消费窗口：窗口内重放拒绝，窗口外视为新授权码周期（演示友好且语义正确）。 */
 const CODE_TTL_MS = 5 * 60_000
 
-/** 钉钉 Auth Adapter（Mock）：code = 工号或 unionId，模拟「扫码」动作。 */
+/** 钉钉 Auth Adapter：mock 降级实现（演示）。 */
 export class DingTalkAuthAdapter implements IdentityProviderAdapter {
   readonly type = 'dingtalk' as const
   readonly label = '钉钉'
+  readonly mock = true
   private consumedCodes = new Map<string, number>()
 
   async buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string): Promise<string | null> {
@@ -116,6 +130,98 @@ export class DingTalkAuthAdapter implements IdentityProviderAdapter {
       corpId: record.corpId,
       name: record.name,
       ...(record.email !== undefined ? { email: record.email } : {}),
+    }
+  }
+}
+
+/**
+ * 钉钉 Auth Adapter：真实 OpenAPI 实现。
+ * 链路（与钉钉官方文档对齐）：
+ *   扫码授权 → POST /v1.0/oauth2/userAccessToken（clientId/clientSecret/code → accessToken）
+ *   → GET /v1.0/contact/users/me（Bearer accessToken → unionId/name/email）
+ */
+export class RealDingTalkAuthAdapter implements IdentityProviderAdapter {
+  readonly type = 'dingtalk' as const
+  readonly label = '钉钉'
+  readonly mock = false
+  private consumedCodes = new Map<string, number>()
+  private readonly credentials: DingTalkCredentials
+
+  constructor(credentials: DingTalkCredentials) {
+    this.credentials = credentials
+  }
+
+  private get apiBase(): string {
+    return this.credentials.apiBase ?? 'https://api.dingtalk.com'
+  }
+
+  async buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string): Promise<string | null> {
+    if (scene === 'in_app') return null
+    const params = new URLSearchParams({
+      client_id: this.credentials.appKey,
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      scope: 'openid corpid',
+      state,
+      prompt: 'consent',
+    })
+    return `https://login.dingtalk.com/oauth2/auth?${params}`
+  }
+
+  async exchangeCode(code: string): Promise<ProviderTokenSet> {
+    const consumedAt = this.consumedCodes.get(code)
+    const now = Date.now()
+    if (consumedAt !== undefined && now - consumedAt < CODE_TTL_MS) {
+      throw new ProviderAuthError('授权码已被使用（code 仅可消费一次）', 'CODE_REPLAY')
+    }
+    const response = await fetch(`${this.apiBase}/v1.0/oauth2/userAccessToken`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        clientId: this.credentials.appKey,
+        clientSecret: this.credentials.appSecret,
+        code,
+        grantType: 'authorization_code',
+      }),
+    })
+    const payload = (await response.json().catch(() => ({}))) as {
+      accessToken?: string
+      refreshToken?: string
+      expireIn?: number
+      corpId?: string
+    }
+    if (!response.ok || !payload.accessToken) {
+      throw new ProviderAuthError(`钉钉 userAccessToken 换取失败（HTTP ${response.status}）`, 'INVALID_CODE')
+    }
+    this.consumedCodes.set(code, now)
+    return {
+      accessToken: payload.accessToken,
+      ...(payload.refreshToken !== undefined ? { refreshToken: payload.refreshToken } : {}),
+      expiresIn: payload.expireIn ?? 7200,
+      raw: { accessToken: payload.accessToken, corpId: payload.corpId ?? this.credentials.corpId },
+    }
+  }
+
+  async getUserInfo(tokenSet: ProviderTokenSet): Promise<unknown> {
+    const response = await fetch(`${this.apiBase}/v1.0/contact/users/me`, {
+      headers: { 'x-acs-dingtalk-access-token': tokenSet.accessToken },
+    })
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>
+    if (!response.ok) {
+      throw new ProviderAuthError(`钉钉用户档案获取失败（HTTP ${response.status}）`, 'PROFILE_NOT_FOUND')
+    }
+    return { ...payload, corpId: this.credentials.corpId }
+  }
+
+  normalizeProfile(raw: unknown): NormalizedProfile {
+    const record = raw as { unionId?: string; userId?: string; nick?: string; name?: string; email?: string; corpId?: string }
+    const providerUserId = record.unionId ?? record.userId
+    if (!providerUserId) throw new ProviderAuthError('钉钉档案缺少 unionId/userId', 'PROFILE_NOT_FOUND')
+    return {
+      providerUserId,
+      corpId: record.corpId ?? this.credentials.corpId,
+      name: record.name ?? record.nick ?? providerUserId,
+      ...(record.email !== undefined && record.email !== '' ? { email: record.email } : {}),
     }
   }
 }

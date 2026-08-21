@@ -140,6 +140,11 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
   cost      report --groupBy=app|agent|org|date
   platform  info                              插件树 / 工具目录 / 集合
   tool      exec --name=<工具名> [--args=<JSON>]   直接调用注册的工具
+  plugin    init --id=<com.vendor.name> [--dir=./my-plugin]
+            （本地脚手架：契约五面 + Ed25519 发布者密钥对 + Hello World 提示词包）
+            sign --dir=<目录>                对五面指纹签名（输出 signature）
+            submit --dir=<目录> --user=<开发者账号> [--password=<密码>]
+            list | install <pluginId> --orgId= --caps=<逗号分隔能力> [--tenantId=]
 
 全局选项：
   --output json|table    输出格式（默认 table，机器消费建议 json）
@@ -153,6 +158,151 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
   },
 
   // ---------------------------------------------------------------- IAM
+  plugin: {
+    desc: '第三方插件市场（L0 声明式契约）',
+    run: async () => {
+      const action = argv[0]
+      const fs = await import('node:fs/promises')
+      const path = await import('node:path')
+      const { generateKeyPairSync, createPrivateKey, sign: edSign, createHash } = await import('node:crypto')
+
+      const MANIFEST_FILES = ['plugin.yaml', 'manifest/permissions.yaml', 'manifest/api.yaml', 'manifest/events.yaml', 'manifest/billing.yaml']
+
+      const readManifestFiles = async (dir) => {
+        const files = {}
+        for (const rel of MANIFEST_FILES) {
+          const content = await fs.readFile(path.join(dir, rel), 'utf8')
+          files[rel] = content
+        }
+        return files
+      }
+      const fingerprintOf = (files) => {
+        const canonical = Object.keys(files).sort().map((key) => `${key}\n${files[key] ?? ''}`).join('\n---\n')
+        return createHash('sha256').update(canonical).digest('hex')
+      }
+
+      if (action === 'init') {
+        const id = argOf('--id')
+        if (!id || !/^[a-z0-9]+(\.[a-z0-9-]+){1,3}$/.test(id)) fail('用法：dshctl plugin init --id=<com.vendor.name> [--dir=./my-plugin]')
+        const dir = argOf('--dir') ?? `./plugin-${id.split('.').pop()}`
+        const { publicKey, privateKey } = generateKeyPairSync('ed25519')
+        const publisher = argOf('--publisher') ?? id.split('.')[0]
+        await fs.mkdir(path.join(dir, 'manifest'), { recursive: true })
+        const writeFile = async (rel, content) => { await fs.writeFile(path.join(dir, rel), content, 'utf8'); ok(`已生成 ${path.join(dir, rel)}`) }
+        await writeFile('plugin.yaml', [
+          '# 第三方插件契约 · 元数据面（L0 声明式：无任何可执行代码）',
+          `id: ${id}`,
+          'version: 0.1.0',
+          `publisher: ${publisher}`,
+          'depends:',
+          '  - dsh-plugin-platform-core: ^1.0',
+          'capabilities_request:',
+          '  - knowledgebase.read',
+          'sandbox: L0',
+          '# L0 声明式内容：提示词包（改提示词 = 改行为，内容变更需重走审批）',
+          'content:',
+          '  prompts:',
+          `    - name: hello`,
+          `      description: Hello World 提示词包`,
+          `      template: |`,
+          `        你是「${id}」提供的助手。请按以下步骤输出：`,
+          `        1. 复述用户请求`,
+          `        2. 给出结构化回答`,
+          '',
+        ].join('\n'))
+        await writeFile('manifest/permissions.yaml', [
+          '# 权限声明面：requested 项在安装时由企业逐项审批（approved ⊆ requested）',
+          'requested:',
+          '  - knowledgebase.read',
+          '',
+        ].join('\n'))
+        await writeFile('manifest/api.yaml', [
+          '# 声明式提供面（L0 阶段仅登记描述，平台不开放真实路由）',
+          'routes: []',
+          '',
+        ].join('\n'))
+        await writeFile('manifest/events.yaml', [
+          '# 事件声明面：订阅自由；发射必须收敛在 plugin:<id>: 命名空间',
+          `subscribes: []`,
+          'emits: []',
+          '',
+        ].join('\n'))
+        await writeFile('manifest/billing.yaml', [
+          '# L3 计费声明面（安装时写入平台价格簿）',
+          'model: usage',
+          'usage:',
+          `  - key: prompts.used`,
+          `    unit: 次`,
+          `    price: 0.5`,
+          'commission: platform_default',
+          '',
+        ].join('\n'))
+        await fs.writeFile(path.join(dir, 'publisher-private-key.pem'), privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), 'utf8')
+        const publicKeyBase64 = publicKey.export({ format: 'der', type: 'spki' }).toString('base64')
+        console.log('')
+        ok(`脚手架完成：${dir}（目标：30 分钟内 Hello World 跑通）`)
+        console.log(`  发布者公钥（注册开发者账号时提交）：\n  ${publicKeyBase64}`)
+        console.log(`  私钥已写入 ${path.join(dir, 'publisher-private-key.pem')}（仅本地保存，切勿上传）`)
+        console.log(`  下一步：`)
+        console.log(`   1) POST /api/market/developers/register （username/email/password/publicKey）`)
+        console.log(`   2) dshctl plugin sign --dir=${dir}      （生成五面签名）`)
+        console.log(`   3) dshctl plugin submit --dir=${dir} --user=<开发者账号>`)
+        return
+      }
+
+      if (action === 'sign') {
+        const dir = argOf('--dir')
+        if (!dir) fail('用法：dshctl plugin sign --dir=<目录>')
+        const files = await readManifestFiles(dir)
+        const fingerprint = fingerprintOf(files)
+        const privateKeyPem = await fs.readFile(path.join(dir, 'publisher-private-key.pem'), 'utf8')
+        const signature = edSign(null, Buffer.from(fingerprint), createPrivateKey(privateKeyPem)).toString('base64')
+        out({ fingerprint, signature })
+        return
+      }
+
+      if (action === 'submit') {
+        const dir = argOf('--dir')
+        const user = argOf('--user')
+        if (!dir || !user) fail('用法：dshctl plugin submit --dir=<目录> --user=<开发者账号> [--password=]')
+        const files = await readManifestFiles(dir)
+        const fingerprint = fingerprintOf(files)
+        const privateKeyPem = await fs.readFile(path.join(dir, 'publisher-private-key.pem'), 'utf8')
+        const signature = edSign(null, Buffer.from(fingerprint), createPrivateKey(privateKeyPem)).toString('base64')
+        token = '' // 开发者身份域登录（独立于平台管理员令牌）
+        const login = await call('POST', '/api/market/developers/login', { username: user, password: argOf('--password') ?? '' })
+        token = login.token
+        const submission = await call('POST', '/api/market/submit', { files, signature })
+        ok(`已提交：${submission.pluginId}@${submission.version}（${submission.status}）`)
+        out(submission)
+        return
+      }
+
+      if (action === 'list' || !action) {
+        await ensureToken()
+        const data = await call('GET', '/api/market/plugins')
+        out(data.plugins.map((item) => ({ pluginId: item.pluginId, version: item.version, developer: item.developer, installs: item.installs, billing: item.billing.model })), ['pluginId', 'version', 'developer', 'installs', 'billing'])
+        return
+      }
+
+      if (action === 'install') {
+        const pluginId = argv[1]
+        const orgId = argOf('--orgId')
+        if (!pluginId || !orgId) fail('用法：dshctl plugin install <pluginId> --orgId=<组织> [--caps=能力1,能力2] [--tenantId=]')
+        await ensureToken()
+        const data = await call('POST', `/api/market/plugins/${pluginId}/install`, {
+          orgId,
+          ...(argOf('--tenantId') ? { tenantId: argOf('--tenantId') } : {}),
+          approvedCapabilities: (argOf('--caps') ?? '').split(',').filter(Boolean),
+        })
+        ok(`已安装：${data.pluginId}@${data.version} → 组织 ${data.orgId}（能力：${data.capabilities.join(',') || '无'}）`)
+        return
+      }
+
+      fail(`未知动作：plugin ${action}`)
+    },
+  },
+
   org: {
     run: async () => {
       const action = argv[0]

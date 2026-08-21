@@ -11,7 +11,7 @@ import {
   type Collection, type RecordBase,
 } from '@dsh-ops/platform-core'
 import * as iamTools from './tools.ts'
-import { DingTalkAuthAdapter, type IdentityProviderAdapter } from './providers.ts'
+import { DingTalkAuthAdapter, RealDingTalkAuthAdapter, type DingTalkCredentials, type IdentityProviderAdapter } from './providers.ts'
 
 // ---------------------------------------------------------------------------
 // 数据模型
@@ -23,7 +23,19 @@ export interface OrgRecord extends RecordBase {
   order: number
   status: 'active' | 'archived'
   customFields: Record<string, string>
+  /** 所属租户（多租户最小集，v1.2 第 2 步；缺省 t_default 兜底存量数据）。 */
+  tenantId?: string
 }
+
+/** 租户（多租户最小集）：计量/钱包/分账的租户维度载体。 */
+export interface TenantRecord extends RecordBase {
+  name: string
+  status: 'active' | 'suspended'
+  /** 套餐档位（后续计费档位扩展位，schema v1 已含 tenant 维度）。 */
+  plan: 'trial' | 'standard' | 'enterprise'
+}
+
+export const DEFAULT_TENANT_ID = 't_default'
 
 export type UserStatus = 'pending' | 'active' | 'frozen' | 'deactivated'
 
@@ -86,8 +98,12 @@ export interface ConnectorConfigRecord extends RecordBase {
   callbackUrl: string
   loginEnabled: boolean
   conflictStrategy: 'third_party_wins' | 'platform_wins' | 'manual'
+  /** real=真实 OpenAPI；mock=演示降级（显式标注）。 */
+  mode: 'real' | 'mock'
+  /** OpenAPI 基址覆盖（测试/专有部署指向本地）。 */
+  apiBase?: string
   lastSyncAt?: string
-  lastSyncResult?: { ok: boolean; created: number; updated: number; conflicts: number; message: string }
+  lastSyncResult?: { ok: boolean; created: number; updated: number; conflicts: number; frozen: number; message: string }
 }
 
 /**
@@ -155,6 +171,20 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'audit.rule.write', label: '管理告警规则', group: '审计' },
   { point: 'approval.read', label: '查看审批中心', group: '审批' },
   { point: 'approval.decide', label: '审批决策', group: '审批' },
+  { point: 'usage.read', label: '查看计量流水', group: '计量计费' },
+  { point: 'usage.write', label: '登记计量事件', group: '计量计费' },
+  { point: 'usage.admin', label: '管理价格簿/对账/能力授权', group: '计量计费' },
+  { point: 'billing.read', label: '查看钱包/流水/分账', group: '计量计费' },
+  { point: 'billing.write', label: '充值/预算管理', group: '计量计费' },
+  { point: 'billing.admin', label: '账期结转/冲正', group: '计量计费' },
+  { point: 'modelgw.read', label: '查看模型网关', group: '模型转售' },
+  { point: 'modelgw.invoke', label: '调用模型网关', group: '模型转售' },
+  { point: 'modelgw.admin', label: '管理模型目录', group: '模型转售' },
+  { point: 'market.read', label: '浏览插件市场', group: '插件市场' },
+  { point: 'market.submit', label: '提交插件', group: '插件市场' },
+  { point: 'market.approve', label: '审批插件', group: '插件市场' },
+  { point: 'market.install', label: '安装插件', group: '插件市场' },
+  { point: 'market.developer', label: '开发者门户', group: '插件市场' },
 ]
 
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [
@@ -179,7 +209,7 @@ export interface OrgConnector {
   provider: string
   label: string
   fetchDirectory(): Promise<RemoteDirectory>
-  healthCheck(): Promise<{ ok: boolean; latencyMs: number; message: string }>
+  healthCheck(): Promise<{ ok: boolean; latencyMs: number; message: string; mock?: boolean }>
 }
 
 /** 钉钉连接器（演示环境内置模拟目录服务，接口与真实 OpenAPI 对齐）。 */
@@ -216,10 +246,131 @@ export class DingTalkConnector implements OrgConnector {
     return structuredClone(this.directory)
   }
 
-  async healthCheck(): Promise<{ ok: boolean; latencyMs: number; message: string }> {
+  async healthCheck(): Promise<{ ok: boolean; latencyMs: number; message: string; mock?: boolean }> {
     const started = Date.now()
     await delay(40)
-    return { ok: true, latencyMs: Date.now() - started, message: '模拟钉钉 OpenAPI 连通正常' }
+    return { ok: true, latencyMs: Date.now() - started, message: '降级模式：未配置钉钉企业凭证，使用内置演示目录', mock: true }
+  }
+}
+
+/**
+ * 钉钉连接器（真实 OpenAPI）：通讯录分页拉取，目录映射到 RemoteDirectory。
+ * 链路：企业内部应用 accessToken（POST /v1.0/oauth2/accessToken）
+ *   → 部门树（POST /v1.0/contact/departments/listByParent，自根遍历）
+ *   → 部门成员（POST /v1.0/contact/users/findByDept 分页）。
+ */
+export class RealDingTalkConnector implements OrgConnector {
+  provider = 'dingtalk'
+  label = '钉钉'
+  private corpTokenCache: { token: string; expiresAt: number } | undefined
+  private readonly credentials: DingTalkCredentials
+
+  constructor(credentials: DingTalkCredentials) {
+    this.credentials = credentials
+  }
+
+  private get apiBase(): string {
+    return this.credentials.apiBase ?? 'https://api.dingtalk.com'
+  }
+
+  private async corpAccessToken(): Promise<string> {
+    if (this.corpTokenCache && this.corpTokenCache.expiresAt > Date.now() + 60_000) {
+      return this.corpTokenCache.token
+    }
+    const response = await fetch(`${this.apiBase}/v1.0/oauth2/accessToken`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ appKey: this.credentials.appKey, appSecret: this.credentials.appSecret }),
+    })
+    const payload = (await response.json().catch(() => ({}))) as { accessToken?: string; expireIn?: number }
+    if (!response.ok || !payload.accessToken) {
+      throw new Error(`钉钉企业 accessToken 获取失败（HTTP ${response.status}）`)
+    }
+    this.corpTokenCache = { token: payload.accessToken, expiresAt: Date.now() + (payload.expireIn ?? 7200) * 1000 }
+    return payload.accessToken
+  }
+
+  async fetchDirectory(): Promise<RemoteDirectory> {
+    const token = await this.corpAccessToken()
+    const orgs: RemoteDirectory['orgs'] = [{ remoteId: '1', name: this.credentials.corpId, parentRemoteId: null }]
+    const users: RemoteDirectory['users'] = []
+    // 自根部门 BFS（上限 3 层 / 每层 50 部门，防御异常目录）
+    let frontier = ['1']
+    for (let depth = 0; depth < 3 && frontier.length > 0; depth++) {
+      const next: string[] = []
+      for (const deptId of frontier.slice(0, 50)) {
+        const children = await this.listDepartments(token, deptId)
+        for (const child of children) {
+          orgs.push({ remoteId: String(child.deptId), name: child.name, parentRemoteId: deptId })
+          next.push(String(child.deptId))
+        }
+      }
+      frontier = next
+    }
+    for (const org of orgs) {
+      const members = await this.listUsers(token, org.remoteId)
+      for (const member of members) {
+        if (users.some((user) => user.remoteId === member.remoteId)) continue
+        users.push({ ...member, orgRemoteId: org.remoteId })
+      }
+    }
+    return { orgs, users }
+  }
+
+  private async listDepartments(token: string, deptId: string): Promise<Array<{ deptId: number; name: string }>> {
+    const response = await fetch(`${this.apiBase}/v1.0/contact/departments/listByParent?deptId=${encodeURIComponent(deptId)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-acs-dingtalk-access-token': token },
+      body: JSON.stringify({ maxResults: 100 }),
+    })
+    if (!response.ok) return []
+    const payload = (await response.json().catch(() => ({}))) as { result?: Array<{ deptId: number; name: string }> }
+    return payload.result ?? []
+  }
+
+  private async listUsers(token: string, deptId: string): Promise<RemoteDirectory['users']> {
+    const users: RemoteDirectory['users'] = []
+    let cursor = 0
+    for (let page = 0; page < 10; page++) {
+      const response = await fetch(`${this.apiBase}/v1.0/contact/users/findByDept?deptId=${encodeURIComponent(deptId)}&cursor=${cursor}&size=100`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-acs-dingtalk-access-token': token },
+        body: JSON.stringify({}),
+      })
+      if (!response.ok) break
+      const payload = (await response.json().catch(() => ({}))) as {
+        result?: Array<{ unionId?: string; userId?: string; name?: string; jobNumber?: string; title?: string; email?: string; active?: boolean }>
+        hasMore?: boolean
+        nextToken?: number
+      }
+      for (const item of payload.result ?? []) {
+        const remoteId = item.unionId ?? item.userId
+        if (!remoteId) continue
+        users.push({
+          remoteId,
+          name: item.name ?? remoteId,
+          jobNumber: item.jobNumber ?? remoteId,
+          title: item.title ?? '',
+          orgRemoteId: deptId,
+          email: item.email ?? '',
+          active: item.active ?? true,
+        })
+      }
+      if (!payload.hasMore) break
+      cursor = Number(payload.nextToken ?? cursor + 100)
+    }
+    return users
+  }
+
+  async healthCheck(): Promise<{ ok: boolean; latencyMs: number; message: string; mock?: boolean }> {
+    const started = Date.now()
+    try {
+      await this.corpAccessToken()
+      return { ok: true, latencyMs: Date.now() - started, message: '钉钉 OpenAPI 连通正常（真实模式）', mock: false }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, latencyMs: Date.now() - started, message, mock: false }
+    }
   }
 }
 
@@ -241,6 +392,7 @@ export class IamService extends Service {
     super(ctx, 'iam')
     this.registerConnector(new DingTalkConnector())
     this.registerAuthProvider(new DingTalkAuthAdapter())
+    this.ensureDefaultTenant()
   }
 
   registerConnector(connector: OrgConnector): () => void {
@@ -341,6 +493,40 @@ export class IamService extends Service {
     return this.ctx.storage.collection<SyncConflictRecord>('iam:conflicts')
   }
 
+  tenants(): Collection<TenantRecord> {
+    const collection = this.ctx.storage.collection<TenantRecord>('iam:tenants')
+    collection.uniqueOn('tenant_name', (tenant) => tenant.name)
+    return collection
+  }
+
+  /** 多租户最小集：默认租户兜底（存量数据全部落 t_default）。 */
+  ensureDefaultTenant(): TenantRecord {
+    const existing = this.tenants().get(DEFAULT_TENANT_ID)
+    if (existing) return existing
+    return this.tenants().insert({
+      id: DEFAULT_TENANT_ID,
+      name: '默认租户',
+      status: 'active',
+      plan: 'standard',
+    })
+  }
+
+  createTenant(input: { name: string; plan?: TenantRecord['plan'] }): TenantRecord {
+    if (!input.name?.trim()) throw new Error('租户名称不能为空')
+    if (this.tenants().findOne((tenant) => tenant.name === input.name)) throw new Error(`租户已存在：${input.name}`)
+    return this.tenants().insert({
+      id: newId('t'),
+      name: input.name,
+      status: 'active',
+      plan: input.plan ?? 'trial',
+    })
+  }
+
+  /** 租户解析：org → tenant；缺省 t_default（usage/钱包/分账统一入口）。 */
+  tenantOfOrg(orgId: string): string {
+    return this.orgs().get(orgId)?.tenantId ?? DEFAULT_TENANT_ID
+  }
+
   // -- 组织 ---------------------------------------------------------------
 
   orgTree(): OrgTreeNode[] {
@@ -364,7 +550,7 @@ export class IamService extends Service {
     return sortRec(roots)
   }
 
-  createOrg(input: { name: string; parentId?: string | null; order?: number; customFields?: Record<string, string> }): OrgRecord {
+  createOrg(input: { name: string; parentId?: string | null; order?: number; customFields?: Record<string, string>; tenantId?: string }): OrgRecord {
     if (!input.name?.trim()) throw new Error('组织名称不能为空')
     const parentId = input.parentId ?? null
     if (parentId && !this.orgs().get(parentId)) throw new Error(`父组织不存在：${parentId}`)
@@ -377,6 +563,7 @@ export class IamService extends Service {
       order: input.order ?? this.orgs().count() + 1,
       status: 'active',
       customFields: input.customFields ?? {},
+      ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
     })
     this.ctx.platformBus.emit(PlatformEvents.OrgChanged, { kind: 'create', orgId: record.id, name: record.name })
     return record
@@ -715,10 +902,15 @@ export class IamService extends Service {
     callbackUrl?: string
     loginEnabled?: boolean
     conflictStrategy?: ConnectorConfigRecord['conflictStrategy']
+    /** real=真实 OpenAPI（需真实企业凭证）；mock=演示降级。 */
+    mode?: 'real' | 'mock'
+    /** OpenAPI 基址覆盖（测试/专有部署）。 */
+    apiBase?: string
   }): ConnectorConfigRecord {
     if (!this.connectors.has(input.provider)) throw new Error(`未注册的连接器：${input.provider}`)
     const existing = this.connectorConfig(input.provider)
     const secret = input.appSecret ?? existing?.secretActual ?? 'demo-secret'
+    const mode = input.mode ?? (secret.startsWith('demo-') ? 'mock' : existing?.mode ?? 'mock')
     const payload = {
       provider: input.provider,
       enabled: input.enabled ?? existing?.enabled ?? true,
@@ -731,9 +923,35 @@ export class IamService extends Service {
       callbackUrl: input.callbackUrl ?? existing?.callbackUrl ?? '',
       loginEnabled: input.loginEnabled ?? existing?.loginEnabled ?? false,
       conflictStrategy: input.conflictStrategy ?? existing?.conflictStrategy ?? 'manual',
+      mode,
+      ...(input.apiBase !== undefined ? { apiBase: input.apiBase } : existing?.apiBase !== undefined ? { apiBase: existing.apiBase } : {}),
     }
-    if (existing) return this.connectorConfigs().update(existing.id, payload)
-    return this.connectorConfigs().insert({ id: newId('conn'), ...payload })
+    const saved = existing
+      ? this.connectorConfigs().update(existing.id, payload)
+      : this.connectorConfigs().insert({ id: newId('conn'), ...payload })
+    this.applyConnectorMode(input.provider)
+    return saved
+  }
+
+  /** 按配置切换连接器/身份源 Adapter 的 real/mock 实现（第 0 步：连接器真实化）。 */
+  applyConnectorMode(provider: 'dingtalk' | 'feishu' | 'wecom'): void {
+    const config = this.connectorConfig(provider)
+    if (!config) return
+    if (provider === 'dingtalk') {
+      if (config.mode === 'real' && config.secretActual) {
+        const credentials: DingTalkCredentials = {
+          corpId: config.corpId,
+          appKey: config.appKey,
+          appSecret: config.secretActual,
+          ...(config.apiBase !== undefined ? { apiBase: config.apiBase } : {}),
+        }
+        this.registerConnector(new RealDingTalkConnector(credentials))
+        this.registerAuthProvider(new RealDingTalkAuthAdapter(credentials))
+      } else {
+        this.registerConnector(new DingTalkConnector())
+        this.registerAuthProvider(new DingTalkAuthAdapter())
+      }
+    }
   }
 
   async testConnector(provider: string): Promise<{ ok: boolean; latencyMs: number; message: string }> {

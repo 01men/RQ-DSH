@@ -1,10 +1,12 @@
 # 衡 · 企业 AI 资源统一管理平台
 
 基于 **DeepSeek Harness（dsh）「一切皆插件」** 架构实现的企业级 AI 资源纳管与治理平台。
-对应设计方案：《企业服务资源统一管理方案 V1.0》与《技术实现规划》。
+对应设计方案：《企业服务资源统一管理方案 V1.0》与《技术实现规划》；生态平台演进设计见
+[docs/ecosystem-design-v1.2.md](docs/ecosystem-design-v1.2.md)，后续路线见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)。
 
-> 组织账号（IAM）· 统一认证（Authn）· MCP 部署服务 · Skill 市场 · Agent 本体 · AI 应用本体 · 审计与告警
-> ——五类资源，一套身份、一套权限、一套审计。
+> 组织账号（IAM）· 统一认证（Authn + OIDC Provider）· MCP 部署服务 · Skill/插件市场 · Agent 本体 ·
+> AI 应用本体 · 计量计费（usage）· 钱包与复式分账（billing）· 模型转售网关（modelgw）· 审计与告警
+> ——多类资源，一套身份、一套权限、一套计量、一套审计。
 
 ---
 
@@ -30,7 +32,8 @@ npm start            # 启动平台（默认 http://127.0.0.1:7300）
 钉钉免密登录演示：登录页「钉钉扫码」输入工号 `DD0002`（林小满）。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例 82 项端到端断言
+npm run selftest      # 功能自测：隔离实例 190 项端到端断言
+npm run lint:manifests  # 插件清单五面 YAML 校验（50 项）
 node cli/dshctl.mjs help    # CLI 帮助
 ```
 
@@ -43,13 +46,17 @@ node cli/dshctl.mjs help    # CLI 帮助
 接入层   dsh-plugin-console        REST 网关 + 控制台 SPA + 工具桥 + 种子数据
 业务域   dsh-plugin-iam            组织/账号/角色/用户组/三方连接器（钉钉演示）
          dsh-plugin-authn          双轨身份 + 令牌 + on-behalf-of 链
-         dsh-plugin-mcp            部署/灰度/回滚/健康熔断/权限组/调用网关/监控
+         dsh-plugin-mcp            部署/灰度/回滚/健康熔断/权限组/调用网关/监控（真实 HTTP 传输层）
          dsh-plugin-skillhub       提交→静态扫描→两级审批→版本化上架
          dsh-plugin-agent          Agent 本体（resource-core 底座 + 机器凭证）
          dsh-plugin-app            AI 应用（编排拓扑 + 应用指标 + 成本穿透）
+         dsh-plugin-usage          计量管道（schema v1 / 幂等 / 死信重放 / 价格簿 / 三方对账 / 能力漂移）
+         dsh-plugin-billing        钱包 + 只追加流水 + 复式分账 ledger（结转/试算平衡/红字冲正）
+         dsh-plugin-modelgw        模型转售网关（OpenAI 兼容真实转发 / 预检 / 实测 tokens 计量）
+         dsh-plugin-market         第三方与自营插件市场（契约五面 / Ed25519 验签 / L0 运行时 / 订阅代收）
          dsh-plugin-audit          四类审计日志 + 告警规则 + 成本归集 + 审批中心
 底座     dsh-plugin-resource-core  资源本体：属性 schema + 生命周期状态机 + 依赖图
-基础层   dsh-plugin-platform-core  存储(JSON集合/原子落盘) + 事件总线 + ToolRuntime-lite + HTTP
+基础层   dsh-plugin-platform-core  存储(JSON集合/原子落盘) + SQLite 事务存储 + YAML 解析 + 事件总线 + ToolRuntime-lite + HTTP
 ```
 
 **插件协作铁律**：状态变更必发事件；跨插件联动只通过事件总线或扩展点（`ctx.platformBus`），
@@ -77,6 +84,27 @@ pnpm dsh web --patch <PROJECT_ROOT>/cordis.yml
 - **refresh_token 轮转链 + sid 会话**（docs/06）：access 30min + refresh 7d 仅存哈希、单次轮转，重放即整链吊销；前端 401 静默续期
 - **state 防 CSRF + code 一次性消费 + 未命中绑定/注册分支**（docs/04/05/07）：完整的三方登录产品化流程
 - 自测新增 15 项安全攻击演练（state/code/refresh 重放、唯一约束冲突），**97/97 通过**
+
+## 三A、生态平台 v1.2 交付（第 0–8 步，本迭代）
+
+在 v1.0 基础上完成生态化演进（实施依据 [docs/ecosystem-design-v1.2.md](docs/ecosystem-design-v1.2.md)）：
+
+- **执行层/连接器真实化（第 0 步）**：MCP 真实 HTTP JSON-RPC 传输层（探活/超时/错误路径/实测 tokens）、
+  钉钉真实 OpenAPI 连接器（corp token → 部门 BFS → 成员分页）、SQLite 事务存储（WAL/幂等唯一索引/只追加表）。
+- **令牌收紧（第 1 步）**：`aud` 受众校验 + 插件 scope 命名空间强制（唯一收敛面）。
+- **多租户最小集 + 计量管道（第 2/4 步）**：租户建模、schema v1 计量事件、先写后发、引擎级幂等、
+  死信重放、价格簿（计价时点费率快照）、三方对账、运行时能力漂移检测。
+- **契约五面 + L0 市场（第 3/7 步）**：第三方开发者身份域、契约五面 Ed25519 验签、内容扫描、
+  L1 门禁、审批上架/安装/卸载、L0 提示词运行时与计量、自营首批供给与订阅代收登记。
+- **钱包与模型网关（第 5 步）**：余额+流水同事务、乐观锁、幂等键、月度预算预检、余额恒等式全量重放；
+  模型转售网关真实 OpenAI 兼容转发（无 endpoint 拒绝调用，不造假 completion）。
+- **OIDC Provider（第 6 步）**：RS256/JWKS/discovery/authorize（一次性 code）/token/id_token/userinfo，
+  账号冻结令牌即时失效。
+- **复式分账 ledger（第 8 步）**：账期汇总结转（费率版本快照、尾差归平台）、试算平衡、红字冲正、开发者应收。
+- **资金红线（v1.2 §六过渡）**：对公收款/开票/开发者付款通道未就位——充值仅管理员手工录入（幂等键=转账单号），
+  订阅代收为 manual-settlement 登记，平台不自动扣外部资金。
+- 验收：`npm run selftest` **190/190**、`npm run lint:manifests` **50/50**；KBaaS/连接器市场/合规门户与
+  L1 有码沙箱为下一迭代（设计见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)）。
 
 ## 三、目录结构（插件标准解剖）
 
@@ -139,6 +167,8 @@ node cli/dshctl.mjs mcp deploy <id> --dry-run --changelog="优化召回"
 node cli/dshctl.mjs agent offline <id> --reason="连续异常"    # 生成 L4 审批单
 node cli/dshctl.mjs approval decide <id> --decision=approve --opinion="已确认"
 node cli/dshctl.mjs tool exec --name=agent_list --args='{"status":"online"}'
+node cli/dshctl.mjs plugin init --id=com.demo.hello --dir=./my-plugin   # 脚手架（契约五面 + 发布者密钥对）
+node cli/dshctl.mjs plugin sign --dir=./my-plugin && node cli/dshctl.mjs plugin submit --dir=./my-plugin
 ```
 
 ```bash
@@ -150,14 +180,18 @@ curl localhost:7300/api/overview -H "authorization: Bearer <token>"
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **97 项端到端断言**：
-登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **190 项端到端断言**：
+v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
-审计四类日志与筛选、告警、成本穿透、工具桥执行；安全演练（state/code/refresh 重放、一人一号唯一约束、未命中绑定分支）。
+审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
+（真实 MCP/钉钉/OpenAI stub 往返、计量幂等与对账、钱包扣费与预算拦截、OIDC RS256/JWKS 全链路、
+市场验签/安装/卸载、复式分账试算平衡与红字冲正）。测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
 
 ## 八、说明与边界
 
-- 存储为 JSON 集合（原子落盘、启动恢复），替换 `ctx.storage` 实现即可切换数据库
-- MCP 执行层为确定性模拟传输（延迟/成功率/Token 可配），管理面与网关语义为真实实现
-- 钉钉连接器为模拟目录服务，接口（`syncFull/healthCheck/authLogin`）与真实 OpenAPI 对齐
-- Node ≥ 22.6（原生 TypeScript 运行，无需构建步骤）
+- 业务配置存储为 JSON 集合（原子落盘）；计量/资金/分账类数据存 SQLite（`data/txnstore.db`，WAL + 事务 + 幂等唯一索引）
+- MCP 执行层支持真实 HTTP 传输（`exec: real`，JSON-RPC tools/call + initialize 探活）；`exec: demo` 为显式降级演示流量（不计费不计 SLO）
+- 钉钉连接器支持真实 OpenAPI（`mode: real` + `apiBase`）与 mock 演示（显式标注）
+- 模型网关仅转发 OpenAI 兼容 chat/completions；模型未配置 endpoint 时拒绝调用（不生成假 completion）
+- 资金通道为手工过渡形态（见「三A」资金红线）；OIDC 私钥存 data 目录，生产建议迁 KMS
+- Node ≥ 22.6（原生 TypeScript 运行，无需构建步骤；node:sqlite 在 Node 24 下为 Experimental，无害）
