@@ -1,0 +1,13 @@
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+id: dsh-plugin-authn
+version: 1.0.0
+label: 统一认证中心
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam']
+provides:
+  services:
+    - authn
+permissions:
+  - authn.principal.read
+  - authn.principal.write
+  - authn.token.issue
+  - authn.token.revoke

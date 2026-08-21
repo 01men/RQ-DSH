@@ -1,0 +1,15 @@
+# 前端路由 + 菜单声明（控制台按此注入导航；表单骨架由 api.yaml 的 schema 生成）
+plugin: dsh-plugin-iam
+routes:
+  - #/iam?tab=members
+  - #/iam?tab=roles
+  - #/iam?tab=groups
+  - #/iam?tab=connectors
+  - #/iam?tab=conflicts
+menus:
+-
+  group: 组织
+  items:
+    - 组织与账号
+    - 角色权限
+    - 三方集成

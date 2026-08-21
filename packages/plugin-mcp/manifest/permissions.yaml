@@ -1,0 +1,9 @@
+# 权限点声明（注册进统一 RBAC，控制台/CLI/工具共用）
+plugin: dsh-plugin-mcp
+points:
+  - mcp.service.read
+  - mcp.service.write
+  - mcp.service.deploy
+  - mcp.service.offline
+  - mcp.permgroup.write
+  - mcp.invoke

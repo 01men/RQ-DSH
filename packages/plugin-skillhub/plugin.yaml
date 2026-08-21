@@ -1,0 +1,14 @@
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+id: dsh-plugin-skillhub
+version: 1.0.0
+label: Skill 市场
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-audit']
+provides:
+  services:
+    - skillHub
+permissions:
+  - skill.read
+  - skill.submit
+  - skill.approve
+  - skill.publish
+  - skill.install

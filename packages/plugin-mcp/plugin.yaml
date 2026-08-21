@@ -1,0 +1,15 @@
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+id: dsh-plugin-mcp
+version: 1.0.0
+label: MCP 部署服务
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam', 'dsh-plugin-audit']
+provides:
+  services:
+    - mcpRegistry
+permissions:
+  - mcp.service.read
+  - mcp.service.write
+  - mcp.service.deploy
+  - mcp.service.offline
+  - mcp.permgroup.write
+  - mcp.invoke

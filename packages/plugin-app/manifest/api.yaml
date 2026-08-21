@@ -1,0 +1,16 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-app
+base: /api
+endpoints:
+  - GET/POST /api/apps · GET /api/apps/:id · PATCH /api/apps/:id
+  - POST /api/apps/:id/transition（发布/下架为 L4 审批）
+  - GET /api/apps/:id（含 topology/cost/impact）
+tools:
+  - app_list
+  - app_topology
+  - app_metrics
+  - app_cost_breakdown
+services:
+  - key: appRegistry
+    access: ctx.appRegistry
+    description: 应用注册/编排依赖图（拓扑）/应用层指标/成本穿透/生命周期

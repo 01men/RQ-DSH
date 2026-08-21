@@ -1,0 +1,19 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-platform-core
+base: /api
+endpoints:
+  - # 平台自身无业务 REST；由 console 插件聚合暴露
+
+services:
+  - key: storage
+    access: ctx.storage
+    description: JSON 集合存储（原子落盘，可替换 DB）
+  - key: platformBus
+    access: ctx.platformBus
+    description: 平台事件总线（插件协作唯一胶水）
+  - key: tools
+    access: ctx.tools
+    description: ToolRuntime-lite（独立宿主；dsh 下由原生 ToolRuntime 提供）
+  - key: httpServer
+    access: ctx.httpServer
+    description: HTTP 服务：REST 路由 + 静态资源

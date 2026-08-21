@@ -1,0 +1,25 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-iam
+base: /api
+endpoints:
+  - GET/POST /api/iam/orgs · GET /api/iam/orgs/tree · PATCH/DELETE /api/iam/orgs/:id
+  - GET/POST /api/iam/users · PATCH /api/iam/users/:id · POST /api/iam/users/import
+  - POST /api/iam/users/:id/activate|freeze|unfreeze|deactivate
+  - POST/DELETE /api/iam/users/:id/bindings[/:provider]
+  - GET /api/iam/roles · GET /api/iam/permissions · POST/PATCH /api/iam/roles/:id
+  - GET/POST/PATCH/DELETE /api/iam/groups
+  - GET/PUT /api/iam/connectors/:provider · POST .../test · POST .../sync
+  - GET /api/iam/conflicts · POST /api/iam/conflicts/:id/resolve
+tools:
+  - iam_org_tree
+  - iam_org_create
+  - iam_user_list
+  - iam_user_create
+  - iam_user_freeze
+  - iam_role_list
+  - iam_sync_run
+  - iam_conflict_list
+services:
+  - key: iam
+    access: ctx.iam
+    description: 组织/账号/角色/用户组/三方连接器（OrgConnector 可插拔）

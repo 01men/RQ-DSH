@@ -1,0 +1,13 @@
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+id: dsh-plugin-agent
+version: 1.0.0
+label: Agent 本体
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-authn', 'dsh-plugin-iam', 'dsh-plugin-audit']
+provides:
+  services:
+    - agentRegistry
+permissions:
+  - agent.read
+  - agent.write
+  - agent.approve
+  - agent.offline

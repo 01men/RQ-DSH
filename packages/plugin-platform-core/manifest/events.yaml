@@ -1,0 +1,6 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-platform-core
+events:
+  - name: tools/change
+    mode: emit
+    description: 工具注册变更（lite 运行时）

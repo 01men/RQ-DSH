@@ -1,0 +1,33 @@
+# cordis.yml —— 把本平台的插件树挂载进完整 dsh 运行时（dsh web / dsh headless）。
+#
+# 用法（在 deepseek-harness 源码检出中）：
+#   pnpm dsh web --patch <本项目绝对路径>/cordis.yml
+#
+# 说明：
+#   - 路径必须是绝对路径，使用前替换 <PROJECT_ROOT> 为本项目实际位置
+#   - provideToolRuntime=false：完整 dsh 自带 ToolRuntime（ctx.tools），
+#     平台插件注册的 37 个运维工具将直接对模型可见、可被调用
+#   - 控制台 SPA 仍由本项目的独立进程提供（node src/main.ts），
+#     两个进程共享同一 data/ 目录即可管理同一份数据
+- insert:
+    - id: ops-platform-core
+      name: '<PROJECT_ROOT>/packages/platform-core/src/index.ts'
+      config:
+        provideToolRuntime: false
+        startHttp: false
+    - id: ops-resource-core
+      name: '<PROJECT_ROOT>/packages/plugin-resource-core/src/index.ts'
+    - id: ops-iam
+      name: '<PROJECT_ROOT>/packages/plugin-iam/src/index.ts'
+    - id: ops-authn
+      name: '<PROJECT_ROOT>/packages/plugin-authn/src/index.ts'
+    - id: ops-audit
+      name: '<PROJECT_ROOT>/packages/plugin-audit/src/index.ts'
+    - id: ops-mcp
+      name: '<PROJECT_ROOT>/packages/plugin-mcp/src/index.ts'
+    - id: ops-skillhub
+      name: '<PROJECT_ROOT>/packages/plugin-skillhub/src/index.ts'
+    - id: ops-agent
+      name: '<PROJECT_ROOT>/packages/plugin-agent/src/index.ts'
+    - id: ops-app
+      name: '<PROJECT_ROOT>/packages/plugin-app/src/index.ts'

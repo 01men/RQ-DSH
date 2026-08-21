@@ -1,0 +1,8 @@
+# 权限点声明（注册进统一 RBAC，控制台/CLI/工具共用）
+plugin: dsh-plugin-skillhub
+points:
+  - skill.read
+  - skill.submit
+  - skill.approve
+  - skill.publish
+  - skill.install

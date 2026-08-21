@@ -1,0 +1,9 @@
+# 前端路由 + 菜单声明（控制台按此注入导航；表单骨架由 api.yaml 的 schema 生成）
+plugin: dsh-plugin-authn
+routes:
+  - #/authn
+menus:
+-
+  group: 治理与运营
+  items:
+    - 认证与令牌

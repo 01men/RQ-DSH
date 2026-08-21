@@ -1,0 +1,10 @@
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+id: dsh-plugin-resource-core
+version: 1.0.0
+label: 资源本体底座
+depends: ['dsh-plugin-platform-core']
+provides:
+  services:
+    - resourceCore
+permissions:
+  []

@@ -1,0 +1,13 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-resource-core
+base: /api
+endpoints:
+  - GET  /api/agents            # 底座驱动的资源列表（schema 随响应返回）
+  - POST /api/agents            # resourceCore.create(agent)
+  - PATCH /api/agents/:id       # resourceCore.update + 属性校验
+  - POST /api/agents/:id/transition  # 状态机迁移（guard/审批/留痕）
+
+services:
+  - key: resourceCore
+    access: ctx.resourceCore
+    description: 属性 schema 引擎 + 生命周期状态机 + 依赖图（topology/impact）

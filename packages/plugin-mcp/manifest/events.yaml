@@ -1,0 +1,12 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-mcp
+events:
+  - name: mcp.deployed / mcp.offlined
+    mode: emit
+    description: 部署与下线
+  - name: mcp.unhealthy
+    mode: emit
+    description: 熔断告警（audit 订阅）
+  - name: mcp.invoked
+    mode: emit
+    description: 网关调用（审计+指标+成本归集）

@@ -1,0 +1,94 @@
+/**
+ * 平台事件总线：插件协作的唯一胶水。
+ * 原则：状态变更必发事件；跨插件联动只许通过事件或扩展点，禁止直连对方数据。
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { Service } from '@deepseek-ai/cordis'
+
+export interface PlatformEvent {
+  id: number
+  name: string
+  payload: unknown
+  at: string
+}
+
+export type BusListener = (payload: unknown, event: PlatformEvent) => void
+
+/** 平台级事件名常量（与各插件 manifest/events.yaml 对应）。 */
+export const PlatformEvents = {
+  UserFrozen: 'iam.user.frozen',
+  UserActivated: 'iam.user.activated',
+  OrgChanged: 'iam.org.changed',
+  PermissionChanged: 'iam.permission.changed',
+  TokenIssued: 'authn.token.issued',
+  TokenRevoked: 'authn.token.revoked',
+  McpDeployed: 'mcp.deployed',
+  McpOfflined: 'mcp.offlined',
+  McpUnhealthy: 'mcp.unhealthy',
+  McpInvoked: 'mcp.invoked',
+  SkillSubmitted: 'skill.submitted',
+  SkillPublished: 'skill.published',
+  SkillDeprecated: 'skill.deprecated',
+  SkillInstalled: 'skill.installed',
+  AgentRegistered: 'agent.registered',
+  AgentOnlined: 'agent.onlined',
+  AgentOfflined: 'agent.offlined',
+  AppRegistered: 'app.registered',
+  AppOnlined: 'app.onlined',
+  AppOfflined: 'app.offlined',
+  ApprovalCreated: 'approval.created',
+  ApprovalDecided: 'approval.decided',
+  AlertFired: 'audit.alert.fired',
+  ConnectorSynced: 'iam.connector.synced',
+} as const
+
+export class PlatformBusService extends Service {
+  static readonly provide = 'platformBus'
+
+  private listeners = new Map<string, Set<BusListener>>()
+  private wildcard = new Set<BusListener>()
+  private seq = 0
+  private ring: PlatformEvent[] = []
+
+  constructor(ctx: Context) {
+    super(ctx, 'platformBus')
+  }
+
+  on(event: string, cb: BusListener): () => void {
+    const set = this.listeners.get(event) ?? new Set()
+    set.add(cb)
+    this.listeners.set(event, set)
+    return () => set.delete(cb)
+  }
+
+  onAny(cb: BusListener): () => void {
+    this.wildcard.add(cb)
+    return () => this.wildcard.delete(cb)
+  }
+
+  emit(name: string, payload: unknown): PlatformEvent {
+    const event: PlatformEvent = { id: ++this.seq, name, payload, at: new Date().toISOString() }
+    this.ring.push(event)
+    if (this.ring.length > 300) this.ring.shift()
+    for (const cb of this.listeners.get(name) ?? []) {
+      try {
+        cb(payload, event)
+      } catch (error) {
+        console.error(`[bus] 监听器处理 ${name} 异常`, error)
+      }
+    }
+    for (const cb of this.wildcard) {
+      try {
+        cb(payload, event)
+      } catch (error) {
+        console.error(`[bus] 通配监听器处理 ${name} 异常`, error)
+      }
+    }
+    return event
+  }
+
+  /** 最近事件（平台事件流展示用）。 */
+  recent(limit = 50): PlatformEvent[] {
+    return this.ring.slice(-limit).reverse()
+  }
+}

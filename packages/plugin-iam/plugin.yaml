@@ -1,0 +1,16 @@
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+id: dsh-plugin-iam
+version: 1.0.0
+label: 组织账号
+depends: ['dsh-plugin-platform-core']
+provides:
+  services:
+    - iam
+permissions:
+  - iam.org.read
+  - iam.org.write
+  - iam.user.read
+  - iam.user.write
+  - iam.user.freeze
+  - iam.role.write
+  - iam.connector.write

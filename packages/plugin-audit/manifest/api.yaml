@@ -1,0 +1,17 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-audit
+base: /api
+endpoints:
+  - GET /api/audit/logs · GET /api/audit/summary
+  - GET/POST/PATCH /api/audit/alert-rules · GET /api/audit/alerts · POST /api/audit/alerts/:id/read
+  - GET /api/audit/cost?groupBy=app|agent|org|date
+  - GET /api/approvals · POST /api/approvals/:id/decide
+tools:
+  - audit_logs
+  - audit_alerts_list
+  - approval_decide
+  - audit_cost_report
+services:
+  - key: audit
+    access: ctx.audit
+    description: 四类审计日志 + 告警规则引擎 + 成本归集 + 审批中心（L4 执行器）

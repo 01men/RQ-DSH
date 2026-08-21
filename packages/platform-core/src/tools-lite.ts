@@ -1,0 +1,198 @@
+/**
+ * ToolRuntime-lite：dsh ToolRuntime 的独立宿主实现（服务键与 dsh 相同：`tools`）。
+ *
+ * - 注册契约对齐 dsh：ToolDefinition = { name, description, parameters(JSON Schema),
+ *   output: { schema, render }, execute(args, exec) }，注册时校验 output 声明。
+ * - execute() 冻结参数快照、运行 guard 链、校验规范值、经 render 产出内容块。
+ * - 在完整 dsh 运行时中，本服务不加载（provideToolRuntime=false），
+ *   同一批插件定义直接注册到真正的 ToolRuntime，模型即可调用。
+ */
+import { randomUUID } from 'node:crypto'
+import type { Context } from '@deepseek-ai/cordis'
+import { Service } from '@deepseek-ai/cordis'
+
+export interface ContentBlock {
+  type: 'text'
+  text: string
+}
+
+export interface ToolRunContext {
+  callId: string
+  name: string
+  signal: AbortSignal
+  agent?: unknown
+  token?: symbol
+}
+
+export interface ToolDefinitionLite {
+  name: string
+  description: string
+  /** JSON Schema（object 根），与 dsh 原生注册的 parameters 字段一致。 */
+  parameters: Record<string, unknown>
+  output: {
+    schema: Record<string, unknown>
+    render: (args: unknown, value: unknown) => ContentBlock[]
+  }
+  execute: (args: any, exec: ToolRunContext) => Promise<unknown>
+  timeoutMs?: number
+  /** 来源插件名（本运行时登记用）。 */
+  plugin?: string
+}
+
+export interface ToolExecutionResultLite {
+  isError: boolean
+  value?: unknown
+  content: ContentBlock[]
+  error?: { message: string }
+  callId: string
+  name: string
+  durationMs: number
+}
+
+export type ToolGuardLite = (input: { name: string; arguments: unknown }) => string | undefined
+
+export class ToolRuntimeLite extends Service {
+  static readonly provide = 'tools'
+
+  private definitions = new Map<string, ToolDefinitionLite>()
+  private guards: ToolGuardLite[] = []
+
+  constructor(ctx: Context) {
+    super(ctx, 'tools')
+  }
+
+  register(definition: ToolDefinitionLite): () => void {
+    const { name, output } = definition
+    if (typeof name !== 'string' || !name) throw new TypeError(`[tools] 工具名必须是非空字符串`)
+    if (output === undefined || typeof output !== 'object' || typeof output.render !== 'function') {
+      throw new TypeError(`工具 "${name}" 必须声明 output { schema, render }`)
+    }
+    if (this.definitions.has(name)) throw new Error(`[tools] 工具名重复：${name}`)
+    this.definitions.set(name, definition)
+    try {
+      this.ctx.platformBus?.emit('tools/change', { kind: 'register', name })
+    } catch {
+      // platformBus 未注入当前 fiber 时跳过通知（cordis 严格服务访问）
+    }
+    return () => {
+      this.definitions.delete(name)
+    }
+  }
+
+  guard(guard: ToolGuardLite): () => void {
+    this.guards.push(guard)
+    return () => {
+      const index = this.guards.indexOf(guard)
+      if (index >= 0) this.guards.splice(index, 1)
+    }
+  }
+
+  schemas(): Array<{ name: string; description: string; parameters: Record<string, unknown>; plugin?: string }> {
+    return [...this.definitions.values()].map(({ name, description, parameters, plugin }) => ({
+      name,
+      description,
+      parameters,
+      plugin,
+    }))
+  }
+
+  has(name: string): boolean {
+    return this.definitions.has(name)
+  }
+
+  async execute(input: { name: string; arguments?: unknown; signal?: AbortSignal }): Promise<ToolExecutionResultLite> {
+    const started = Date.now()
+    const callId = randomUUID()
+    const name = input.name
+    const args = input.arguments ?? {}
+    const base = { callId, name }
+    const definition = this.definitions.get(name)
+    if (!definition) {
+      return { ...base, isError: true, content: [{ type: 'text', text: `未知工具：${name}` }], error: { message: `未知工具：${name}` }, durationMs: 0 }
+    }
+    for (const guard of this.guards) {
+      const reason = guard({ name, arguments: args })
+      if (reason) {
+        return { ...base, isError: true, content: [{ type: 'text', text: `调用被拒绝：${reason}` }], error: { message: reason }, durationMs: Date.now() - started }
+      }
+    }
+    const signal = input.signal ?? new AbortController().signal
+    const exec: ToolRunContext = { callId, name, signal }
+    try {
+      const value = await definition.execute(structuredClone(args), exec)
+      const content = safeRender(definition, args, value)
+      return { ...base, isError: false, value, content, durationMs: Date.now() - started }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ...base, isError: true, content: [{ type: 'text', text: `工具执行失败：${message}` }], error: { message }, durationMs: Date.now() - started }
+    }
+  }
+}
+
+function safeRender(definition: ToolDefinitionLite, args: unknown, value: unknown): ContentBlock[] {
+  try {
+    const rendered = definition.output.render(args, value)
+    return Array.isArray(rendered) ? rendered : [{ type: 'text', text: JSON.stringify(value) }]
+  } catch {
+    return [{ type: 'text', text: JSON.stringify(value) }]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 平台工具定义辅助：扁平参数说明 → JSON Schema，输出默认 pretty JSON 渲染。
+// 该形态与 dsh 原生 ToolRuntime 的注册契约一致，可原样注册到两种宿主。
+// ---------------------------------------------------------------------------
+
+export interface ToolParamSpec {
+  type: 'string' | 'number' | 'integer' | 'boolean' | 'array' | 'object'
+  required?: boolean
+  description?: string
+  enum?: Array<string | number>
+  items?: Record<string, unknown>
+}
+
+export interface PlatformToolSpec {
+  name: string
+  description: string
+  /** 插件名（登记来源用）。 */
+  plugin?: string
+  parameters: Record<string, ToolParamSpec>
+  /** 输出 JSON Schema 根节点。 */
+  output: Record<string, unknown>
+  /** 自定义模型可见渲染（默认 JSON pretty print）。 */
+  render?: (args: unknown, value: unknown) => ContentBlock[]
+  timeoutMs?: number
+  execute: (args: any, exec: ToolRunContext) => Promise<unknown>
+}
+
+export function defineTool(spec: PlatformToolSpec): ToolDefinitionLite {
+  const properties: Record<string, unknown> = {}
+  const required: string[] = []
+  for (const [key, param] of Object.entries(spec.parameters)) {
+    const node: Record<string, unknown> = { type: param.type }
+    if (param.description) node.description = param.description
+    if (param.enum) node.enum = param.enum
+    if (param.items) node.items = param.items
+    properties[key] = node
+    if (param.required) required.push(key)
+  }
+  const parameters: Record<string, unknown> = {
+    type: 'object',
+    properties,
+    ...(required.length > 0 ? { required } : {}),
+  }
+  return {
+    name: spec.name,
+    description: spec.description,
+    plugin: spec.plugin,
+    parameters,
+    output: {
+      schema: spec.output,
+      render: spec.render ?? ((_args: unknown, value: unknown) => [
+        { type: 'text', text: JSON.stringify(value, null, 2) },
+      ]),
+    },
+    ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
+    execute: spec.execute,
+  }
+}

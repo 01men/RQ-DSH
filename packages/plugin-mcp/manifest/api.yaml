@@ -1,0 +1,20 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-mcp
+base: /api
+endpoints:
+  - GET/POST /api/mcp/services · PATCH /api/mcp/services/:id
+  - POST /api/mcp/services/:id/verify|deploy|rollback|offline|health
+  - GET /api/mcp/services/:id/metrics · GET /api/mcp/calls
+  - GET/POST/PATCH/DELETE /api/mcp/perm-groups
+  - POST /api/mcp/invoke（网关统一鉴权/限流/审计）
+tools:
+  - mcp_service_list
+  - mcp_deploy
+  - mcp_offline
+  - mcp_metrics
+  - mcp_invoke
+  - mcp_health_check
+services:
+  - key: mcpRegistry
+    access: ctx.mcpRegistry
+    description: 服务注册/版本/灰度/回滚 + 健康探活熔断 + 权限组 + 调用网关 + 监控

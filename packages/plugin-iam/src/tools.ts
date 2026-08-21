@@ -1,0 +1,141 @@
+/**
+ * iam 插件对模型暴露的工具（dsh-ops-iam Skill 的底座）。
+ * 注册到 ctx.tools：在完整 dsh 中模型可直接调用；独立宿主中经 /api/tools/execute 触达。
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { defineTool } from '@dsh-ops/platform-core'
+
+export const name = 'iam-tools'
+export const inject = ['tools', 'iam']
+
+export function apply(ctx: Context) {
+  const t = ctx.tools
+
+  t.register(defineTool({
+    name: 'iam_org_tree',
+    description: '获取组织架构树（含各级子组织与人数统计）。',
+    parameters: {},
+    output: { type: 'object', additionalProperties: true },
+    async execute() {
+      const tree = ctx.iam.orgTree()
+      const decorate = (nodes: any[]): any[] => nodes.map((node) => ({
+        id: node.id, name: node.name, status: node.status,
+        userCount: ctx.iam.users().find((user) => user.orgId === node.id).length,
+        children: decorate(node.children),
+      }))
+      return { tree: decorate(tree) }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'iam_org_create',
+    description: '创建组织（需 iam.org.write 权限）。parentId 为空表示顶级组织。',
+    parameters: {
+      name: { type: 'string', required: true, description: '组织名称' },
+      parentId: { type: 'string', description: '父组织 ID' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const org = ctx.iam.createOrg({ name: args.name, parentId: args.parentId ?? null })
+      return { id: org.id, name: org.name }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'iam_user_list',
+    description: '查询账号列表，可按组织/状态/关键字过滤。',
+    parameters: {
+      orgId: { type: 'string', description: '限定组织（含子树）' },
+      status: { type: 'string', enum: ['pending', 'active', 'frozen', 'deactivated'], description: '状态过滤' },
+      q: { type: 'string', description: '姓名/用户名关键字' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const users = ctx.iam.users().find((user) => {
+        if (args.status && user.status !== args.status) return false
+        if (args.q && !`${user.displayName}${user.username}`.includes(args.q)) return false
+        if (args.orgId) {
+          const scope = new Set(ctx.iam.orgSubtreeIds(args.orgId))
+          if (!scope.has(user.orgId)) return false
+        }
+        return true
+      })
+      return {
+        total: users.length,
+        users: users.map((user) => ({
+          id: user.id, username: user.username, displayName: user.displayName,
+          org: ctx.iam.orgs().get(user.orgId)?.name, title: user.title, status: user.status,
+        })),
+      }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'iam_user_create',
+    description: '创建账号（默认密码 Ybk@2026，需激活后使用）。',
+    parameters: {
+      username: { type: 'string', required: true, description: '登录名（字母数字）' },
+      displayName: { type: 'string', required: true, description: '姓名' },
+      orgId: { type: 'string', required: true, description: '所属组织 ID' },
+      title: { type: 'string', description: '职位' },
+      roleIds: { type: 'array', items: { type: 'string' }, description: '角色 ID 列表' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const user = ctx.iam.createUser({ ...args, roleIds: args.roleIds })
+      return { id: user.id, username: user.username, status: user.status }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'iam_user_freeze',
+    description: '冻结账号（L4 高危：必须填写 reason，将联动吊销名下全部令牌）。',
+    parameters: {
+      userId: { type: 'string', required: true, description: '账号 ID' },
+      reason: { type: 'string', required: true, description: '冻结原因（审计留痕）' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const user = ctx.iam.freezeUser(args.userId, args.reason)
+      return { id: user.id, status: user.status, note: '已发布 iam.user.frozen 事件，认证中心将吊销其令牌' }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'iam_role_list',
+    description: '列出全部角色与权限点。',
+    parameters: {},
+    output: { type: 'object', additionalProperties: true },
+    async execute() {
+      return {
+        roles: ctx.iam.roles().all().map((role) => ({ id: role.id, code: role.code, name: role.name, builtin: role.builtin, permissions: role.permissions })),
+      }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'iam_sync_run',
+    description: '触发三方通讯录全量同步（当前内置钉钉模拟连接器）。',
+    parameters: {
+      provider: { type: 'string', enum: ['dingtalk'], required: true, description: '连接器' },
+      actor: { type: 'string', description: '操作人（审计用）' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      return await ctx.iam.syncConnector(args.provider, args.actor ?? 'agent')
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'iam_conflict_list',
+    description: '查看三方同步冲突队列（pending 未处理）。',
+    parameters: {
+      status: { type: 'string', enum: ['pending', 'resolved'], description: '默认 pending' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const conflicts = ctx.iam.conflicts().find((item) => item.status === (args.status ?? 'pending'))
+      return { total: conflicts.length, conflicts }
+    },
+  }))
+}

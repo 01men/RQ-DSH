@@ -1,0 +1,6 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-console
+events:
+  - name: audit.authz.denied
+    mode: emit
+    description: 网关越权拒绝（audit 订阅计数告警）

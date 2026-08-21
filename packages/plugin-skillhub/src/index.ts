@@ -1,0 +1,419 @@
+/**
+ * @dsh-ops/plugin-skillhub —— Skill 市场（方案 §四）。
+ *
+ * 提交流水线（事件驱动）：submitted → scanned(静态扫描) → approved(两级审批)
+ *                        → published(版本化上架)。
+ * - 提交前置校验：格式/元数据完整性、恶意代码静态扫描、敏感信息检测。
+ * - 两级审批：领域负责人（业务适用性）→ 平台管理员（安全合规）；
+ *   高风险 Skill（外联/写文件）需安全团队加签。
+ * - 版本不可变：新版本上架不覆盖旧版，支持弃用标记与强制下架。
+ * - 下载/安装即登记依赖关系（接入 Agent 时自动回填关联 Skill 列表）。
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { Service } from '@deepseek-ai/cordis'
+import { PlatformEvents, newId, slugify, type Collection, type RecordBase } from '@dsh-ops/platform-core'
+import * as skillhubTools from './tools.ts'
+
+// ---------------------------------------------------------------------------
+// 数据模型
+// ---------------------------------------------------------------------------
+
+export type SkillStatus = 'draft' | 'scanning' | 'pending_approval' | 'rejected' | 'published' | 'deprecated' | 'offline'
+
+export interface ScanFinding {
+  level: 'block' | 'warn' | 'info'
+  rule: string
+  message: string
+}
+
+export interface VersionApproval {
+  level: 'domain' | 'security'
+  approverId: string
+  approverName: string
+  opinion: string
+  at: string
+}
+
+export interface SkillVersion {
+  version: string
+  changelog: string
+  content: string
+  status: 'scanning' | 'pending_domain' | 'pending_security' | 'approved' | 'rejected' | 'published' | 'deprecated'
+  submittedAt: string
+  findings: ScanFinding[]
+  approvals: VersionApproval[]
+  publishedAt?: string
+  rejectedReason?: string
+}
+
+export interface SkillRecord extends RecordBase {
+  name: string
+  slug: string
+  category: string
+  tags: string[]
+  summary: string
+  description: string
+  authorId: string
+  authorName: string
+  orgId: string
+  visibility: 'all' | 'orgs' | 'groups'
+  targetOrgs: string[]
+  applicableModels: string[]
+  deps: string[]
+  riskLevel: 'low' | 'medium' | 'high'
+  status: SkillStatus
+  currentVersion: string
+  versions: SkillVersion[]
+  stats: { downloads: number; installs: number; rating: number; ratingCount: number }
+  ratings: Array<{ userId: string; stars: number; at: string }>
+  cover: string
+}
+
+export interface SkillDownloadRecord extends RecordBase {
+  skillId: string
+  version: string
+  userId: string
+  userName: string
+}
+
+// ---------------------------------------------------------------------------
+// 静态扫描器
+// ---------------------------------------------------------------------------
+
+const BLOCK_RULES: Array<{ rule: string; pattern: RegExp; message: string }> = [
+  { rule: 'destructive', pattern: /rm\s+-rf|del\s+\/[sq]/i, message: '检测到破坏性删除命令' },
+  { rule: 'shell-injection', pattern: /eval\s*\(|exec\s*\(|system\s*\(/i, message: '检测到动态代码执行调用' },
+  { rule: 'pipe-download', pattern: /(curl|wget)[^\n]*\|\s*(sh|bash|zsh)/i, message: '检测到下载并直接执行脚本' },
+  { rule: 'secret', pattern: /(sk-[a-zA-Z0-9]{16,}|AKID[A-Za-z0-9]{12,}|api[_-]?key\s*[:=]\s*['"][^'"]{8,})/i, message: '检测到疑似密钥/凭证泄露' },
+]
+
+const WARN_RULES: Array<{ rule: string; pattern: RegExp; message: string }> = [
+  { rule: 'network', pattern: /https?:\/\/(?!127\.0\.0\.1|localhost)/i, message: '包含外部网络访问，需评估数据出域风险' },
+  { rule: 'fs-write', pattern: /writeFile|open\s*\(.['"]w|>\s*\/[a-z]/i, message: '包含文件写入操作' },
+  { rule: 'subprocess', pattern: /child_process|subprocess|spawn/i, message: '包含子进程调用' },
+]
+
+export function scanContent(content: string): ScanFinding[] {
+  const findings: ScanFinding[] = []
+  for (const rule of BLOCK_RULES) {
+    if (rule.pattern.test(content)) findings.push({ level: 'block', rule: rule.rule, message: rule.message })
+  }
+  for (const rule of WARN_RULES) {
+    if (rule.pattern.test(content)) findings.push({ level: 'warn', rule: rule.rule, message: rule.message })
+  }
+  if (content.length < 40) findings.push({ level: 'warn', rule: 'too-short', message: 'SKILL.md 内容过短，请补充使用说明' })
+  return findings
+}
+
+// ---------------------------------------------------------------------------
+// 服务
+// ---------------------------------------------------------------------------
+
+export class SkillHubService extends Service {
+  static readonly provide = 'skillHub'
+
+  constructor(ctx: Context) {
+    super(ctx, 'skillHub')
+  }
+
+  skills(): Collection<SkillRecord> {
+    return this.ctx.storage.collection<SkillRecord>('skill:skills')
+  }
+
+  downloads(): Collection<SkillDownloadRecord> {
+    return this.ctx.storage.collection<SkillDownloadRecord>('skill:downloads')
+  }
+
+  categories(): string[] {
+    return [...new Set(this.skills().all().map((skill) => skill.category))].filter(Boolean)
+  }
+
+  // -- 提交与扫描 ---------------------------------------------------------
+
+  submit(input: {
+    name: string
+    category?: string
+    tags?: string[]
+    summary?: string
+    description?: string
+    content: string
+    version?: string
+    changelog?: string
+    authorId: string
+    authorName: string
+    orgId: string
+    visibility?: SkillRecord['visibility']
+    targetOrgs?: string[]
+    applicableModels?: string[]
+    deps?: string[]
+    cover?: string
+  }): SkillRecord {
+    if (!input.name?.trim()) throw new Error('Skill 名称不能为空')
+    if (!input.content?.trim()) throw new Error('SKILL.md 内容不能为空')
+    const slug = slugify(input.name)
+    const existing = this.skills().findOne((skill) => skill.slug === slug)
+    const version: SkillVersion = {
+      version: input.version ?? (existing ? bumpMinor(existing.currentVersion) : '1.0.0'),
+      changelog: input.changelog ?? '首次提交',
+      content: input.content,
+      status: 'scanning',
+      submittedAt: now(),
+      findings: [],
+      approvals: [],
+    }
+    if (existing) {
+      if (existing.versions.some((item) => item.version === version.version)) {
+        throw new Error(`版本 ${version.version} 已存在（版本不可变原则），请递增版本号`)
+      }
+      const updated = this.skills().update(existing.id, {
+        versions: [...existing.versions, version],
+        currentVersion: version.version,
+        status: 'scanning',
+        ...(input.summary !== undefined ? { summary: input.summary } : {}),
+        ...(input.description !== undefined ? { description: input.description } : {}),
+      })
+      this.runScan(updated.id, version.version)
+      return this.skills().get(updated.id)!
+    }
+    const created = this.skills().insert({
+      id: newId('skl'),
+      name: input.name,
+      slug,
+      category: input.category ?? '通用',
+      tags: input.tags ?? [],
+      summary: input.summary ?? input.content.split('\n')[0]?.slice(0, 80) ?? '',
+      description: input.description ?? '',
+      authorId: input.authorId,
+      authorName: input.authorName,
+      orgId: input.orgId,
+      visibility: input.visibility ?? 'all',
+      targetOrgs: input.targetOrgs ?? [],
+      applicableModels: input.applicableModels ?? ['deepseek-chat'],
+      deps: input.deps ?? [],
+      riskLevel: 'low',
+      status: 'scanning',
+      currentVersion: version.version,
+      versions: [version],
+      stats: { downloads: 0, installs: 0, rating: 0, ratingCount: 0 },
+      ratings: [],
+      cover: input.cover ?? 'spark',
+    })
+    this.ctx.platformBus.emit(PlatformEvents.SkillSubmitted, { skillId: created.id, name: created.name, version: version.version, author: input.authorName })
+    this.runScan(created.id, version.version)
+    return this.skills().get(created.id)!
+  }
+
+  /** 静态扫描：blocking 发现 → 自动驳回；警告 → 高风险需安全加签。 */
+  runScan(skillId: string, version: string): ScanFinding[] {
+    const skill = this.requireSkill(skillId)
+    const target = skill.versions.find((item) => item.version === version)
+    if (!target) throw new Error(`版本不存在：${version}`)
+    const findings = scanContent(target.content)
+    const hasBlock = findings.some((finding) => finding.level === 'block')
+    const hasWarn = findings.some((finding) => finding.level === 'warn')
+    const versions = skill.versions.map((item) =>
+      item.version === version
+        ? { ...item, findings, status: hasBlock ? ('rejected' as const) : ('pending_domain' as const), rejectedReason: hasBlock ? '静态扫描发现阻断级问题' : undefined }
+        : item)
+    const nextStatus: SkillStatus = hasBlock ? 'rejected' : 'pending_approval'
+    this.skills().update(skillId, {
+      versions: versions as SkillVersion[],
+      status: nextStatus,
+      riskLevel: hasWarn ? 'high' : findings.some((f) => f.level === 'info') ? 'medium' : 'low',
+    })
+    if (hasBlock) {
+      this.ctx.audit.record({
+        type: 'change', actorType: 'system', actorId: 'scanner', actorName: '静态扫描',
+        action: 'skill.scan.rejected', resourceType: 'skill', resourceId: skillId, resourceName: skill.name,
+        result: 'denied', detail: findings.filter((f) => f.level === 'block').map((f) => f.message).join('；'),
+      })
+    }
+    return findings
+  }
+
+  // -- 审批与上架 ---------------------------------------------------------
+
+  approve(skillId: string, version: string, level: 'domain' | 'security', approver: { id: string; name: string }, opinion: string): SkillRecord {
+    const skill = this.requireSkill(skillId)
+    const target = skill.versions.find((item) => item.version === version)
+    if (!target) throw new Error(`版本不存在：${version}`)
+    if (target.status !== 'pending_domain' && target.status !== 'pending_security') {
+      throw new Error(`该版本当前状态 ${target.status} 不可审批`)
+    }
+    if (level === 'domain' && target.status !== 'pending_domain') throw new Error('领域审批已完成，当前等待安全审批')
+    if (level === 'security' && target.status !== 'pending_security') throw new Error('高风险 Skill 才需要安全加签，当前等待领域审批')
+    if (target.approvals.some((item) => item.level === level && item.approverId === approver.id)) {
+      throw new Error('同一审批人不可重复审批')
+    }
+    const approvals = [...target.approvals, { level, approverId: approver.id, approverName: approver.name, opinion, at: now() }]
+    const needSecurity = skill.riskLevel === 'high'
+    const nextVersionStatus: SkillVersion['status'] = level === 'domain' && needSecurity ? 'pending_security' : 'approved'
+    const versions = skill.versions.map((item) => item.version === version ? { ...item, approvals, status: nextVersionStatus } : item)
+    return this.skills().update(skillId, { versions: versions as SkillVersion[] })
+  }
+
+  reject(skillId: string, version: string, approver: { id: string; name: string }, opinion: string): SkillRecord {
+    const skill = this.requireSkill(skillId)
+    const versions = skill.versions.map((item) =>
+      item.version === version
+        ? { ...item, status: 'rejected' as const, rejectedReason: opinion, approvals: [...item.approvals, { level: item.status === 'pending_domain' ? 'domain' : 'security', approverId: approver.id, approverName: approver.name, opinion, at: now() }] }
+        : item)
+    return this.skills().update(skillId, { versions: versions as SkillVersion[], status: 'rejected' })
+  }
+
+  publish(skillId: string, version: string, actor: string): SkillRecord {
+    const skill = this.requireSkill(skillId)
+    const target = skill.versions.find((item) => item.version === version)
+    if (!target) throw new Error(`版本不存在：${version}`)
+    if (target.status !== 'approved') throw new Error(`版本状态 ${target.status} 不可上架（需完成审批）`)
+    const versions = skill.versions.map((item) =>
+      item.version === version ? { ...item, status: 'published' as const, publishedAt: now() } : item)
+    const updated = this.skills().update(skillId, { versions: versions as SkillVersion[], status: 'published' })
+    this.ctx.platformBus.emit(PlatformEvents.SkillPublished, { skillId, name: updated.name, version, actor, type: 'skill', slug: updated.slug })
+    return updated
+  }
+
+  deprecate(skillId: string, actor: string, note: string, force?: boolean): { skill: SkillRecord; referencingAgents: Array<{ id: string; name: string; owner: string }> } {
+    const skill = this.requireSkill(skillId)
+    if (skill.status !== 'published') throw new Error('仅已上架 Skill 可弃用')
+    const versions = skill.versions.map((item) => item.status === 'published' ? { ...item, status: 'deprecated' as const } : item)
+    const updated = this.skills().update(skillId, { versions: versions as SkillVersion[], status: force ? 'offline' : 'deprecated' })
+    // 扫描引用该 Skill 的 Agent，产出存量引用告警
+    const referencingAgents = this.referencingAgents(skillId)
+    this.ctx.platformBus.emit(PlatformEvents.SkillDeprecated, {
+      skillId, name: updated.name, actor, note, force,
+      referencingAgents: referencingAgents.map((agent) => agent.id),
+      type: 'skill', slug: updated.slug,
+    })
+    if (referencingAgents.length > 0) {
+      this.ctx.audit.fire({
+        severity: 'warning',
+        title: `Skill「${updated.name}」已${force ? '强制下架' : '弃用'}，存在存量引用`,
+        message: `${referencingAgents.length} 个 Agent 仍在使用该 Skill：${referencingAgents.map((agent) => agent.name).join('、')}。请通知负责人灰度迁移。`,
+        resourceType: 'skill',
+        resourceId: skillId,
+      })
+    }
+    return { skill: updated, referencingAgents }
+  }
+
+  /** 依赖图反查：哪些 Agent 安装了该 Skill。 */
+  referencingAgents(skillId: string): Array<{ id: string; name: string; owner: string }> {
+    return this.ctx.resourceCore.dependencies()
+      .find((record) => record.kind === 'skill' && record.toId === skillId)
+      .map((record) => {
+        const agent = this.ctx.resourceCore.collection('agent').get(record.fromId)
+        return agent ? { id: agent.id, name: agent.name, owner: agent.attrs['ownerName'] ?? agent.ownerId } : null
+      })
+      .filter((item): item is { id: string; name: string; owner: string } => item !== null)
+  }
+
+  // -- 下载 / 安装 --------------------------------------------------------
+
+  download(skillId: string, version: string, user: { id: string; name: string }): { content: string } {
+    const skill = this.requireSkill(skillId)
+    const target = skill.versions.find((item) => item.version === version && item.status === 'published')
+    if (!target) throw new Error(`已发布版本不存在：${version}`)
+    this.downloads().insert({ id: newId('dwl'), skillId, version, userId: user.id, userName: user.name })
+    this.skills().update(skillId, { stats: { ...skill.stats, downloads: skill.stats.downloads + 1 } })
+    return { content: target.content }
+  }
+
+  /** 安装到 Agent：登记依赖关系（资源依赖图自动回填）。 */
+  install(skillId: string, version: string, agentId: string, actor: string): SkillRecord {
+    const skill = this.requireSkill(skillId)
+    const agent = this.ctx.resourceCore.collection('agent').get(agentId)
+    if (!agent) throw new Error(`Agent 不存在：${agentId}`)
+    const target = skill.versions.find((item) => item.version === version && item.status === 'published')
+    if (!target) throw new Error(`已发布版本不存在：${version}`)
+    this.ctx.resourceCore.addDependency({ fromType: 'agent', fromId: agentId, toType: 'skill', toId: skillId, kind: 'skill' })
+    // 回填 Agent 属性中的关联 Skill 列表
+    const skillsAttr = Array.isArray(agent.attrs['skills']) ? [...agent.attrs['skills'] as string[]] : []
+    if (!skillsAttr.includes(skill.slug)) {
+      skillsAttr.push(skill.slug)
+      this.ctx.resourceCore.collection('agent').update(agentId, { attrs: { ...agent.attrs, skills: skillsAttr } })
+    }
+    const updated = this.skills().update(skillId, { stats: { ...skill.stats, installs: skill.stats.installs + 1 } })
+    this.ctx.platformBus.emit(PlatformEvents.SkillInstalled, { skillId, version, agentId, agentName: agent.name, actor })
+    return updated
+  }
+
+  uninstall(skillId: string, agentId: string): void {
+    this.ctx.resourceCore.removeDependency({ fromType: 'agent', fromId: agentId, toType: 'skill', toId: skillId })
+    const agent = this.ctx.resourceCore.collection('agent').get(agentId)
+    if (agent && Array.isArray(agent.attrs['skills'])) {
+      const skills = (agent.attrs['skills'] as string[]).filter((slug) => slug !== this.requireSkill(skillId).slug)
+      this.ctx.resourceCore.collection('agent').update(agentId, { attrs: { ...agent.attrs, skills } })
+    }
+  }
+
+  rate(skillId: string, userId: string, stars: number): SkillRecord {
+    const skill = this.requireSkill(skillId)
+    if (stars < 1 || stars > 5 || !Number.isInteger(stars)) throw new Error('评分须为 1-5 的整数')
+    const ratings = [...skill.ratings.filter((item) => item.userId !== userId), { userId, stars, at: now() }]
+    const rating = ratings.length === 0 ? 0 : Math.round((ratings.reduce((sum, item) => sum + item.stars, 0) / ratings.length) * 10) / 10
+    return this.skills().update(skillId, { ratings, stats: { ...skill.stats, rating, ratingCount: ratings.length } })
+  }
+
+  // -- 搜索 ---------------------------------------------------------------
+
+  search(options: { q?: string; category?: string; tag?: string; sort?: 'downloads' | 'rating' | 'updated'; viewerOrgId?: string }): SkillRecord[] {
+    let list = this.skills().find((skill) => {
+      if (!['published', 'deprecated'].includes(skill.status)) return false
+      if (options.category && skill.category !== options.category) return false
+      if (options.tag && !skill.tags.includes(options.tag)) return false
+      if (skill.visibility === 'orgs' && options.viewerOrgId && !skill.targetOrgs.includes(options.viewerOrgId)) return false
+      if (options.q) {
+        const haystack = `${skill.name} ${skill.summary} ${skill.tags.join(' ')} ${skill.category}`.toLowerCase()
+        if (!haystack.includes(options.q.toLowerCase())) return false
+      }
+      return true
+    })
+    const sort = options.sort ?? 'downloads'
+    list = list.sort((a, b) => {
+      if (sort === 'rating') return b.stats.rating - a.stats.rating
+      if (sort === 'updated') return b.updatedAt.localeCompare(a.updatedAt)
+      return b.stats.downloads - a.stats.downloads
+    })
+    return list
+  }
+
+  detail(skillId: string): SkillRecord {
+    return this.requireSkill(skillId)
+  }
+
+  private requireSkill(skillId: string): SkillRecord {
+    const skill = this.skills().get(skillId)
+    if (!skill) throw new Error(`Skill 不存在：${skillId}`)
+    return skill
+  }
+}
+
+function bumpMinor(version: string): string {
+  const parts = version.split('.').map(Number)
+  parts[1] = (parts[1] ?? 0) + 1
+  parts[2] = 0
+  return parts.join('.')
+}
+
+function now(): string {
+  return new Date().toISOString()
+}
+
+// ---------------------------------------------------------------------------
+// 插件
+// ---------------------------------------------------------------------------
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    skillHub: SkillHubService
+  }
+}
+
+export const name = 'skillhub'
+export const inject = ['storage', 'platformBus', 'resourceCore', 'audit']
+
+export function apply(ctx: Context) {
+  ctx.plugin(SkillHubService)
+  ctx.plugin(skillhubTools)
+}

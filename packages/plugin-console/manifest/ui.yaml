@@ -1,0 +1,15 @@
+# 前端路由 + 菜单声明（控制台按此注入导航；表单骨架由 api.yaml 的 schema 生成）
+plugin: dsh-plugin-console
+routes:
+  - #/dashboard
+  - #/platform
+  - （业务页面由各插件 ui.yaml 声明）
+menus:
+-
+  group: 总览
+  items:
+    - 工作台
+-
+  group: 平台
+  items:
+    - 插件与工具

@@ -1,0 +1,15 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-authn
+events:
+  - name: authn.token.issued
+    mode: emit
+    description: 令牌签发
+  - name: authn.token.revoked
+    mode: emit
+    description: 令牌吊销
+  - name: iam.user.frozen
+    mode: on
+    description: 订阅：吊销该用户全部令牌
+  - name: agent.offlined / app.offlined
+    mode: on
+    description: 订阅：禁用对应机器凭证

@@ -1,0 +1,17 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-authn
+base: /api
+endpoints:
+  - POST /api/auth/login · POST /api/auth/sso · POST /api/auth/client-credentials
+  - GET /api/auth/me · POST /api/auth/logout
+  - GET/POST /api/authn/principals · POST /api/authn/principals/:id/disable
+  - GET/POST /api/authn/tokens · DELETE /api/authn/tokens/:jti · POST /api/authn/rotate-secret
+tools:
+  - authn_token_issue
+  - authn_token_revoke
+  - authn_token_list
+  - authn_credential_create
+services:
+  - key: authn
+    access: ctx.authn
+    description: 双轨身份（人/机器）+ 令牌签发校验吊销 + on-behalf-of act 链

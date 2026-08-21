@@ -1,0 +1,9 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-skillhub
+events:
+  - name: skill.submitted / skill.published / skill.installed
+    mode: emit
+    description: 流水线事件
+  - name: skill.deprecated
+    mode: emit
+    description: 弃用（扫描引用 Agent 并告警负责人）

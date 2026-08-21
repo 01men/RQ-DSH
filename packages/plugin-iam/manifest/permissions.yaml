@@ -1,0 +1,10 @@
+# 权限点声明（注册进统一 RBAC，控制台/CLI/工具共用）
+plugin: dsh-plugin-iam
+points:
+  - iam.org.read
+  - iam.org.write
+  - iam.user.read
+  - iam.user.write
+  - iam.user.freeze
+  - iam.role.write
+  - iam.connector.write

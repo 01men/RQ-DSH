@@ -1,0 +1,18 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-skillhub
+base: /api
+endpoints:
+  - GET /api/skills?q=&category=&sort=&mine=1&pending=1 · GET /api/skills/:id
+  - POST /api/skills（提交即扫描）
+  - POST /api/skills/:id/approve|publish|deprecate|install|uninstall|rate|download
+tools:
+  - skill_search
+  - skill_submit
+  - skill_approve
+  - skill_publish
+  - skill_install
+  - skill_deprecate
+services:
+  - key: skillHub
+    access: ctx.skillHub
+    description: 提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索

@@ -1,0 +1,12 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-audit
+events:
+  - name: audit.alert.fired
+    mode: emit
+    description: 告警触发
+  - name: approval.created / approval.decided
+    mode: emit
+    description: 审批流转
+  - name: （订阅全部业务事件自动落审计）
+    mode: on
+    description: mcp/skill/agent/app/token/iam

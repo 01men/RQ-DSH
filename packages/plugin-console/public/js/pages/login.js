@@ -1,0 +1,114 @@
+/** 登录页：账号密码 / 三方扫码（模拟）。 */
+import { api, session } from '../api.js'
+import { icon } from '../icons.js'
+import { h, $, toast } from '../ui.js'
+
+export function renderLogin(app) {
+  app.innerHTML = `
+    <div class="login-page">
+      <div class="login-hero">
+        <div class="login-hero-inner">
+          <div style="display:flex;align-items:center;gap:14px">
+            <div class="brand-mark" style="width:46px;height:46px;font-size:22px;border-radius:12px">衡</div>
+            <div style="font-size:19px;font-weight:600;letter-spacing:2px">HENG · AI OPS</div>
+          </div>
+          <h1>企业 AI 资源<br>统一纳管与治理平台</h1>
+          <p>组织账号、MCP 服务、Skill 市场、Agent 本体、AI 应用——五类资源一套身份、一套权限、一套审计。</p>
+          <div class="login-hero-points">
+            <div class="login-point">
+              <div class="login-point-ic">${icon('puzzle')}</div>
+              <div><b>一切皆插件</b><span>基于 DeepSeek Harness 插件架构，九大业务域即插即用</span></div>
+            </div>
+            <div class="login-point">
+              <div class="login-point-ic">${icon('shieldCheck')}</div>
+              <div><b>注册即治理</b><span>双轨身份 + RBAC + 令牌网关，全链路审计留痕</span></div>
+            </div>
+            <div class="login-point">
+              <div class="login-point-ic">${icon('gitBranch')}</div>
+              <div><b>依赖可穿透</b><span>应用 → Agent → MCP/Skill 拓扑一图可视，影响面先知</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="login-hero-footer">© 2026 元冰可 · 基于 DeepSeek Harness 构建</div>
+      </div>
+      <div class="login-panel">
+        <h2 id="login-title">登录控制台</h2>
+        <div class="sub" id="login-sub">使用平台账号或钉钉扫码登录</div>
+        <div class="segmented" style="margin-bottom:24px" id="login-tabs">
+          <span class="segmented-item active" data-tab="password">账号密码</span>
+          <span class="segmented-item" data-tab="dingtalk">钉钉扫码</span>
+        </div>
+
+        <form class="login-form" id="login-form-password">
+          <div class="form-item">
+            <label class="form-label">用户名</label>
+            <input class="input input-lg" id="login-username" placeholder="请输入用户名" autocomplete="username" value="admin">
+          </div>
+          <div class="form-item">
+            <label class="form-label">密码</label>
+            <input class="input input-lg" id="login-password" type="password" placeholder="请输入密码" autocomplete="current-password" value="Ybk@2026">
+          </div>
+          <button class="btn btn-primary btn-lg btn-block" id="login-submit" type="submit">登 录</button>
+        </form>
+
+        <form class="login-form" id="login-form-dingtalk" style="display:none">
+          <div style="text-align:center;padding:10px 0 6px">
+            <div style="width:180px;height:180px;margin:0 auto;border-radius:16px;background:
+              radial-gradient(120px 120px at 30% 25%, #e0e7ff, transparent),
+              radial-gradient(120px 120px at 75% 80%, #ede9fe, transparent), #f8f9fb;
+              border:1px solid var(--border);display:grid;place-items:center;position:relative">
+              <div style="color:var(--brand-500)">${icon('fingerprint', 64)}</div>
+              <div style="position:absolute;bottom:12px;font-size:12px;color:var(--text-3)">模拟扫码（输入工号即可）</div>
+            </div>
+          </div>
+          <div class="form-item" style="margin-top:16px">
+            <label class="form-label">钉钉工号 / 三方身份</label>
+            <input class="input input-lg" id="login-ding-code" placeholder="如 DD0002（林小满）" value="DD0002">
+            <div class="form-hint">演示环境模拟 OAuth2 回调：code = 工号或三方 unionId</div>
+          </div>
+          <button class="btn btn-primary btn-lg btn-block" id="login-ding-submit" type="submit">免密登录</button>
+        </form>
+
+        <div class="login-demo-tip">
+          <b>演示账号</b>：admin / Ybk@2026（超管）· ops（资源管理员）· dev（开发者）· audit（审计员只读）· hr（组织管理员）
+        </div>
+      </div>
+    </div>`
+
+  const tabPassword = $('#login-form-password')
+  const tabDing = $('#login-form-dingtalk')
+  app.querySelectorAll('#login-tabs .segmented-item').forEach((el) => {
+    el.onclick = () => {
+      app.querySelectorAll('#login-tabs .segmented-item').forEach((item) => item.classList.remove('active'))
+      el.classList.add('active')
+      const isPassword = el.dataset.tab === 'password'
+      tabPassword.style.display = isPassword ? '' : 'none'
+      tabDing.style.display = isPassword ? 'none' : ''
+    }
+  })
+
+  const doLogin = async (payload, path) => {
+    const btn = $(path === '/api/auth/login' ? '#login-submit' : '#login-ding-submit')
+    btn.classList.add('btn-loading')
+    try {
+      const result = await api.post(path, payload)
+      session.save(result.token, result.user)
+      toast(`欢迎回来，${result.user.displayName}`)
+      location.hash = '#/dashboard'
+      window.dispatchEvent(new HashChangeEvent('hashchange'))
+    } catch (error) {
+      toast(error.message, 'error')
+    } finally {
+      btn.classList.remove('btn-loading')
+    }
+  }
+
+  tabPassword.onsubmit = (e) => {
+    e.preventDefault()
+    void doLogin({ username: $('#login-username').value.trim(), password: $('#login-password').value }, '/api/auth/login')
+  }
+  tabDing.onsubmit = (e) => {
+    e.preventDefault()
+    void doLogin({ provider: 'dingtalk', code: $('#login-ding-code').value.trim() }, '/api/auth/sso')
+  }
+}

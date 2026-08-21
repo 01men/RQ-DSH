@@ -1,0 +1,22 @@
+{
+  "name": "dsh-enterprise-ops",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "企业 AI 资源统一管理平台 —— 基于 DeepSeek Harness「一切皆插件」架构",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "start": "node src/main.ts",
+    "selftest": "node scripts/selftest.mjs",
+    "lint:manifests": "node scripts/lint-manifests.mjs",
+    "manifests": "node scripts/gen-manifests.mjs"
+  },
+  "engines": {
+    "node": ">=22.6"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}

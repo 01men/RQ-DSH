@@ -1,0 +1,18 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-iam
+events:
+  - name: iam.user.frozen
+    mode: emit
+    description: 账号冻结（authn 订阅吊销令牌）
+  - name: iam.user.activated
+    mode: emit
+    description: 账号恢复
+  - name: iam.org.changed
+    mode: emit
+    description: 组织变更
+  - name: iam.permission.changed
+    mode: emit
+    description: 权限变更（全插件缓存失效）
+  - name: iam.connector.synced
+    mode: emit
+    description: 三方同步完成
