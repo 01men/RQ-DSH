@@ -13,6 +13,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'authn_token_issue',
     description: '为主体签发短期访问令牌（默认 2 小时）。人 / 机器身份均可。',
+    permission: 'authn.token.issue',
     parameters: {
       principalId: { type: 'string', required: true, description: '主体 ID（pri_ 前缀）' },
       ttlHours: { type: 'number', description: '有效期（小时），默认 2' },
@@ -33,6 +34,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'authn_token_revoke',
     description: '吊销令牌（L4 高危，需 reason）。支持按 jti 吊销单个令牌。',
+    permission: 'authn.token.revoke',
     parameters: {
       jti: { type: 'string', required: true, description: '令牌 jti' },
       reason: { type: 'string', required: true, description: '吊销原因' },
@@ -71,6 +73,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'authn_credential_create',
     description: '为 Agent/应用/外部系统创建机器身份凭证（Client Credentials，密钥仅返回一次）。',
+    permission: 'authn.principal.write',
     parameters: {
       name: { type: 'string', required: true, description: '主体名称' },
       refType: { type: 'string', enum: ['agent', 'app', 'external'], description: '绑定资源类型' },

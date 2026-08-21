@@ -714,10 +714,15 @@ export function apply(ctx: Context) {
       .sort((a, b) => b.issuedAt.localeCompare(a.issuedAt))
     return {
       total: tokens.length,
-      tokens: tokens.slice(0, 200).map((token) => ({
-        ...token,
-        principalName: ctx.authn.principals().get(token.principalId)?.name ?? '',
-      })),
+      tokens: tokens.slice(0, 200).map((token) => {
+        // 脱敏：refreshHash 为签名级敏感凭证哈希，sid/chainId 属会话内部标识，一律不外发
+        const { refreshHash, sid, chainId, ...rest } = token
+        void refreshHash; void sid; void chainId
+        return {
+          ...rest,
+          principalName: ctx.authn.principals().get(token.principalId)?.name ?? '',
+        }
+      }),
     }
   })
 
@@ -1572,7 +1577,53 @@ export function apply(ctx: Context) {
   guarded('POST', '/api/tools/execute', 'console.login', async (exchange) => {
     const input = body<{ name: string; args?: Record<string, unknown> }>(exchange)
     if (!input.name) throw new Error('工具名必填')
-    const result = await ctx.tools.execute({ name: input.name, arguments: input.args ?? {} })
+    const info = caller(exchange)
+    // 工具级权限校验：以工具声明的最小权限点为准，缺省仅要求登录
+    const definition = ctx.tools.schemas().find((tool) => tool.name === input.name)
+    const required = definition?.permission
+    if (required && !info.permissions.includes('*') && !info.permissions.includes(required)) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId ?? info.principalId,
+        actorName: info.name,
+        point: required,
+        path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', `缺少权限点 ${required}，请联系管理员调整角色`, { permission: required })
+      return
+    }
+    // 身份注入：服务端以令牌解析的调用者身份为准，禁止调用方自填身份参数
+    const args = { ...(input.args ?? {}) } as Record<string, unknown>
+    const principalId = info.userId ?? info.principalId
+    switch (input.name) {
+      case 'mcp_invoke':
+        args.callerType = 'user'
+        args.callerId = principalId
+        args.callerName = info.name
+        break
+      case 'approval_decide':
+        args.approverId = principalId
+        args.approverName = info.name
+        break
+      case 'agent_offline':
+      case 'mcp_offline':
+      case 'iam_sync_run':
+        args.requesterId = principalId
+        args.requesterName = info.name
+        args.actor = info.name
+        break
+      case 'skill_approve':
+        args.approverId = principalId
+        args.approverName = info.name
+        break
+      case 'agent_bind_user':
+      case 'skill_install':
+      case 'skill_publish':
+        args.actor = info.name
+        break
+      default:
+        break
+    }
+    const result = await ctx.tools.execute({ name: input.name, arguments: args })
     return result
   })
 

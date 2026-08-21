@@ -73,6 +73,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'iam_user_create',
     description: '创建账号。未提供 password 时生成随机初始口令，仅在返回值 initialPassword 中出现一次，请安全传达给本人。',
+    permission: 'iam.user.write',
     parameters: {
       username: { type: 'string', required: true, description: '登录名（字母数字）' },
       displayName: { type: 'string', required: true, description: '姓名' },
@@ -91,6 +92,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'iam_user_reset_password',
     description: '重置账号为随机初始口令（仅返回一次；请第一时间传达给本人）。',
+    permission: 'iam.user.write',
     parameters: {
       userId: { type: 'string', required: true, description: '账号 ID' },
     },
@@ -104,6 +106,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'iam_user_freeze',
     description: '冻结账号（L4 高危：必须填写 reason，将联动吊销名下全部令牌）。',
+    permission: 'iam.user.freeze',
     parameters: {
       userId: { type: 'string', required: true, description: '账号 ID' },
       reason: { type: 'string', required: true, description: '冻结原因（审计留痕）' },
@@ -130,6 +133,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'iam_sync_run',
     description: '触发三方通讯录全量同步（当前内置钉钉模拟连接器）。',
+    permission: 'iam.connector.write',
     parameters: {
       provider: { type: 'string', enum: ['dingtalk'], required: true, description: '连接器' },
       actor: { type: 'string', description: '操作人（审计用）' },

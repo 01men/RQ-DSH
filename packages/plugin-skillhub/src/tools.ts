@@ -58,6 +58,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'skill_approve',
     description: '审批 Skill 版本（domain 领域审批 / security 安全加签，高风险必须两級都过）。',
+    permission: 'skill.approve',
     parameters: {
       skillId: { type: 'string', required: true, description: 'Skill ID' },
       version: { type: 'string', required: true, description: '版本号' },
@@ -79,6 +80,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'skill_publish',
     description: '上架已审批通过的 Skill 版本（版本不可变，旧版保留）。',
+    permission: 'skill.publish',
     parameters: {
       skillId: { type: 'string', required: true, description: 'Skill ID' },
       version: { type: 'string', required: true, description: '版本号' },
@@ -93,6 +95,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'skill_install',
     description: '将市场 Skill 安装到指定 Agent（自动登记依赖关系并回填关联列表）。',
+    permission: 'skill.install',
     parameters: {
       skillId: { type: 'string', required: true, description: 'Skill ID' },
       version: { type: 'string', required: true, description: '版本号' },
@@ -108,6 +111,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'skill_deprecate',
     description: '弃用/强制下架 Skill（触发存量引用告警与迁移建议）。必须给出 reason。',
+    permission: 'skill.publish',
     parameters: {
       skillId: { type: 'string', required: true, description: 'Skill ID' },
       reason: { type: 'string', required: true, description: '弃用原因' },

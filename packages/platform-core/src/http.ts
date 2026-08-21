@@ -247,9 +247,9 @@ export class HttpServerService extends Service {
       }
       exchange.fail(404, 'NOT_FOUND', `路由不存在：${method} ${url.pathname}`)
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
       if (!res.writableEnded) {
-        exchange.fail(500, 'INTERNAL', message)
+        // 生产安全：500 兜底不回传内部异常文本，详情仅入服务日志
+        exchange.fail(500, 'INTERNAL', '服务器内部错误，请稍后重试或联系管理员')
       }
       console.error(`[http] ${method} ${url.pathname} 处理异常`, error)
     }

@@ -390,8 +390,12 @@ export class IamService extends Service {
 
   constructor(ctx: Context) {
     super(ctx, 'iam')
-    this.registerConnector(new DingTalkConnector())
-    this.registerAuthProvider(new DingTalkAuthAdapter())
+    // 默认不注册任何三方身份源：生产基线三方登录入口自动隐藏（未配置连接器时 sso 不可用）。
+    // mock 钉钉 IdP 仅在显式 DEMO_SEED=1 演示环境下注册，避免生产基线暴露演示身份/匿名注册入口。
+    if (process.env.DEMO_SEED === '1') {
+      this.registerConnector(new DingTalkConnector())
+      this.registerAuthProvider(new DingTalkAuthAdapter())
+    }
     this.ensureDefaultTenant()
   }
 
@@ -959,9 +963,15 @@ export class IamService extends Service {
         }
         this.registerConnector(new RealDingTalkConnector(credentials))
         this.registerAuthProvider(new RealDingTalkAuthAdapter(credentials))
-      } else {
-        this.registerConnector(new DingTalkConnector())
-        this.registerAuthProvider(new DingTalkAuthAdapter())
+      } else if (config.mode === 'mock') {
+        // 显式声明 mock（演示/联调）：仅 DEMO_SEED 环境允许注册 mock 身份源，
+        // 生产基线禁止将 mock 作为可登录身份源暴露。
+        if (process.env.DEMO_SEED === '1') {
+          this.registerConnector(new DingTalkConnector())
+          this.registerAuthProvider(new DingTalkAuthAdapter())
+        } else {
+          this.registerConnector(new DingTalkConnector())
+        }
       }
     }
   }

@@ -42,6 +42,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'approval_decide',
     description: '审批中心决策（approve/reject）。发起人与审批人不得为同一人。',
+    permission: 'approval.decide',
     parameters: {
       approvalId: { type: 'string', required: true, description: '审批单 ID' },
       decision: { type: 'string', enum: ['approve', 'reject'], required: true },

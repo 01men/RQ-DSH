@@ -37,6 +37,8 @@ export interface ToolDefinitionLite {
   timeoutMs?: number
   /** 来源插件名（本运行时登记用）。 */
   plugin?: string
+  /** 调用所需的最小权限点（RBAC）。缺省视为无需额外权限（仅登录）。 */
+  permission?: string
 }
 
 export interface ToolExecutionResultLite {
@@ -87,12 +89,13 @@ export class ToolRuntimeLite extends Service {
     }
   }
 
-  schemas(): Array<{ name: string; description: string; parameters: Record<string, unknown>; plugin?: string }> {
-    return [...this.definitions.values()].map(({ name, description, parameters, plugin }) => ({
+  schemas(): Array<{ name: string; description: string; parameters: Record<string, unknown>; plugin?: string; permission?: string }> {
+    return [...this.definitions.values()].map(({ name, description, parameters, plugin, permission }) => ({
       name,
       description,
       parameters,
       plugin,
+      permission,
     }))
   }
 
@@ -162,6 +165,8 @@ export interface PlatformToolSpec {
   /** 自定义模型可见渲染（默认 JSON pretty print）。 */
   render?: (args: unknown, value: unknown) => ContentBlock[]
   timeoutMs?: number
+  /** 调用所需的最小权限点（RBAC）。缺省视为无需额外权限（仅登录）。 */
+  permission?: string
   execute: (args: any, exec: ToolRunContext) => Promise<unknown>
 }
 
@@ -185,6 +190,7 @@ export function defineTool(spec: PlatformToolSpec): ToolDefinitionLite {
     name: spec.name,
     description: spec.description,
     plugin: spec.plugin,
+    ...(spec.permission !== undefined ? { permission: spec.permission } : {}),
     parameters,
     output: {
       schema: spec.output,

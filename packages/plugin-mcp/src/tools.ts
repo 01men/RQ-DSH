@@ -59,6 +59,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'mcp_offline',
     description: '下线 MCP 服务（L4 高危：创建审批单，双人确认后自动执行）。必须给出 reason。',
+    permission: 'mcp.service.offline',
     parameters: {
       serviceId: { type: 'string', required: true, description: '服务 ID' },
       reason: { type: 'string', required: true, description: '下线原因' },
@@ -94,6 +95,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'mcp_invoke',
     description: '通过 MCP 网关调用工具（统一鉴权/限流/审计）。callerType: user|agent|app。',
+    permission: 'mcp.invoke',
     parameters: {
       serviceId: { type: 'string', required: true, description: '服务 ID' },
       tool: { type: 'string', required: true, description: '工具名' },

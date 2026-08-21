@@ -31,6 +31,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'usage_reconcile',
     description: '触发计量对账：usage 事件流水 vs 消费方投影，偏差即告警。',
+    permission: 'usage.admin',
     parameters: {},
     output: { type: 'object', additionalProperties: true },
     async execute() {
@@ -41,6 +42,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'usage_replay',
     description: '重放时间窗内计量事件（消费水位保证幂等，重复重放不产生重复扣费/投影）。',
+    permission: 'usage.admin',
     parameters: {
       since: { type: 'string', required: true, description: '起始时间（ISO，含）' },
     },
@@ -53,6 +55,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'usage_deadletter_retry',
     description: '重投 usage 消费死信：逐条重新分发，成功即移出死信队列。',
+    permission: 'usage.admin',
     parameters: {},
     output: { type: 'object', additionalProperties: true },
     async execute() {

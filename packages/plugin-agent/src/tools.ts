@@ -56,6 +56,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'agent_offline',
     description: '下线 Agent（L4 高危：生成审批单，双人确认后自动执行；联动吊销机器凭证并通知绑定用户）。必须给出 reason。',
+    permission: 'agent.offline',
     parameters: {
       agentId: { type: 'string', required: true, description: 'Agent ID' },
       reason: { type: 'string', required: true, description: '下线原因' },
@@ -88,6 +89,7 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'agent_bind_user',
     description: '为 Agent 绑定用户（记录"哪些用户可使用该 Agent"，使用即授权留痕）。',
+    permission: 'agent.write',
     parameters: {
       agentId: { type: 'string', required: true, description: 'Agent ID' },
       userId: { type: 'string', required: true, description: '用户 ID' },

@@ -241,8 +241,11 @@ export class MarketService extends Service {
 
   constructor(ctx: Context) {
     super(ctx, 'market')
-    // 自营种子须在服务构造器内做（插件 apply 里 ctx.market 未注入，cordis 红线）
-    seedOfficialPlugins(this)
+    // 自营种子须在服务构造器内做（插件 apply 里 ctx.market 未注入，cordis 红线）。
+    // 仅在 DEMO_SEED=1 演示环境下注入自营商业插件，生产基线不写入任何计费价格簿/自营供给。
+    if (process.env.DEMO_SEED === '1') {
+      seedOfficialPlugins(this)
+    }
   }
 
   developers(): Collection<DeveloperRecord> {
