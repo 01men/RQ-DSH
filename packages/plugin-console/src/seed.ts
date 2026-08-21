@@ -1,15 +1,57 @@
 /**
- * 首次启动种子数据（演示环境）：
- * 组织树 / 内置角色 / 账号 / 用户组 / 连接器配置 / MCP 服务与权限组 /
- * Skill 市场 / Agent / 应用 / 历史用量与成本 / 告警规则 / 待办审批。
+ * 首次启动种子（二选一，空库时执行一次）：
+ * - 基线（默认，生产形态）：内置角色 + 根组织 + 平台管理员 admin——口令取 ADMIN_PASSWORD 环境变量，
+ *   缺省则随机生成并一次性写入 data/admin-initial-password.txt。不含任何演示业务数据。
+ * - 演示（DEMO_SEED=1）：完整演示数据——组织树 / 演示账号（口令统一 Ybk@2026，仅限演示环境）/
+ *   钉钉 mock 连接器 / MCP 服务与权限组 / Skill 市场 / Agent / 应用 / 28 天历史用量与成本 / 告警规则 / 待办审批。
  */
+import { existsSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { newId } from '@dsh-ops/platform-core'
 
 export async function seedAll(ctx: Context): Promise<void> {
   if (ctx.iam.orgs().count() > 0) return
+  if (process.env.DEMO_SEED === '1') {
+    await seedDemo(ctx)
+    return
+  }
+  seedBaseline(ctx)
+}
+
+/** 生产基线：可上线的最小初始化（零演示数据）。 */
+function seedBaseline(ctx: Context): void {
   const logger = ctx.logger('seed')
-  logger.info('首次启动，正在初始化演示数据…')
+  logger.info('首次启动，正在初始化平台基线（内置角色 + 根组织 + 平台管理员）…')
+  ctx.iam.ensureBuiltinRoles()
+  const root = ctx.iam.createOrg({ name: process.env.ORG_NAME ?? '元冰可集团' })
+  const roleSuper = ctx.iam.roles().findOne((role) => role.code === 'super_admin')!
+  const { user: admin, initialPassword } = ctx.iam.createUser({
+    username: 'admin',
+    displayName: '平台管理员',
+    orgId: root.id,
+    title: '平台管理员',
+    roleIds: [roleSuper.id],
+    password: process.env.ADMIN_PASSWORD,
+  })
+  ctx.iam.users().update(admin.id, { status: 'active' })
+  void admin
+  if (initialPassword) {
+    const file = join(ctx.storage.dataDirPath, 'admin-initial-password.txt')
+    if (!existsSync(file)) {
+      writeFileSync(file, `平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\n${initialPassword}\n`, 'utf8')
+    }
+    logger.info(`平台管理员 admin 初始口令已生成，写入 ${file}（请立即登录并妥善保管）`)
+  } else {
+    logger.info('平台管理员 admin 已按 ADMIN_PASSWORD 环境变量初始化')
+  }
+  logger.info('平台基线初始化完成。如需完整演示数据：设 DEMO_SEED=1 并清空数据目录后重启')
+}
+
+/** 演示数据（DEMO_SEED=1）：为评估/培训环境准备的完整样例。 */
+async function seedDemo(ctx: Context): Promise<void> {
+  const logger = ctx.logger('seed')
+  logger.info('首次启动（DEMO_SEED=1），正在初始化演示数据…')
 
   // -- 组织树 --------------------------------------------------------------
   const root = ctx.iam.createOrg({ name: '元冰可集团' })
@@ -29,7 +71,7 @@ export async function seedAll(ctx: Context): Promise<void> {
   const roleAuditor = ctx.iam.roles().findOne((role) => role.code === 'auditor')!
 
   const mkUser = (username: string, displayName: string, orgId: string, title: string, roleIds: string[]) => {
-    const user = ctx.iam.createUser({ username, displayName, orgId, title, roleIds })
+    const { user } = ctx.iam.createUser({ username, displayName, orgId, title, roleIds, password: 'Ybk@2026' })
     ctx.iam.users().update(user.id, { status: 'active' })
     return ctx.iam.users().get(user.id)!
   }
@@ -46,7 +88,7 @@ export async function seedAll(ctx: Context): Promise<void> {
   mkUser('suyq', '苏砚秋', beDept.id, '后端工程师', [roleDev.id])
   mkUser('heqw', '何青梧', feDept.id, '前端工程师', [roleDev.id])
   mkUser('yqz', '叶栖迟', prodDept.id, '运营专员', [])
-  const pendingUser = ctx.iam.createUser({ username: 'newcomer', displayName: '周明澜', orgId: feDept.id, title: '前端工程师（试用期）' })
+  const { user: pendingUser } = ctx.iam.createUser({ username: 'newcomer', displayName: '周明澜', orgId: feDept.id, title: '前端工程师（试用期）', password: 'Ybk@2026' })
   void pendingUser
 
   // -- 用户组 --------------------------------------------------------------
@@ -434,6 +476,35 @@ export async function seedAll(ctx: Context): Promise<void> {
       }
     }
   }
+
+  // -- 演示计量历史（经真实 usage 管道：可对账/可报表；钱包先充值，账实一致） ----
+  const meteredOrgs = new Map<string, string>()
+  for (const service of [kb, dw, ticket, hrSvc]) meteredOrgs.set(service.orgId, service.name)
+  for (const orgId of meteredOrgs.keys()) {
+    ctx.billing.recharge({
+      ownerType: 'org', ownerId: orgId, amountCents: 2_000_000,
+      channelRef: 'demo-seed-grant', idempotencyKey: `seed:recharge:${orgId}`, actor: '演示初始化',
+    })
+  }
+  for (let day = 27; day >= 0; day--) {
+    const date = new Date(today.getTime() - day * 86400_000).toISOString().slice(0, 10)
+    for (const service of [kb, dw, ticket, hrSvc]) {
+      const tokens = 20_000 + Math.floor(rand() * 160_000)
+      ctx.usage.record({
+        org: service.orgId,
+        subject: 'agent:seed-demo',
+        principal: `org:${service.orgId}`,
+        resource: `mcp:${service.slug}`,
+        meters: [{ key: 'tokens', value: tokens, unit: 'token' }],
+        occurred_at: `${date}T12:00:00.000Z`,
+        idempotency_key: `seed:${service.slug}:${date}`,
+      })
+    }
+  }
+
+  // 模型路由台账（演示：未配置真实凭据，offline 待接入——诚实降级，不伪装可调用）
+  ctx.modelGateway.upsertModel({ slug: 'deepseek-chat', displayName: 'DeepSeek Chat（待接入）', provider: 'deepseek', endpoint: '', apiKey: '', listCentsPerKTokens: 1, costCentsPerKTokens: 0, status: 'offline' })
+  ctx.modelGateway.upsertModel({ slug: 'qwen-plus', displayName: 'Qwen Plus（待接入）', provider: 'qwen', endpoint: '', apiKey: '', listCentsPerKTokens: 2, costCentsPerKTokens: 0, status: 'offline' })
 
   // -- 告警规则与告警 ----------------------------------------------------------
   ctx.audit.createAlertRule({ name: 'MCP 服务熔断', metric: 'mcp_unhealthy', operator: 'gt', threshold: 2, windowMinutes: 5, severity: 'critical', channels: ['dingtalk', 'email'], enabled: true, description: '健康探活连续失败超过阈值' })

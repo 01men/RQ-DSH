@@ -17,11 +17,19 @@ npm install          # 安装依赖（@deepseek-ai/cordis）
 npm start            # 启动平台（默认 http://127.0.0.1:7300）
 ```
 
-打开 **http://127.0.0.1:7300** 进入管理控制台（首次启动自动初始化演示数据）。
+打开 **http://127.0.0.1:7300** 进入管理控制台。首次启动在空数据目录上执行**基线初始化**（生产形态）：
+内置角色 + 根组织 + 平台管理员 `admin`（无任何演示业务数据）。
 
-**演示账号**（密码均为 `Ybk@2026`）：
+- `admin` 口令取 `ADMIN_PASSWORD` 环境变量；未设置则随机生成，一次性写入 `data/admin-initial-password.txt` 并打印在启动日志（请立即登录并妥善保管）。
+- 忘记口令：清空数据目录重启，或由持有 `iam.user.write` 的管理员在「组织与账号 → 账号详情 → 重置口令」重置。
 
-| 账号 | 角色 | 用途 |
+**演示模式**（评估/培训，自动生成完整演示数据与演示账号，口令均为 `Ybk@2026`）：
+
+```bash
+DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账号/MCP/Skill/Agent/应用/28 天历史）
+```
+
+| 演示账号 | 角色 | 用途 |
 |---|---|---|
 | `admin` | 平台超级管理员 | 全功能 |
 | `ops` | 资源管理员 | MCP/Skill/Agent/应用管理 |
@@ -29,12 +37,12 @@ npm start            # 启动平台（默认 http://127.0.0.1:7300）
 | `dev` | 开发者 | 提交 Skill、注册 Agent |
 | `audit` | 审计员（只读） | 审计与告警 |
 
-钉钉免密登录演示：登录页「钉钉扫码」输入工号 `DD0002`（林小满）。
+演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例 190 项端到端断言
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）207 项端到端断言
 npm run lint:manifests  # 插件清单五面 YAML 校验（50 项）
-node cli/dshctl.mjs help    # CLI 帮助
+DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
 
 ## 二、架构：一切皆插件
@@ -83,7 +91,7 @@ pnpm dsh web --patch <PROJECT_ROOT>/cordis.yml
 - **引擎级唯一约束**（红线工程化）：`collection.uniqueOn()` 模拟数据库部分唯一索引，「一人一号」等业务唯一性由存储引擎兜底，取代「先查后插」
 - **refresh_token 轮转链 + sid 会话**（docs/06）：access 30min + refresh 7d 仅存哈希、单次轮转，重放即整链吊销；前端 401 静默续期
 - **state 防 CSRF + code 一次性消费 + 未命中绑定/注册分支**（docs/04/05/07）：完整的三方登录产品化流程
-- 自测新增 15 项安全攻击演练（state/code/refresh 重放、唯一约束冲突），**97/97 通过**
+- 自测含安全攻击演练（state/code/refresh 重放、唯一约束冲突），详见 `npm run selftest`
 
 ## 三A、生态平台 v1.2 交付（第 0–8 步，本迭代）
 
@@ -103,8 +111,35 @@ pnpm dsh web --patch <PROJECT_ROOT>/cordis.yml
 - **复式分账 ledger（第 8 步）**：账期汇总结转（费率版本快照、尾差归平台）、试算平衡、红字冲正、开发者应收。
 - **资金红线（v1.2 §六过渡）**：对公收款/开票/开发者付款通道未就位——充值仅管理员手工录入（幂等键=转账单号），
   订阅代收为 manual-settlement 登记，平台不自动扣外部资金。
-- 验收：`npm run selftest` **190/190**、`npm run lint:manifests` **50/50**；KBaaS/连接器市场/合规门户与
+- 验收：`npm run selftest` **207/207**、`npm run lint:manifests` **50/50**；KBaaS/连接器市场/合规门户与
   L1 有码沙箱为下一迭代（设计见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)）。
+
+## 三B、评审缺陷修复与资产运营（本迭代，v1.3）
+
+针对外部技术评审（严重 S1–S4 / 中等 M1–M5 / 轻微 L1–L4）逐项整改：
+
+- **S1 账期结算硬缺陷**：`settle()` 改 keyset 分页全量归集（不再单页 limit:1000 截断），
+  归集条数与 SQL COUNT 对账不符即拒绝结转；同一账期二次红字冲正被拒；钱包幂等键绑定主体（同键异主体拒绝）。
+- **S2 密钥轮换宽限期**：轮换不再立即吊销全部令牌——旧密钥进入 24h 验签宽限期，在途请求不掉线，
+  refresh 随时换取新密钥令牌，全局无感轮换。
+- **S3 暴力破解防护**：登录 / Client Credentials / SSO 绑定 / OIDC 授权与换牌全部接入失败锁定
+  （15 分钟窗口 5 次失败锁定，时长逐次升级至 24h，持久化防重启绕过，触发即告警）。
+- **崩溃恢复**：认证类集合（令牌/主体/锁定计数）即时落盘并 fsync，登出/吊销返回 200 后被杀不丢失；
+  坏 JSON 集合文件自动备份为 `*.corrupt-*` 并显式告警，不再静默当空集合。
+- **计量消费幂等（重放不双计）**：引擎级消费水位（usage_consumptions 唯一索引）——replay/死信重投
+  对 billing/audit 投影零重复副作用；消费失败真实即时重试 3 次后入死信，支持一键重投。
+- **OIDC 收敛**：scope 白名单（openid/profile/email）、PKCE S256 全链路、JWT 校验 iss/aud/kid；
+  issuer 支持 `OIDC_ISSUER` 环境变量对外声明。
+- **MCP 熔断业务化**：真实调用失败与探活失败共用连续失败计数（连续 3 次开熔断，业务成功即半闭合）；
+  回滚目标版本校验（当前版本/已回滚版本不可作为目标）。
+- **多租户隔离补全（M1）**：钱包流水查询支持 tenant_id 过滤；审计/计量口径一致。
+- **M2 撤销列表收敛**：吊销状态全量走持久化令牌记录（去掉进程内无限增长集合），
+  过期令牌 7 天后物理清理（启动 + 每日巡检）；refresh 哈希索引化查询。
+- **企业 AI 资产运营（新）**：`资产运营` 控制台页 + REST——统一台账（MCP/Agent/应用/Skill/模型路由
+  五类资产一处盘点，含归属组织、负责人、健康、近 N 天调用与消耗）、一键健康巡检（批量探活留审计）、
+  成本报表（Top 资产 / 主体分摊 / 日趋势，计量口径）。
+- **商业化放缓（决策）**：真实支付网关/对公收款/开票/开发者付款等资金通道**保持手工过渡态暂缓实施**，
+  插件市场变现（订阅代收/分账结算自动化）同样暂缓——本迭代优先企业内资产治理与运营能力。
 
 ## 三、目录结构（插件标准解剖）
 
@@ -124,7 +159,7 @@ packages/
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（97 项断言，含安全攻击演练）
+scripts/selftest.mjs        功能自测（191 项断言，含安全攻击演练；隔离实例 + DEMO_SEED）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -174,13 +209,13 @@ node cli/dshctl.mjs plugin sign --dir=./my-plugin && node cli/dshctl.mjs plugin 
 ```bash
 # REST（Bearer 令牌）
 curl -X POST localhost:7300/api/auth/login -H 'content-type: application/json' \
-     -d '{"username":"admin","password":"Ybk@2026"}'
+     -d '{"username":"admin","password":"<你的口令>"}'
 curl localhost:7300/api/overview -H "authorization: Bearer <token>"
 ```
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **190 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **207 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
@@ -189,8 +224,9 @@ Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批�
 
 ## 八、说明与边界
 
+- 生产部署默认**基线初始化**（内置角色 + 根组织 + `admin`，零演示数据）；完整演示数据仅在 `DEMO_SEED=1` 时注入，请勿在生产环境启用
 - 业务配置存储为 JSON 集合（原子落盘）；计量/资金/分账类数据存 SQLite（`data/txnstore.db`，WAL + 事务 + 幂等唯一索引）
-- MCP 执行层支持真实 HTTP 传输（`exec: real`，JSON-RPC tools/call + initialize 探活）；`exec: demo` 为显式降级演示流量（不计费不计 SLO）
+- MCP 执行层支持真实 HTTP 传输（`exec: real`，JSON-RPC tools/call + initialize 探活）；`exec: demo` 为显式降级演示传输层（确定性模拟、不计费不计 SLO）
 - 钉钉连接器支持真实 OpenAPI（`mode: real` + `apiBase`）与 mock 演示（显式标注）
 - 模型网关仅转发 OpenAI 兼容 chat/completions；模型未配置 endpoint 时拒绝调用（不生成假 completion）
 - 资金通道为手工过渡形态（见「三A」资金红线）；OIDC 私钥存 data 目录，生产建议迁 KMS

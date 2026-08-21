@@ -206,15 +206,33 @@ export async function renderIam(content, params, ctx) {
             ${field('职位', inputField('title'))}
             ${field('邮箱', inputField('email', { placeholder: '选填，默认 username@yuanbingke.com' }), { full: true })}
           </div>
-          <div class="form-hint">创建后默认密码 Ybk@2026，账号状态为「正常」。</div>`,
+          <div class="form-hint">创建后将生成随机初始口令（仅展示一次），账号状态为「正常」。</div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
       modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.body.querySelector('[data-ok]').onclick = async () => {
         const data = collectForm(modal.body)
         try {
-          await api.post('/api/iam/users', data)
-          toast('账号已创建'); modal.close(); ctx.rerender()
+          const result = await api.post('/api/iam/users', data)
+          modal.close()
+          if (result.initialPassword) {
+            const pwModal = openModal({
+              title: `账号已创建（${result.displayName}）`,
+              body: `
+                <div class="form-hint" style="margin-bottom:10px">随机初始口令仅本次展示，请立即复制并安全传达给本人：</div>
+                <div class="muted-box" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
+                  <code style="font-size:14px;word-break:break-all">${esc(result.initialPassword)}</code>
+                  <button class="btn btn-default btn-sm" id="pw-copy">复制</button>
+                </div>`,
+              foot: '<button class="btn btn-primary" data-cancel>我已妥善传达</button>',
+            })
+            pwModal.body.querySelector('#pw-copy').onclick = () => {
+              void navigator.clipboard?.writeText(result.initialPassword).then(() => toast('已复制'))
+            }
+            pwModal.body.querySelector('[data-cancel]').onclick = () => { pwModal.close(); ctx.rerender() }
+          } else {
+            toast('账号已创建'); ctx.rerender()
+          }
         } catch (error) { toast(error.message, 'error') }
       }
     }
@@ -299,6 +317,7 @@ export async function renderIam(content, params, ctx) {
           <button class="btn btn-default" id="ud-edit">${icon('edit', 14)}编辑</button>
           <button class="btn btn-default" id="ud-assign">${icon('shield', 14)}分配角色</button>
           <button class="btn btn-default" id="ud-bind">${icon('link', 14)}绑定三方</button>
+          <button class="btn btn-default" id="ud-resetpw">${icon('key', 14)}重置口令</button>
           ${user.status === 'active' ? `<button class="btn btn-danger-ghost" id="ud-freeze">${icon('alert', 14)}冻结</button>` : ''}
           ${user.status === 'frozen' ? `<button class="btn btn-primary" id="ud-unfreeze">解除冻结</button>` : ''}
           ${user.status === 'pending' ? `<button class="btn btn-primary" id="ud-activate">激活账号</button>` : ''}`,
@@ -364,6 +383,30 @@ export async function renderIam(content, params, ctx) {
             toast('绑定成功'); modal.close(); drawer.close(); ctx.rerender()
           } catch (error) { toast(error.message, 'error') }
         }
+      }
+      drawer.el.querySelector('#ud-resetpw').onclick = async () => {
+        const confirmed = await confirmDialog({
+          title: '重置口令', danger: true, confirmText: '确认重置',
+          message: `将为 <b>${esc(user.displayName)}</b> 生成新的随机口令，原口令立即失效。新口令仅展示一次，请准备传达给本人。`,
+        })
+        if (!confirmed) return
+        try {
+          const result = await api.post(`/api/iam/users/${user.id}/reset-password`)
+          const modal = openModal({
+            title: '重置成功（口令仅本次展示）',
+            body: `
+              <div class="form-hint" style="margin-bottom:10px">请立即复制并安全传达给本人；关闭后无法再次查看。</div>
+              <div class="muted-box" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
+                <code style="font-size:14px;word-break:break-all">${esc(result.initialPassword)}</code>
+                <button class="btn btn-default btn-sm" id="pw-copy">复制</button>
+              </div>`,
+            foot: '<button class="btn btn-primary" data-cancel>我已妥善传达</button>',
+          })
+          modal.body.querySelector('#pw-copy').onclick = () => {
+            void navigator.clipboard?.writeText(result.initialPassword).then(() => toast('已复制'))
+          }
+          modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
+        } catch (error) { toast(error.message, 'error') }
       }
       const freezeBtn = drawer.el.querySelector('#ud-freeze')
       if (freezeBtn) freezeBtn.onclick = async () => {

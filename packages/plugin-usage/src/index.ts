@@ -136,6 +136,13 @@ export class UsageService extends Service {
       pricing_json: 'TEXT NOT NULL',
       trace_id: "TEXT NOT NULL DEFAULT ''",
     }, { uniques: [['idempotency_key']], indexes: [['occurred_at'], ['principal'], ['tenant_id']] })
+    // 消费水位（引擎级幂等）：同一消费方对同一事件只产生一次副作用——
+    // replay()/死信重投不会造成 billing/audit 投影双计（评审实证缺陷的修复点）。
+    ctx.txnStore.ensureTable('usage_consumptions', {
+      consumer: 'TEXT NOT NULL',
+      event_id: 'TEXT NOT NULL',
+      at: 'TEXT NOT NULL',
+    }, { primaryKey: ['consumer', 'event_id'] })
     this.ensureDefaultPriceBook()
   }
 
@@ -201,32 +208,44 @@ export class UsageService extends Service {
     return () => this.consumers.delete(consumerId)
   }
 
+  /**
+   * 分发：at-least-once 语义下的「效果恰好一次」——
+   *   1. 先占消费水位（INSERT OR IGNORE）：已消费过的事件直接跳过（replay 幂等）；
+   *   2. 处理器失败即释放水位，立即退避重试（真实执行，共 3 次）；
+   *   3. 3 次均失败入死信（持久化）并告警，可经 retryDeadLetters() 人工重投。
+   */
   private dispatch(event: UsageEvent): void {
     this.ctx.platformBus.emit(USAGE_SCHEMA, event)
     for (const [consumerId, entry] of this.consumers) {
-      const key = `${consumerId}:${event.event_id}`
-      try {
-        entry.handler(event)
-        entry.attempts.delete(key)
-      } catch (error) {
-        const attempts = (entry.attempts.get(key) ?? 0) + 1
-        entry.attempts.set(key, attempts)
-        if (attempts >= 3) {
-          entry.attempts.delete(key)
+      const claimed = this.ctx.txnStore.insertOrIgnore('usage_consumptions', {
+        consumer: consumerId, event_id: event.event_id, at: new Date().toISOString(),
+      })
+      if (!claimed) continue // 已消费（replay/重投）：幂等跳过
+      let delivered = false
+      for (let attempt = 1; attempt <= 3 && !delivered; attempt++) {
+        try {
+          entry.handler(event)
+          entry.attempts.delete(`${consumerId}:${event.event_id}`)
+          delivered = true
+        } catch (error) {
+          // 立即重试（同步管道不阻塞事件循环）：瞬时失败最多 3 次真实执行
+          if (attempt < 3) continue
+          // 释放消费水位，允许人工重投时重新消费
+          this.ctx.txnStore.run('DELETE FROM usage_consumptions WHERE consumer = ? AND event_id = ?', [consumerId, event.event_id])
           this.deadLetters().insert({
             id: newId('dlq'), event_id: event.event_id, consumer: consumerId,
             error: error instanceof Error ? error.message : String(error), attempts,
           })
           this.ctx.platformBus.emit('audit.alert.fired', {
             id: newId('alt'), severity: 'critical', title: 'usage 消费死信',
-            message: `消费方 ${consumerId} 处理事件 ${event.event_id} 连续失败 ${attempts} 次，已入死信`,
+            message: `消费方 ${consumerId} 处理事件 ${event.event_id} 连续失败 ${attempt} 次（含即时重试），已入死信，可通过 usage_deadletter_retry 重投`,
           })
         }
       }
     }
   }
 
-  /** 重放窗口内事件（消费端按幂等键去重，重复消费无害）。 */
+  /** 重放窗口内事件（消费水位保证幂等：重复重放不产生重复副作用）。 */
   replay(sinceIso: string): { replayed: number } {
     const rows = this.ctx.txnStore.sql<UsageRow>(
       'SELECT * FROM usage_events WHERE occurred_at >= ? ORDER BY occurred_at',
@@ -234,6 +253,39 @@ export class UsageService extends Service {
     )
     for (const row of rows) this.dispatch(rowToEvent(row))
     return { replayed: rows.length }
+  }
+
+  /** 死信重投：逐条重新分发，成功即移出死信队列。返回 {retried, remaining}。 */
+  retryDeadLetters(): { retried: number; remaining: number } {
+    const letters = this.deadLetters().all()
+    let retried = 0
+    for (const letter of letters) {
+      const row = this.ctx.txnStore.one<UsageRow>('usage_events', { id: letter.event_id })
+      if (!row) {
+        this.deadLetters().remove(letter.id) // 事件已不存在（清理/过期）：死信一并移除
+        continue
+      }
+      const consumer = this.consumers.get(letter.consumer)
+      if (!consumer) continue // 消费方未注册（插件未加载）：保留死信
+      this.deadLetters().remove(letter.id)
+      try {
+        const claimed = this.ctx.txnStore.insertOrIgnore('usage_consumptions', {
+          consumer: letter.consumer, event_id: letter.event_id, at: new Date().toISOString(),
+        })
+        if (!claimed) {
+          retried++
+          continue
+        }
+        consumer.handler(rowToEvent(row))
+        retried++
+      } catch (error) {
+        this.deadLetters().insert({
+          id: newId('dlq'), event_id: letter.event_id, consumer: letter.consumer,
+          error: `重投仍失败：${error instanceof Error ? error.message : String(error)}`, attempts: letter.attempts + 1,
+        })
+      }
+    }
+    return { retried, remaining: this.deadLetters().count() }
   }
 
   // -- 查询 -----------------------------------------------------------------
@@ -265,6 +317,30 @@ export class UsageService extends Service {
       params,
     )[0] ?? { n: 0, charge: 0, cost: 0 }
     return { count: Number(row.n), charge_cents: Number(row.charge), cost_cents: Number(row.cost) }
+  }
+
+  /**
+   * 运营分析聚合（资产运营页/成本报表）：窗口内按资源 / 计费主体（组织）/ 日趋势分组。
+   * 一次 SQL 各取一份聚合，供「谁在用什么资产、花了多少」的运营口径。
+   */
+  breakdown(fromIso: string): {
+    byResource: Array<{ resource: string; count: number; charge_cents: number; cost_cents: number }>
+    byPrincipal: Array<{ principal: string; count: number; charge_cents: number }>
+    byDay: Array<{ day: string; count: number; charge_cents: number }>
+  } {
+    const byResource = this.ctx.txnStore.sql<{ resource: string; count: number; charge_cents: number; cost_cents: number }>(
+      "SELECT resource, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents, COALESCE(SUM(CAST(json_extract(pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents FROM usage_events WHERE occurred_at >= ? GROUP BY resource ORDER BY charge_cents DESC",
+      [fromIso],
+    ).map((row) => ({ resource: row.resource, count: Number(row.count), charge_cents: Number(row.charge_cents), cost_cents: Number(row.cost_cents) }))
+    const byPrincipal = this.ctx.txnStore.sql<{ principal: string; count: number; charge_cents: number }>(
+      "SELECT principal, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents FROM usage_events WHERE occurred_at >= ? GROUP BY principal ORDER BY charge_cents DESC",
+      [fromIso],
+    ).map((row) => ({ principal: row.principal, count: Number(row.count), charge_cents: Number(row.charge_cents) }))
+    const byDay = this.ctx.txnStore.sql<{ day: string; count: number; charge_cents: number }>(
+      "SELECT substr(occurred_at, 1, 10) AS day, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents FROM usage_events WHERE occurred_at >= ? GROUP BY day ORDER BY day",
+      [fromIso],
+    ).map((row) => ({ day: row.day, count: Number(row.count), charge_cents: Number(row.charge_cents) }))
+    return { byResource, byPrincipal, byDay }
   }
 
   // -- 价格簿 ---------------------------------------------------------------

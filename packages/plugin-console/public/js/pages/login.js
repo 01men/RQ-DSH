@@ -1,4 +1,4 @@
-/** 登录页：账号密码 / 三方扫码（模拟）。 */
+/** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）。 */
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
 import { h, $, toast } from '../ui.js'
@@ -42,11 +42,11 @@ export function renderLogin(app) {
         <form class="login-form" id="login-form-password">
           <div class="form-item">
             <label class="form-label">用户名</label>
-            <input class="input input-lg" id="login-username" placeholder="请输入用户名" autocomplete="username" value="admin">
+            <input class="input input-lg" id="login-username" placeholder="请输入用户名" autocomplete="username">
           </div>
           <div class="form-item">
             <label class="form-label">密码</label>
-            <input class="input input-lg" id="login-password" type="password" placeholder="请输入密码" autocomplete="current-password" value="Ybk@2026">
+            <input class="input input-lg" id="login-password" type="password" placeholder="请输入密码" autocomplete="current-password">
           </div>
           <button class="btn btn-primary btn-lg btn-block" id="login-submit" type="submit">登 录</button>
         </form>
@@ -59,12 +59,12 @@ export function renderLogin(app) {
                 radial-gradient(120px 120px at 75% 80%, #ede9fe, transparent), #f8f9fb;
                 border:1px solid var(--border);display:grid;place-items:center;position:relative">
                 <div style="color:var(--brand-500)">${icon('fingerprint', 64)}</div>
-                <div style="position:absolute;bottom:12px;font-size:12px;color:var(--text-3)">模拟扫码（输入工号即授权码）</div>
+                <div style="position:absolute;bottom:12px;font-size:12px;color:var(--text-3)">使用钉钉扫码授权登录</div>
               </div>
             </div>
             <div class="form-item" style="margin-top:16px">
-              <label class="form-label">钉钉工号 / 三方身份</label>
-              <input class="input input-lg" id="login-ding-code" placeholder="如 DD0002（已绑定）或 DD0003（未绑定）" value="DD0002">
+              <label class="form-label">钉钉授权码</label>
+              <input class="input input-lg" id="login-ding-code" placeholder="请输入钉钉扫码授权码">
               <div class="form-hint">走完整 OAuth2 链路：authorize 签发 state → code 换令牌 → unionId 归一化。code 5 分钟内仅可消费一次。</div>
             </div>
             <button class="btn btn-primary btn-lg btn-block" id="login-ding-submit" type="submit">免密登录</button>
@@ -89,15 +89,19 @@ export function renderLogin(app) {
             <button class="btn btn-ghost btn-block mt-8" id="ding-pending-back">返回重试</button>
           </div>
         </form>
-
-        <div class="login-demo-tip">
-          <b>演示账号</b>：admin / Ybk@2026（超管）· ops（资源管理员）· dev（开发者）· audit（审计员只读）· hr（组织管理员）
-        </div>
       </div>
     </div>`
 
   const tabPassword = $('#login-form-password')
   const tabDing = $('#login-form-dingtalk')
+  // 三方登录入口按平台配置显隐：未启用任何登录连接器时仅展示账号密码
+  void api.get('/api/auth/providers').then((data) => {
+    const hasDingtalk = (data?.providers ?? []).some((item) => item.provider === 'dingtalk')
+    if (!hasDingtalk) {
+      $('#login-tabs').style.display = 'none'
+      $('#login-sub').textContent = '使用平台账号登录'
+    }
+  }).catch(() => { /* 查询失败时保持默认展示 */ })
   app.querySelectorAll('#login-tabs .segmented-item').forEach((el) => {
     el.onclick = () => {
       app.querySelectorAll('#login-tabs .segmented-item').forEach((item) => item.classList.remove('active'))

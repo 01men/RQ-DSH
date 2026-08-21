@@ -4,6 +4,7 @@ base: /api
 endpoints:
   - POST /api/tools/execute（工具桥：与 dsh ToolRuntime 同一契约）
   - GET /api/platform/info（插件树/工具目录/集合） · GET /api/overview（工作台聚合）
+  - GET /api/assets/inventory（资产台账） · POST /api/assets/healthcheck（健康巡检） · GET /api/assets/report（成本报表）
   - 静态托管 public/ SPA（飞书级控制台）
 
 services:

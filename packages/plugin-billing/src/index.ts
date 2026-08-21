@@ -142,7 +142,7 @@ export class BillingService extends Service {
   /** 充值（credit）：幂等键=渠道单号；资金通道未就位时由管理员手工录入（v1.2 §六过渡形态）。 */
   recharge(input: { ownerType: WalletOwnerType; ownerId: string; tenantId?: string; amountCents: number; channelRef: string; idempotencyKey: string; actor?: string }): { balanceCents: number; journalId: string; duplicated: boolean } {
     if (!Number.isInteger(input.amountCents) || input.amountCents <= 0) throw new Error('充值金额必须为正整数（分）')
-    const existing = this.ctx.txnStore.one<WalletJournalRow>('wallet_journal', { idempotency_key: input.idempotencyKey })
+    const existing = this.requireJournalForKey(input.idempotencyKey, input.ownerType, input.ownerId)
     if (existing) return { balanceCents: this.balance(input.ownerType, input.ownerId), journalId: existing.id, duplicated: true }
     const journalId = newId('wjr')
     const tenant = input.tenantId ?? 't_default'
@@ -181,7 +181,7 @@ export class BillingService extends Service {
   /** 扣费（debit）：余额与流水同事务；不足抛错且不留任何写入（原子回滚）。 */
   charge(input: { ownerType: WalletOwnerType; ownerId: string; tenantId?: string; amountCents: number; reason: string; refEvent?: string; idempotencyKey: string }): { balanceCents: number; journalId: string; duplicated: boolean } {
     if (!Number.isInteger(input.amountCents) || input.amountCents < 0) throw new Error('扣费金额必须为非负整数（分）')
-    const existing = this.ctx.txnStore.one<WalletJournalRow>('wallet_journal', { idempotency_key: input.idempotencyKey })
+    const existing = this.requireJournalForKey(input.idempotencyKey, input.ownerType, input.ownerId)
     if (existing) return { balanceCents: this.balance(input.ownerType, input.ownerId), journalId: existing.id, duplicated: true }
     if (input.amountCents === 0) return { balanceCents: this.balance(input.ownerType, input.ownerId), journalId: '', duplicated: false }
     const journalId = newId('wjr')
@@ -218,11 +218,24 @@ export class BillingService extends Service {
     return { balanceCents: result.balance, journalId, duplicated: false }
   }
 
-  journal(filter: { ownerType?: string; ownerId?: string; limit?: number } = {}): WalletJournalRow[] {
+  /**
+   * 幂等键查找并绑定主体校验：同键异主体（钱包）视为攻击面直接拒绝，
+   * 不得返回他人钱包状态（评审：幂等键未绑定钱包主体）。
+   */
+  private requireJournalForKey(idempotencyKey: string, ownerType: WalletOwnerType, ownerId: string): WalletJournalRow | undefined {
+    const existing = this.ctx.txnStore.one<WalletJournalRow>('wallet_journal', { idempotency_key: idempotencyKey })
+    if (existing && (existing.owner_type !== ownerType || existing.owner_id !== ownerId)) {
+      throw new Error(`幂等键 ${idempotencyKey} 已绑定主体 ${existing.owner_type}:${existing.owner_id}，不能用于 ${ownerType}:${ownerId}`)
+    }
+    return existing
+  }
+
+  journal(filter: { ownerType?: string; ownerId?: string; tenantId?: string; limit?: number } = {}): WalletJournalRow[] {
     const conditions: string[] = []
     const params: SqlValue[] = []
     if (filter.ownerType) { conditions.push('owner_type = ?'); params.push(filter.ownerType) }
     if (filter.ownerId) { conditions.push('owner_id = ?'); params.push(filter.ownerId) }
+    if (filter.tenantId) { conditions.push('tenant_id = ?'); params.push(filter.tenantId) }
     const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
     return this.ctx.txnStore.sql<WalletJournalRow>(`SELECT * FROM wallet_journal${where} ORDER BY at DESC LIMIT ?`, [...params, Math.min(filter.limit ?? 100, 1000)])
   }
@@ -294,29 +307,49 @@ export class BillingService extends Service {
    * 规则（M4）：逐事件归集、按 (借方org, 贷方账户) 汇总生成复合分录（一借多贷）；
    *   借 org:<消费组织> 应收 = Σ charge；插件资源 → 贷 developer:<发布者>（费率版本快照）+ 贷 platform（差额）；
    *   平台自营资源 → 全额贷 platform；尾差（分账取整）归 platform 损益。
+   * 修复（评审 S1）：keyset 分页全量归集（不再单页 limit:1000 截断），
+   *   且归集条数与 SQL COUNT 对账不符时拒绝结转——宁可不结，不可结错。
    */
-  settle(period: string, actor: string): { period: string; entries: number; debitCents: number; creditCents: number; balanced: boolean } {
+  settle(period: string, actor: string): { period: string; entries: number; debitCents: number; creditCents: number; balanced: boolean; events: number } {
     if (!/^\d{4}-\d{2}$/.test(period)) throw new Error('账期格式应为 YYYY-MM')
     const already = this.ctx.txnStore.count('ledger_entries', { period })
     if (already > 0) throw new Error(`账期 ${period} 已结转（${already} 条分录）；调整请走红字冲正`)
-    const { items } = this.ctx.usage.query({ from: `${period}-01T00:00:00`, to: `${period}-31T23:59:59`, limit: 1000 })
-    // 归集：借方 org → 贷方账户
+    const [from, to] = periodBounds(period)
+    const expected = Number(this.ctx.txnStore.sql<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM usage_events WHERE occurred_at >= ? AND occurred_at < ?', [from, to],
+    )[0]?.n ?? 0)
+    // keyset 分页全量归集（occurred_at + id 稳定排序，页间无重叠无遗漏）
     const debits = new Map<string, number>()
     const credits = new Map<string, number>()
     const rateVersions = new Map<string, string>()
-    for (const event of items) {
-      debits.set(`org:${event.org}`, (debits.get(`org:${event.org}`) ?? 0) + event.pricing.charge_cents)
-      if (event.resource.startsWith('plugin:')) {
-        const pluginId = event.resource.slice(7)
-        const submission = this.ctx.storage.collection<{ developerId: string }>('market:submissions').findOne((item) => item.pluginId === pluginId)
-        const rate = COMMISSION_RATES.platform_default
-        rateVersions.set(`developer:${submission?.developerId ?? 'unknown'}`, rate.version)
-        const devShare = Math.floor(event.pricing.charge_cents * rate.developerShare)
-        credits.set(`developer:${submission?.developerId ?? 'unknown'}`, (credits.get(`developer:${submission?.developerId ?? 'unknown'}`) ?? 0) + devShare)
-        credits.set('platform', (credits.get('platform') ?? 0) + (event.pricing.charge_cents - devShare)) // 尾差归平台
-      } else {
-        credits.set('platform', (credits.get('platform') ?? 0) + event.pricing.charge_cents)
+    let processed = 0
+    let cursor: Array<string> = [from, '']
+    for (;;) {
+      const rows = this.ctx.txnStore.sql<{ org: string; resource: string; charge_cents: number; occurred_at: string; id: string }>(
+        "SELECT id, occurred_at, org, resource, CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER) AS charge_cents FROM usage_events WHERE occurred_at >= ? AND occurred_at < ? AND (occurred_at > ? OR (occurred_at = ? AND id > ?)) ORDER BY occurred_at, id LIMIT 1000",
+        [from, to, cursor[0], cursor[0], cursor[1]],
+      )
+      for (const row of rows) {
+        debits.set(`org:${row.org}`, (debits.get(`org:${row.org}`) ?? 0) + Number(row.charge_cents))
+        if (row.resource.startsWith('plugin:')) {
+          const pluginId = row.resource.slice(7)
+          const submission = this.ctx.storage.collection<{ developerId: string }>('market:submissions').findOne((item) => item.pluginId === pluginId)
+          const rate = COMMISSION_RATES.platform_default
+          rateVersions.set(`developer:${submission?.developerId ?? 'unknown'}`, rate.version)
+          const devShare = Math.floor(Number(row.charge_cents) * rate.developerShare)
+          credits.set(`developer:${submission?.developerId ?? 'unknown'}`, (credits.get(`developer:${submission?.developerId ?? 'unknown'}`) ?? 0) + devShare)
+          credits.set('platform', (credits.get('platform') ?? 0) + (Number(row.charge_cents) - devShare)) // 尾差归平台
+        } else {
+          credits.set('platform', (credits.get('platform') ?? 0) + Number(row.charge_cents))
+        }
       }
+      processed += rows.length
+      if (rows.length < 1000) break
+      const last = rows[rows.length - 1]!
+      cursor = [last.occurred_at, last.id]
+    }
+    if (processed !== expected) {
+      throw new Error(`结转对账失败：账期内事件 COUNT=${expected}，归集 ${processed} 条（归集与口径不一致，拒绝结转）`)
     }
     const at = new Date().toISOString()
     const entries: Array<Record<string, SqlValue>> = []
@@ -331,11 +364,13 @@ export class BillingService extends Service {
     })
     const trial = this.trialBalance(period)
     this.ctx.platformBus.emit(PlatformEvents.LedgerSettled, { period, actor, entries: entries.length, ...trial })
-    return { period, entries: entries.length, debitCents: trial.debitCents, creditCents: trial.creditCents, balanced: trial.balanced }
+    return { period, entries: entries.length, debitCents: trial.debitCents, creditCents: trial.creditCents, balanced: trial.balanced, events: processed }
   }
 
-  /** 红字冲正：引用既有结转，生成负数分录（反向）。 */
+  /** 红字冲正：引用既有结转，生成负数分录（反向）。同一账期至多冲正一次（防二次冲正破坏借贷）。 */
   reverse(period: string, reason: string, actor: string): { entries: number; balanced: boolean } {
+    const reversed = this.ctx.txnStore.count('ledger_entries', { period, journal_type: 'reversal' })
+    if (reversed > 0) throw new Error(`账期 ${period} 已存在红字冲正（${reversed} 条）；如需调整请先重新结转或联系平台管理员`)
     const originals = this.ctx.txnStore.sql<LedgerEntryRow>('SELECT * FROM ledger_entries WHERE period = ? AND journal_type = ?', [period, 'usage_settlement'])
     if (originals.length === 0) throw new Error(`账期 ${period} 无可冲正分录`)
     const at = new Date().toISOString()
@@ -349,6 +384,7 @@ export class BillingService extends Service {
       }
     })
     const trial = this.trialBalance(period)
+    if (!trial.balanced) throw new Error(`冲正后试算不平衡（借 ${trial.debitCents} / 贷 ${trial.creditCents}），请立即核查`)
     return { entries: originals.length, balanced: trial.balanced }
   }
 
@@ -360,6 +396,13 @@ export class BillingService extends Service {
     )[0]
     return Number(row?.total ?? 0)
   }
+}
+
+/** 账期边界：[当月 1 日 00:00, 次月 1 日 00:00)，与事件 ISO 时间词法比较兼容。 */
+function periodBounds(period: string): [string, string] {
+  const [year, month] = period.split('-').map(Number)
+  const next = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`
+  return [`${period}-01T00:00:00`, `${next}-01T00:00:00`]
 }
 
 // ---------------------------------------------------------------------------

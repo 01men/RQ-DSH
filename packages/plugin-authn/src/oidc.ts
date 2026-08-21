@@ -32,6 +32,9 @@ export interface OidcCodeRecord extends RecordBase {
   state: string
   nonce?: string
   scope: string
+  /** PKCE（评审修复）：授权时登记的 code_challenge（S256）；换 token 必须携带匹配的 code_verifier。 */
+  codeChallenge?: string
+  codeChallengeMethod?: 'S256'
   expiresAt: string
   usedAt?: string
 }
@@ -45,6 +48,8 @@ interface OidcKeyMaterial {
 
 export class OidcService extends Service {
   static readonly provide = 'oidc'
+  /** 复用 AuthnService 的登录限流（子插件显式声明依赖，等待其就绪）。 */
+  static readonly inject = ['authn']
 
   private keys: OidcKeyMaterial
 
@@ -55,7 +60,8 @@ export class OidcService extends Service {
   }
 
   issuer(): string {
-    return `http://127.0.0.1:${this.ctx.httpServer.port}`
+    // 外部应用接入时以 OIDC_ISSUER 显式声明对外地址（默认本机；评审 L1）
+    return process.env.OIDC_ISSUER ?? `http://127.0.0.1:${this.ctx.httpServer.port}`
   }
 
   clients(): Collection<OidcClientRecord> {
@@ -83,15 +89,37 @@ export class OidcService extends Service {
 
   // -- 授权码 ---------------------------------------------------------------
 
-  /** 发起授权：用户在平台完成认证（用户名/密码）→ 一次性 code（5 分钟）。 */
-  authorize(input: { clientId: string; redirectUri?: string; state: string; scope?: string; nonce?: string; username: string; password: string }): { code: string; state: string; expires_in: number } {
+  /** 允许对外签发的 scope 白名单（评审修复：不得任意申请并原样进 JWT）。 */
+  static readonly ALLOWED_SCOPES = ['openid', 'profile', 'email']
+
+  /** 发起授权：用户在平台完成认证（用户名/密码）→ 一次性 code（5 分钟）。支持 PKCE（S256）。 */
+  authorize(input: { clientId: string; redirectUri?: string; state: string; scope?: string; nonce?: string; username: string; password: string; codeChallenge?: string; codeChallengeMethod?: string }): { code: string; state: string; expires_in: number } {
     const client = this.clients().findOne((item) => item.clientId === input.clientId)
     if (!client) throw new Error(`OIDC 客户端不存在：${input.clientId}`)
     const redirectUri = input.redirectUri ?? client.redirectUris[0]
     if (!redirectUri || !client.redirectUris.includes(redirectUri)) {
       throw new Error(`redirect_uri 未登记在客户端白名单：${redirectUri}`)
     }
-    const user = this.ctx.iam.verifyPassword(input.username, input.password)
+    const scopes = (input.scope ?? 'openid profile').split(/\s+/).filter(Boolean)
+    const offender = scopes.find((scope) => !OidcService.ALLOWED_SCOPES.includes(scope))
+    if (offender) throw new Error(`scope 未获授权：${offender}（允许：${OidcService.ALLOWED_SCOPES.join(' ')}）`)
+    if (input.codeChallengeMethod !== undefined && input.codeChallengeMethod !== 'S256') {
+      throw new Error('code_challenge_method 仅支持 S256')
+    }
+    if (input.codeChallenge !== undefined && !/^[A-Za-z0-9_-]{43,128}$/.test(input.codeChallenge)) {
+      throw new Error('code_challenge 格式非法（S256 应为 43-128 位 base64url）')
+    }
+    // 授权入口同样受暴力破解防护（评审 S3）
+    const throttleKey = `oidc-authorize:${input.username}`
+    this.ctx.authn.assertNotLocked(throttleKey)
+    let user
+    try {
+      user = this.ctx.iam.verifyPassword(input.username, input.password)
+    } catch (error) {
+      this.ctx.authn.recordLoginFailure(throttleKey)
+      throw error
+    }
+    this.ctx.authn.recordLoginSuccess(throttleKey)
     if (user.status !== 'active') throw new Error('账号状态异常，无法授权')
     const code = randomUUID().replace(/-/g, '')
     this.codes().insert({
@@ -101,25 +129,35 @@ export class OidcService extends Service {
       redirectUri,
       state: input.state,
       ...(input.nonce !== undefined ? { nonce: input.nonce } : {}),
-      scope: input.scope ?? 'openid profile',
+      scope: scopes.join(' '),
+      ...(input.codeChallenge !== undefined ? { codeChallenge: input.codeChallenge, codeChallengeMethod: 'S256' as const } : {}),
       expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
     })
     return { code, state: input.state, expires_in: 300 }
   }
 
-  /** code 换令牌：RS256 签发的 access token（JWT）+ id token。code 单次消费。 */
-  token(input: { grantType: string; code: string; clientId: string; clientSecret: string; redirectUri?: string }): { access_token: string; id_token: string; token_type: 'Bearer'; expires_in: number } {
+  /** code 换令牌：RS256 签发的 access token（JWT）+ id token。code 单次消费；PKCE 强制校验。 */
+  token(input: { grantType: string; code: string; clientId: string; clientSecret: string; redirectUri?: string; codeVerifier?: string }): { access_token: string; id_token: string; token_type: 'Bearer'; expires_in: number } {
     if (input.grantType !== 'authorization_code') throw new Error(`不支持的 grant_type：${input.grantType}`)
     const client = this.clients().findOne((item) => item.clientId === input.clientId)
     if (!client || client.clientSecretHash !== sha256Hex(input.clientSecret)) {
+      // client_secret 同样纳入失败锁定（评审 S3：不得暴力猜测机密）
+      this.ctx.authn.recordLoginFailure(`oidc-token:${input.clientId}`)
       throw new Error('client_id 或 client_secret 错误')
     }
+    this.ctx.authn.recordLoginSuccess(`oidc-token:${input.clientId}`)
     const record = this.codes().get(input.code)
     if (!record) throw new Error('授权码无效')
     if (record.usedAt) throw new Error('授权码已被使用（单次消费，防重放）')
     if (new Date(record.expiresAt).getTime() < Date.now()) throw new Error('授权码已过期')
     if (record.clientId !== input.clientId) throw new Error('授权码与客户端不匹配')
     if (input.redirectUri && input.redirectUri !== record.redirectUri) throw new Error('redirect_uri 与授权时不一致')
+    if (record.codeChallenge) {
+      // PKCE（S256）：BASE64URL(SHA256(code_verifier)) 必须与授权时登记的 challenge 一致
+      if (!input.codeVerifier) throw new Error('授权使用了 PKCE，token 请求必须携带 code_verifier')
+      const derived = createHash('sha256').update(input.codeVerifier).digest('base64url')
+      if (derived !== record.codeChallenge) throw new Error('PKCE 校验失败：code_verifier 不匹配')
+    }
     this.codes().update(record.id, { usedAt: new Date().toISOString() })
     const nowSec = Math.floor(Date.now() / 1000)
     const user = this.ctx.iam.users().get(record.userId)
@@ -139,9 +177,9 @@ export class OidcService extends Service {
     return { access_token: access, id_token: idToken, token_type: 'Bearer', expires_in: 2 * 3600 }
   }
 
-  /** userinfo：RS256 验签 + 用户实时状态校验（冻结/离职即时失效）。 */
+  /** userinfo：RS256 验签（iss/kid/aud 全验）+ 用户实时状态校验（冻结/离职即时失效）。 */
   userinfo(accessToken: string): Record<string, unknown> {
-    const claims = this.verifyJwt(accessToken)
+    const claims = this.verifyJwt(accessToken, { audience: undefined })
     const user = this.ctx.iam.users().get(claims.sub ?? '')
     if (!user) throw new Error('用户不存在')
     if (user.status !== 'active') throw new Error('用户状态异常（冻结/离职联动失效）')
@@ -168,9 +206,20 @@ export class OidcService extends Service {
     return `${head}.${body}.${signature}`
   }
 
-  verifyJwt(token: string): Record<string, unknown> {
+  /**
+   * JWT 校验（评审修复）：签名 + header.kid 匹配当前 JWKS 公布的密钥 + iss 归属本 Provider
+   * + exp 有效；options.audience 指定时校验受众（azp/aud 必须命中）。
+   */
+  verifyJwt(token: string, options: { audience?: string } = {}): Record<string, unknown> {
     const parts = token.split('.')
     if (parts.length !== 3) throw new Error('JWT 格式不合法')
+    let header: Record<string, unknown>
+    try {
+      header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString('utf8')) as Record<string, unknown>
+    } catch {
+      throw new Error('JWT 头部解析失败')
+    }
+    if (header.kid !== this.keys.kid) throw new Error('JWT kid 与 JWKS 公布密钥不匹配')
     const valid = rsVerify('RSA-SHA256', Buffer.from(`${parts[0]}.${parts[1]}`), this.keys.publicPem, Buffer.from(parts[2]!, 'base64url'))
     if (!valid) throw new Error('JWT 签名校验失败（RS256）')
     let claims: Record<string, unknown>
@@ -179,7 +228,12 @@ export class OidcService extends Service {
     } catch {
       throw new Error('JWT 载荷解析失败')
     }
+    if (claims.iss !== this.issuer()) throw new Error('JWT 签发方（iss）校验失败')
     if (typeof claims.exp === 'number' && claims.exp * 1000 < Date.now()) throw new Error('JWT 已过期')
+    if (options.audience !== undefined) {
+      const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud]
+      if (!aud.includes(options.audience)) throw new Error(`JWT 受众（aud）校验失败：期望 ${options.audience}`)
+    }
     return claims
   }
 
@@ -206,6 +260,7 @@ export class OidcService extends Service {
       userinfo_endpoint: `${this.issuer()}/oauth/userinfo`,
       response_types_supported: ['code'],
       grant_types_supported: ['authorization_code'],
+      code_challenge_methods_supported: ['S256'],
       subject_types_supported: ['public'],
       id_token_signing_alg_values_supported: ['RS256'],
       scopes_supported: ['openid', 'profile'],
@@ -261,16 +316,26 @@ export class OidcService extends Service {
     })
 
     http.register('POST', '/oauth/authorize', async (exchange) => {
-      const input = exchange.body as { clientId: string; redirectUri?: string; state: string; scope?: string; nonce?: string; username: string; password: string }
+      const input = exchange.body as { clientId: string; redirectUri?: string; state: string; scope?: string; nonce?: string; username: string; password: string; code_challenge?: string; code_challenge_method?: string }
       try {
-        raw(exchange, 200, this.authorize(input))
+        raw(exchange, 200, this.authorize({
+          clientId: input.clientId,
+          ...(input.redirectUri !== undefined ? { redirectUri: input.redirectUri } : {}),
+          state: input.state,
+          ...(input.scope !== undefined ? { scope: input.scope } : {}),
+          ...(input.nonce !== undefined ? { nonce: input.nonce } : {}),
+          username: input.username,
+          password: input.password,
+          ...(input.code_challenge !== undefined ? { codeChallenge: input.code_challenge } : {}),
+          ...(input.code_challenge_method !== undefined ? { codeChallengeMethod: input.code_challenge_method } : {}),
+        }))
       } catch (error) {
         raw(exchange, 401, { error: 'access_denied', error_description: error instanceof Error ? error.message : String(error) })
       }
     })
 
     http.register('POST', '/oauth/token', async (exchange) => {
-      const input = exchange.body as { grant_type?: string; code?: string; client_id?: string; client_secret?: string; redirect_uri?: string }
+      const input = exchange.body as { grant_type?: string; code?: string; client_id?: string; client_secret?: string; redirect_uri?: string; code_verifier?: string }
       try {
         if (!input.code || !input.client_id || !input.client_secret) {
           raw(exchange, 400, { error: 'invalid_request', error_description: 'code / client_id / client_secret 必填' })
@@ -282,6 +347,7 @@ export class OidcService extends Service {
           clientId: input.client_id,
           clientSecret: input.client_secret,
           ...(input.redirect_uri !== undefined ? { redirectUri: input.redirect_uri } : {}),
+          ...(input.code_verifier !== undefined ? { codeVerifier: input.code_verifier } : {}),
         }))
       } catch (error) {
         raw(exchange, 401, { error: 'invalid_client', error_description: error instanceof Error ? error.message : String(error) })

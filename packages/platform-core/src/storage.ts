@@ -2,7 +2,7 @@
  * 存储抽象：JSON 集合 + 内存索引 + 防抖原子落盘。
  * 业务插件只面对 Collection API，不感知文件系统；替换为数据库实现时只需重写本服务。
  */
-import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readdir, readFile, rename, open } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
@@ -38,6 +38,15 @@ export interface Collection<T extends RecordBase> {
    * 并发与竞态下不再可能产生重复数据（红线来自 auth-identity 模块设计）。
    */
   uniqueOn(label: string, keyOf: (record: T) => string): void
+}
+
+export interface CollectionOptions {
+  /**
+   * 持久化模式：
+   *   - debounced（默认）：250ms 防抖合并落盘；
+   *   - durable：每次变更立即落盘并 fsync（认证吊销等不容许崩溃丢失的集合）。
+   */
+  durability?: 'debounced' | 'durable'
 }
 
 export interface StorageConfig {
@@ -165,8 +174,14 @@ export class StorageService extends Service {
   static readonly provide = 'storage'
 
   private collections = new Map<string, CollectionImpl<RecordBase>>()
+  private durableNames = new Set<string>()
   private dirty = new Set<string>()
   private flushTimer: ReturnType<typeof setTimeout> | undefined
+  /** 落盘串行链（并发 flushNow 排队执行，避免同名 tmp 竞争）。 */
+  private flushChain: Promise<void> = Promise.resolve()
+  private tmpSeq = 0
+  /** 恢复期发现的损坏文件（坏 JSON 已备份为 *.corrupt，启动日志有痕）。 */
+  readonly corruptFiles: string[] = []
   /** 数据目录（密钥等平台级文件的存放处）。 */
   readonly dataDirPath: string
 
@@ -183,24 +198,50 @@ export class StorageService extends Service {
     await mkdir(this.dataDirPath, { recursive: true })
   }
 
-  collection<T extends RecordBase>(name: string): Collection<T> {
+  collection<T extends RecordBase>(name: string, options: CollectionOptions = {}): Collection<T> {
+    if (options.durability === 'durable') this.durableNames.add(name)
     const existing = this.collections.get(name)
     if (existing) return existing as unknown as Collection<T>
-    const created = new CollectionImpl<T>(name, (n) => this.markDirty(n))
+    const created = new CollectionImpl<T>(name, (n) => this.onPersist(n))
     this.collections.set(name, created as unknown as CollectionImpl<RecordBase>)
     return created
   }
 
-  /** 启动期从磁盘恢复指定集合（幂等）。 */
+  private onPersist(name: string): void {
+    if (this.durableNames.has(name)) {
+      // 关键集合：跳过防抖窗口立即落盘（评审 S 系列：吊销返回 200 后崩溃不得丢失）
+      this.dirty.add(name)
+      void this.flushNow()
+      return
+    }
+    this.markDirty(name)
+  }
+
+  /** 启动期从磁盘恢复指定集合（幂等）。坏 JSON 备份为 *.corrupt 后从空集合开始（不再静默清空）。 */
   async restore<T extends RecordBase>(name: string): Promise<Collection<T>> {
     await mkdir(this.dataDirPath, { recursive: true })
     const collection = this.collection<T>(name)
+    const file = join(this.dataDirPath, `${fileNameOf(name)}.json`)
     let records: T[] = []
     try {
-      const raw = await readFile(join(this.dataDirPath, `${fileNameOf(name)}.json`), 'utf8')
+      const raw = await readFile(file, 'utf8')
       records = JSON.parse(raw) as T[]
-    } catch {
-      records = []
+      if (!Array.isArray(records)) throw new Error('集合文件顶层不是数组')
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') {
+        records = []
+      } else {
+        // 文件存在但损坏：保留现场（*.corrupt 备份），显式告警，绝不无痕当空集合
+        const backup = `${file}.corrupt-${Date.now()}`
+        try {
+          await copyFile(file, backup)
+        } catch { /* 备份失败不阻断启动，下方仍有错误日志 */
+        }
+        console.error(`[storage] 集合 ${name} 文件损坏（${error instanceof Error ? error.message : String(error)}），已备份至 ${backup}，从空集合恢复`)
+        this.corruptFiles.push(backup)
+        records = []
+      }
     }
     ;(collection as unknown as CollectionImpl<T>).loadFrom(records)
     return collection
@@ -242,23 +283,47 @@ export class StorageService extends Service {
     }, 250)
   }
 
-  /** 立即将脏集合落盘（原子写：tmp + rename）。 */
-  async flushNow(): Promise<void> {
-    const names = [...this.dirty]
-    this.dirty.clear()
-    for (const name of names) {
-      const collection = this.collections.get(name)
-      if (!collection) continue
-      const file = join(this.dataDirPath, `${fileNameOf(name)}.json`)
-      try {
-        await mkdir(dirname(file), { recursive: true })
-        const tmp = `${file}.tmp`
-        await writeFile(tmp, JSON.stringify(collection.all(), null, 2), 'utf8')
-        await rename(tmp, file)
-      } catch (error) {
-        console.error(`[storage] 集合 ${name} 落盘失败`, error)
+  /** 立即将脏集合落盘（原子写：tmp + fsync + rename；全程串行防并发写同名 tmp）。 */
+  flushNow(): Promise<void> {
+    this.flushChain = this.flushChain.then(() => this.doFlush())
+    return this.flushChain
+  }
+
+  private async doFlush(): Promise<void> {
+    for (;;) {
+      const names = [...this.dirty]
+      this.dirty.clear()
+      if (names.length === 0) return
+      for (const name of names) {
+        const collection = this.collections.get(name)
+        if (!collection) continue
+        const file = join(this.dataDirPath, `${fileNameOf(name)}.json`)
+        const tmp = `${file}.${process.pid}-${Date.now()}-${++this.tmpSeq}.tmp`
+        try {
+          await mkdir(dirname(file), { recursive: true })
+          const handle = await open(tmp, 'w')
+          try {
+            await handle.writeFile(JSON.stringify(collection.all(), null, 2), 'utf8')
+            await handle.sync()
+          } finally {
+            await handle.close()
+          }
+          await rename(tmp, file)
+        } catch (error) {
+          console.error(`[storage] 集合 ${name} 落盘失败`, error)
+        }
       }
+      // 落盘期间又有变更（durable 即时触发）：循环直至清空
     }
+  }
+
+  /**
+   * 全量强持久化：把所有已注册集合写入并 fsync（HTTP 响应前调用，
+   * 确保「返回 200 后进程被杀」不丢变更——评审崩溃恢复实验的修复点）。
+   */
+  async flushDurable(): Promise<void> {
+    for (const name of this.collections.keys()) this.dirty.add(name)
+    await this.flushNow()
   }
 }
 

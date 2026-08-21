@@ -7,6 +7,7 @@
  */
 import { spawn } from 'node:child_process'
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { rm, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
@@ -47,6 +48,7 @@ await rm(DATA_DIR, { recursive: true, force: true })
 await mkdir(DATA_DIR, { recursive: true })
 const proc = spawn(process.execPath, ['src/main.ts', '--port', String(PORT), '--data', DATA_DIR], {
   stdio: ['ignore', 'pipe', 'pipe'],
+  env: { ...process.env, DEMO_SEED: '1' },  // 自测基于完整演示种子（隔离实例，不触碰生产 data/）
 })
 proc.stderr.on('data', (chunk) => process.stderr.write(`\x1b[90m[server] ${chunk}\x1b[0m`))
 
@@ -178,6 +180,8 @@ try {
 
   const newUser = await api('POST', '/api/iam/users', { token: admin, body: { username: 'selftester', displayName: '测试账号', orgId: newOrg.data.id, title: '测试工程师' } })
   check('创建账号（默认激活）', newUser.ok && newUser.data.status === 'active')
+  check('创建账号返回一次性随机初始口令', newUser.ok && typeof newUser.data.initialPassword === 'string' && newUser.data.initialPassword.length >= 16)
+  const testerInitialPassword = newUser.data.initialPassword
 
   const roleList = await api('GET', '/api/iam/roles', { token: admin })
   const devRole = roleList.data.roles.find((role) => role.code === 'developer')
@@ -209,8 +213,8 @@ try {
 
   // 冻结联动：令牌吊销
   section('账号冻结 → 令牌联动吊销')
-  const testerLogin = await api('POST', '/api/auth/login', { body: { username: 'selftester', password: 'Ybk@2026' } })
-  check('新账号可登录', testerLogin.ok)
+  const testerLogin = await api('POST', '/api/auth/login', { body: { username: 'selftester', password: testerInitialPassword } })
+  check('新账号可登录（随机初始口令）', testerLogin.ok)
   const testerToken = testerLogin.data.token
   const testerMe = await api('GET', '/api/auth/me', { token: testerToken })
   check('新账号令牌可用', testerMe.ok)
@@ -220,7 +224,7 @@ try {
   check('冻结成功', freeze.ok && freeze.data.status === 'frozen')
   const revokedCheck = await api('GET', '/api/auth/me', { token: testerToken })
   check('冻结后令牌立即失效（401）', revokedCheck.status === 401)
-  const frozenLogin = await api('POST', '/api/auth/login', { body: { username: 'selftester', password: 'Ybk@2026' } })
+  const frozenLogin = await api('POST', '/api/auth/login', { body: { username: 'selftester', password: testerInitialPassword } })
   check('冻结账号无法登录', frozenLogin.status === 401)
 
   // ================================================================ refresh 轮转链
@@ -731,6 +735,78 @@ try {
   check('红字冲正（负数分录引用原分录，试算仍平衡）', reverse.ok && reverse.data.balanced === true)
   const trialAfter = (await api('GET', `/api/billing/ledger?period=${month}`, { token: admin })).data.trial
   check('冲正后期间净额归零（借=贷）', trialAfter.debitCents === trialAfter.creditCents && trialAfter.debitCents === 0)
+
+  // ================================================================ 评审缺陷修复回归（S/M 系列）
+  section('评审缺陷修复回归（settle 全量 / 冲正防重 / 幂等键绑定主体 / replay 不双计）')
+  const monthTotals = await api('GET', `/api/usage/totals?from=${month}-01T00:00:00`, { token: admin })
+  check('结转归集事件数 = 计量口径 COUNT（无截断对账）', settle.ok && settle.data.events === monthTotals.data.count)
+
+  const reverseAgain = await api('POST', '/api/billing/ledger/reverse', { token: admin, body: { period: month, reason: '二次冲正应被拒绝' } })
+  check('同一账期二次红字冲正被拒（防借贷破坏）', !reverseAgain.ok && JSON.stringify(reverseAgain.error).includes('已存在'))
+
+  const idemOwner = (await api('GET', '/api/iam/orgs', { token: admin })).data[0]
+  const rechA = await api('POST', '/api/billing/recharge', { token: admin, body: { ownerType: 'org', ownerId: idemOwner.id, amountCents: 100, channelRef: 'selftest-idem-owner', idempotencyKey: 'rech-selftest-owner-binding' } })
+  const rechB = await api('POST', '/api/billing/recharge', { token: admin, body: { ownerType: 'platform', ownerId: 'platform', amountCents: 100, channelRef: 'selftest-idem-owner', idempotencyKey: 'rech-selftest-owner-binding' } })
+  check('钱包幂等键绑定主体（同键异主体被拒）', rechA.ok && !rechB.ok && JSON.stringify(rechB.error).includes('绑定主体'))
+
+  const reconcileBeforeReplay = await api('POST', '/api/usage/reconcile', { token: admin })
+  const replayAll = await api('POST', '/api/usage/replay', { token: admin, body: { from: new Date(Date.now() - 40 * 86_400_000).toISOString() } })
+  const reconcileAfterReplay = await api('POST', '/api/usage/reconcile', { token: admin })
+  check('replay 重放不双计（消费水位幂等，投影/口径一致）', replayAll.ok && replayAll.data.replayed > 0
+    && reconcileBeforeReplay.data.reconciliation.mismatch === false
+    && reconcileAfterReplay.data.reconciliation.mismatch === false
+    && JSON.stringify(reconcileAfterReplay.data.reconciliation.projections) === JSON.stringify(reconcileBeforeReplay.data.reconciliation.projections))
+
+  const dlRetry = await api('POST', '/api/usage/dead-letters/retry', { token: admin })
+  check('死信重投端点可用（真实执行重试）', dlRetry.ok && typeof dlRetry.data.retried === 'number')
+
+  // ================================================================ 认证加固回归（轮换宽限 / 暴力破解锁定 / OIDC 收敛）
+  section('认证加固回归（密钥轮换宽限期 / 暴力破解锁定 / OIDC scope+PKCE）')
+  const preRotate = await api('POST', '/api/auth/login', { body: { username: 'admin', password: 'Ybk@2026' } })
+  const rotate = await api('POST', '/api/authn/rotate-secret', { token: admin })
+  const oldTokenAlive = await api('GET', '/api/auth/me', { token: preRotate.data.token })
+  check('密钥轮换宽限期：存量令牌不掉线（24h 验签兼容）', rotate.ok && rotate.data.graceHours === 24 && oldTokenAlive.ok)
+
+  const postRotateLogin = await api('POST', '/api/auth/login', { body: { username: 'admin', password: 'Ybk@2026' } })
+  const postRotateMe = await api('GET', '/api/auth/me', { token: postRotateLogin.data.token })
+  check('轮换后新签发令牌可用（新密钥签名）', postRotateLogin.ok && postRotateMe.ok)
+
+  const brute = await api('POST', '/api/iam/users', { token: admin, body: { username: 'brutetest', displayName: '暴力破解测试', orgId: idemOwner.id, title: '测试' } })
+  for (let i = 0; i < 5; i++) {
+    await api('POST', '/api/auth/login', { body: { username: 'brutetest', password: 'wrong-password' } })
+  }
+  const bruteLocked = await api('POST', '/api/auth/login', { body: { username: 'brutetest', password: brute.data.initialPassword } })
+  check('连续失败 5 次后锁定（正确口令也暂拒 + 告警）', brute.ok && bruteLocked.status === 401 && JSON.stringify(bruteLocked.error).includes('锁定'))
+
+  const lockAlerts = await api('GET', '/api/audit/alerts', { token: admin })
+  check('锁定触发已入告警中心（暴力破解可观测）', lockAlerts.ok && JSON.stringify(lockAlerts.data.alerts).includes('登录失败锁定'))
+
+  const scopeBad = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, redirectUri: 'https://crm.partner.example/cb', state: 'st-scope', username: 'admin', password: 'Ybk@2026', scope: 'openid profile billing:admin' } })
+  check('OIDC 白名单外 scope 申请被拒', scopeBad.status === 401 && JSON.stringify(scopeBad.json).includes('scope'))
+
+  const pkceVerifier = 'selftest-pkce-verifier-43-chars-aaaaaaaaaaaaaa'
+  const pkceChallenge = createHash('sha256').update(pkceVerifier).digest('base64url')
+  const pkceAuth = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, redirectUri: 'https://crm.partner.example/cb', state: 'st-pkce', username: 'admin', password: 'Ybk@2026', code_challenge: pkceChallenge, code_challenge_method: 'S256' } })
+  const pkceNoVerifier = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: pkceAuth.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret } })
+  check('PKCE 授权码缺少 code_verifier 被拒', pkceAuth.status === 200 && pkceNoVerifier.status === 401 && JSON.stringify(pkceNoVerifier.json).includes('code_verifier'))
+
+  const pkceAuth2 = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, redirectUri: 'https://crm.partner.example/cb', state: 'st-pkce2', username: 'admin', password: 'Ybk@2026', code_challenge: pkceChallenge, code_challenge_method: 'S256' } })
+  const pkceOk = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: pkceAuth2.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret, code_verifier: pkceVerifier } })
+  check('PKCE S256 正确 verifier 换牌成功', pkceOk.status === 200 && pkceOk.json.access_token.split('.').length === 3)
+
+  // ================================================================ 资产运营（企业 AI 资产台账 / 健康巡检 / 成本报表）
+  section('资产运营（统一台账 / 健康巡检 / 成本报表）')
+  const assetsInv = await api('GET', '/api/assets/inventory', { token: admin })
+  check('资产台账（五类资产统一盘点）', assetsInv.ok && assetsInv.data.total > 0
+    && ['mcp', 'agent', 'app', 'skill', 'model'].every((t) => assetsInv.data.items.some((i) => i.type === t)))
+  const assetsReport = await api('GET', '/api/assets/report?days=30', { token: admin })
+  check('资产成本报表（Top 资产 / 主体分摊 / 日趋势）', assetsReport.ok && assetsReport.data.topResources.length > 0
+    && assetsReport.data.byPrincipal.length > 0 && assetsReport.data.byDay.length > 0
+    && assetsReport.data.totals.count > 0)
+  const assetsHealth = await api('POST', '/api/assets/healthcheck', { token: admin })
+  check('资产健康巡检（批量探活并留审计）', assetsHealth.ok && assetsHealth.data.checked > 0 && Array.isArray(assetsHealth.data.items))
+  const assetsTyped = await api('GET', '/api/assets/inventory?type=mcp&days=7', { token: admin })
+  check('台账筛选（类型 + 窗口）', assetsTyped.ok && assetsTyped.data.items.every((i) => i.type === 'mcp'))
 
   // ================================================================ Skill 市场
   section('Skill 市场流水线')

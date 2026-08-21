@@ -72,18 +72,32 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'iam_user_create',
-    description: '创建账号（默认密码 Ybk@2026，需激活后使用）。',
+    description: '创建账号。未提供 password 时生成随机初始口令，仅在返回值 initialPassword 中出现一次，请安全传达给本人。',
     parameters: {
       username: { type: 'string', required: true, description: '登录名（字母数字）' },
       displayName: { type: 'string', required: true, description: '姓名' },
       orgId: { type: 'string', required: true, description: '所属组织 ID' },
       title: { type: 'string', description: '职位' },
       roleIds: { type: 'array', items: { type: 'string' }, description: '角色 ID 列表' },
+      password: { type: 'string', description: '初始口令（缺省则随机生成，仅返回一次）' },
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args) {
-      const user = ctx.iam.createUser({ ...args, roleIds: args.roleIds })
-      return { id: user.id, username: user.username, status: user.status }
+      const { user, initialPassword } = ctx.iam.createUser({ ...args, roleIds: args.roleIds })
+      return { id: user.id, username: user.username, status: user.status, ...(initialPassword ? { initialPassword } : {}) }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'iam_user_reset_password',
+    description: '重置账号为随机初始口令（仅返回一次；请第一时间传达给本人）。',
+    parameters: {
+      userId: { type: 'string', required: true, description: '账号 ID' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const { user, initialPassword } = ctx.iam.resetPassword(args.userId)
+      return { id: user.id, username: user.username, initialPassword }
     },
   }))
 

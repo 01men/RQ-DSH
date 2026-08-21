@@ -103,6 +103,7 @@ function buildStaticItems(q) {
     { title: 'Agent 本体', hash: '#/agents', icon: 'bot', perm: 'agent.read' },
     { title: 'AI 应用', hash: '#/apps', icon: 'app', perm: 'app.read' },
     { title: 'MCP 服务', hash: '#/mcp', icon: 'plug', perm: 'mcp.service.read' },
+    { title: '资产运营（台账/巡检/成本）', hash: '#/assets', icon: 'layers', perm: 'usage.read' },
     { title: '审批中心', hash: '#/approvals', icon: 'checkSquare', perm: 'approval.read' },
     { title: '审计与告警', hash: '#/audit', icon: 'scroll', perm: 'audit.read' },
     { title: '组织与账号', hash: '#/iam', icon: 'users', perm: 'iam.user.read' },

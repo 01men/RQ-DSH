@@ -51,14 +51,16 @@ const PLUGINS = [
     api: [
       'GET/POST /api/iam/orgs · GET /api/iam/orgs/tree · PATCH/DELETE /api/iam/orgs/:id',
       'GET/POST /api/iam/users · PATCH /api/iam/users/:id · POST /api/iam/users/import',
-      'POST /api/iam/users/:id/activate|freeze|unfreeze|deactivate',
+      'POST /api/iam/users/:id/activate|freeze|unfreeze|deactivate|reset-password',
       'POST/DELETE /api/iam/users/:id/bindings[/:provider]',
       'GET /api/iam/roles · GET /api/iam/permissions · POST/PATCH /api/iam/roles/:id',
       'GET/POST/PATCH/DELETE /api/iam/groups',
       'GET/PUT /api/iam/connectors/:provider · POST .../test · POST .../sync',
       'GET /api/iam/conflicts · POST /api/iam/conflicts/:id/resolve',
+      '# v1.1（融合 auth-identity）：IdentityProviderAdapter + 身份链接事实源',
+      'identityLinks 集合（provider+providerUserId 引擎级唯一）；bindThirdParty 走链接层',
     ],
-    tools: ['iam_org_tree', 'iam_org_create', 'iam_user_list', 'iam_user_create', 'iam_user_freeze', 'iam_role_list', 'iam_sync_run', 'iam_conflict_list'],
+    tools: ['iam_org_tree', 'iam_org_create', 'iam_user_list', 'iam_user_create', 'iam_user_reset_password', 'iam_user_freeze', 'iam_role_list', 'iam_sync_run', 'iam_conflict_list'],
     ui: {
       routes: ['#/iam?tab=members', '#/iam?tab=roles', '#/iam?tab=groups', '#/iam?tab=connectors', '#/iam?tab=conflicts'],
       menus: [{ group: '组织', items: ['组织与账号', '角色权限', '三方集成'] }],
@@ -177,11 +179,12 @@ const PLUGINS = [
     api: [
       'POST /api/tools/execute（工具桥：与 dsh ToolRuntime 同一契约）',
       'GET /api/platform/info（插件树/工具目录/集合） · GET /api/overview（工作台聚合）',
+      'GET /api/assets/inventory（资产台账） · POST /api/assets/healthcheck（健康巡检） · GET /api/assets/report（成本报表）',
       '静态托管 public/ SPA（飞书级控制台）',
     ],
     ui: {
-      routes: ['#/dashboard', '#/platform', '（业务页面由各插件 ui.yaml 声明）'],
-      menus: [{ group: '总览', items: ['工作台'] }, { group: '平台', items: ['插件与工具'] }],
+      routes: ['#/dashboard', '#/assets', '#/platform', '（业务页面由各插件 ui.yaml 声明）'],
+      menus: [{ group: '总览', items: ['工作台'] }, { group: '治理与运营', items: ['资产运营'] }, { group: '平台', items: ['插件与工具'] }],
     },
   },
 ]

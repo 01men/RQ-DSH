@@ -98,16 +98,58 @@ export interface VerifiedPrincipal {
 /** 令牌生命周期基线（auth-identity docs/06）：access 30min + refresh 7d 轮转。 */
 const ACCESS_TTL_MS = 30 * 60_000
 const REFRESH_TTL_MS = 7 * 24 * 3600_000
+/** 旧签名密钥的验签宽限期：轮换后旧令牌在窗口内仍可验证，宽限期后自然失效（评审 S2）。 */
+const SECRET_GRACE_MS = 24 * 3600_000
+
+/** 登录失败锁定策略（评审 S3）：窗口内连续失败达阈值即锁定，时长逐次升级。 */
+const LOGIN_MAX_FAILS = 5
+const LOGIN_WINDOW_MS = 15 * 60_000
+const LOGIN_BASE_LOCK_MS = 15 * 60_000
+const LOGIN_MAX_LOCK_MS = 24 * 3600_000
+
+/** 登录尝试计数（持久化：重启不清零，暴力破解者无法借重启绕过锁定）。 */
+export interface LoginAttemptRecord extends RecordBase {
+  key: string
+  fails: number
+  /** 窗口起点（ISO）：窗口滑出后计数自然衰减。 */
+  windowStart: string
+  lockCount: number
+  lockedUntil?: string
+}
 
 export class AuthnService extends Service {
   static readonly provide = 'authn'
 
   private signingSecret: string
-  private revocations = new Set<string>()
+  /** 已退役但仍在宽限期内的签名密钥（验签兼容旧令牌）。 */
+  private retiredSecrets: Array<{ secret: string; retiredAt: number }> = []
+  private refreshIndex = new Map<string, string>()
+  private cleanupTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(ctx: Context) {
     super(ctx, 'authn')
+    // 认证数据用 durable 集合：吊销/锁定即时落盘（fsync），返回 200 后被杀不丢失
+    this.ctx.storage.collection<TokenRecord>('authn:tokens', { durability: 'durable' })
+    this.ctx.storage.collection<LoginAttemptRecord>('authn:loginAttempts', { durability: 'durable' })
+    this.ctx.storage.collection<PrincipalRecord>('authn:principals', { durability: 'durable' })
     this.signingSecret = this.loadOrCreateSecret()
+    this.loadRetiredSecrets()
+    // refresh 哈希索引：替代全表扫描（评审 M2）
+    for (const token of this.tokens().all()) {
+      if (token.kind === 'refresh' && token.refreshHash) this.refreshIndex.set(token.refreshHash, token.id)
+    }
+    this.tokens().onChange((change) => {
+      const hash = change.record.refreshHash
+      if (!hash) return
+      if (change.kind === 'remove') this.refreshIndex.delete(hash)
+      else this.refreshIndex.set(hash, change.record.id)
+    })
+    // 过期令牌清理（评审 M2：撤销/过期记录不无限增长）：启动即清 + 每日巡检
+    this.cleanupExpiredTokens()
+    this.cleanupTimer = setInterval(() => this.cleanupExpiredTokens(), 24 * 3600_000)
+    ctx.effect(() => {
+      if (this.cleanupTimer) clearInterval(this.cleanupTimer)
+    })
     // 事件联动：账号冻结 → 吊销全部令牌；Agent 下线 → 吊销机器凭证
     ctx.platformBus.on(PlatformEvents.UserFrozen, (payload) => {
       const { userId, reason } = payload as { userId: string; reason: string }
@@ -177,8 +219,9 @@ export class AuthnService extends Service {
   /** 刷新会话：校验 refresh 哈希 → 重放检测（已轮转的 refresh 再现 → 吊销整链）。 */
   refreshSession(refreshToken: string): { token: string; refreshToken: string; sid: string } {
     const hash = sha256Hex(refreshToken)
-    const record = this.tokens().findOne((item) => item.kind === 'refresh' && item.refreshHash === hash)
-    if (!record) throw new Error('refresh token 无效')
+    const recordId = this.refreshIndex.get(hash)
+    const record = recordId ? this.tokens().get(recordId) : undefined
+    if (!record || record.kind !== 'refresh') throw new Error('refresh token 无效')
     if (record.revokedAt) throw new Error('refresh token 已吊销：' + (record.revokedReason ?? ''))
     if (new Date(record.expiresAt).getTime() < Date.now()) throw new Error('refresh token 已过期，请重新登录')
     if (record.rotatedAt) {
@@ -275,7 +318,16 @@ export class AuthnService extends Service {
   /** 待绑定票据 → 绑定已有平台账号（校验密码）→ 建立身份链接并登录。 */
   ssoBindExisting(pendingTicket: string, username: string, password: string): { session: { token: string; refreshToken: string; access: TokenRecord; sid: string }; userId: string } {
     const ticket = this.peekTicket(pendingTicket)
-    const user = this.ctx.iam.verifyPassword(username, password)
+    const throttleKey = `sso-bind:${username}`
+    this.assertNotLocked(throttleKey)
+    let user
+    try {
+      user = this.ctx.iam.verifyPassword(username, password)
+    } catch (error) {
+      this.recordLoginFailure(throttleKey)
+      throw error
+    }
+    this.recordLoginSuccess(throttleKey)
     this.ctx.iam.linkIdentity(user.id, {
       provider: ticket.provider as 'dingtalk',
       providerUserId: ticket.profile['providerUserId'] ?? '',
@@ -296,7 +348,7 @@ export class AuthnService extends Service {
     const defaultOrg = this.ctx.iam.orgs().all()[0]
     if (!defaultOrg) throw new Error('平台尚未初始化组织，无法注册')
     const username = ticket.provider + '_' + (ticket.profile['providerUserId'] ?? '')
-    const user = this.ctx.iam.createUser({
+    const { user } = this.ctx.iam.createUser({
       username,
       displayName: ticket.profile['name'] ?? username,
       orgId: defaultOrg.id,
@@ -345,22 +397,65 @@ export class AuthnService extends Service {
       const secret = generateSecret('sign')
       writeFileSync(file, secret, { encoding: 'utf8', mode: 0o600 })
       return secret
-    } catch {
+    } catch (error) {
+      // 降级为进程内密钥必须显式告警（重启即令牌全部失效，不可静默）
+      console.error('[authn] 签名密钥读取/落盘失败，降级为进程内密钥（重启后所有令牌失效）', error)
       return generateSecret('sign')
     }
   }
 
-  /** 轮换签名密钥：现有令牌在宽限期后失效（演示实现为立即失效并留痕）。 */
-  rotateSigningSecret(): void {
+  private loadRetiredSecrets(): void {
+    try {
+      const file = join(this.ctx.storage.dataDirPath, 'authn-signing-secret-history.json')
+      if (!existsSync(file)) return
+      const stored = JSON.parse(readFileSync(file, 'utf8')) as Array<{ secret: string; retiredAt: number }>
+      const cutoff = Date.now() - SECRET_GRACE_MS
+      this.retiredSecrets = stored.filter((item) => item.retiredAt > cutoff)
+    } catch { /* 历史文件缺失/损坏：视为无宽限密钥 */ }
+  }
+
+  private saveRetiredSecrets(): void {
+    try {
+      const file = join(this.ctx.storage.dataDirPath, 'authn-signing-secret-history.json')
+      writeFileSync(file, JSON.stringify(this.retiredSecrets, null, 2), 'utf8')
+    } catch (error) {
+      console.error('[authn] 退役密钥历史落盘失败（仅影响轮换宽限）', error)
+    }
+  }
+
+  /**
+   * 轮换签名密钥（评审 S2 修复）：旧密钥进入宽限期（默认 24h）而非立即作废——
+   * 宽限期内旧令牌仍可通过验签（在途请求不掉线），宽限期后自然失效；
+   * 会话可随时用 refresh token 换取新密钥签发的访问令牌，全局无感轮换。
+   */
+  rotateSigningSecret(): { graceMs: number } {
+    this.retiredSecrets = [
+      ...this.retiredSecrets.filter((item) => Date.now() - item.retiredAt < SECRET_GRACE_MS),
+      { secret: this.signingSecret, retiredAt: Date.now() },
+    ]
     this.signingSecret = generateSecret('sign')
     const file = join(this.ctx.storage.dataDirPath, 'authn-signing-secret')
     writeFileSync(file, this.signingSecret, 'utf8')
+    this.saveRetiredSecrets()
+    return { graceMs: SECRET_GRACE_MS }
+  }
+
+  /** 校验签名：先当前密钥，再宽限期内的退役密钥（轮换在途兼容）。 */
+  private signatureMatches(body: string, signature: string): boolean {
+    const candidates = [this.signingSecret, ...this.retiredSecrets.filter((item) => Date.now() - item.retiredAt < SECRET_GRACE_MS).map((item) => item.secret)]
+    return candidates.some((secret) => createHmac('sha256', secret).update(body).digest('base64url') === signature)
+  }
+
+  /** 清理过期/吊销令牌（评审 M2）：过期 7 天后物理删除，撤销状态不再无限累积。 */
+  cleanupExpiredTokens(): number {
+    const cutoff = Date.now() - 7 * 24 * 3600_000
+    let removed = 0
     for (const token of this.tokens().all()) {
-      if (!token.revokedAt) {
-        this.revocations.add(token.jti)
-        this.tokens().update(token.id, { revokedAt: new Date().toISOString(), revokedReason: '签名密钥轮换' })
+      if (new Date(token.expiresAt).getTime() < cutoff) {
+        if (this.tokens().remove(token.id)) removed++
       }
     }
+    return removed
   }
 
   // -- Principal ----------------------------------------------------------
@@ -419,8 +514,71 @@ export class AuthnService extends Service {
 
   // -- 登录 ---------------------------------------------------------------
 
+  /** 登录尝试计数集合（durable：重启不清零）。 */
+  loginAttempts(): Collection<LoginAttemptRecord> {
+    const collection = this.ctx.storage.collection<LoginAttemptRecord>('authn:loginAttempts')
+    collection.uniqueOn('login_attempt_key', (item) => item.key)
+    return collection
+  }
+
+  /** 锁定校验：命中锁定窗口直接拒绝（评审 S3：暴力破解面收敛；OIDC 授权/换牌端点复用）。 */
+  assertNotLocked(key: string): void {
+    const record = this.loginAttempts().findOne((item) => item.key === key)
+    if (!record?.lockedUntil) return
+    const remainMs = new Date(record.lockedUntil).getTime() - Date.now()
+    if (remainMs > 0) {
+      const minutes = Math.ceil(remainMs / 60_000)
+      throw new Error(`失败次数过多已锁定：请约 ${minutes} 分钟后重试（或联系管理员重置）`)
+    }
+  }
+
+  recordLoginFailure(key: string): void {
+    const collection = this.loginAttempts()
+    const now = Date.now()
+    const existing = collection.findOne((item) => item.key === key)
+    if (!existing) {
+      collection.insert({ id: newId('lga'), key, fails: 1, windowStart: new Date().toISOString(), lockCount: 0 })
+      return
+    }
+    // 窗口滑出后重新计数
+    const inWindow = now - new Date(existing.windowStart).getTime() < LOGIN_WINDOW_MS
+    const fails = inWindow ? existing.fails + 1 : 1
+    const patch: Partial<LoginAttemptRecord> = {
+      fails,
+      ...(inWindow ? {} : { windowStart: new Date().toISOString() }),
+    }
+    if (fails >= LOGIN_MAX_FAILS) {
+      const lockCount = existing.lockCount + 1
+      const lockMs = Math.min(LOGIN_BASE_LOCK_MS * 2 ** (lockCount - 1), LOGIN_MAX_LOCK_MS)
+      patch.lockCount = lockCount
+      patch.lockedUntil = new Date(now + lockMs).toISOString()
+      patch.fails = 0
+      this.ctx.platformBus.emit(PlatformEvents.AlertFired, {
+        id: newId('alt'), severity: 'warning', title: '登录失败锁定触发',
+        message: `主体 ${key} 在 ${LOGIN_WINDOW_MS / 60_000} 分钟内连续失败 ${LOGIN_MAX_FAILS} 次，锁定 ${Math.round(lockMs / 60_000)} 分钟（暴力破解防护）`,
+        resourceType: 'authn', resourceId: key,
+      })
+    }
+    collection.update(existing.id, patch)
+  }
+
+  recordLoginSuccess(key: string): void {
+    const collection = this.loginAttempts()
+    const existing = collection.findOne((item) => item.key === key)
+    if (existing) collection.remove(existing.id)
+  }
+
   login(username: string, password: string): { token: string; refreshToken: string; sid: string; record: TokenRecord; principal: PrincipalRecord; userId: string } {
-    const user = this.ctx.iam.verifyPassword(username, password)
+    const throttleKey = `login:${username}`
+    this.assertNotLocked(throttleKey)
+    let user
+    try {
+      user = this.ctx.iam.verifyPassword(username, password)
+    } catch (error) {
+      this.recordLoginFailure(throttleKey)
+      throw error
+    }
+    this.recordLoginSuccess(throttleKey)
     const principal = this.ensureHumanPrincipal(user.id, user.displayName)
     const session = this.issueSessionPair(principal.id, { issuedBy: `password:${username}` })
     this.ctx.iam.markLogin(user.id)
@@ -429,10 +587,14 @@ export class AuthnService extends Service {
   }
 
   clientCredentialsLogin(clientId: string, clientSecret: string): { token: string; record: TokenRecord; principal: PrincipalRecord } {
+    const throttleKey = `cc:${clientId}`
+    this.assertNotLocked(throttleKey)
     const principal = this.principals().findOne((item) => item.clientId === clientId)
     if (!principal || principal.clientSecretHash !== sha256Hex(clientSecret)) {
+      this.recordLoginFailure(throttleKey)
       throw new Error('client_id 或 client_secret 错误')
     }
+    this.recordLoginSuccess(throttleKey)
     if (principal.status !== 'active') throw new Error('机器身份已禁用')
     const { token, record } = this.issueToken(principal.id, {
       kind: 'machine',
@@ -526,16 +688,15 @@ export class AuthnService extends Service {
   verify(tokenString: string, options: { audience?: string } = {}): VerifiedPrincipal {
     const parts = tokenString.split('.')
     if (parts.length !== 3 || parts[0] !== 'dst1') throw new Error('令牌格式不合法')
-    const expected = createHmac('sha256', this.signingSecret).update(parts[1]!).digest('base64url')
-    if (expected !== parts[2]) throw new Error('令牌签名校验失败')
+    if (!this.signatureMatches(parts[1]!, parts[2]!)) throw new Error('令牌签名校验失败')
     let payload: any
     try {
       payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8'))
     } catch {
       throw new Error('令牌载荷解析失败')
     }
+    if (payload.iss !== 'dsh-ops-authn') throw new Error('令牌签发方（iss）不匹配')
     if (payload.exp * 1000 < Date.now()) throw new Error('令牌已过期')
-    if (this.revocations.has(payload.jti)) throw new Error('令牌已被吊销')
     if (options.audience !== undefined) {
       if (payload.aud === undefined) throw new Error('令牌未绑定受众（aud），目标服务要求受众校验')
       if (payload.aud !== options.audience) throw new Error(`令牌受众不匹配：期望 ${options.audience}，实际 ${payload.aud}`)
@@ -561,7 +722,6 @@ export class AuthnService extends Service {
     const record = this.tokens().get(jti)
     if (!record) throw new Error(`令牌不存在：${jti}`)
     if (record.revokedAt) return record
-    this.revocations.add(jti)
     const updated = this.tokens().update(record.id, {
       revokedAt: new Date().toISOString(),
       revokedReason: reason,

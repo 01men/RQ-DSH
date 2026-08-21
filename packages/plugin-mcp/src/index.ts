@@ -237,6 +237,8 @@ export class McpService extends Service {
     const service = this.requireService(id)
     const target = service.versions.find((item) => item.version === targetVersion)
     if (!target) throw new Error(`目标版本不存在：${targetVersion}`)
+    if (target.status === 'current') throw new Error(`目标版本 ${targetVersion} 即当前版本，无需回滚`)
+    if (target.status === 'rolled-back') throw new Error(`目标版本 ${targetVersion} 已被回滚过，不允许作为回滚目标（版本不可变原则）`)
     const updated = this.services().update(id, {
       currentVersion: targetVersion,
       versions: service.versions.map((item) => ({
@@ -309,6 +311,31 @@ export class McpService extends Service {
         this.ctx.logger('mcp').warn('探活失败', service.id, error)
       }
     }
+  }
+
+  /** 业务失败计入熔断：真实调用失败与探活失败共用连续失败计数（连续 3 次开熔断）。 */
+  private noteBusinessFailure(service: McpServiceRecord, reason: string): void {
+    const fails = service.health.consecutiveFails + 1
+    const breakerOpen = fails >= 3
+    this.services().update(service.id, {
+      health: { ...service.health, lastProbeAt: now(), status: breakerOpen ? 'down' : 'degraded', consecutiveFails: fails, breakerOpen },
+      ...(breakerOpen && service.status !== 'unhealthy' ? { status: 'unhealthy' } : {}),
+    })
+    if (breakerOpen && service.status !== 'unhealthy') {
+      this.ctx.platformBus.emit(PlatformEvents.McpUnhealthy, {
+        serviceId: service.id, name: service.name, consecutiveFails: fails, latencyMs: 0,
+        reason: `业务调用连续失败 ${fails} 次：${reason}`,
+      })
+    }
+  }
+
+  /** 业务成功即半闭合：清零失败计数、解除熔断（下次探活仍会复核）。 */
+  private noteBusinessSuccess(service: McpServiceRecord): void {
+    if (service.health.consecutiveFails === 0 && !service.health.breakerOpen) return
+    this.services().update(service.id, {
+      health: { ...service.health, status: 'healthy', consecutiveFails: 0, breakerOpen: false },
+      ...(service.status === 'unhealthy' ? { status: service.grayPercent >= 100 ? 'online' : 'gray' } : {}),
+    })
   }
 
   async healthCheck(id: string): Promise<{ status: string; latencyMs: number }> {
@@ -448,22 +475,22 @@ export class McpService extends Service {
       ? (service.versions.find((item) => item.status === 'previous')?.version ?? service.currentVersion)
       : service.currentVersion
 
-    // 执行传输层：real = 真实 HTTP JSON-RPC；demo = 确定性模拟（显式降级）。
+    // 执行传输层：real = 真实 HTTP JSON-RPC；demo = 确定性模拟（显式降级，恒成功、结果可复现）。
     // 存量演示数据（无 exec 字段）按 demo 兜底——新建服务缺省一律 real。
     let tokens = 0
     let result: unknown
     if (service.exec !== 'real') {
-      await sleep(simulateLatency(service))
-      if (Math.random() >= service.stability) {
-        return fail('error', 'MCP 服务执行超时/内部错误（demo 传输层）')
-      }
+      await sleep(simulateLatency(service, toolName))
       tokens = 200 + (Number.parseInt(sha256Hex(JSON.stringify(args)).slice(0, 6), 16) % 1800)
       result = mockToolResult(service, toolName, args)
     } else {
       const transportResult = await this.realTransport(service, toolName, args)
       if (!transportResult.ok) {
+        // 业务失败计入熔断（评审修复：熔断不能只依赖 30s 探活，真实调用失败同样累计）
+        this.noteBusinessFailure(service, transportResult.error ?? 'MCP 服务调用失败')
         return fail('error', transportResult.error ?? 'MCP 服务调用失败')
       }
+      this.noteBusinessSuccess(service)
       result = transportResult.result
       tokens = transportResult.tokens
     }
@@ -684,13 +711,12 @@ const REAL_TRANSPORT_TIMEOUT_MS = 10_000
 const REAL_PROBE_TIMEOUT_MS = 5_000
 
 function probeLatency(service: McpServiceRecord): number {
-  const seed = Number.parseInt(sha256Hex(`${service.id}:${Math.floor(Date.now() / 30_000)}`).slice(0, 8), 16) % 1000
-  if (seed > service.stability * 1000) return -1
-  return 40 + (seed % 400)
+  // demo 探活确定性健康：失败/降级路径由 real 探活（真实 HTTP）呈现，不伪造波动。
+  return 40 + (Number.parseInt(sha256Hex(service.id).slice(0, 4), 16) % 360)
 }
 
-function simulateLatency(service: McpServiceRecord): number {
-  return 30 + Math.floor(Math.random() * 220)
+function simulateLatency(service: McpServiceRecord, tool: string): number {
+  return 30 + (Number.parseInt(sha256Hex(`${service.slug}:${tool}`).slice(0, 4), 16) % 220)
 }
 
 function mockToolResult(service: McpServiceRecord, tool: string, args: Record<string, unknown>): unknown {

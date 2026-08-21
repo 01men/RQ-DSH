@@ -37,4 +37,26 @@ export function apply(ctx: Context) {
       return ctx.usage.reconcile()
     },
   }))
+
+  t.register(defineTool({
+    name: 'usage_replay',
+    description: '重放时间窗内计量事件（消费水位保证幂等，重复重放不产生重复扣费/投影）。',
+    parameters: {
+      since: { type: 'string', required: true, description: '起始时间（ISO，含）' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      return ctx.usage.replay(args.since)
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'usage_deadletter_retry',
+    description: '重投 usage 消费死信：逐条重新分发，成功即移出死信队列。',
+    parameters: {},
+    output: { type: 'object', additionalProperties: true },
+    async execute() {
+      return ctx.usage.retryDeadLetters()
+    },
+  }))
 }

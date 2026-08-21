@@ -2,6 +2,7 @@
 plugin: dsh-plugin-console
 routes:
   - #/dashboard
+  - #/assets
   - #/platform
   - （业务页面由各插件 ui.yaml 声明）
 menus:
@@ -9,6 +10,10 @@ menus:
   group: 总览
   items:
     - 工作台
+-
+  group: 治理与运营
+  items:
+    - 资产运营
 -
   group: 平台
   items:

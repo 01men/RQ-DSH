@@ -618,6 +618,7 @@ export class IamService extends Service {
 
   // -- 账号 ---------------------------------------------------------------
 
+  /** 创建账号：未显式指定口令时生成随机初始口令（仅本次调用返回，须安全传达给本人）。 */
   createUser(input: {
     username: string
     displayName: string
@@ -628,14 +629,14 @@ export class IamService extends Service {
     roleIds?: string[]
     password?: string
     jobNumber?: string
-  }): UserRecord {
+  }): { user: UserRecord; initialPassword?: string } {
     if (!input.username?.trim()) throw new Error('用户名不能为空')
     if (!/^[a-z0-9_.-]+$/i.test(input.username)) throw new Error('用户名仅支持字母、数字与 _ . -')
     if (this.users().findOne((user) => user.username === input.username)) throw new Error(`用户名已存在：${input.username}`)
     if (!this.orgs().get(input.orgId)) throw new Error(`组织不存在：${input.orgId}`)
     const salt = generateSecret('salt').slice(0, 16)
-    const password = input.password ?? 'Ybk@2026'
-    return this.users().insert({
+    const password = input.password ?? generateSecret('init')
+    const user = this.users().insert({
       id: newId('usr'),
       username: input.username,
       displayName: input.displayName || input.username,
@@ -650,6 +651,17 @@ export class IamService extends Service {
       bindings: [],
       ...(input.jobNumber !== undefined ? { jobNumber: input.jobNumber } : {}),
     })
+    return input.password ? { user } : { user, initialPassword: password }
+  }
+
+  /** 重置为随机初始口令（仅本次返回；同时吊销令牌由冻结类事件或认证中心策略处理）。 */
+  resetPassword(id: string): { user: UserRecord; initialPassword: string } {
+    const user = this.requireUser(id)
+    if (user.status === 'deactivated') throw new Error('账号已注销，无法重置口令')
+    const password = generateSecret('init')
+    const salt = generateSecret('salt').slice(0, 16)
+    this.users().update(id, { passwordSalt: salt, passwordHash: hashPassword(password, salt) })
+    return { user: this.users().get(id)!, initialPassword: password }
   }
 
   importUsers(items: Array<{ username: string; displayName: string; orgId: string; title?: string; email?: string }>): { created: UserRecord[]; skipped: string[] } {
@@ -660,7 +672,7 @@ export class IamService extends Service {
         skipped.push(item.username)
         continue
       }
-      created.push(this.createUser(item))
+      created.push(this.createUser(item).user)
     }
     return { created, skipped }
   }
@@ -993,7 +1005,7 @@ export class IamService extends Service {
       const local = this.users().findOne((user) => user.bindings.some((binding) => binding.provider === provider && binding.unionId === remoteUser.remoteId))
         ?? this.users().findOne((user) => user.jobNumber === remoteUser.jobNumber)
       if (!local) {
-        const record = this.createUser({
+        const { user: record } = this.createUser({
           username: remoteUser.jobNumber.toLowerCase(),
           displayName: remoteUser.name,
           orgId,

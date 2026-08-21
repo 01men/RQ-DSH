@@ -58,13 +58,16 @@ function fail(message) {
 
 async function ensureToken() {
   if (token) return
-  const username = process.env.DSHCTL_USER ?? 'admin'
-  const password = process.env.DSHCTL_PASS ?? 'Ybk@2026'
+  const username = process.env.DSHCTL_USER
+  const password = process.env.DSHCTL_PASS
+  if (!username || !password) {
+    fail('未提供凭据：请通过 DSHCTL_USER / DSHCTL_PASS 指定账号口令，或 DSHCTL_TOKEN 直接携带令牌')
+  }
   try {
     const data = await call('POST', '/api/auth/login', { username, password })
     token = data.token
   } catch {
-    fail('自动登录失败：请通过 DSHCTL_USER / DSHCTL_PASS 指定账号，或 DSHCTL_TOKEN 直接携带令牌')
+    fail('自动登录失败：请检查 DSHCTL_USER / DSHCTL_PASS 是否正确，或改用 DSHCTL_TOKEN')
   }
 }
 

@@ -40,6 +40,7 @@ const PUBLIC_PATHS = new Set([
   '/api/auth/sso/register',
   '/api/auth/refresh',
   '/api/auth/client-credentials',
+  '/api/auth/providers',
   '/api/health',
   '/api/market/developers/register',
   '/api/market/developers/login',
@@ -124,6 +125,14 @@ export function apply(ctx: Context) {
   // -- 健康 ---------------------------------------------------------------
   http.register('GET', '/api/health', (exchange) => {
     exchange.ok({ status: 'ok', time: new Date().toISOString() })
+  })
+
+  // -- 三方登录可用性（公开：登录页按配置显隐三方登录入口） ----------------------
+  http.register('GET', '/api/auth/providers', (exchange) => {
+    const providers = ctx.iam.connectorConfigs().all()
+      .filter((config) => config.enabled && config.loginEnabled)
+      .map((config) => ({ provider: config.provider, corpId: config.corpId }))
+    exchange.ok({ providers })
   })
 
   // -- 认证 ---------------------------------------------------------------
@@ -277,7 +286,7 @@ export function apply(ctx: Context) {
     })
   })
 
-  http.register('POST', '/api/auth/logout', (exchange) => {
+  http.register('POST', '/api/auth/logout', async (exchange) => {
     const header = String(exchange.headers['authorization'] ?? '')
     const token = header.slice(7)
     const refreshToken = body<{ refreshToken?: string }>(exchange).refreshToken
@@ -292,6 +301,8 @@ export function apply(ctx: Context) {
     if (refreshToken) {
       try { ctx.authn.refreshSession(refreshToken) } catch { /* 已失效 */ }
     }
+    // 吊销强持久化后再响应：返回 200 后进程被杀，吊销状态不丢失（评审崩溃恢复实验）
+    await ctx.storage.flushDurable()
     exchange.ok()
   })
 
@@ -319,6 +330,158 @@ export function apply(ctx: Context) {
       recentEvents,
       costTrend,
       conflicts: ctx.iam.conflicts().find((item) => item.status === 'pending').length,
+    }
+  })
+
+  // -- 资产运营：统一台账 / 健康巡检 / 成本报表（企业 AI 资产运营管理） --------
+  guarded('GET', '/api/assets/inventory', 'usage.read', (exchange) => {
+    const days = Math.min(Math.max(Number(exchange.query.get('days') ?? 30) || 30, 1), 90)
+    const fromIso = new Date(Date.now() - days * 86_400_000).toISOString()
+    const usageByResource = new Map(ctx.usage.breakdown(fromIso).byResource.map((row) => [row.resource, row]))
+    const orgName = (orgId: string) => ctx.iam.orgs().get(orgId)?.name ?? orgId
+    const usageOf = (resource: string | undefined) => {
+      if (!resource) return { calls: 0, chargeCents: 0 }
+      const row = usageByResource.get(resource)
+      return { calls: row?.count ?? 0, chargeCents: row?.charge_cents ?? 0 }
+    }
+    const items = [
+      ...ctx.mcpRegistry.services().all().map((service) => ({
+        type: 'mcp' as const,
+        id: service.id,
+        name: service.name,
+        slug: service.slug,
+        status: service.status,
+        health: service.health.status,
+        exec: service.exec,
+        version: service.currentVersion,
+        org: orgName(service.orgId),
+        owner: service.owner,
+        updatedAt: service.updatedAt,
+        ...usageOf(`mcp:${service.slug}`),
+      })),
+      ...ctx.resourceCore.list('agent').map((agent) => ({
+        type: 'agent' as const,
+        id: agent.id,
+        name: agent.name,
+        slug: agent.slug,
+        status: agent.status,
+        health: agent.status === 'online' ? 'healthy' : 'unknown',
+        org: orgName(agent.orgId),
+        owner: agent.ownerId,
+        updatedAt: agent.updatedAt,
+        ...usageOf(undefined),
+      })),
+      ...ctx.resourceCore.list('app').map((app) => ({
+        type: 'app' as const,
+        id: app.id,
+        name: app.name,
+        slug: app.slug,
+        status: app.status,
+        health: app.status === 'online' ? 'healthy' : 'unknown',
+        org: orgName(app.orgId),
+        owner: app.ownerId,
+        updatedAt: app.updatedAt,
+        ...usageOf(`app:${app.slug}`),
+      })),
+      ...ctx.skillHub.skills().all().map((skill) => ({
+        type: 'skill' as const,
+        id: skill.id,
+        name: skill.name,
+        slug: skill.slug,
+        status: skill.status,
+        health: 'unknown',
+        org: orgName(skill.orgId),
+        owner: skill.authorName,
+        updatedAt: skill.updatedAt,
+        calls: skill.stats?.installs ?? 0,
+        chargeCents: 0,
+      })),
+      ...ctx.modelGateway.models().all().map((model) => ({
+        type: 'model' as const,
+        id: model.id,
+        name: model.displayName,
+        slug: model.slug,
+        status: model.status,
+        health: model.status === 'online' ? (model.endpoint ? 'healthy' : 'down') : 'unknown',
+        org: '平台自营',
+        owner: model.provider,
+        updatedAt: model.updatedAt,
+        ...usageOf(`model:${model.slug}`),
+      })),
+    ]
+    const type = exchange.query.get('type')
+    const status = exchange.query.get('status')
+    const q = exchange.query.get('q')
+    const filtered = items.filter((item) => {
+      if (type && item.type !== type) return false
+      if (status && item.status !== status) return false
+      if (q && !`${item.name}${item.slug}${item.org}${item.owner}`.toLowerCase().includes(q.toLowerCase())) return false
+      return true
+    }).sort((a, b) => b.chargeCents - a.chargeCents || a.name.localeCompare(b.name))
+    const byType: Record<string, { total: number; inService: number }> = {}
+    for (const item of items) {
+      const bucket = byType[item.type] ?? { total: 0, inService: 0 }
+      bucket.total++
+      if (['online', 'gray', 'published'].includes(item.status)) bucket.inService++
+      byType[item.type] = bucket
+    }
+    return {
+      days,
+      total: filtered.length,
+      summary: {
+        byType,
+        unhealthy: items.filter((item) => item.health === 'down' || item.health === 'degraded').length,
+        chargeCents30d: items.reduce((sum, item) => sum + item.chargeCents, 0),
+      },
+      items: filtered,
+    }
+  })
+
+  guarded('POST', '/api/assets/healthcheck', 'mcp.service.read', async (exchange) => {
+    const info = caller(exchange)
+    const checked: Array<{ type: string; id: string; name: string; status: string; latencyMs: number }> = []
+    for (const service of ctx.mcpRegistry.services().all()) {
+      if (!['online', 'gray', 'unhealthy'].includes(service.status)) continue
+      const result = await ctx.mcpRegistry.probeService(service.id)
+      checked.push({ type: 'mcp', id: service.id, name: service.name, status: result.status, latencyMs: result.latencyMs })
+    }
+    for (const entity of [...ctx.resourceCore.list('agent'), ...ctx.resourceCore.list('app')]) {
+      checked.push({ type: entity.type, id: entity.id, name: entity.name, status: entity.status, latencyMs: 0 })
+    }
+    for (const model of ctx.modelGateway.models().all()) {
+      checked.push({ type: 'model', id: model.id, name: model.displayName, status: model.status, latencyMs: 0 })
+    }
+    const abnormal = checked.filter((item) => item.status === 'down' || item.status === 'degraded' || item.status === 'unhealthy' || item.status === 'offline')
+    changeLog(exchange, 'assets.healthcheck', 'asset', 'batch', '健康巡检', `巡检 ${checked.length} 项，异常 ${abnormal.length} 项`)
+    return {
+      checkedAt: new Date().toISOString(),
+      checked: checked.length,
+      abnormal: abnormal.length,
+      items: checked,
+      abnormalItems: abnormal,
+    }
+  })
+
+  guarded('GET', '/api/assets/report', 'usage.read', (exchange) => {
+    const days = Math.min(Math.max(Number(exchange.query.get('days') ?? 30) || 30, 1), 90)
+    const fromIso = new Date(Date.now() - days * 86_400_000).toISOString()
+    const { byResource, byPrincipal, byDay } = ctx.usage.breakdown(fromIso)
+    const labelOfResource = (resource: string) => {
+      const [kind, key] = [resource.slice(0, resource.indexOf(':')), resource.slice(resource.indexOf(':') + 1)]
+      if (kind === 'mcp') return ctx.mcpRegistry.services().findOne((item) => item.slug === key)?.name ?? resource
+      if (kind === 'model') return ctx.modelGateway.models().findOne((item) => item.slug === key)?.displayName ?? resource
+      return resource
+    }
+    const labelOfPrincipal = (principal: string) => {
+      if (principal.startsWith('org:')) return ctx.iam.orgs().get(principal.slice(4))?.name ?? principal
+      return principal
+    }
+    return {
+      days,
+      totals: ctx.usage.totals({ from: fromIso }),
+      topResources: byResource.slice(0, 20).map((row) => ({ ...row, label: labelOfResource(row.resource) })),
+      byPrincipal: byPrincipal.map((row) => ({ ...row, label: labelOfPrincipal(row.principal) })),
+      byDay,
     }
   })
 
@@ -371,12 +534,18 @@ export function apply(ctx: Context) {
   })
 
   guarded('POST', '/api/iam/users', 'iam.user.write', (exchange) => {
-    const input = body<{ username: string; displayName: string; orgId: string; title?: string; email?: string; phone?: string; roleIds?: string[] }>(exchange)
-    const user = ctx.iam.createUser(input)
+    const input = body<{ username: string; displayName: string; orgId: string; title?: string; email?: string; phone?: string; roleIds?: string[]; password?: string }>(exchange)
+    const { user, initialPassword } = ctx.iam.createUser(input)
     if (input.roleIds?.length) ctx.iam.assignRoles(user.id, input.roleIds)
     ctx.iam.activateUser(user.id)
     changeLog(exchange, 'iam.user.create', 'user', user.id, user.displayName)
-    return decorateUser(ctx, ctx.iam.users().get(user.id)!)
+    return { ...decorateUser(ctx, ctx.iam.users().get(user.id)!), ...(initialPassword ? { initialPassword } : {}) }
+  })
+
+  guarded('POST', '/api/iam/users/:id/reset-password', 'iam.user.write', (exchange) => {
+    const { user, initialPassword } = ctx.iam.resetPassword(exchange.params['id']!)
+    changeLog(exchange, 'iam.user.reset_password', 'user', user.id, user.displayName, '重置为随机初始口令')
+    return { id: user.id, username: user.username, initialPassword }
   })
 
   guarded('POST', '/api/iam/users/import', 'iam.user.write', (exchange) => {
@@ -595,9 +764,9 @@ export function apply(ctx: Context) {
   })
 
   guarded('POST', '/api/authn/rotate-secret', 'authn.token.revoke', (exchange) => {
-    ctx.authn.rotateSigningSecret()
-    changeLog(exchange, 'authn.secret.rotate', 'platform', 'signing-secret', '', '签名密钥轮换，全部存量令牌失效')
-    return { rotated: true }
+    const result = ctx.authn.rotateSigningSecret()
+    changeLog(exchange, 'authn.secret.rotate', 'platform', 'signing-secret', '', `签名密钥轮换（旧密钥 ${result.graceMs / 3600_000}h 宽限期内仍可验签）`)
+    return { rotated: true, graceHours: result.graceMs / 3600_000 }
   })
 
   // OIDC 客户端登记（模式 B：外部应用以平台为 IdP）
@@ -1100,6 +1269,12 @@ export function apply(ctx: Context) {
     return ctx.usage.replay(from)
   })
 
+  guarded('POST', '/api/usage/dead-letters/retry', 'usage.admin', (exchange) => {
+    const result = ctx.usage.retryDeadLetters()
+    changeLog(exchange, 'usage.deadletter.retry', 'usage', 'dead-letters', '', `重投 ${result.retried} 条，剩余 ${result.remaining} 条`)
+    return result
+  })
+
   guarded('PUT', '/api/usage/capability-grants', 'usage.admin', (exchange) => {
     const input = body<{ principal: string; capabilities: string[]; source?: string }>(exchange)
     return ctx.usage.grantCapabilities(input.principal, input.capabilities, input.source ?? 'console')
@@ -1285,6 +1460,7 @@ export function apply(ctx: Context) {
     entries: ctx.billing.journal({
       ...(exchange.query.get('ownerType') ? { ownerType: exchange.query.get('ownerType')! } : {}),
       ...(exchange.query.get('ownerId') ? { ownerId: exchange.query.get('ownerId')! } : {}),
+      ...(exchange.query.get('tenantId') ? { tenantId: exchange.query.get('tenantId')! } : {}),
       ...(exchange.query.get('limit') ? { limit: Number(exchange.query.get('limit')) } : {}),
     }),
   }))

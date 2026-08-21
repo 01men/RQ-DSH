@@ -14,6 +14,7 @@ import { renderAgents } from './pages/agents.js'
 import { renderApps } from './pages/apps.js'
 import { renderAudit } from './pages/audit.js'
 import { renderApprovals } from './pages/approvals.js'
+import { renderAssets } from './pages/assets.js'
 import { renderPlatform } from './pages/platform.js'
 
 const NAV = [
@@ -27,6 +28,7 @@ const NAV = [
     { path: '#/mcp', label: 'MCP 服务', icon: 'plug', perm: 'mcp.service.read' },
   ] },
   { section: '治理与运营', items: [
+    { path: '#/assets', label: '资产运营', icon: 'layers', perm: 'usage.read' },
     { path: '#/approvals', label: '审批中心', icon: 'checkSquare', perm: 'approval.read', badge: 'approvals' },
     { path: '#/audit', label: '审计与告警', icon: 'scroll', perm: 'audit.read', badge: 'alerts' },
     { path: '#/authn', label: '认证与令牌', icon: 'key', perm: 'authn.principal.read' },
@@ -63,6 +65,7 @@ function navigate() {
     skills: renderSkills,
     agents: renderAgents,
     apps: renderApps,
+    assets: renderAssets,
     audit: renderAudit,
     approvals: renderApprovals,
     platform: renderPlatform,
