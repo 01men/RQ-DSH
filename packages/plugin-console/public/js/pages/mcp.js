@@ -309,7 +309,7 @@ function openGrayDialog(svc, drawer, ctx) {
 
 function openDeployWizard(ctx) {
   let step = 1
-  const state = {}
+  const state = { transport: 'http' }
   const modal = openModal({
     title: '接入 MCP 服务', wide: true,
     body: `
@@ -429,7 +429,7 @@ tools: []           # 部署后在「工具」页登记`
 
   function sourceCard(value, title, desc, ic) {
     return `
-      <div class="res-card" data-source="${value}" style="${state.source === value ? 'border-color:var(--brand-400);box-shadow:0 0 0 3px var(--brand-50)' : ''}">
+      <div class="res-card ${state.source === value ? 'selected' : ''}" data-source="${value}">
         <div class="res-card-top">
           <div class="res-icon" style="background:var(--brand-50);color:var(--brand-500)">${icon(ic, 20)}</div>
           <div style="font-weight:600">${title}</div>

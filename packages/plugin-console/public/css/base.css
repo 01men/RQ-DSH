@@ -497,6 +497,8 @@ textarea.form-control { height: auto; min-height: 88px; padding: 9px 12px; resiz
   display: flex; flex-direction: column; gap: 10px;
 }
 .res-card:hover { border-color: var(--brand-300); box-shadow: var(--shadow); transform: translateY(-2px); }
+.res-card.selected { border-color: var(--brand-400); box-shadow: 0 0 0 3px var(--brand-50); }
+.res-card.selected:hover { transform: none; }
 .res-card-top { display: flex; align-items: flex-start; gap: 12px; }
 .res-icon {
   width: 42px; height: 42px; border-radius: 10px; flex-shrink: 0;
