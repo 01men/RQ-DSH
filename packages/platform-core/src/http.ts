@@ -71,7 +71,7 @@ export class HttpServerService extends Service {
   constructor(ctx: Context, config: HttpServerConfig = {}) {
     super(ctx, 'httpServer')
     this.port = config.port ?? 7300
-    this.host = config.host ?? '127.0.0.1'
+    this.host = config.host ?? '0.0.0.0'
     ctx.effect(() => () => {
       void this.stop()
     })

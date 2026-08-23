@@ -23,7 +23,7 @@ await bootAll(ctx, { dataDir, port })
 
 const logger = ctx.logger('main')
 logger.info('企业 AI 资源统一管理平台已启动')
-logger.info(`控制台地址：http://127.0.0.1:${port}`)
+logger.info(`控制台地址：http://0.0.0.0:${port}（本机访问 http://127.0.0.1:${port}）`)
 
 process.on('SIGINT', () => {
   logger.info('收到 SIGINT，正在退出…')
