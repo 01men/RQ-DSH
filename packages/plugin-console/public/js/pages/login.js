@@ -121,7 +121,6 @@ export function renderLogin(app) {
       if (result.refreshToken) session.saveRefresh(result.refreshToken)
       toast(`欢迎回来，${result.user.displayName}`)
       location.hash = '#/dashboard'
-      window.dispatchEvent(new HashChangeEvent('hashchange'))
     } catch (error) {
       toast(error.message, 'error')
     } finally {
@@ -140,6 +139,7 @@ export function renderLogin(app) {
     btn.classList.add('btn-loading')
     try {
       const code = $('#login-ding-code').value.trim()
+      if (!code) return toast('请输入钉钉授权码（演示环境为工号，如 DD0002）', 'error')
       const auth = await api.post('/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr' })
       const result = await api.post('/api/auth/sso', { provider: 'dingtalk', code, state: auth.state })
       if (result.kind === 'pending') {
@@ -162,7 +162,6 @@ export function renderLogin(app) {
     if (result.refreshToken) session.saveRefresh(result.refreshToken)
     toast(`欢迎回来，${result.user.displayName}`)
     location.hash = '#/dashboard'
-    window.dispatchEvent(new HashChangeEvent('hashchange'))
   }
 
   app.querySelectorAll('#login-form-dingtalk .tab[data-ptab]').forEach((el) => {

@@ -207,6 +207,7 @@ export class ResourceCoreService extends Service {
     orgId: string
   }): ResourceEntity {
     const spec = this.requireSpec(type)
+    if (!input.name || !String(input.name).trim()) throw new Error(`${spec.label}名称不能为空`)
     const attrs: Record<string, unknown> = {}
     for (const field of spec.schema.fields) {
       const provided = input.attrs?.[field.key]

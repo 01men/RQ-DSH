@@ -177,8 +177,8 @@ export async function renderAudit(content, params, ctx) {
           <div class="form-hint">触发后推送渠道：钉钉机器人 / 邮件（演示环境写入告警中心）</div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
-      modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.body.querySelector('[data-ok]').onclick = async () => {
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
         try {
           await api.post('/api/audit/alert-rules', {

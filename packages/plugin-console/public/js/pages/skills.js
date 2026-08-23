@@ -221,8 +221,8 @@ async function openSkillDetail(id, ctx, refresh) {
         <div class="form-hint">安装后自动登记依赖关系，Agent 的「关联 Skill」属性同步回填。</div>`,
       foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>安装</button>',
     })
-    modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-    modal.body.querySelector('[data-ok]').onclick = async () => {
+    modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+    modal.el.querySelector('[data-ok]').onclick = async () => {
       try {
         await api.post(`/api/skills/${skill.id}/install`, { agentId: collectForm(modal.body).agentId, version: skill.currentVersion })
         toast('安装成功，依赖已登记'); modal.close(); drawer.close(); refresh?.()
@@ -242,13 +242,13 @@ async function openSkillDetail(id, ctx, refresh) {
         ${field('审批意见', textareaField('opinion', { placeholder: '请说明审批依据…' }), { required: true })}`,
       foot: '<button class="btn btn-danger-ghost" data-reject>驳回</button><button class="btn btn-primary" data-ok>通过</button>',
     })
-    modal.body.querySelector('[data-reject]').onclick = async () => {
+    modal.el.querySelector('[data-reject]').onclick = async () => {
       const opinion = collectForm(modal.body).opinion
       if (!opinion) return toast('请填写意见', 'error')
       await api.post(`/api/skills/${skill.id}/approve`, { decision: 'reject', level: needLevel, opinion })
       toast('已驳回'); modal.close(); drawer.close(); refresh?.()
     }
-    modal.body.querySelector('[data-ok]').onclick = async () => {
+    modal.el.querySelector('[data-ok]').onclick = async () => {
       const opinion = collectForm(modal.body).opinion
       if (!opinion) return toast('请填写意见', 'error')
       try {
@@ -296,8 +296,8 @@ function openSubmitModal(ctx, refresh) {
       ${field('SKILL.md 内容', textareaField('content', { placeholder: '# Skill 名称\n\n## 何时使用\n…\n\n## 操作步骤\n1. …', rows: 8 }), { required: true, hint: '静态扫描将检测破坏性命令、动态执行、密钥泄露等风险模式' })}`,
     foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>提交（进入扫描）</button>',
   })
-  modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-  modal.body.querySelector('[data-ok]').onclick = async (e) => {
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async (e) => {
     const btn = e.currentTarget
     btn.classList.add('btn-loading')
     try {

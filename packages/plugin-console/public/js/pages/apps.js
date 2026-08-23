@@ -293,8 +293,8 @@ function openAppCreate(schema, ctx) {
         </div>`,
       foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>注册应用</button>',
     })
-    modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-    modal.body.querySelector('[data-ok]').onclick = async () => {
+    modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+    modal.el.querySelector('[data-ok]').onclick = async () => {
       const data = collectForm(modal.body)
       const agentIds = [...modal.body.querySelectorAll('input[name=agentIds]:checked')].map((el) => el.value)
       try {

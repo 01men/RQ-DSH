@@ -76,8 +76,8 @@ export async function renderDashboard(content) {
       </div>
     </div>`
 
-  $('#dash-goto-agents').onclick = () => { location.hash = '#/agents' }
-  $('#dash-goto-approve').onclick = () => { location.hash = '#/approvals' }
+  $('#dash-goto-agents')?.addEventListener('click', () => { location.hash = '#/agents' })
+  $('#dash-goto-approve')?.addEventListener('click', () => { location.hash = '#/approvals' })
   $$('.stat-card[data-href]').forEach((card) => {
     card.onclick = () => { location.hash = card.dataset.href }
   })

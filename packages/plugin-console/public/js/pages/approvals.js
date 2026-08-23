@@ -1,7 +1,7 @@
 /** 审批中心：全平台 L4 高危操作汇聚（飞书审批式时间线 + IM 卡片语义）。 */
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
-import { h, $, $$, esc, toast, openDrawer, collectForm, field, textareaField, statusBadge, timeAgo, emptyState } from '../ui.js'
+import { h, $, $$, esc, toast, openDrawer, openModal, collectForm, field, textareaField, statusBadge, timeAgo, emptyState } from '../ui.js'
 
 export async function renderApprovals(content, params, ctx) {
   const data = await api.get('/api/approvals')
@@ -124,8 +124,8 @@ function openDecision(id, decision, ctx) {
       ${field('审批意见', textareaField('opinion', { placeholder: decision === 'approve' ? '如：已确认影响面，同意执行' : '请说明驳回原因…' }), { required: true })}`,
     foot: `<button class="btn btn-default" data-cancel>取消</button><button class="btn ${decision === 'approve' ? 'btn-primary' : 'btn-danger'}" data-ok>${decision === 'approve' ? '确认通过' : '确认驳回'}</button>`,
   })
-  modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-  modal.body.querySelector('[data-ok]').onclick = async (e) => {
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async (e) => {
     const btn = e.currentTarget
     const opinion = collectForm(modal.body).opinion
     if (!opinion) return toast('请填写审批意见', 'error')

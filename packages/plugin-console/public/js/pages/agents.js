@@ -158,7 +158,7 @@ async function openAgentDetail(id, ctx) {
         <div class="tab" data-tab="lifecycle">生命周期</div>
       </div>
       <div id="ag-tab-body"></div>`,
-    foot: footForStatus(agent, ctx, drawer),
+    foot: footForStatus(agent, ctx),
   })
 
   const tabBody = drawer.body.querySelector('#ag-tab-body')
@@ -236,8 +236,8 @@ token:    ${esc(result.token.slice(0, 64))}…</div>`,
           body: field('选择用户', selectField('userId', users.users.filter((u) => u.status === 'active').map((u) => ({ value: u.id, label: `${u.displayName}（${u.orgName}）` }))), { required: true }),
           foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>绑定</button>',
         })
-        modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-        modal.body.querySelector('[data-ok]').onclick = async () => {
+        modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+        modal.el.querySelector('[data-ok]').onclick = async () => {
           try {
             await api.post(`/api/agents/${agent.id}/bindings`, { userId: collectForm(modal.body).userId })
             toast('绑定成功（授权已留痕）'); modal.close(); drawer.close(); void openAgentDetail(id, ctx)
@@ -329,8 +329,8 @@ token:    ${esc(result.token.slice(0, 64))}…</div>`,
               body: field('试运行用户组', inputField('groups', { value: '灰度试点组', placeholder: '用户组名称' }), { required: true, hint: '试运行期间仅该用户组成员可用' }),
               foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>确认</button>',
             })
-            modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-            modal.body.querySelector('[data-ok]').onclick = async () => {
+            modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+            modal.el.querySelector('[data-ok]').onclick = async () => {
               const groupName = collectForm(modal.body).groups
               const groupsData = await api.get('/api/iam/groups')
               const group = groupsData.groups.find((g) => g.name === groupName)
@@ -348,7 +348,7 @@ token:    ${esc(result.token.slice(0, 64))}…</div>`,
   }
 }
 
-function footForStatus(agent, ctx, drawer) {
+function footForStatus(agent, ctx) {
   const buttons = agent.availableTransitions.map((t) => {
     const isL4 = t.action === 'online' || t.action === 'offline'
     return `<button class="btn ${isL4 ? 'btn-primary' : 'btn-default'}" data-action="${esc(t.action)}">${icon(t.action === 'online' ? 'play' : t.action === 'offline' ? 'alert' : 'chevronRight', 14)}${esc(t.label)}</button>`
@@ -367,6 +367,10 @@ function openAgentCreate(schema, ctx) {
     title: '注册 Agent', wide: true,
     body: `
       <div class="form-hint" style="margin-bottom:12px">渐进式表单：必填最小集即可创建草稿，其余可后续补全（上线前完成登记即可）。</div>
+      <div class="form-grid">
+        ${field('Agent 名称', inputField('name', { placeholder: '如：智能客服助手' }), { required: true })}
+        ${field('唯一标识', inputField('slug', { placeholder: '小写字母与中划线，留空自动生成' }))}
+      </div>
       ${[...groupsByField.entries()].map(([group, fields]) => `
         <div class="card-title mb-8" style="margin-top:6px">${esc(groupLabels[group] ?? group)}</div>
         <div class="form-grid">
@@ -375,8 +379,8 @@ function openAgentCreate(schema, ctx) {
       <div class="muted-box mt-8" style="display:flex;gap:8px">${icon('key', 15)}<span>注册成功后自动颁发机器身份凭证（Client Credentials），密钥仅展示一次。</span></div>`,
     foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>注册并颁发凭证</button>',
   })
-  modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-  modal.body.querySelector('[data-ok]').onclick = async () => {
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async () => {
     const data = collectForm(modal.body)
     const attrs = {}
     for (const [key, value] of Object.entries(data)) {

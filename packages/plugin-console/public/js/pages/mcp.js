@@ -283,8 +283,8 @@ function openGrayDialog(svc, drawer, ctx) {
     foot: `<button class="btn btn-default" data-dryrun>预演影响面</button><button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>发布</button>`,
   })
   const body = modal.body
-  body.querySelector('[data-cancel]').onclick = () => modal.close()
-  body.querySelector('[data-dryrun]').onclick = async () => {
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-dryrun]').onclick = async () => {
     try {
       const result = await api.post(`/api/mcp/services/${svc.id}/deploy`, { dryRun: true })
       const impact = result.impact?.length
@@ -292,10 +292,10 @@ function openGrayDialog(svc, drawer, ctx) {
         : '<li>无直接依赖方，可安全发布</li>'
       modal.close()
       openModal({ title: '影响面预演（dry-run）', body: `<div class="form-hint">以下资源可能受到本次发布影响：</div><ul style="padding-left:18px;line-height:2">${impact}</ul><div class="muted-box mt-14">dry-run 未执行任何变更。</div>`, foot: '<button class="btn btn-primary" data-ok>知道了</button>' })
-        .body.querySelector('[data-ok]').onclick = () => openGrayDialog(svc, drawer, ctx)
+        .el.querySelector('[data-ok]').onclick = () => openGrayDialog(svc, drawer, ctx)
     } catch (error) { toast(error.message, 'error') }
   }
-  body.querySelector('[data-ok]').onclick = async () => {
+  modal.el.querySelector('[data-ok]').onclick = async () => {
     const data = collectForm(body)
     try {
       await api.post(`/api/mcp/services/${svc.id}/deploy`, {
@@ -322,8 +322,8 @@ function openDeployWizard(ctx) {
       <button class="btn btn-primary" id="wiz-next">下一步</button>`,
   })
   const bodyEl = modal.body.querySelector('#wiz-body')
-  const prevBtn = modal.body.querySelector('#wiz-prev')
-  const nextBtn = modal.body.querySelector('#wiz-next')
+  const prevBtn = modal.el.querySelector('#wiz-prev')
+  const nextBtn = modal.el.querySelector('#wiz-next')
 
   const renderStep = () => {
     modal.body.querySelectorAll('#wiz-steps .wiz-step').forEach((el, index) => {
@@ -516,8 +516,8 @@ async function openPermGroups(ctx) {
           </div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
-      modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.body.querySelector('[data-ok]').onclick = async () => {
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
         const name = collectForm(modal.body).name
         const policies = {}
         modal.body.querySelectorAll('[data-service]:checked').forEach((el) => {
@@ -543,8 +543,8 @@ function openTryInvoke(svc, toolName, ctx) {
       ${field('参数（JSON）', textareaField('args', { value: '{\n  "query": "演示参数"\n}', rows: 5 }))}`,
     foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>调用</button>',
   })
-  modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-  modal.body.querySelector('[data-ok]').onclick = async (e) => {
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async (e) => {
     const btn = e.currentTarget
     btn.classList.add('btn-loading')
     try {
@@ -556,7 +556,7 @@ function openTryInvoke(svc, toolName, ctx) {
         title: result.ok ? '调用成功' : `调用失败（${result.status}）`,
         body: `<div class="code-block">${esc(JSON.stringify({ status: result.status, latencyMs: result.latencyMs, version: result.version, result: result.result ?? result.error }, null, 2))}</div>`,
         foot: '<button class="btn btn-primary" data-ok>关闭</button>',
-      }).body.querySelector('[data-ok]').onclick = () => { }
+      })
     } catch (error) {
       toast(error.message, 'error')
     } finally {

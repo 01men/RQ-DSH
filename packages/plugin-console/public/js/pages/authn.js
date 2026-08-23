@@ -123,8 +123,8 @@ export async function renderAuthn(content, params, ctx) {
         </div>`,
       foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>签发</button>',
     })
-    modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-    modal.body.querySelector('[data-ok]').onclick = async () => {
+    modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+    modal.el.querySelector('[data-ok]').onclick = async () => {
       const data = collectForm(modal.body)
       try {
         const result = await api.post('/api/authn/principals', { name: data.name, refType: data.refType, scopes: [data.scope] })

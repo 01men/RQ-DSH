@@ -136,8 +136,8 @@ export async function renderIam(content, params, ctx) {
             body: field('组织名称', inputField('name', { value: node.name }), { required: true }),
             foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
           })
-          modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-          modal.body.querySelector('[data-ok]').onclick = async () => {
+          modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+          modal.el.querySelector('[data-ok]').onclick = async () => {
             const data = collectForm(modal.body)
             if (!data.name) return toast('名称不能为空', 'error')
             await api.patch(`/api/iam/orgs/${node.id}`, { name: data.name })
@@ -209,8 +209,8 @@ export async function renderIam(content, params, ctx) {
           <div class="form-hint">创建后将生成随机初始口令（仅展示一次），账号状态为「正常」。</div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
-      modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.body.querySelector('[data-ok]').onclick = async () => {
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
         const data = collectForm(modal.body)
         try {
           const result = await api.post('/api/iam/users', data)
@@ -229,7 +229,7 @@ export async function renderIam(content, params, ctx) {
             pwModal.body.querySelector('#pw-copy').onclick = () => {
               void navigator.clipboard?.writeText(result.initialPassword).then(() => toast('已复制'))
             }
-            pwModal.body.querySelector('[data-cancel]').onclick = () => { pwModal.close(); ctx.rerender() }
+            pwModal.el.querySelector('[data-cancel]').onclick = () => { pwModal.close(); ctx.rerender() }
           } else {
             toast('账号已创建'); ctx.rerender()
           }
@@ -245,8 +245,8 @@ export async function renderIam(content, params, ctx) {
           ${field('组织名称', inputField('name'), { required: true })}`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
-      modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.body.querySelector('[data-ok]').onclick = async () => {
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
         const data = collectForm(modal.body)
         try {
           await api.post('/api/iam/orgs', { name: data.name, parentId: data.parentId || null })
@@ -264,8 +264,8 @@ export async function renderIam(content, params, ctx) {
           <div class="muted-box" id="import-preview"></div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>导入</button>',
       })
-      modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.body.querySelector('[data-ok]').onclick = async () => {
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
         const raw = collectForm(modal.body).raw
         const items = raw.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
           const [username, displayName, orgId, title] = line.split(',').map((s) => s?.trim())
@@ -336,8 +336,8 @@ export async function renderIam(content, params, ctx) {
             </div>`,
           foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
         })
-        modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-        modal.body.querySelector('[data-ok]').onclick = async () => {
+        modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+        modal.el.querySelector('[data-ok]').onclick = async () => {
           try {
             await api.patch(`/api/iam/users/${user.id}`, collectForm(modal.body))
             toast('已保存'); modal.close(); drawer.close(); ctx.rerender()
@@ -357,8 +357,8 @@ export async function renderIam(content, params, ctx) {
             </label>`).join(''),
           foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
         })
-        modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-        modal.body.querySelector('[data-ok]').onclick = async () => {
+        modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+        modal.el.querySelector('[data-ok]').onclick = async () => {
           const roleIds = [...modal.body.querySelectorAll('input[name=role]:checked')].map((el) => el.value)
           try {
             await api.patch(`/api/iam/users/${user.id}`, { roleIds })
@@ -376,8 +376,8 @@ export async function renderIam(content, params, ctx) {
             ${field('二次验证码', inputField('verifyCode', { placeholder: '演示环境任意 6 位数字' }), { hint: '一人一号原则：同一三方身份只能绑定一个平台账号' })}`,
           foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>绑定</button>',
         })
-        modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-        modal.body.querySelector('[data-ok]').onclick = async () => {
+        modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+        modal.el.querySelector('[data-ok]').onclick = async () => {
           try {
             await api.post(`/api/iam/users/${user.id}/bindings`, { ...collectForm(modal.body), verifyCode: collectForm(modal.body).verifyCode || '123456' })
             toast('绑定成功'); modal.close(); drawer.close(); ctx.rerender()
@@ -405,7 +405,7 @@ export async function renderIam(content, params, ctx) {
           modal.body.querySelector('#pw-copy').onclick = () => {
             void navigator.clipboard?.writeText(result.initialPassword).then(() => toast('已复制'))
           }
-          modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
+          modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
         } catch (error) { toast(error.message, 'error') }
       }
       const freezeBtn = drawer.el.querySelector('#ud-freeze')
@@ -485,8 +485,8 @@ export async function renderIam(content, params, ctx) {
           </div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
-      modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.body.querySelector('[data-ok]').onclick = async () => {
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
         const permissions = [...modal.body.querySelectorAll('input[name=perm]:checked')].map((el) => el.value)
         try {
@@ -578,8 +578,8 @@ export async function renderIam(content, params, ctx) {
           </div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
       })
-      modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.body.querySelector('[data-ok]').onclick = async () => {
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
         const payload = {
           name: data2.name,
@@ -668,8 +668,8 @@ export async function renderIam(content, params, ctx) {
           </div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
       })
-      modal.body.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.body.querySelector('[data-ok]').onclick = async () => {
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
         try {
           await api.put('/api/iam/connectors/dingtalk', { ...data2, intervalMinutes: Number(data2.intervalMinutes) || 60 })

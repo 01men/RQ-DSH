@@ -140,6 +140,11 @@ export function openModal({ title, body, foot, wide, onClose }) {
     const footEl = modal.querySelector('.modal-foot')
     if (typeof foot === 'string') footEl.innerHTML = foot
     else footEl.appendChild(foot)
+    // 默认行为：foot 按钮点击即关闭；调用方后续绑定的 onclick 会覆盖此默认值
+    const cancelBtn = footEl.querySelector('[data-cancel]')
+    if (cancelBtn) cancelBtn.onclick = () => close()
+    const okBtn = footEl.querySelector('[data-ok]')
+    if (okBtn) okBtn.onclick = () => close()
   }
   const close = () => { modal.classList.remove('show'); mask.classList.remove('show'); setTimeout(() => { modal.remove(); mask.remove(); onClose?.() }, 200) }
   mask.onclick = (e) => { if (e.target === mask) close() }
@@ -174,8 +179,8 @@ export function confirmDialog({ title, message, requireReason, danger, confirmTe
              <button class="btn ${danger ? 'btn-danger' : 'btn-primary'}" id="dlg-ok">${esc(confirmText)}</button>`,
       onClose: () => resolve(null),
     })
-    modal.body.querySelector('#dlg-cancel').onclick = () => { modal.close(); resolve(null) }
-    modal.body.querySelector('#dlg-ok').onclick = () => {
+    modal.el.querySelector('#dlg-cancel').onclick = () => { modal.close(); resolve(null) }
+    modal.el.querySelector('#dlg-ok').onclick = () => {
       const reason = modal.body.querySelector('#dlg-reason')?.value.trim()
       if (requireReason && !reason) {
         toast('请填写操作原因（审计要求）', 'error')

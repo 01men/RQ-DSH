@@ -14,14 +14,6 @@ const TYPE_META = {
 /** 金额（分）→ 元展示。 */
 const fmtCents = (cents) => `¥${(cents / 100).toFixed(2)}`
 
-const TYPE_META = {
-  mcp: ['MCP 服务', 'plug'],
-  agent: ['Agent', 'bot'],
-  app: ['AI 应用', 'app'],
-  skill: ['Skill', 'sparkles'],
-  model: ['模型路由', 'zap'],
-}
-
 function statusBadge(status) {
   const tone = ['online', 'published', 'healthy'].includes(status) ? 'badge-ok'
     : ['gray', 'trial'].includes(status) ? 'badge-info'
