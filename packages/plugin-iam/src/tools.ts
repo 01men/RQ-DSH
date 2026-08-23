@@ -3,7 +3,7 @@
  * 注册到 ctx.tools：在完整 dsh 中模型可直接调用；独立宿主中经 /api/tools/execute 触达。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@dsh-ops/platform-core'
+import { defineTool } from '../../platform-core/src/index.ts'
 
 export const name = 'iam-tools'
 export const inject = ['tools', 'iam']

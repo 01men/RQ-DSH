@@ -86,6 +86,13 @@ DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭
 pnpm dsh web --patch <PROJECT_ROOT>/cordis.yml
 ```
 
+也可以不检出源码，直接把整个平台作为插件 bundle 安装进 dsh profile
+（根 `package.json` 声明 `dsh.bundle`，安装补丁为 `cordis.patch.yml`，路径自包含）：
+
+```bash
+dsh plugin --profile web add github:01men/ybkk-AIOS
+```
+
 ### 已融合 OS-skill 模块设计（v1.1）
 
 选择性吸收了 [01men/OS-skill](https://github.com/01men/OS-skill) 两个模块中具有长远价值的设计（决策全记录见 [docs/roadmap.md](docs/roadmap.md)）：
@@ -166,7 +173,8 @@ scripts/selftest.mjs        功能自测（191 项断言，含安全攻击演练
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
-cordis.yml                  dsh 接入 overlay
+cordis.yml                  dsh 接入 overlay（源码检出 + --patch）
+cordis.patch.yml            dsh.bundle 安装补丁（dsh plugin add）
 ```
 
 ## 四、核心能力对照（方案 → 实现）

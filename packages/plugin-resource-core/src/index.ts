@@ -11,7 +11,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import { newId, slugify, type Collection, type RecordBase } from '@dsh-ops/platform-core'
+import { newId, slugify, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
 
 // ---------------------------------------------------------------------------
 // 属性表 schema DSL

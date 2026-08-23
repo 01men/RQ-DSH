@@ -17,7 +17,7 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign, verify as edVerify } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import { PlatformEvents, newId, parseYaml, sha256Hex, type Collection, type RecordBase } from '@dsh-ops/platform-core'
+import { PlatformEvents, newId, parseYaml, sha256Hex, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
 import * as marketTools from './tools.ts'
 
 // ---------------------------------------------------------------------------

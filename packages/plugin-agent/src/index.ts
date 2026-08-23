@@ -11,7 +11,7 @@ import { Service } from '@deepseek-ai/cordis'
 import {
   PlatformEvents, newId,
   type Collection, type RecordBase, type ResourceTypeSpec,
-} from '@dsh-ops/platform-core'
+} from '../../platform-core/src/index.ts'
 import * as agentTools from './tools.ts'
 import { AGENT_TYPE_SPEC } from './schema.ts'
 
@@ -107,7 +107,7 @@ export class AgentRegistryService extends Service {
     ownerName: string
     orgId: string
     withCredential?: boolean
-  }): { agent: import('@dsh-ops/platform-core').RecordBase & Record<string, unknown>; credential?: { principalId: string; clientId: string; clientSecret: string } } {
+  }): { agent: import('../../platform-core/src/index.ts').RecordBase & Record<string, unknown>; credential?: { principalId: string; clientId: string; clientSecret: string } } {
     const attrs = {
       ownerName: input.ownerName,
       ...(input.attrs ?? {}),
@@ -162,7 +162,7 @@ export class AgentRegistryService extends Service {
   }
 
   /** on-behalf-of：用户通过 Agent 行事时签发身份透传令牌。 */
-  issueOnBehalfOfToken(agentId: string, verifiedUser: import('@dsh-ops/plugin-authn').VerifiedPrincipal): { token: string; actChain: unknown[] } {
+  issueOnBehalfOfToken(agentId: string, verifiedUser: import('../../plugin-authn/src/index.ts').VerifiedPrincipal): { token: string; actChain: unknown[] } {
     const principal = this.machinePrincipal(agentId)
     if (!principal) throw new Error('该 Agent 尚未注册机器身份，请先在注册时勾选颁发凭证')
     const { token, record } = this.ctx.authn.issueOnBehalfOf(verifiedUser, principal.id)

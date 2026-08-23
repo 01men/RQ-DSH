@@ -2,7 +2,7 @@
  * Agent 本体属性表与生命周期声明（方案 §5.1 / §5.6）。
  * schema 同时驱动：控制台注册表单（分「基本/技术/治理」三组）、属性校验、详情页展示。
  */
-import type { ResourceTypeSpec } from '@dsh-ops/platform-core'
+import type { ResourceTypeSpec } from '../../platform-core/src/index.ts'
 
 export const AGENT_TYPE_SPEC: ResourceTypeSpec = {
   type: 'agent',

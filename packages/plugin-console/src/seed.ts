@@ -8,7 +8,7 @@
 import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-import { newId } from '@dsh-ops/platform-core'
+import { newId } from '../../platform-core/src/index.ts'
 
 export async function seedAll(ctx: Context): Promise<void> {
   if (ctx.iam.orgs().count() > 0) return

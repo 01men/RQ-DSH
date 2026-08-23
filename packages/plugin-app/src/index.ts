@@ -10,7 +10,7 @@ import { Service } from '@deepseek-ai/cordis'
 import {
   PlatformEvents, newId,
   type Collection, type RecordBase, type ResourceTypeSpec, type TopologyNode,
-} from '@dsh-ops/platform-core'
+} from '../../platform-core/src/index.ts'
 import * as appTools from './tools.ts'
 import { APP_TYPE_SPEC } from './schema.ts'
 

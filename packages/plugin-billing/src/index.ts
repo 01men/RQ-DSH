@@ -10,8 +10,8 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import { PlatformEvents, newId, type Collection, type RecordBase, type SqlValue } from '@dsh-ops/platform-core'
-import type { UsageEvent } from '@dsh-ops/plugin-usage'
+import { PlatformEvents, newId, type Collection, type RecordBase, type SqlValue } from '../../platform-core/src/index.ts'
+import type { UsageEvent } from '../../plugin-usage/src/index.ts'
 import * as billingTools from './tools.ts'
 
 // ---------------------------------------------------------------------------

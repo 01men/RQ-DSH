@@ -1,7 +1,7 @@
 /**
  * AI 应用本体属性表（方案 §6.1）：在 Agent 属性模型上扩展应用特有字段。
  */
-import type { ResourceTypeSpec } from '@dsh-ops/platform-core'
+import type { ResourceTypeSpec } from '../../platform-core/src/index.ts'
 
 export const APP_TYPE_SPEC: ResourceTypeSpec = {
   type: 'app',

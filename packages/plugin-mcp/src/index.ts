@@ -8,7 +8,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import { PlatformEvents, newId, sha256Hex, type Collection, type RecordBase } from '@dsh-ops/platform-core'
+import { PlatformEvents, newId, sha256Hex, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
 import * as mcpTools from './tools.ts'
 
 // ---------------------------------------------------------------------------

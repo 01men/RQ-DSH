@@ -14,7 +14,7 @@ import { Service } from '@deepseek-ai/cordis'
 import {
   PlatformEvents, generateSecret, newId, sha256Hex,
   type Collection, type RecordBase,
-} from '@dsh-ops/platform-core'
+} from '../../platform-core/src/index.ts'
 import * as authnTools from './tools.ts'
 import { OidcService } from './oidc.ts'
 

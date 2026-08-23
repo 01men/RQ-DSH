@@ -2,7 +2,7 @@
  * market 插件对模型暴露的工具。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '@dsh-ops/platform-core'
+import { defineTool } from '../../platform-core/src/index.ts'
 
 export const name = 'market-tools'
 export const inject = ['tools', 'market']

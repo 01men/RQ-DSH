@@ -9,7 +9,7 @@ import { Service } from '@deepseek-ai/cordis'
 import {
   PlatformEvents, newId, sha256Hex, generateSecret, mask,
   type Collection, type RecordBase,
-} from '@dsh-ops/platform-core'
+} from '../../platform-core/src/index.ts'
 import * as iamTools from './tools.ts'
 import { DingTalkAuthAdapter, RealDingTalkAuthAdapter, type DingTalkCredentials, type IdentityProviderAdapter } from './providers.ts'
 

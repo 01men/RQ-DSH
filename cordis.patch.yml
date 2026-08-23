@@ -1,0 +1,42 @@
+# cordis.patch.yml —— dsh.bundle 安装补丁（dsh plugin add github:01men/ybkk-AIOS）。
+#
+# 与 cordis.yml 的区别：
+#   - cordis.yml      面向本仓库源码检出，name 为替换 <PROJECT_ROOT> 后的绝对路径（--patch overlay）
+#   - cordis.patch.yml 面向 `dsh plugin add` 安装场景，name 为相对本文件的路径，
+#                      安装后随包分发、开箱可解析（packages/ 内跨包引用均为相对路径）
+#
+# 行为与 cordis.yml 一致：
+#   - provideToolRuntime=false：完整 dsh 自带 ToolRuntime（ctx.tools），
+#     平台插件注册的 37 个运维工具将直接对模型可见、可被调用
+#   - startHttp=false：控制台 SPA 仍由独立进程提供（node src/main.ts），
+#     两个进程共享同一 data/ 目录即可管理同一份数据
+- insert:
+    - id: ops-platform-core
+      name: ./packages/platform-core/src/index.ts
+      config:
+        provideToolRuntime: false
+        startHttp: false
+    - id: ops-resource-core
+      name: ./packages/plugin-resource-core/src/index.ts
+    - id: ops-iam
+      name: ./packages/plugin-iam/src/index.ts
+    - id: ops-authn
+      name: ./packages/plugin-authn/src/index.ts
+    - id: ops-usage
+      name: ./packages/plugin-usage/src/index.ts
+    - id: ops-billing
+      name: ./packages/plugin-billing/src/index.ts
+    - id: ops-audit
+      name: ./packages/plugin-audit/src/index.ts
+    - id: ops-market
+      name: ./packages/plugin-market/src/index.ts
+    - id: ops-mcp
+      name: ./packages/plugin-mcp/src/index.ts
+    - id: ops-skillhub
+      name: ./packages/plugin-skillhub/src/index.ts
+    - id: ops-agent
+      name: ./packages/plugin-agent/src/index.ts
+    - id: ops-app
+      name: ./packages/plugin-app/src/index.ts
+    - id: ops-modelgw
+      name: ./packages/plugin-modelgw/src/index.ts
