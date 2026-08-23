@@ -45,6 +45,9 @@ npm run lint:manifests  # 插件清单五面 YAML 校验（50 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
 
+> **企业部署 / Agent 一键接入**：部署 runbook、dsh 运行时接入与「可直接下达给 dsh 自带 Agent 的一键部署指引」
+> 见 [docs/deploy-enterprise.md](docs/deploy-enterprise.md)；日常运维 Agent 指引见 `skills/dsh-ops-admin/SKILL.md`。
+
 ## 二、架构：一切皆插件
 
 运行中的平台就是一棵 **cordis 插件树**（与 dsh 同一插件框架，`@deepseek-ai/cordis`）。
