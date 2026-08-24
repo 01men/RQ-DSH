@@ -48,6 +48,9 @@ const PUBLIC_PATHS = new Set([
   '/api/connect/enroll',
 ])
 
+/** 动态路径的公开前缀（OIDC 授权页查询：仅回显客户端名/scope，不泄露 redirect_uri）。 */
+const PUBLIC_PATH_PREFIXES = ['/api/authn/oidc/auth-requests/']
+
 /** 从请求头推导对外基址（钉钉等真实 IdP 的 redirect_uri 需绝对 URL；反代场景优先 x-forwarded-*）。 */
 function requestOrigin(exchange: HttpExchange): string | undefined {
   const header = (name: string): string | undefined => {
@@ -78,7 +81,7 @@ export function apply(ctx: Context) {
 
   // -- 鉴权中间件 ---------------------------------------------------------
   http.use((exchange) => {
-    if (!exchange.path.startsWith('/api/') || PUBLIC_PATHS.has(exchange.path)) return
+    if (!exchange.path.startsWith('/api/') || PUBLIC_PATHS.has(exchange.path) || PUBLIC_PATH_PREFIXES.some((prefix) => exchange.path.startsWith(prefix))) return
     const header = String(exchange.headers['authorization'] ?? '')
     if (!header.startsWith('Bearer ')) {
       exchange.fail(401, 'UNAUTHORIZED', '缺少 Bearer 令牌，请先登录')
@@ -808,15 +811,73 @@ export function apply(ctx: Context) {
     return { rotated: true, graceHours: result.graceMs / 3600_000 }
   })
 
-  // OIDC 客户端登记（模式 B：外部应用以平台为 IdP）
-  guarded('POST', '/api/authn/oidc/clients', 'authn.principal.write', (exchange) => {
-    const input = body<{ name: string; redirectUris: string[] }>(exchange)
+  // OIDC 客户端管理（模式 B：外部应用以平台为 IdP；管理员全局兜底面）
+  guarded('GET', '/api/authn/oidc/clients', 'authn.oidc.read', () => ({
+    clients: ctx.oidc.listClients().map((client) => ({
+      ...client,
+      status: client.status ?? 'active',
+      clientType: client.clientType ?? 'confidential',
+      discovery: {
+        issuer: ctx.oidc.issuer(),
+        authorization_endpoint: `${ctx.oidc.issuer()}/oauth/authorize`,
+        token_endpoint: `${ctx.oidc.issuer()}/oauth/token`,
+        userinfo_endpoint: `${ctx.oidc.issuer()}/oauth/userinfo`,
+      },
+    })),
+  }))
+
+  guarded('POST', '/api/authn/oidc/clients', 'authn.oidc.write', (exchange) => {
+    const input = body<{ name: string; redirectUris: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[]; clientType?: 'confidential' | 'public' }>(exchange)
     if (!input.name || !Array.isArray(input.redirectUris) || input.redirectUris.length === 0) {
       throw new Error('name 与 redirectUris（至少一个回调地址）必填')
     }
-    const created = ctx.oidc.createClient({ name: input.name, redirectUris: input.redirectUris })
-    changeLog(exchange, 'authn.oidc.client.create', 'oidc_client', created.client.id, created.client.name)
-    return { clientId: created.client.clientId, clientSecret: created.clientSecret, redirectUris: created.client.redirectUris, note: 'clientSecret 仅此一次返回' }
+    for (const uri of input.redirectUris) {
+      let parsed: URL
+      try { parsed = new URL(uri) } catch { throw new Error(`回调地址非法：${uri}`) }
+      const localhostOk = parsed.protocol === 'http:' && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+      if (parsed.protocol !== 'https:' && !localhostOk) throw new Error(`回调地址必须为 https:// 或 http://localhost[:port]（收到：${uri}）`)
+    }
+    const created = ctx.oidc.createClient({
+      name: input.name,
+      redirectUris: input.redirectUris,
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.consentRequired !== undefined ? { consentRequired: input.consentRequired } : {}),
+      ...(input.postLogoutUris !== undefined ? { postLogoutUris: input.postLogoutUris } : {}),
+      ...(input.clientType !== undefined ? { clientType: input.clientType } : {}),
+    })
+    changeLog(exchange, 'authn.oidc.client.create', 'oidc_client', created.client.id, created.client.name, input.clientType === 'public' ? 'public 客户端（免 secret）' : '')
+    return { clientId: created.client.clientId, clientSecret: created.clientSecret, redirectUris: created.client.redirectUris, note: created.client.clientType === 'public' ? 'public 客户端无 secret（强制 PKCE）' : 'clientSecret 仅此一次返回' }
+  })
+
+  guarded('PATCH', '/api/authn/oidc/clients/:id', 'authn.oidc.write', (exchange) => {
+    const input = body<{ name?: string; redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    const updated = ctx.oidc.updateClient(exchange.params['id']!, input)
+    changeLog(exchange, 'authn.oidc.client.update', 'oidc_client', updated.id, updated.name)
+    return updated
+  })
+
+  guarded('POST', '/api/authn/oidc/clients/:id/rotate', 'authn.oidc.write', (exchange) => {
+    const rotated = ctx.oidc.rotateSecret(exchange.params['id']!)
+    changeLog(exchange, 'authn.oidc.client.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
+    return { clientId: rotated.client.clientId, clientSecret: rotated.clientSecret, note: '新 clientSecret 仅此一次返回，旧值立即失效' }
+  })
+
+  for (const [action, label] of [['disable', '禁用'], ['enable', '启用']] as const) {
+    guarded('POST', `/api/authn/oidc/clients/:id/${action}`, 'authn.oidc.write', (exchange) => {
+      const { reason } = body<{ reason?: string }>(exchange)
+      const client = action === 'disable'
+        ? ctx.oidc.disableClient(exchange.params['id']!, reason ?? '控制台手动禁用')
+        : ctx.oidc.enableClient(exchange.params['id']!)
+      changeLog(exchange, `authn.oidc.client.${action}`, 'oidc_client', client.id, client.name, reason ?? '')
+      return client
+    })
+  }
+
+  /** JWKS 签名密钥轮换：新 key 立即签名，旧 key 24h 验签宽限（在途令牌不掉线）。 */
+  guarded('POST', '/api/authn/oidc/keys/rotate', 'authn.oidc.write', (exchange) => {
+    const result = ctx.oidc.rotateKeys()
+    changeLog(exchange, 'authn.oidc.keys.rotate', 'platform', 'oidc-keys', '', `新 kid=${result.kid}，旧 key ${result.graceHours}h 宽限`)
+    return { rotated: true, kid: result.kid, graceHours: result.graceHours }
   })
 
   guarded('GET', '/api/authn/oidc/discovery', 'authn.principal.read', () => ctx.oidc.discovery())
@@ -1162,6 +1223,11 @@ export function apply(ctx: Context) {
     const id = exchange.params['id']!
     const app = ctx.resourceCore.get('app', id)
     if (!app) throw new Error(`应用不存在：${id}`)
+    // SSO 配置块（不含 secret；供详情页「SSO 配置」tab 与门禁提示使用）
+    const ssoClients = ctx.oidc.clientsForApp(id)
+    const ssoClient = ssoClients[0]
+    const { clientSecretHash, ...ssoSafe } = ssoClient ?? {}
+    void clientSecretHash
     return {
       ...app,
       metrics: ctx.appRegistry.metrics(id),
@@ -1170,6 +1236,24 @@ export function apply(ctx: Context) {
       impact: ctx.resourceCore.impact('app', id),
       availableTransitions: ctx.resourceCore.availableTransitions('app', id),
       audit: ctx.audit.query({ resourceType: 'app', resourceId: id, limit: 30 }).items,
+      sso: ssoClient
+        ? {
+          ...ssoSafe,
+          status: ssoSafe.status ?? 'active',
+          clientType: ssoSafe.clientType ?? 'confidential',
+          refAppName: ctx.resourceCore.get('app', ssoSafe.refId ?? '')?.name ?? undefined,
+          discovery: {
+            issuer: ctx.oidc.issuer(),
+            authorization_endpoint: `${ctx.oidc.issuer()}/oauth/authorize`,
+            token_endpoint: `${ctx.oidc.issuer()}/oauth/token`,
+            userinfo_endpoint: `${ctx.oidc.issuer()}/oauth/userinfo`,
+          },
+        }
+        : null,
+      ssoEnforceTypes: ((): string[] => {
+        // 门禁形态提示（与 plugin-app 同源逻辑；动态 import 避免循环依赖）
+        return String(process.env.APP_SSO_ENFORCE ?? 'web,h5').split(',').map((item) => item.trim()).filter(Boolean)
+      })(),
     }
   })
 
@@ -1205,9 +1289,82 @@ export function apply(ctx: Context) {
       return { approval, note: '下架为 L4 操作，已创建审批单' }
     }
     if (action === 'submit_trial') return ctx.resourceCore.transition('app', id, 'submit_trial', info.name).entity
-    if (action === 'archive') return ctx.resourceCore.transition('app', id, 'archive', info.name).entity
+    if (action === 'retrial') return ctx.resourceCore.transition('app', id, 'retrial', info.name).entity
+    if (action === 'archive') return ctx.appRegistry.archive(id, info.name)
     throw new Error(`未知操作：${action}`)
   })
+
+  // -- 应用 ↔ SSO 打通（owner 自助签发；全库首例 owner-based 授权） ----------------
+  const ssoApp = (exchange: HttpExchange): { id: string; name: string; ownerId: string } => {
+    const app = ctx.resourceCore.get('app', exchange.params['id']!)
+    if (!app) throw new Error(`应用不存在：${exchange.params['id']}`)
+    return { id: app.id, name: app.name, ownerId: app.ownerId }
+  }
+
+  /** owner 校验（human 且 app.ownerId === userId，或持 authn.oidc.write）；机器一律 403。 */
+  const requireSsoOwner = (exchange: HttpExchange): boolean => {
+    const app = ssoApp(exchange)
+    const info = caller(exchange)
+    const isOwner = info.kind === 'human' && Boolean(info.userId) && app.ownerId === info.userId
+    const isAdmin = info.permissions.includes('*') || info.permissions.includes('authn.oidc.write')
+    if (info.kind !== 'human' || (!isOwner && !isAdmin)) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId ?? info.principalId,
+        actorName: info.name,
+        point: `app.sso(owner:${app.id})`,
+        path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', info.kind !== 'human'
+        ? 'SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作'
+        : `仅应用 owner 或持有 authn.oidc.write 的管理员可管理「${app.name}」的 SSO 客户端`)
+      return false
+    }
+    return true
+  }
+
+  guarded('POST', '/api/apps/:id/sso-client', 'app.write', (exchange) => {
+    if (!requireSsoOwner(exchange)) return
+    const app = ssoApp(exchange)
+    const input = body<{ redirectUris: string[]; clientType?: 'confidential' | 'public'; consentRequired?: boolean; postLogoutUris?: string[]; description?: string }>(exchange)
+    const created = ctx.appRegistry.createSsoClient(app.id, input)
+    changeLog(exchange, 'app.sso.create', 'oidc_client', created.client.id, created.client.name, `应用 ${app.name} 签发（${input.clientType ?? 'confidential'}）`)
+    return {
+      clientId: created.client.clientId,
+      clientSecret: created.clientSecret,
+      redirectUris: created.client.redirectUris,
+      note: created.client.clientType === 'public' ? 'public 客户端无 secret（强制 PKCE、不发 refresh）' : 'clientSecret 仅此一次返回',
+    }
+  })
+
+  guarded('PATCH', '/api/apps/:id/sso-client', 'app.write', (exchange) => {
+    if (!requireSsoOwner(exchange)) return
+    const app = ssoApp(exchange)
+    const input = body<{ redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    const updated = ctx.appRegistry.updateSsoClient(app.id, input)
+    changeLog(exchange, 'app.sso.update', 'oidc_client', updated.id, updated.name)
+    return updated
+  })
+
+  guarded('POST', '/api/apps/:id/sso-client/rotate', 'app.write', (exchange) => {
+    if (!requireSsoOwner(exchange)) return
+    const app = ssoApp(exchange)
+    const rotated = ctx.appRegistry.rotateSsoSecret(app.id)
+    changeLog(exchange, 'app.sso.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
+    return { clientId: rotated.client.clientId, clientSecret: rotated.clientSecret, note: '新 clientSecret 仅此一次返回，旧值立即失效' }
+  })
+
+  for (const action of ['disable', 'enable'] as const) {
+    guarded('POST', `/api/apps/:id/sso-client/${action}`, 'app.write', (exchange) => {
+      if (!requireSsoOwner(exchange)) return
+      const app = ssoApp(exchange)
+      const { reason } = body<{ reason?: string }>(exchange)
+      const client = action === 'disable'
+        ? ctx.appRegistry.disableSsoClient(app.id, reason ?? `owner 手动禁用`)
+        : ctx.appRegistry.enableSsoClient(app.id)
+      changeLog(exchange, `app.sso.${action}`, 'oidc_client', client.id, client.name, reason ?? '')
+      return client
+    })
+  }
 
   // -- Audit / 审批 / 告警 --------------------------------------------------
   guarded('GET', '/api/audit/logs', 'audit.read', (exchange) => {

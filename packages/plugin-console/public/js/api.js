@@ -76,7 +76,7 @@ async function request(method, path, body, retried = false) {
   }
   if (!response.ok || payload?.ok === false) {
     const err = payload?.error ?? {}
-    if (response.status === 401 && !path.startsWith('/api/auth/')) {
+    if (response.status === 401 && !path.startsWith('/api/auth/') && !location.hash.startsWith('#/oauth')) {
       session.clear()
       if (!location.hash.startsWith('#/login')) location.hash = '#/login'
     }

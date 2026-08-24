@@ -151,6 +151,23 @@ export class AuditService extends Service {
     ctx.platformBus.on(PlatformEvents.AgentOfflined, auditOf('change', 'agent.offline'))
     ctx.platformBus.on(PlatformEvents.AppOnlined, auditOf('change', 'app.online'))
     ctx.platformBus.on(PlatformEvents.AppOfflined, auditOf('change', 'app.offline'))
+    ctx.platformBus.on(PlatformEvents.AppArchived, auditOf('change', 'app.archive'))
+    ctx.platformBus.on(PlatformEvents.OidcAuthorizeGranted, (payload) => {
+      const p = payload as { reqId: string; clientId: string; clientName: string; userId: string; userName: string; scope: string }
+      this.record({
+        type: 'auth', actorType: 'human', actorId: p.userId, actorName: p.userName,
+        action: 'oidc.authorize.granted', resourceType: 'oidc_client', resourceId: p.clientId, resourceName: p.clientName,
+        result: 'ok', detail: `授权通过（scope：${p.scope}，req：${p.reqId.slice(0, 8)}…）`,
+      })
+    })
+    ctx.platformBus.on(PlatformEvents.OidcAuthorizeDenied, (payload) => {
+      const p = payload as { reqId: string; clientId: string; clientName: string; userId: string; userName: string }
+      this.record({
+        type: 'auth', actorType: 'human', actorId: p.userId, actorName: p.userName,
+        action: 'oidc.authorize.denied', resourceType: 'oidc_client', resourceId: p.clientId, resourceName: p.clientName,
+        result: 'denied', detail: `用户拒绝授权（req：${p.reqId.slice(0, 8)}…）`,
+      })
+    })
     ctx.platformBus.on(PlatformEvents.UpdateAvailable, (payload) => {
       const p = payload as { currentVersion: string; latestVersion: string; behindBy: number }
       this.record({

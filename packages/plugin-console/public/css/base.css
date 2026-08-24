@@ -693,3 +693,30 @@ textarea.form-control { height: auto; min-height: 88px; padding: 9px 12px; resiz
 
 /* 打印时隐藏导航 */
 @media print { .sidebar, .topbar { display: none; } }
+
+/* ============ OAuth 协议页（授权 / 错误 / 登出；独立于控制台外壳） ============ */
+.oauth-page {
+  min-height: 100vh; display: grid; place-items: center;
+  background:
+    radial-gradient(600px 420px at 15% 85%, rgba(124, 92, 245, 0.10), transparent 60%),
+    radial-gradient(700px 500px at 85% 15%, rgba(79, 110, 247, 0.10), transparent 62%), #f4f5f8;
+}
+.oauth-card {
+  width: 420px; max-width: calc(100vw - 32px); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 14px; padding: 30px 32px;
+  box-shadow: 0 12px 40px rgba(15, 23, 42, 0.08);
+}
+.oauth-brand { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+.oauth-title { font-size: 18px; font-weight: 600; }
+.oauth-sub { color: var(--text-3); font-size: 13px; line-height: 1.7; }
+.oauth-app { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); margin: 16px 0; }
+.oauth-app-ic { width: 38px; height: 38px; border-radius: 10px; background: linear-gradient(135deg,#eef2ff,#e0e7ff); display: grid; place-items: center; font-size: 19px; }
+.oauth-app b { font-size: 14.5px; display: block; }
+.oauth-app span { font-size: 12px; color: var(--text-3); }
+.oauth-scopes { display: flex; flex-direction: column; gap: 8px; margin: 14px 0 18px; }
+.oauth-scope { display: flex; gap: 9px; align-items: flex-start; font-size: 13px; line-height: 1.6; }
+.oauth-scope svg { flex-shrink: 0; margin-top: 2px; color: var(--brand-500); }
+.oauth-user { display: flex; align-items: center; gap: 9px; font-size: 13px; color: var(--text-2); margin-bottom: 16px; }
+.oauth-actions { display: flex; gap: 10px; margin-top: 6px; }
+.oauth-actions .btn { flex: 1; }
+.oauth-error-ic { width: 52px; height: 52px; border-radius: 14px; background: #fef2f2; border: 1px solid #fecaca; display: grid; place-items: center; margin: 6px 0 16px; }

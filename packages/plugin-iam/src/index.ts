@@ -149,6 +149,8 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'authn.principal.write', label: '管理机器凭证', group: '统一认证' },
   { point: 'authn.token.issue', label: '签发令牌', group: '统一认证' },
   { point: 'authn.token.revoke', label: '吊销令牌', group: '统一认证' },
+  { point: 'authn.oidc.read', label: '查看 OIDC 客户端', group: '统一认证' },
+  { point: 'authn.oidc.write', label: '管理 OIDC 客户端（签发/轮换/禁用）', group: '统一认证' },
   { point: 'mcp.service.read', label: '查看 MCP 服务', group: 'MCP' },
   { point: 'mcp.service.write', label: '管理 MCP 服务', group: 'MCP' },
   { point: 'mcp.service.deploy', label: '部署/灰度 MCP', group: 'MCP' },
@@ -193,10 +195,10 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [
   { code: 'super_admin', name: '平台超级管理员', builtin: true, description: '拥有全部权限点', permissions: ['*'] },
   { code: 'org_admin', name: '组织管理员', builtin: true, description: '管理本组织账号与用户组', permissions: ['console.login', 'iam.*', 'approval.read'] },
-  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'approval.read'] },
-  { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'app.read'] },
+  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'authn.oidc.*', 'approval.read'] },
+  { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'app.read', 'app.write'] },
   { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read'] },
-  { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'audit.read', 'approval.read'] },
+  { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'authn.oidc.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'audit.read', 'approval.read'] },
 ]
 
 // ---------------------------------------------------------------------------

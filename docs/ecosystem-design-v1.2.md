@@ -266,7 +266,7 @@ third-party-plugin/
 | 3 | 契约五面解析 + bus source 校验 + 代理 ctx + L0 运行时 + init + 门禁 | ✅ 已实现 | selftest §step3 + app 复合验收 |
 | 4 | 多租户全量（org/user/资源挂租户 + 令牌携带 + 隔离查询） | ✅ 已实现 | selftest §step4 |
 | 5 | 钱包/journal/幂等 + 模型网关（预算/限额）+ 开发者身份域 + 资金清单 | ✅ 已实现（自动充值依赖 §六清单，手工充值通道可用） | selftest §step5 |
-| 6 | OIDC Provider RS256/JWKS | ✅ 已实现 | selftest §step6（JWKS 验签） |
+| 6 | OIDC Provider RS256/JWKS | ✅ 已实现（v1.4 App SSO 迭代升级：浏览器授权流 + Basic/Post 双认证 + token_use + refresh/end_session/revoke + JWKS 数组轮换 + 应用签发与上线门禁，见 docs/app-sso-integration.md） | selftest §step6 + §AppSSO/§OIDC 会话补全（含 openid-client 冒烟） |
 | 7 | L0 市场 beta（上架/安装/自营供给） | ✅ 已实现 | selftest §step7 |
 | 8 | 复式分账 ledger（账期结转/红字冲正） | ✅ 已实现 | selftest §step8（试算平衡） |
 | 9 | KBaaS / 连接器市场 / 合规门户 | 📐 设计完成 | docs/roadmap-9-10.md |

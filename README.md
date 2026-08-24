@@ -231,6 +231,40 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
 - **商业化放缓（决策）**：真实支付网关/对公收款/开票/开发者付款等资金通道**保持手工过渡态暂缓实施**，
   插件市场变现（订阅代收/分账结算自动化）同样暂缓——本迭代优先企业内资产治理与运营能力。
 
+## 三C、应用统一身份接入 App SSO（本迭代，v1.4）
+
+企业内自研 AI 应用上线前完成身份纳管——「注册应用 → 签发 SSO 凭据 → 上线门禁 → 跳转登录」闭环
+（设计：[docs/dev-plan-app-sso.md](docs/dev-plan-app-sso.md) · 执行版：[docs/app-sso-实施计划-执行版.md](docs/app-sso-实施计划-执行版.md) · 接入文档：[docs/app-sso-integration.md](docs/app-sso-integration.md)）：
+
+- **浏览器授权流（协议合规面）**：`GET /oauth/authorize` 校验（response_type/client/redirect_uri 白名单/scope
+  白名单/强制 PKCE S256）→ 落授权请求（5 分钟单次消费）→ 302 平台授权页 `/#/oauth/authorize?req=`；
+  失败一律 302 平台错误页（绝不携带外部 redirect_uri，防开放重定向）；`POST /api/authn/oidc/authorize`
+  用户确认（human-only，consent 卡片）→ code/state/iss（RFC 9207）回跳。
+  **旧账密式 `POST /oauth/authorize` 已删除**。
+- **换牌协议面**：`client_secret_basic` + `client_secret_post` 双认证 × form/JSON 双编码；错误码状态码
+  归位（invalid_grant→400、invalid_client→401+WWW-Authenticate）；access/id token 打标 `token_use`；
+  userinfo 校验 token 类型与 aud 受众，email claim 按 scope 裁剪；JWKS 数组化（kid 匹配验签）。
+- **应用 ↔ SSO 打通**：应用详情「SSO 配置」tab——owner 签发（secret 一次性）、回调行内编辑、轮换、
+  禁用/启用、discovery 一键复制；`GET /api/apps/:id` 附 `sso` 块。「认证与令牌」新增 OIDC 客户端全局
+  管理面。**owner-based 授权为全库首例**（human 且 `app.ownerId === userId`，或持 `authn.oidc.write`；
+  机器一律 403）。
+- **上线门禁双点**：`requestOnline()` 早反馈（`APP_SSO_ENFORCE` 默认 `web,h5` 形态须有 active 客户端，
+  审批单快照 `ssoClientId`）+ `app.online` 审批执行器执行期复核（挂单期间禁用 → 上线失败留痕）。
+- **生命周期联动**：`app.offlined`/`app.archived` → 客户端禁用（refresh 链吊销）；`app.onlined` → 启用；
+  `app.updated` → 客户端名称同步（plugin-app 补发历史缺失事件）。
+- **会话补全与安全闭环（P3）**：refresh_token 轮转 grant（一次一换、重放整链吊销、scope 只收窄、
+  实时校验用户状态）；`/oauth/end_session`（id_token_hint 定位 client + postLogoutUris 白名单 + 登出即
+  吊销 refresh 链）；`/oauth/revoke`（RFC 7009，access jti 黑名单 / refresh 整链，恒 200）；JWKS 密钥
+  轮换端点（新 key 签名、旧 key 24h 宽限验签）；冻结/禁用客户端全链即时失效。
+- **public 客户端（D-a 决策）**：纯前端 SPA 可签发 public 形态（免 secret + 强制 PKCE + 不发 refresh），
+  BFF 架构仍为 confidential 推荐形态（文档双指引）。
+- **双 TTL**：OIDC access 默认 2h（`OIDC_ACCESS_TTL_SECONDS`）/ refresh 默认 7d（`OIDC_REFRESH_TTL_SECONDS`），
+  与平台会话（30min/7d）独立可调；授权码与授权请求 5 分钟单次消费。
+- **「平台接入」外部接入总览**：机器凭证（按绑定资源分组）+ OIDC 客户端（含关联应用）+ 远程 dsh
+  客户端一处盘点，跳转对应管理页。
+- **一行 SDK 式接入验证**：selftest 内置 openid-client（v6）冒烟——discovery 驱动走通 authorize →
+  token → userinfo → refresh → revoke → end_session 全链（标准客户端真实姿势回归）。
+
 ## 三、目录结构（插件标准解剖）
 
 ```
@@ -250,7 +284,7 @@ packages/
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（244 项断言，含安全攻击演练、远程接入与平台更新链路；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（326 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、远程接入与平台更新链路；隔离实例 + DEMO_SEED）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -271,6 +305,7 @@ cordis.patch.yml            dsh.bundle 安装补丁（dsh plugin add）
 | Skill 市场（§4） | 静态扫描（恶意代码/密钥泄露自动驳回）、两级审批（高风险安全加签）、版本化、安装登记依赖、弃用告警 |
 | Agent 本体（§5） | 属性表三组（基本/技术/治理）、注册颁发机器凭证、用户绑定、监测指标、生命周期 L4 |
 | AI 应用本体（§6） | 应用 schema、编排拓扑（SVG 一图穿透）、DAU/留存、成本穿透 |
+| 应用 SSO 纳管（§6/App SSO） | OIDC Provider 浏览器授权流、owner 自助签发、上线门禁双点、refresh/end_session/revoke、冻结即时失效 |
 | 安全与审计（§7） | 四类日志、告警规则引擎、越权计数告警、成本多维报表 |
 | L4 护栏（§4.4） | 上线/下线/下架/吊销强制审批单，双人确认（发起人不可自审），执行结果回写 |
 
@@ -307,14 +342,19 @@ curl localhost:7300/api/overview -H "authorization: Bearer <token>"
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **244 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **326 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
 （真实 MCP/钉钉/OpenAI stub 往返、计量幂等与对账、钱包扣费与预算拦截、OIDC RS256/JWKS 全链路、
 市场验签/安装/卸载、复式分账试算平衡与红字冲正）+ 远程 dsh 接入
 （接入码创建/掩码存储/伪造拒绝/一次性消费、机器凭证换牌、operator 模板越权拦截、
-工具桥代理路径、客户端禁用联动吊销、管理工具 RBAC）。测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
+工具桥代理路径、客户端禁用联动吊销、管理工具 RBAC）+ **App SSO 全链**
+（浏览器授权流：校验失败一律平台错误页不开放重定向、授权请求单次消费/TTL/consent 门禁、
+换牌 Basic+Post × form+JSON、PKCE 正误、code 重放、token_use 收敛、JWKS 本地验签、
+MVP 闭环：门禁双点（含审批期间禁用→执行失败留痕）、owner 校验（非 owner/机器 403）、
+secret 轮换旧值即废、offline/online/updated/archived 四事件联动、openid-client 冒烟
+authorize→token→userinfo→refresh→revoke→end_session）。测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
 
 ## 八、说明与边界
 

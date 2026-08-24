@@ -11,6 +11,7 @@ import {
   PlatformEvents, newId,
   type Collection, type RecordBase, type ResourceTypeSpec, type TopologyNode,
 } from '../../platform-core/src/index.ts'
+import { OidcService } from '../../plugin-authn/src/oidc.ts'
 import * as appTools from './tools.ts'
 import { APP_TYPE_SPEC } from './schema.ts'
 
@@ -71,6 +72,7 @@ export class AppRegistryService extends Service {
     const updated = this.ctx.resourceCore.update('app', appId, patch)
     const agentIds = Array.isArray(updated.attrs['agentIds']) ? updated.attrs['agentIds'] as string[] : []
     this.syncAgentDependencies(appId, agentIds)
+    this.ctx.platformBus.emit(PlatformEvents.AppUpdated, { id: appId, name: updated.name, actor: 'console' })
     return updated
   }
 
@@ -102,13 +104,28 @@ export class AppRegistryService extends Service {
     if (!app) throw new Error(`应用不存在：${appId}`)
     const errors = this.ctx.resourceCore.validateAttrs('app', app.attrs, 'online')
     if (errors.length > 0) throw new Error(`上线条件不满足：${errors.join('；')}`)
+    // 上线门禁（点 1，早反馈）：门禁形态（默认 web,h5）必须有 active SSO 客户端
+    const ssoClientId = this.checkSsoGate(app)
     return this.ctx.audit.createApproval({
       kind: 'app.online',
       title: `AI 应用上线：${app.name}`,
-      payload: { appId, requesterId: requester.id },
+      payload: { appId, requesterId: requester.id, ...(ssoClientId !== undefined ? { ssoClientId } : {}) },
       requesterId: requester.id,
       requesterName: requester.name,
     })
+  }
+
+  /** SSO 门禁校验：返回 active 客户端 clientId（供审批单快照），违规抛错并指路。 */
+  private checkSsoGate(app: { id: string; name: string; attrs: Record<string, unknown> }): string | undefined {
+    const enforce = AppRegistryService.ssoEnforceTypes()
+    if (enforce.length === 0) return this.activeSsoClient(app.id)?.clientId
+    const appType = String(app.attrs['appType'] ?? '')
+    if (!enforce.includes(appType)) return this.activeSsoClient(app.id)?.clientId
+    const active = this.activeSsoClient(app.id)
+    if (!active) {
+      throw new Error(`上线门禁：${appType} 形态应用上线前必须完成身份纳管——请在「AI 应用 → 应用详情 → SSO 配置」签发 OIDC 客户端（当前门禁形态：${enforce.join('/')}）`)
+    }
+    return active.clientId
   }
 
   requestOffline(appId: string, requester: { id: string; name: string }, reason: string) {
@@ -134,6 +151,102 @@ export class AppRegistryService extends Service {
     const result = this.ctx.resourceCore.transition('app', appId, 'offline', actor, reason)
     this.ctx.platformBus.emit(PlatformEvents.AppOfflined, { id: appId, name: result.entity.name, actor, reason, type: 'app', slug: result.entity.slug })
     return result.entity
+  }
+
+  /** 归档（终态）：下架后的应用彻底退出运营；关联 SSO 客户端经 app.archived 事件联动禁用。 */
+  archive(appId: string, actor: string) {
+    const result = this.ctx.resourceCore.transition('app', appId, 'archive', actor)
+    this.ctx.platformBus.emit(PlatformEvents.AppArchived, { id: appId, name: result.entity.name, actor, type: 'app', slug: result.entity.slug })
+    return result.entity
+  }
+
+  // -- SSO 客户端（应用 ↔ 平台身份源打通；owner 自助签发） ----------------------
+
+  /** 上线门禁覆盖的应用形态（APP_SSO_ENFORCE，默认 web,h5；空串可关闭门禁）。 */
+  static ssoEnforceTypes(): string[] {
+    return String(process.env.APP_SSO_ENFORCE ?? 'web,h5').split(',').map((item) => item.trim()).filter(Boolean)
+  }
+
+  /**
+   * owner-based 授权（全库首例，非 permission-point 制）：
+   * human 且 app.ownerId === userId，或持 authn.oidc.write（管理员兜底）；机器 principal 一律 403。
+   */
+  assertSsoManage(app: { id: string; name: string; ownerId: string }, caller: { kind: string; userId?: string; permissions: string[] }): void {
+    if (caller.kind !== 'human' || !caller.userId) {
+      throw new Error('SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作')
+    }
+    const isOwner = app.ownerId === caller.userId
+    const hasAdmin = caller.permissions.includes('*') || caller.permissions.includes('authn.oidc.write')
+    if (!isOwner && !hasAdmin) {
+      throw new Error(`仅应用 owner 或持有 authn.oidc.write 的管理员可管理「${app.name}」的 SSO 客户端`)
+    }
+  }
+
+  /** 回跳地址护栏：https 或 http://localhost[:port]（本机调试）。 */
+  private static assertRedirectUris(uris: string[]): void {
+    if (!Array.isArray(uris) || uris.length === 0) throw new Error('redirectUris 必填（至少一个回调地址）')
+    for (const uri of uris) {
+      let parsed: URL
+      try { parsed = new URL(uri) } catch { throw new Error(`回调地址非法：${uri}`) }
+      const localhostOk = parsed.protocol === 'http:' && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+      if (parsed.protocol !== 'https:' && !localhostOk) {
+        throw new Error(`回调地址必须为 https:// 或 http://localhost[:port]（收到：${uri}）`)
+      }
+    }
+  }
+
+  activeSsoClient(appId: string) {
+    return this.ctx.oidc.clientsForApp(appId).find((client) => OidcService.isClientActive(client))
+  }
+
+  /** 签发应用关联 OIDC 客户端（name=应用名，回填 refType/refId）；secret 仅本次返回。 */
+  createSsoClient(appId: string, input: {
+    redirectUris: string[]
+    clientType?: 'confidential' | 'public'
+    consentRequired?: boolean
+    postLogoutUris?: string[]
+    description?: string
+  }): { client: ReturnType<OidcService['clientsForApp']>[number]; clientSecret: string } {
+    const app = this.ctx.resourceCore.get('app', appId)
+    if (!app) throw new Error(`应用不存在：${appId}`)
+    AppRegistryService.assertRedirectUris(input.redirectUris)
+    const existing = this.ctx.oidc.clientsForApp(appId)
+    if (existing.length > 0) throw new Error(`该应用已签发 SSO 客户端（${existing[0]!.clientId}），请直接管理或先禁用后重新签发`)
+    const created = this.ctx.oidc.createClient({
+      name: app.name,
+      redirectUris: input.redirectUris,
+      ...(input.clientType !== undefined ? { clientType: input.clientType } : {}),
+      ...(input.consentRequired !== undefined ? { consentRequired: input.consentRequired } : {}),
+      ...(input.postLogoutUris !== undefined ? { postLogoutUris: input.postLogoutUris } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      refType: 'app',
+      refId: appId,
+    })
+    return created
+  }
+
+  updateSsoClient(appId: string, patch: { redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }) {
+    this.requireSsoClient(appId)
+    if (patch.redirectUris !== undefined) AppRegistryService.assertRedirectUris(patch.redirectUris)
+    return this.ctx.oidc.updateClient(this.requireSsoClient(appId).id, patch)
+  }
+
+  rotateSsoSecret(appId: string) {
+    return this.ctx.oidc.rotateSecret(this.requireSsoClient(appId).id)
+  }
+
+  disableSsoClient(appId: string, reason: string) {
+    return this.ctx.oidc.disableClient(this.requireSsoClient(appId).id, reason)
+  }
+
+  enableSsoClient(appId: string) {
+    return this.ctx.oidc.enableClient(this.requireSsoClient(appId).id)
+  }
+
+  private requireSsoClient(appId: string) {
+    const clients = this.ctx.oidc.clientsForApp(appId)
+    if (clients.length === 0) throw new Error(`该应用尚未签发 SSO 客户端`)
+    return clients[0]!
   }
 
   // -- 应用层指标 ---------------------------------------------------------
@@ -217,15 +330,24 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'app'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'audit']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'oidc', 'audit']
 
 export function apply(ctx: Context) {
   const registry = new AppRegistryService(ctx)
   ctx.plugin(appTools)
   ctx.effect(() => ctx.audit.registerExecutor('app.online', async (payload) => {
-    return registry.online(String(payload.appId), 'approval-center')
+    // 上线门禁（点 2，兜底）：审批挂单期间客户端可能被禁用——执行前复核，失效则执行失败留痕
+    const app = ctx.resourceCore.get('app', String(payload['appId']))
+    if (app) {
+      const enforce = AppRegistryService.ssoEnforceTypes()
+      const appType = String(app.attrs['appType'] ?? '')
+      if (enforce.includes(appType) && !registry.activeSsoClient(app.id)) {
+        throw new Error(`执行期复核失败：审批期间 SSO 客户端已失效（${appType} 形态门禁），请重新签发后再发起上线`)
+      }
+    }
+    return registry.online(String(payload['appId']), 'approval-center')
   }))
   ctx.effect(() => ctx.audit.registerExecutor('app.offline', async (payload) => {
-    return registry.offline(String(payload.appId), 'approval-center', String(payload.reason ?? '审批通过下架'))
+    return registry.offline(String(payload['appId']), 'approval-center', String(payload['reason'] ?? '审批通过下架'))
   }))
 }

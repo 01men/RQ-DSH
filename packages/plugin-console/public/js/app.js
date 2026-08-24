@@ -17,6 +17,7 @@ import { renderApprovals } from './pages/approvals.js'
 import { renderAssets } from './pages/assets.js'
 import { renderPlatform } from './pages/platform.js'
 import { renderConnect } from './pages/connect.js'
+import { renderOauthAuthorize, renderOauthError, renderOauthLogout } from './pages/oauth.js'
 import { mountUpdateBadge, openUpdateDrawer } from './update.js'
 
 const NAV = [
@@ -52,13 +53,25 @@ function currentHash() { return location.hash || '#/dashboard' }
 
 function navigate() {
   const hash = currentHash()
+  const [path, query] = hash.split('?')
+  const params = new URLSearchParams(query ?? '')
+  const page = path.replace(/^#\//, '') || 'dashboard'
+
+  // OAuth 协议页（授权/错误/登出）：独立于控制台外壳，无会话也放行（页面自带登录面板）
+  if (page.startsWith('oauth/')) {
+    const oauthBuilders = {
+      'oauth/authorize': renderOauthAuthorize,
+      'oauth/error': renderOauthError,
+      'oauth/logout': renderOauthLogout,
+    }
+    ;(oauthBuilders[page] ?? renderOauthError)(app, params)
+    return
+  }
+
   if (!session.token) {
     renderLogin(app)
     return
   }
-  const [path, query] = hash.split('?')
-  const params = new URLSearchParams(query ?? '')
-  const page = path.replace(/^#\//, '') || 'dashboard'
 
   const builders = {
     dashboard: renderDashboard,

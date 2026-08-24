@@ -45,6 +45,10 @@ export const PlatformEvents = {
   AppRegistered: 'app.registered',
   AppOnlined: 'app.onlined',
   AppOfflined: 'app.offlined',
+  AppUpdated: 'app.updated',
+  AppArchived: 'app.archived',
+  OidcAuthorizeGranted: 'oidc.authorize.granted',
+  OidcAuthorizeDenied: 'oidc.authorize.denied',
   ApprovalCreated: 'approval.created',
   ApprovalDecided: 'approval.decided',
   AlertFired: 'audit.alert.fired',
@@ -63,7 +67,7 @@ export const PlatformEvents = {
 
 /** 平台保留命名空间：第三方插件（source=plugin:*）禁止发射。 */
 const PLATFORM_RESERVED_PREFIXES = [
-  'iam.', 'authn.', 'mcp.', 'audit.', 'skill.', 'agent.', 'app.',
+  'iam.', 'authn.', 'oidc.', 'mcp.', 'audit.', 'skill.', 'agent.', 'app.',
   'usage.', 'billing.', 'model.', 'market.', 'developer.', 'wallet.',
   'platform.', 'approval.', 'connector.', 'console.', 'connect.',
 ]
