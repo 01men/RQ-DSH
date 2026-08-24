@@ -95,6 +95,67 @@ const ghStub = createServer((req, res) => {
 })
 await new Promise((resolve) => ghStub.listen(GH_PORT, '127.0.0.1', resolve))
 
+// ---------------------------------------------------------------- stub NAS 文件网关
+// 进程内真实 HTTP stub，复刻 synology-filestation-mcp 契约：
+// POST /mcp（initialize / notifications/initialized / tools/list / tools/call），
+// 强制校验 Authorization: Bearer 与 X-NAS-IP 设备路由头；fs_upload 按真实网关语义
+// 在「网关进程侧」读取 local_file（同机/共享卷契约——本进程可直接读平台 staging 目录）。
+const NAS_GW_PORT = 7362
+const NAS_GW_TOKEN = 'gw-selftest-token-9f8e7d6c'
+const NAS_GW_IP = '192.168.0.196'
+const nasGwCalls = []
+const nasGwUploads = []
+const nasGwStub = createServer(async (req, res) => {
+  const json = (status, payload, headers = {}) => {
+    res.writeHead(status, { 'content-type': 'application/json', ...headers })
+    res.end(JSON.stringify(payload))
+  }
+  if (req.method !== 'POST' || req.url !== '/mcp') return json(404, { error: 'not found' })
+  if (req.headers.authorization !== `Bearer ${NAS_GW_TOKEN}`) return json(401, { jsonrpc: '2.0', id: null, error: { code: -32001, message: '网关鉴权失败' } })
+  if (req.headers['x-nas-ip'] !== NAS_GW_IP) return json(400, { jsonrpc: '2.0', id: null, error: { code: -32002, message: '未知 NAS 设备（X-NAS-IP）' } })
+  let message = null
+  try { message = JSON.parse(await readBody(req)) } catch { return json(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }) }
+  const sessionHeaders = { 'mcp-session-id': 'stub-session-selftest' }
+  // 通知类消息（无 id）：确认即止
+  if (message.id === undefined || message.id === null) { res.writeHead(202, sessionHeaders); res.end(); return }
+  const reply = (result) => json(200, { jsonrpc: '2.0', id: message.id, result }, sessionHeaders)
+  const replyError = (code, text) => json(200, { jsonrpc: '2.0', id: message.id, error: { code, message: text } }, sessionHeaders)
+  if (message.method === 'initialize') {
+    return reply({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'synology-filestation-stub', version: '1.0.0' } })
+  }
+  if (message.method === 'tools/list') {
+    const names = ['fs_list_shares', 'fs_list', 'fs_get_info', 'fs_search', 'fs_create_folder', 'fs_rename', 'fs_delete', 'fs_upload', 'fs_download', 'fs_task_status']
+    return reply({ tools: names.map((name) => ({ name, description: `stub ${name}`, inputSchema: { type: 'object' } })) })
+  }
+  if (message.method === 'tools/call') {
+    const name = String(message.params?.name ?? '')
+    const args = message.params?.arguments ?? {}
+    nasGwCalls.push({ name, args })
+    const text = (value) => reply({ content: [{ type: 'text', text: JSON.stringify(value) }] })
+    if (name === 'fs_list_shares') return text({ shares: ['homes', 'skillhub'] })
+    if (name === 'fs_list') return text({ files: [{ name: 'readme.txt', isdir: false }, { name: 'reports', isdir: true }] })
+    if (name === 'fs_get_info') return text({ path: args.path, size: 128, isdir: false })
+    if (name === 'fs_search') return text({ files: [{ path: `/found/${args.pattern}` }] })
+    if (name === 'fs_create_folder') return text({ created: args.path })
+    if (name === 'fs_rename') return text({ renamed: true, new_name: args.new_name })
+    if (name === 'fs_delete') return text({ deleted: args.paths })
+    if (name === 'fs_download') return text({ downloaded: args.path, dest_dir: args.dest_dir })
+    if (name === 'fs_task_status') return text({ taskid: args.taskid, finished: true })
+    if (name === 'fs_upload') {
+      try {
+        const buffer = await import('node:fs/promises').then((fs) => fs.readFile(String(args.local_file)))
+        nasGwUploads.push({ share: args.share, path: args.path, sizeBytes: buffer.length, magic: buffer.subarray(0, 2).toString('latin1'), content: buffer })
+        return text({ uploaded: args.path, size: buffer.length })
+      } catch (error) {
+        return reply({ content: [{ type: 'text', text: `fs_upload 网关侧读不到 local_file：${error instanceof Error ? error.message : error}` }], isError: true })
+      }
+    }
+    return replyError(-32601, `未知工具：${name}`)
+  }
+  return replyError(-32601, `方法不存在：${message.method}`)
+})
+await new Promise((resolve) => nasGwStub.listen(NAS_GW_PORT, '127.0.0.1', resolve))
+
 // ---------------------------------------------------------------- 启动隔离实例
 console.log('\x1b[90m» 启动隔离测试实例…\x1b[0m')
 await rm(DATA_DIR, { recursive: true, force: true })
@@ -1519,11 +1580,169 @@ try {
   // 工具级 connect 管理工具（宿主侧 dsh Agent 用自然语言管理接入）
   const toolCodeCreate = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'connect_code_create', args: { template: 'readonly', ttlMinutes: 5 } } })
   check('工具 connect_code_create 签发接入码', toolCodeCreate.ok && toolCodeCreate.data.isError === false && toolCodeCreate.data.value.code.startsWith('enr_'))
+
+  // ================================================================ NAS 资产（FS 文件存储）
+  section('NAS 资产纳管（plugin-nas + 文件网关 stub）')
+
+  // 网关 stub 自身契约：错误 Bearer 被拒（证明平台调用确实携带网关令牌）
+  const gwBadToken = await fetch(`http://127.0.0.1:${NAS_GW_PORT}/mcp`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer wrong-token' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }),
+  })
+  check('网关 stub 校验 Bearer（错误令牌 401）', gwBadToken.status === 401)
+
+  // 用户测试配置（synology-filestation 形态）一键导入 → 创建 + 探活 + 上线 + 工具发现
+  const mcpServersConfig = JSON.stringify({
+    mcpServers: {
+      'synology-filestation': {
+        url: `http://127.0.0.1:${NAS_GW_PORT}/mcp`,
+        headers: { Authorization: `Bearer ${NAS_GW_TOKEN}`, 'X-NAS-IP': NAS_GW_IP },
+      },
+    },
+  })
+  const nasImport = await api('POST', '/api/nas/import', { token: admin, body: { config: mcpServersConfig, name: '自测群晖 NAS' } })
+  const nasImportResult = nasImport.data?.results?.[0] ?? {}
+  check('mcpServers JSON 一键导入（探活 → 上线 → 工具发现）',
+    nasImport.ok && nasImport.data.imported === 1 && nasImportResult.reachable === true && nasImportResult.status === 'online' && nasImportResult.tools === 10,
+    JSON.stringify(nasImport.error ?? nasImportResult))
+  const nasId = nasImportResult.nasId
+
+  const nasDetail = await api('GET', `/api/nas/${nasId}`, { token: admin })
+  check('详情含健康与网关工具面', nasDetail.ok && nasDetail.data.health.status === 'healthy' && nasDetail.data.gatewayTools.length === 10)
+  check('访问令牌回显脱敏（原文不落响应）', nasDetail.ok && !JSON.stringify(nasDetail.data).includes(NAS_GW_TOKEN) && String(nasDetail.data.attrs.accessToken).endsWith('…'))
+
+  const nasHealth = await api('POST', `/api/nas/${nasId}/health`, { token: admin })
+  check('手动探活（initialize 握手测延迟）', nasHealth.ok && nasHealth.data.status === 'healthy' && nasHealth.data.latencyMs >= 0)
+
+  // 文件全链（全部经网关 tools/call）
+  const nasShares = await api('GET', `/api/nas/${nasId}/fs`, { token: admin })
+  check('列出共享文件夹（fs_list_shares）', nasShares.ok && JSON.stringify(nasShares.data).includes('skillhub'))
+  const nasFiles = await api('GET', `/api/nas/${nasId}/fs?path=/skillhub`, { token: admin })
+  check('列目录（fs_list）', nasFiles.ok && JSON.stringify(nasFiles.data).includes('readme.txt'))
+  const nasMkdir = await api('POST', `/api/nas/${nasId}/fs/mkdir`, { token: admin, body: { path: '/skillhub/selftest' } })
+  check('创建目录（fs_create_folder）', nasMkdir.ok && nasGwCalls.some((c) => c.name === 'fs_create_folder' && c.args.share === 'skillhub'))
+  const nasUpload = await api('POST', `/api/nas/${nasId}/fs/upload`, {
+    token: admin,
+    body: { contentBase64: Buffer.from('PK\x03\x04selftest-file', 'latin1').toString('base64'), destPath: '/skillhub/selftest/a.zip' },
+  })
+  check('上传文件（平台 staging → 网关 fs_upload 侧读盘）', nasUpload.ok && nasGwUploads.some((u) => u.share === 'skillhub' && u.path === '/selftest/a.zip' && u.magic === 'PK'))
+  const nasSearch = await api('POST', `/api/nas/${nasId}/fs/search`, { token: admin, body: { pattern: 'report', path: '/skillhub' } })
+  check('检索文件（fs_search）', nasSearch.ok && JSON.stringify(nasSearch.data).includes('report'))
+  const nasDelete = await api('POST', `/api/nas/${nasId}/fs/delete`, { token: admin, body: { paths: ['/skillhub/selftest/a.zip'] } })
+  check('删除文件（fs_delete）', nasDelete.ok && nasGwCalls.some((c) => c.name === 'fs_delete'))
+  const nasAudit = await api('GET', `/api/audit/logs?resourceId=${nasId}&limit=20`, { token: admin })
+  check('写类文件操作审计留痕', (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.mkdir') && (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.upload'))
+
+  // RBAC：无角色 403 / developer 只读
+  const memberLogin = await api('POST', '/api/auth/login', { body: { username: 'yqz', password: 'Ybk@2026' } })
+  const member = memberLogin.data?.token
+  const memberNas = await api('GET', '/api/nas', { token: member })
+  check('无 nas.read 角色访问被拒（403）', memberNas.status === 403)
+  const devNasRead = await api('GET', '/api/nas', { token: dev })
+  check('developer 只读放行（nas.read）', devNasRead.ok)
+  const devNasWrite = await api('POST', `/api/nas/${nasId}/fs/mkdir`, { token: dev, body: { path: '/skillhub/deny' } })
+  check('developer 写操作被拒（缺 nas.write，403）', devNasWrite.status === 403)
+
+  // ================================================================ Skill 包 NAS 存储
+  section('Skill 包 NAS 存储（上架自动打包上传）')
+  const storageDeny = await api('PUT', '/api/skill-storage', { token: dev, body: { mode: 'nas', nasId, basePath: '/skillhub' } })
+  check('无 skill.storage.write 配置存储被拒（403）', storageDeny.status === 403)
+  const storageSet = await api('PUT', '/api/skill-storage', { token: admin, body: { mode: 'nas', nasId, basePath: '/skillhub' } })
+  check('配置包存储后端为已纳管 NAS 资产', storageSet.ok && storageSet.data.mode === 'nas' && storageSet.data.nasId === nasId && storageSet.data.basePath === '/skillhub')
+
+  // ① 提交自带 zip：上架时原样上传 NAS
+  const zipBuffer = Buffer.concat([Buffer.from('PK\x03\x04', 'latin1'), Buffer.from('selftest-skill-zip-payload')])
+  const pkgSubmit = await api('POST', '/api/skills', { token: admin, body: { name: '自测打包技能', content: '# 自测打包技能\n\n## 何时使用\n验证 skill.zip 随提交上传 NAS 的全链路。\n\n## 步骤\n提交即携带包内容。', category: '通用', version: '1.0.0', packageBase64: zipBuffer.toString('base64') } })
+  check('提交可携带 skill.zip（hasPackage）', pkgSubmit.ok && pkgSubmit.data.hasPackage === true, JSON.stringify(pkgSubmit.error))
+  const pkgSkillId = pkgSubmit.data?.id
+  const badZip = await api('POST', '/api/skills', { token: admin, body: { name: '坏包技能', content: '# x', category: '通用', packageBase64: Buffer.from('not-a-zip').toString('base64') } })
+  check('非 ZIP 内容（缺 PK 魔数）提交被拒', !badZip.ok)
+  await api('POST', `/api/skills/${pkgSkillId}/approve`, { token: admin, body: { level: 'domain', decision: 'approve', opinion: 'selftest' } })
+  const uploadsBefore = nasGwUploads.length
+  const pkgPublish = await api('POST', `/api/skills/${pkgSkillId}/publish`, { token: admin, body: {} })
+  const pkgUploaded = nasGwUploads[nasGwUploads.length - 1]
+  check('上架自动上传 NAS（fs_upload 收到包）', pkgPublish.ok && nasGwUploads.length === uploadsBefore + 1, JSON.stringify(pkgPublish.error))
+  check('上传产物即提交的 zip（字节级一致）', pkgUploaded?.magic === 'PK' && pkgUploaded.sizeBytes === zipBuffer.length && pkgUploaded.content.equals(zipBuffer))
+  check('上传路径契约 <basePath>/<slug>/<slug>-<version>.zip', pkgUploaded?.share === 'skillhub' && typeof pkgUploaded?.path === 'string' && pkgUploaded.path.endsWith('-1.0.0.zip'))
+  const pkgSkill = await api('GET', `/api/skills/${pkgSkillId}`, { token: admin })
+  const pkgVersion = pkgSkill.data?.versions?.find((v) => v.version === '1.0.0')
+  check('版本记录回写 package 元数据（storage=nas）', pkgVersion?.package?.storage === 'nas' && pkgVersion.package.nasId === nasId && pkgVersion.package.sizeBytes === zipBuffer.length)
+  const pkgDownload = await rawReq('GET', `/api/skills/${pkgSkillId}/package?version=1.0.0`, { headers: { authorization: `Bearer ${admin}` } })
+  check('包下载端点返回 zip（PK 头）', pkgDownload.status === 200 && pkgDownload.body.startsWith('PK'))
+
+  // ② 无 zip 提交：上架时由 SKILL.md 现场打包（platform-core zip.ts，零依赖）
+  const autoSubmit = await api('POST', '/api/skills', { token: admin, body: { name: '自测自动打包', content: '# 自测自动打包\n\n## 何时使用\n验证无 zip 提交时由 SKILL.md 现场打包上传 NAS。\n\n## 步骤\n提交 → 审批 → 上架。', category: '通用', version: '0.1.0' } })
+  await api('POST', `/api/skills/${autoSubmit.data.id}/approve`, { token: admin, body: { level: 'domain', decision: 'approve', opinion: 'selftest' } })
+  const autoPublish = await api('POST', `/api/skills/${autoSubmit.data.id}/publish`, { token: admin, body: {} })
+  const autoUploaded = nasGwUploads[nasGwUploads.length - 1]
+  check('无 zip 时由 SKILL.md 现场打包上传', autoPublish.ok && autoUploaded?.magic === 'PK' && autoUploaded.sizeBytes > 100 && autoUploaded.path.endsWith('-0.1.0.zip'), JSON.stringify(autoPublish.error))
+  check('现场打包产物含 SKILL.md 条目', autoUploaded?.content.toString('latin1').includes('SKILL.md'))
+
+  // ③ fail-closed：存储后端 NAS 非 online → 上架中止且版本不落 published
+  const draftNas = await api('POST', '/api/nas', { token: admin, body: { name: '未上线 NAS', attrs: { description: 'fail-closed 验证', gatewayUrl: `http://127.0.0.1:${NAS_GW_PORT}/mcp`, accessToken: NAS_GW_TOKEN, nasIp: NAS_GW_IP, dataClass: 'internal' } } })
+  await api('PUT', '/api/skill-storage', { token: admin, body: { mode: 'nas', nasId: draftNas.data.id, basePath: '/skillhub' } })
+  const fcSubmit = await api('POST', '/api/skills', { token: admin, body: { name: '自测中止技能', content: '# 自测中止技能\n\n## 何时使用\n验证存储后端 NAS 未上线时上架 fail-closed。\n\n## 步骤\n提交 → 审批 → 上架应中止。', category: '通用', version: '1.0.0' } })
+  await api('POST', `/api/skills/${fcSubmit.data.id}/approve`, { token: admin, body: { level: 'domain', decision: 'approve', opinion: 'selftest' } })
+  const fcPublish = await api('POST', `/api/skills/${fcSubmit.data.id}/publish`, { token: admin, body: {} })
+  check('存储后端 NAS 未上线 → 上架 fail-closed', !fcPublish.ok && JSON.stringify(fcPublish.error).includes('fail-closed'), JSON.stringify(fcPublish.error))
+  const fcSkill = await api('GET', `/api/skills/${fcSubmit.data.id}`, { token: admin })
+  check('fail-closed 后版本未标记 published', fcSkill.ok && fcSkill.data.versions.every((v) => v.status !== 'published'))
+  await api('PUT', '/api/skill-storage', { token: admin, body: { mode: 'local' } })
+  const storageBack = await api('GET', '/api/skill-storage', { token: admin })
+  check('存储后端可切回 local', storageBack.ok && storageBack.data.config.mode === 'local')
+
+  // ================================================================ 台账与巡检（NAS 接入）
+  section('资产台账与巡检（NAS 接入）')
+  const inventory = await api('GET', '/api/assets/inventory', { token: admin })
+  check('台账包含 nas 资产类型', inventory.ok && inventory.data.items.some((item) => item.type === 'nas') && (inventory.data.summary.byType.nas?.total ?? 0) >= 2)
+  const healthcheck = await api('POST', '/api/assets/healthcheck', { token: admin, body: {} })
+  check('一键巡检覆盖在线 NAS（initialize 探活 healthy）', healthcheck.ok && healthcheck.data.items.some((item) => item.type === 'nas' && item.status === 'healthy'))
+
+  // ================================================================ 平台即 MCP Server（POST /mcp）
+  section('平台即 MCP Server（POST /mcp）')
+  const mcpAnon = await rawReq('POST', '/mcp', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) })
+  check('无 Bearer 令牌 401', mcpAnon.status === 401)
+  const mcpGet = await rawReq('GET', '/mcp', { headers: { authorization: `Bearer ${admin}` } })
+  check('GET SSE 长流不支持（405，纯 JSON 形态合法）', mcpGet.status === 405)
+  const mcpInit = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'selftest', version: '1.0' } } }),
+  })
+  check('initialize 返回 serverInfo/capabilities + 会话头', mcpInit.status === 200 && jsonBody(mcpInit).result?.serverInfo?.name === 'dsh-ops-platform' && typeof mcpInit.headers['mcp-session-id'] === 'string')
+  const mcpNotify = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+  })
+  check('通知类消息 202 确认', mcpNotify.status === 202)
+  const mcpTools = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+  })
+  const mcpToolList = jsonBody(mcpTools).result?.tools ?? []
+  check('tools/list 暴露全部运维工具（40+，含 nas_*）', mcpToolList.length >= 40 && mcpToolList.some((t) => t.name === 'nas_fs_upload'), `tools=${mcpToolList.length}`)
+  const mcpCall = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'nas_list', arguments: {} } }),
+  })
+  const mcpCallResult = jsonBody(mcpCall).result
+  check('tools/call 执行成功（content blocks）', mcpCall.status === 200 && mcpCallResult?.isError === false && Array.isArray(mcpCallResult?.content), JSON.stringify(jsonBody(mcpCall)).slice(0, 200))
+  const mcpDeny = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${dev}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'nas_fs_mkdir', arguments: { nasId, path: '/skillhub/x' } } }),
+  })
+  const mcpDenyResult = jsonBody(mcpDeny).result
+  check('工具级权限点拦截（dev 缺 nas.write → isError）', mcpDeny.status === 200 && mcpDenyResult?.isError === true && JSON.stringify(mcpDenyResult).includes('nas.write'))
+  const mcpUnknown = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'resources/list', params: {} }),
+  })
+  check('未知方法 -32601', jsonBody(mcpUnknown).error?.code === -32601)
 } finally {
   // ---------------------------------------------------------------- 收尾
   console.log('\n\x1b[90m» 停止测试实例…\x1b[0m')
   proc.kill('SIGKILL')
   await new Promise((resolve) => ghStub.close(resolve))
+  await new Promise((resolve) => nasGwStub.close(resolve))
   await rm(DATA_DIR, { recursive: true, force: true }).catch(() => {})
 }
 

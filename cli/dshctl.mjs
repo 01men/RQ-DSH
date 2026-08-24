@@ -130,9 +130,16 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
             offline <id> --reason=<原因>      （L4：生成审批单）
             invoke <id> --tool=<工具名> [--args=<JSON>]
   skill     list [--q= --category=] | get <id>
-            submit --name= --content-file=<SKILL.md路径> [--category=]
+            submit --name= --content-file=<SKILL.md路径> [--category=] [--package=<skill.zip>]
             approve <id> --level=domain|security --decision=approve|reject --opinion=
             publish <id> | install <id> --agentId= | deprecate <id> --reason=
+            storage get | storage set --mode=local|nas [--nas-id= --base-path=]
+  nas       list [--status= --q=] | get <id>
+            create --name= --gateway-url= --token= --nas-ip= [--root-path=] [--staging-dir=]
+            import --config=<mcpServers JSON 或 @文件> [--name=]   （synology-filestation 配置一键纳管）
+            health <id> | online <id> | offline <id> --reason=
+            shares <id> | files <id> [--path=] | mkdir <id> --path= | delete <id> --path=
+            upload <id> --file=<本地路径> --dest=<NAS路径> | search <id> --pattern= [--path=]
   agent     list [--status=] | get <id> | metrics <id> | topology <id>
             create --name= --model= --riskLevel=
             offline <id> --reason=<原因> --requesterId= --requesterName=   （L4 审批）
@@ -503,6 +510,102 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
     },
   },
 
+  // ---------------------------------------------------------------- nas
+  nas: {
+    desc: 'NAS 文件存储资产（FS 类，经 MCP 网关访问）',
+    run: async () => {
+      const action = argv[0] ?? 'list'
+      const id = argv[1]
+      await ensureToken()
+      if (action === 'list') {
+        const search = new URLSearchParams()
+        if (flag('status')) search.set('status', flag('status'))
+        if (flag('q')) search.set('q', flag('q'))
+        const data = await call('GET', '/api/nas' + (search.size ? `?${search}` : ''))
+        out(data.items.map((n) => ({ id: n.id, name: n.name, status: n.status, health: n.health?.status ?? '—', tools: n.gatewayToolCount, rootPath: n.attrs?.rootPath ?? '/' })), ['id', 'name', 'status', 'health', 'tools', 'rootPath'])
+        return
+      }
+      if (action === 'get') { out(await call('GET', `/api/nas/${id}`)); return }
+      if (action === 'create') {
+        const name = argOf('--name')
+        const gatewayUrl = argOf('--gateway-url')
+        const accessToken = argOf('--token')
+        const nasIp = argOf('--nas-ip')
+        if (!name || !gatewayUrl || !accessToken || !nasIp) fail('用法：nas create --name= --gateway-url= --token= --nas-ip= [--root-path=] [--description=]')
+        const data = await call('POST', '/api/nas', {
+          name,
+          attrs: {
+            description: flag('description', 'CLI 注册'),
+            gatewayUrl, accessToken, nasIp,
+            rootPath: flag('root-path', '/'),
+            ...(flag('staging-dir') ? { stagingDir: flag('staging-dir') } : {}),
+            dataClass: 'internal',
+          },
+        })
+        ok(`NAS 资产已创建：${data.name}（${data.id}，${data.status}）`)
+        return
+      }
+      if (action === 'import') {
+        const config = argOf('--config')
+        if (!config) fail('用法：nas import --config=<mcpServers JSON 或 @文件路径> [--name=]')
+        const payload = String(config).startsWith('@')
+          ? await import('node:fs/promises').then((fs) => fs.readFile(String(config).slice(1), 'utf8'))
+          : String(config)
+        const data = await call('POST', '/api/nas/import', { config: payload, name: flag('name'), description: flag('description') })
+        out(data.results, ['name', 'ok', 'nasId', 'reachable', 'tools', 'status', 'error'], `导入结果（成功 ${data.imported}）`)
+        return
+      }
+      if (action === 'health') { out(await call('POST', `/api/nas/${id}/health`)); return }
+      if (action === 'online') { const data = await call('POST', `/api/nas/${id}/transition`, { action: 'online' }); ok(`已上线：${data.name}（${data.status}）`); return }
+      if (action === 'offline') {
+        const reason = flag('reason')
+        if (!reason) fail('offline 必须提供 --reason（护栏要求）')
+        const data = await call('POST', `/api/nas/${id}/transition`, { action: 'offline', note: String(reason) })
+        ok(`已下线：${data.name}（${data.status}）`)
+        return
+      }
+      if (action === 'shares') { out(await call('GET', `/api/nas/${id}/fs`)); return }
+      if (action === 'files') {
+        const path = flag('path', '')
+        const data = await call('GET', `/api/nas/${id}/fs` + (path ? `?path=${encodeURIComponent(String(path))}` : ''))
+        out(data)
+        return
+      }
+      if (action === 'mkdir') {
+        const path = argOf('--path')
+        if (!path) fail('mkdir 需要 --path=<NAS路径>')
+        out(await call('POST', `/api/nas/${id}/fs/mkdir`, { path }))
+        return
+      }
+      if (action === 'delete') {
+        const path = argOf('--path')
+        if (!path) fail('delete 需要 --path=<NAS路径>')
+        if (!ASSUME_YES && OUTPUT === 'table') {
+          console.log(`将删除 NAS ${id} 上的路径：${path}`)
+          if (!await confirm()) { console.log('已取消（使用 --yes 跳过确认）'); return }
+        }
+        out(await call('POST', `/api/nas/${id}/fs/delete`, { paths: [path] }))
+        return
+      }
+      if (action === 'upload') {
+        const file = argOf('--file')
+        const dest = argOf('--dest')
+        if (!file || !dest) fail('用法：nas upload <id> --file=<本地路径> --dest=<NAS路径>')
+        const buffer = await import('node:fs/promises').then((fs) => fs.readFile(file))
+        out(await call('POST', `/api/nas/${id}/fs/upload`, { contentBase64: buffer.toString('base64'), destPath: dest }))
+        ok(`已上传 → ${dest}`)
+        return
+      }
+      if (action === 'search') {
+        const pattern = argOf('--pattern')
+        if (!pattern) fail('search 需要 --pattern=<关键字>')
+        out(await call('POST', `/api/nas/${id}/fs/search`, { pattern, path: flag('path', '/') }))
+        return
+      }
+      fail(`未知动作：nas ${action}`)
+    },
+  },
+
   // ---------------------------------------------------------------- skill
   skill: {
     run: async () => {
@@ -521,14 +624,41 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       if (action === 'submit') {
         const file = argOf('--content-file')
         if (!file) fail('submit 需要 --content-file=<SKILL.md 路径>')
-        const content = await import('node:fs/promises').then((fs) => fs.readFile(file, 'utf8'))
+        const fs = await import('node:fs/promises')
+        const content = await fs.readFile(file, 'utf8')
+        const packageFile = argOf('--package')
+        const packageBase64 = packageFile ? (await fs.readFile(packageFile)).toString('base64') : undefined
         const data = await call('POST', '/api/skills', {
           name: argOf('--name'), content, category: flag('category', '通用'), summary: flag('summary', ''),
           version: flag('version', '1.0.0'),
+          ...(packageBase64 !== undefined ? { packageBase64 } : {}),
         })
-        ok(`已提交：${data.status === 'rejected' ? '静态扫描未通过（自动驳回）' : '进入审批流水线'}`)
+        ok(`已提交：${data.status === 'rejected' ? '静态扫描未通过（自动驳回）' : '进入审批流水线'}${data.hasPackage ? '（含 skill.zip 包）' : ''}`)
         out({ id: data.id, status: data.status, findings: (data.findings ?? []).map((f) => f.message).join('；') })
         return
+      }
+      if (action === 'storage') {
+        const sub = argv[1] ?? 'get'
+        if (sub === 'get') {
+          const data = await call('GET', '/api/skill-storage')
+          out(data.config)
+          table(data.nasOptions, ['id', 'name', 'rootPath'], '可用 NAS（online）')
+          return
+        }
+        if (sub === 'set') {
+          const mode = String(flag('mode', ''))
+          if (mode !== 'local' && mode !== 'nas') fail('storage set 需要 --mode=local|nas')
+          const body = { mode }
+          if (mode === 'nas') {
+            body.nasId = argOf('--nas-id')
+            if (!body.nasId) fail('--mode=nas 需要 --nas-id=<NAS资产ID>')
+            body.basePath = flag('base-path', '/skills')
+          }
+          const data = await call('PUT', '/api/skill-storage', body)
+          ok(`Skill 包存储已切换：${data.mode}${data.nasId ? ` → ${data.nasId}:${data.basePath}` : ''}`)
+          return
+        }
+        fail('用法：skill storage get | set --mode=local|nas [--nas-id= --base-path=]')
       }
       if (action === 'approve') {
         const data = await call('POST', `/api/skills/${id}/approve`, {

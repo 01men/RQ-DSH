@@ -265,6 +265,33 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
 - **一行 SDK 式接入验证**：selftest 内置 openid-client（v6）冒烟——discovery 驱动走通 authorize →
   token → userinfo → refresh → revoke → end_session 全链（标准客户端真实姿势回归）。
 
+## 三D、NAS 资产纳管 + Skill 包 NAS 存储 + 平台三端调用（本迭代，v1.5）
+
+NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可直传 NAS，平台能力对 CLI / REST / MCP 三端同构开放
+（设计与可行性结论：[docs/dev-plan-nas.md](docs/dev-plan-nas.md)）：
+
+- **plugin-nas（resource-core Pattern A）**：以 synology-filestation-mcp 这类「MCP 文件网关」为访问通道——
+  平台持有网关地址 + Bearer 令牌 + `X-NAS-IP` 设备路由头，全部文件操作经网关 `tools/call` 完成
+  （fs_list/fs_upload/fs_delete/fs_search 等），不直连 DSM 私有 API。属性表三组（基本/接入/治理）、
+  生命周期 `draft → online → offline → archived`（上线前 initialize 探活护栏）、健康巡检接入资产运营、
+  写类操作审计留痕、令牌回显脱敏。
+- **mcpServers JSON 一键纳管**：`POST /api/nas/import`（CLI `nas import` / 控制台导入弹窗）直接吃
+  synology-filestation 形态的 mcpServers 配置 → 创建资产 → 探活 → 上线 → 工具发现。
+- **Skill 包 NAS 存储**：`GET/PUT /api/skill-storage`（`skill.storage.write`）配置包后端
+  `local | nas`（引用已纳管 NAS 资产 + basePath，凭证不重复配置）。上架时：提交携带的
+  `packageBase64`（CLI `skill submit --package=<zip>` / 控制台附件）原样上传；无包时由
+  platform-core 零依赖 ZIP 打包器（`zip.ts`，deflate + CRC32）从 SKILL.md 现场打包 →
+  平台 staging → 网关 `fs_upload` → 版本记录回写 `package { storage, nasId, path, sizeBytes }`。
+  **fail-closed**：上传失败即上架失败。**部署约束**：`fs_upload` 在网关进程侧读本地路径，
+  平台与网关需同机或共享卷（资产 `stagingDir` 可配共享挂载点）。
+- **平台即 MCP Server**：`POST /mcp`（Streamable HTTP 纯 JSON 形态）——initialize（会话头 +
+  serverInfo）/ tools/list（全部运维工具 40+）/ tools/call / ping；复用平台 Bearer 令牌与
+  工具级权限点（含身份注入防参数伪造），ZCode / Claude / Cursor 等任意 MCP 客户端可直接纳管平台。
+- **三端同构**：`nas_*` 八个工具对 dsh 插件 / REST 工具桥 / `/mcp` 端点同一契约；CLI 新增
+  `nas` 命令组（list/get/create/import/health/online/offline/shares/files/mkdir/delete/upload/search）
+  与 `skill storage get|set`；控制台新增「NAS 存储」页（列表/详情/文件浏览器/导入），
+  资产台账与一键巡检覆盖 nas 类型。
+
 ## 三、目录结构（插件标准解剖）
 
 ```
@@ -284,7 +311,7 @@ packages/
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（326 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、远程接入与平台更新链路；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（365 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -331,6 +358,10 @@ node cli/dshctl.mjs approval decide <id> --decision=approve --opinion="已确认
 node cli/dshctl.mjs tool exec --name=agent_list --args='{"status":"online"}'
 node cli/dshctl.mjs plugin init --id=com.demo.hello --dir=./my-plugin   # 脚手架（契约五面 + 发布者密钥对）
 node cli/dshctl.mjs plugin sign --dir=./my-plugin && node cli/dshctl.mjs plugin submit --dir=./my-plugin
+node cli/dshctl.mjs nas import --config='{"mcpServers":{"synology-filestation":{"url":"http://192.168.0.7:3000/mcp","headers":{"Authorization":"Bearer <令牌>","X-NAS-IP":"192.168.0.196"}}}}'
+node cli/dshctl.mjs nas files <id> --path=/skillhub    # 文件浏览（shares/mkdir/upload/delete/search 同组）
+node cli/dshctl.mjs skill submit --name=<名> --content-file=SKILL.md --package=skill.zip
+node cli/dshctl.mjs skill storage set --mode=nas --nas-id=<id> --base-path=/skillhub
 ```
 
 ```bash
@@ -338,11 +369,14 @@ node cli/dshctl.mjs plugin sign --dir=./my-plugin && node cli/dshctl.mjs plugin 
 curl -X POST localhost:7300/api/auth/login -H 'content-type: application/json' \
      -d '{"username":"admin","password":"<你的口令>"}'
 curl localhost:7300/api/overview -H "authorization: Bearer <token>"
+# 平台即 MCP Server（任意 MCP 客户端可接入）
+curl -X POST localhost:7300/mcp -H "authorization: Bearer <token>" -H 'content-type: application/json' \
+     -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **326 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **365 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
@@ -354,7 +388,12 @@ Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批�
 换牌 Basic+Post × form+JSON、PKCE 正误、code 重放、token_use 收敛、JWKS 本地验签、
 MVP 闭环：门禁双点（含审批期间禁用→执行失败留痕）、owner 校验（非 owner/机器 403）、
 secret 轮换旧值即废、offline/online/updated/archived 四事件联动、openid-client 冒烟
-authorize→token→userinfo→refresh→revoke→end_session）。测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
+authorize→token→userinfo→refresh→revoke→end_session）+ **NAS 与平台 MCP 端点**
+（进程内真实 synology-filestation stub（校验 Bearer + X-NAS-IP，fs_upload 真实读盘）：
+mcpServers JSON 导入→探活→上线→工具发现、文件全链与审计留痕、RBAC 读写分离、
+Skill 包上架自动上传（字节级校验 / 无包现场打包 / NAS 未上线 fail-closed）、台账巡检覆盖、
+`/mcp` 端点 401/initialize/tools-list/tools-call/工具级越权/-32601）。
+测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
 
 ## 八、说明与边界
 
@@ -364,4 +403,5 @@ authorize→token→userinfo→refresh→revoke→end_session）。测试内 stu
 - 钉钉连接器支持真实 OpenAPI（`mode: real` + `apiBase`）与 mock 演示（显式标注）
 - 模型网关仅转发 OpenAI 兼容 chat/completions；模型未配置 endpoint 时拒绝调用（不生成假 completion）
 - 资金通道为手工过渡形态（见「三A」资金红线）；OIDC 私钥存 data 目录，生产建议迁 KMS
+- NAS 文件操作全部经 MCP 文件网关（不直连 DSM 私有 API）；`fs_upload/fs_download` 在网关进程侧读写本地路径——平台与网关需同机部署，或把资产 `stagingDir` 配置为共享挂载点；`/mcp` 端点为无会话纯 JSON 形态（不提供 GET SSE 长流，主流客户端兼容）
 - Node ≥ 22.6（原生 TypeScript 运行，无需构建步骤；node:sqlite 在 Node 24 下为 Experimental，无害）

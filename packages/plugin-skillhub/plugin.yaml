@@ -12,3 +12,4 @@ permissions:
   - skill.approve
   - skill.publish
   - skill.install
+  - skill.storage.write

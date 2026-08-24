@@ -1,0 +1,22 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-nas
+base: /api
+endpoints:
+  - GET/POST /api/nas · GET/PATCH /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）
+  - POST /api/nas/:id/transition|health|sync-tools
+  - GET /api/nas/:id/fs[?path=] · GET /api/nas/:id/fs/info
+  - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download（经网关 fs_* 工具）
+  - GET/PUT /api/skill-storage（Skill 包存储后端：local | 已纳管 NAS 资产）
+tools:
+  - nas_list
+  - nas_get
+  - nas_health_check
+  - nas_fs_list
+  - nas_fs_search
+  - nas_fs_mkdir
+  - nas_fs_delete
+  - nas_fs_upload
+services:
+  - key: nasRegistry
+    access: ctx.nasRegistry
+    description: NAS 资产注册/生命周期/探活 + MCP 文件网关客户端（synology-filestation 形态）+ Skill 包存储配置

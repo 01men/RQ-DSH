@@ -21,6 +21,7 @@ export * from './http.ts'
 export * from './ids.ts'
 export * from './sqlite.ts'
 export * from './yaml.ts'
+export * from './zip.ts'
 export * from './plugin-ctx.ts'
 export * from './version.ts'
 

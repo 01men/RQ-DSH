@@ -212,8 +212,22 @@ async function seedDemo(ctx: Context): Promise<void> {
   })
   void financeGroup
 
+  // -- NAS 文件存储资产（演示：草稿态，指向真实网关后可探活上线） ----------------
+  ctx.nasRegistry.register({
+    name: '群晖文件网关（机房 A）', slug: 'synology-dc-a',
+    attrs: {
+      description: '技术中心共享文件存储（演示草稿：通过 nas import 或编辑接入信息指向真实 synology-filestation-mcp 网关后上线）',
+      vendor: 'Synology DS920+', capacity: '4×4TB',
+      tags: ['文件存储', '演示'],
+      gatewayUrl: 'http://192.168.0.7:3000/mcp', accessToken: 'demo-token-replace-me', nasIp: '192.168.0.196',
+      rootPath: '/', stagingDir: '/volume1/dsh-staging',
+      dataClass: 'internal',
+    },
+    ownerId: opsAdmin.id, orgId: aiDept.id,
+  })
+
   // -- Skill 市场 ------------------------------------------------------------
-  const mkSkill = (input: Parameters<typeof ctx.skillHub.submit>[0]) => {
+  const mkSkill = async (input: Parameters<typeof ctx.skillHub.submit>[0]) => {
     const skill = ctx.skillHub.submit(input)
     const target = skill.versions.find((item) => item.version === skill.currentVersion)!
     if (target.status === 'pending_domain') {
@@ -222,35 +236,35 @@ async function seedDemo(ctx: Context): Promise<void> {
         ctx.skillHub.approve(skill.id, target.version, 'security', { id: admin.id, name: admin.displayName }, '安全团队加签通过')
       }
     }
-    const published = ctx.skillHub.publish(skill.id, target.version, opsAdmin.displayName)
+    const published = await ctx.skillHub.publish(skill.id, target.version, opsAdmin.displayName)
     return ctx.skillHub.skills().get(published.id)!
   }
 
-  const skillWeekly = mkSkill({
+  const skillWeekly = await mkSkill({
     name: '周报生成器', category: '办公提效', tags: ['文档', '自动化'],
     summary: '汇总本周会话与项目进展，一键生成结构化周报',
     content: '# 周报生成器\n\n## 何时使用\n每周五 17:00 汇总个人与团队进展。\n\n## 步骤\n1. 读取本周所有会话摘要\n2. 按项目分组提炼结论\n3. 生成分节周报并发出确认\n\n## 输出格式\nMarkdown，含【本周结论】【风险】【下周计划】三节。',
     authorId: dev1.id, authorName: dev1.displayName, orgId: aiDept.id, version: '1.2.0', changelog: '支持自定义模板',
   })
-  const skillSql = mkSkill({
+  const skillSql = await mkSkill({
     name: 'SQL 审查助手', category: '研发效能', tags: ['数据库', '评审'],
     summary: '对 SQL 变更做索引/风险审查并给出改写建议',
     content: '# SQL 审查助手\n\n## 何时使用\n提交含 SQL 变更的 MR 时触发。\n\n## 检查项\n- 全表扫描风险\n- 索引命中分析\n- 事务与锁范围\n\n## 输出\n审查意见 + 改写示例。',
     authorId: dev2.id, authorName: dev2.displayName, orgId: aiDept.id, version: '2.0.1', changelog: '适配新解析器',
   })
-  const skillCs = mkSkill({
+  const skillCs = await mkSkill({
     name: '客诉安抚话术库', category: '客户服务', tags: ['客服', '话术'],
     summary: '按情绪等级与场景匹配备选安抚话术',
     content: '# 客诉安抚话术库\n\n## 何时使用\n客服 Agent 识别到用户负面情绪时调用。\n\n## 分级\nL1 失望 / L2 愤怒 / L3 投诉升级\n\n## 原则\n先共情，后解释，给出可执行补偿选项。',
     authorId: orgAdmin.id, authorName: orgAdmin.displayName, orgId: prodDept.id, version: '1.0.3',
   })
-  const skillData = mkSkill({
+  const skillData = await mkSkill({
     name: '指标异动归因', category: '数据分析', tags: ['BI', '归因'],
     summary: '对指标波动做多维下钻归因，输出结论卡片',
     content: '# 指标异动归因\n\n## 何时使用\n看板指标同比/环比异常时。\n\n## 流程\n1. 确认异动显著性\n2. 按渠道/地区/客群下钻\n3. 输出 Top3 归因与置信度。',
     authorId: dev1.id, authorName: dev1.displayName, orgId: aiDept.id, version: '0.9.0',
   })
-  const skillOnboard = mkSkill({
+  const skillOnboard = await mkSkill({
     name: '新人入职引导', category: '人事行政', tags: ['HR', '流程'],
     summary: '按入职清单引导新同学完成账号、设备、培训',
     content: '# 新人入职引导\n\n## 何时使用\n新员工入职首日。\n\n## 清单\n- 账号激活与三方绑定\n- 设备领用\n- 安全培训考试\n- 导师匹配',
@@ -258,7 +272,7 @@ async function seedDemo(ctx: Context): Promise<void> {
   })
 
   // 高风险 Skill（含外联）演示两级审批 + 安全加签
-  const skillWeb = mkSkill({
+  const skillWeb = await mkSkill({
     name: '竞品舆情监控', category: '市场情报', tags: ['外联', '监控'],
     summary: '定时抓取公开舆情并生成竞品日报（高风险：外部网络）',
     content: '# 竞品舆情监控\n\n## 何时使用\n每日 08:00 定时任务。\n\n## 行为\n- 通过 https://news.example.com 获取公开新闻\n- 关键词过滤与情感标注\n- 生成日报',

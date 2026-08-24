@@ -11,7 +11,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import { PlatformEvents, newId, slugify, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
+import { PlatformEvents, createZip, newId, slugify, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
 import * as skillhubTools from './tools.ts'
 
 // ---------------------------------------------------------------------------
@@ -34,6 +34,15 @@ export interface VersionApproval {
   at: string
 }
 
+/** 上架产物：Skill 包（skill.zip）的位置与体积（storage=nas 时由上架钩子写入）。 */
+export interface SkillPackageInfo {
+  storage: 'nas' | 'local'
+  nasId?: string
+  path?: string
+  sizeBytes?: number
+  uploadedAt?: string
+}
+
 export interface SkillVersion {
   version: string
   changelog: string
@@ -44,6 +53,10 @@ export interface SkillVersion {
   approvals: VersionApproval[]
   publishedAt?: string
   rejectedReason?: string
+  /** 提交时可选携带的 skill.zip 包内容（base64；上架时原样上传 NAS）。 */
+  packageBase64?: string
+  /** 上架时写入的包位置（storage=nas 为 NAS 绝对路径；local 为平台内联）。 */
+  package?: SkillPackageInfo
 }
 
 export interface SkillRecord extends RecordBase {
@@ -147,9 +160,12 @@ export class SkillHubService extends Service {
     applicableModels?: string[]
     deps?: string[]
     cover?: string
+    /** 可选：skill.zip 包内容（base64）。上架时经存储后端（可配 NAS）原样上传。 */
+    packageBase64?: string
   }): SkillRecord {
     if (!input.name?.trim()) throw new Error('Skill 名称不能为空')
     if (!input.content?.trim()) throw new Error('SKILL.md 内容不能为空')
+    if (input.packageBase64 !== undefined) validatePackageBase64(input.packageBase64)
     const slug = slugify(input.name)
     const existing = this.skills().findOne((skill) => skill.slug === slug)
     const version: SkillVersion = {
@@ -160,6 +176,7 @@ export class SkillHubService extends Service {
       submittedAt: now(),
       findings: [],
       approvals: [],
+      ...(input.packageBase64 !== undefined ? { packageBase64: input.packageBase64 } : {}),
     }
     if (existing) {
       if (existing.versions.some((item) => item.version === version.version)) {
@@ -261,16 +278,68 @@ export class SkillHubService extends Service {
     return this.skills().update(skillId, { versions: versions as SkillVersion[], status: 'rejected' })
   }
 
-  publish(skillId: string, version: string, actor: string): SkillRecord {
+  /**
+   * 上架：审批通过 →（可选）skill.zip 上传 NAS 存储后端 → 版本标记 published。
+   * 存储后端为 nas 时 fail-closed：包上传失败即上架失败（错误信息含网关/中转目录排查指引）。
+   */
+  async publish(skillId: string, version: string, actor: string): Promise<SkillRecord> {
     const skill = this.requireSkill(skillId)
     const target = skill.versions.find((item) => item.version === version)
     if (!target) throw new Error(`版本不存在：${version}`)
     if (target.status !== 'approved') throw new Error(`版本状态 ${target.status} 不可上架（需完成审批）`)
+    let packageInfo: SkillPackageInfo | undefined
+    const storage = this.ctx.nasRegistry.getSkillStorage()
+    if (storage.mode === 'nas') {
+      const nasId = storage.nasId!
+      const nas = this.ctx.nasRegistry.get(nasId)
+      if (!nas) throw new Error(`Skill 包存储后端指向的 NAS 资产不存在：${nasId}（请在 Skill 存储配置中修正）`)
+      if (nas.status !== 'online') throw new Error(`Skill 包存储后端 NAS「${nas.name}」当前状态 ${nas.status}，上架中止（fail-closed）`)
+      const buffer = this.packageBufferOf(skill, target)
+      const basePath = (storage.basePath ?? '/skillhub').replace(/\/+$/, '')
+      const destPath = `${basePath}/${skill.slug}/${skill.slug}-${version}.zip`
+      try {
+        const uploaded = await this.ctx.nasRegistry.uploadFile(nasId, {
+          buffer,
+          destPath,
+          actor: { id: actor, name: actor },
+        })
+        packageInfo = { storage: 'nas', nasId, path: uploaded.path, sizeBytes: uploaded.sizeBytes, uploadedAt: new Date().toISOString() }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        throw new Error(`skill.zip 上传 NAS 失败，上架中止：${message}（排查：网关服务与令牌、网关侧可读的 staging 中转目录；或先把 Skill 存储切回 local）`)
+      }
+    }
     const versions = skill.versions.map((item) =>
-      item.version === version ? { ...item, status: 'published' as const, publishedAt: now() } : item)
+      item.version === version
+        ? { ...item, status: 'published' as const, publishedAt: now(), ...(packageInfo !== undefined ? { package: packageInfo } : {}) }
+        : item)
     const updated = this.skills().update(skillId, { versions: versions as SkillVersion[], status: 'published' })
-    this.ctx.platformBus.emit(PlatformEvents.SkillPublished, { skillId, name: updated.name, version, actor, type: 'skill', slug: updated.slug })
+    this.ctx.platformBus.emit(PlatformEvents.SkillPublished, {
+      skillId, name: updated.name, version, actor, type: 'skill', slug: updated.slug,
+      ...(packageInfo !== undefined ? { package: { storage: packageInfo.storage, path: packageInfo.path, sizeBytes: packageInfo.sizeBytes } } : {}),
+    })
     return updated
+  }
+
+  /** 上架/下载用的 skill.zip 字节：优先提交时携带的原始包；否则由 SKILL.md + manifest 现场打包。 */
+  packageBufferOf(skill: SkillRecord, target: SkillVersion): Buffer {
+    if (target.packageBase64) return Buffer.from(target.packageBase64, 'base64')
+    return createZip([
+      { path: 'SKILL.md', content: target.content },
+      { path: 'manifest.json', content: JSON.stringify({ name: skill.name, slug: skill.slug, version: target.version, category: skill.category, tags: skill.tags, summary: skill.summary }, null, 2) },
+    ])
+  }
+
+  /** 取某已发布版本的 skill.zip（本地字节与 NAS 上架产物同源）。 */
+  packageOf(skillId: string, version: string): { buffer: Buffer; filename: string; info: SkillPackageInfo } {
+    const skill = this.requireSkill(skillId)
+    const target = skill.versions.find((item) => item.version === version && item.status === 'published')
+    if (!target) throw new Error(`已发布版本不存在：${version}`)
+    return {
+      buffer: this.packageBufferOf(skill, target),
+      filename: `${skill.slug}-${target.version}.zip`,
+      info: target.package ?? { storage: 'local' },
+    }
   }
 
   deprecate(skillId: string, actor: string, note: string, force?: boolean): { skill: SkillRecord; referencingAgents: Array<{ id: string; name: string; owner: string }> } {
@@ -396,6 +465,16 @@ function bumpMinor(version: string): string {
   return parts.join('.')
 }
 
+/** 提交包校验：base64 可解码、ZIP 魔数（PK\u0003\u0004）、体积 ≤ 32MB。 */
+function validatePackageBase64(value: string): void {
+  if (typeof value !== 'string' || value.length === 0) throw new Error('packageBase64 不能为空字符串')
+  if (value.length > 44_000_000) throw new Error('skill.zip 过大（base64 后上限 32MB）')
+  const buffer = Buffer.from(value, 'base64')
+  if (buffer.length < 4 || buffer[0] !== 0x50 || buffer[1] !== 0x4b) {
+    throw new Error('packageBase64 不是合法的 ZIP 内容（缺少 PK 魔数）')
+  }
+}
+
 function now(): string {
   return new Date().toISOString()
 }
@@ -411,7 +490,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'skillhub'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit', 'nasRegistry']
 
 export function apply(ctx: Context) {
   ctx.plugin(SkillHubService)

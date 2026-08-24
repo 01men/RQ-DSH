@@ -127,16 +127,18 @@ const PLUGINS = [
   },
   {
     dir: 'skillhub', id: 'dsh-plugin-skillhub', label: 'Skill 市场',
-    depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-audit'], permissions: ['skill.read', 'skill.submit', 'skill.approve', 'skill.publish', 'skill.install'],
-    services: [['skillHub', 'ctx.skillHub', '提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索']],
+    depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-audit'], permissions: ['skill.read', 'skill.submit', 'skill.approve', 'skill.publish', 'skill.install', 'skill.storage.write'],
+    services: [['skillHub', 'ctx.skillHub', '提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索 + skill.zip 包存储（local/NAS）']],
     events: [
       ['skill.submitted / skill.published / skill.installed', 'emit', '流水线事件'],
       ['skill.deprecated', 'emit', '弃用（扫描引用 Agent 并告警负责人）'],
     ],
     api: [
       'GET /api/skills?q=&category=&sort=&mine=1&pending=1 · GET /api/skills/:id',
-      'POST /api/skills（提交即扫描）',
+      'POST /api/skills（提交即扫描；可选 packageBase64 随传 skill.zip）',
       'POST /api/skills/:id/approve|publish|deprecate|install|uninstall|rate|download',
+      'GET /api/skills/:id/package?version=（拉取 skill.zip；NAS 模式经网关 fs_download 中转）',
+      'GET/PUT /api/skill-storage（包存储后端配置，写需 skill.storage.write）',
     ],
     tools: ['skill_search', 'skill_submit', 'skill_approve', 'skill_publish', 'skill_install', 'skill_deprecate'],
     ui: { routes: ['#/skills'], menus: [{ group: 'AI 资源', items: ['Skill 市场'] }] },
@@ -175,12 +177,31 @@ const PLUGINS = [
     ui: { routes: ['#/apps'], menus: [{ group: 'AI 资源', items: ['AI 应用'] }] },
   },
   {
+    dir: 'nas', id: 'dsh-plugin-nas', label: 'NAS 文件存储',
+    depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-iam', 'dsh-plugin-audit'],
+    permissions: ['nas.read', 'nas.write'],
+    services: [['nasRegistry', 'ctx.nasRegistry', 'NAS 资产注册/生命周期/探活 + MCP 文件网关客户端（synology-filestation 形态）+ Skill 包存储配置']],
+    events: [
+      ['nas.registered / nas.onlined / nas.offlined', 'emit', 'NAS 资产生命周期'],
+    ],
+    api: [
+      'GET/POST /api/nas · GET/PATCH /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）',
+      'POST /api/nas/:id/transition|health|sync-tools',
+      'GET /api/nas/:id/fs[?path=] · GET /api/nas/:id/fs/info',
+      'POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download（经网关 fs_* 工具）',
+      'GET/PUT /api/skill-storage（Skill 包存储后端：local | 已纳管 NAS 资产）',
+    ],
+    tools: ['nas_list', 'nas_get', 'nas_health_check', 'nas_fs_list', 'nas_fs_search', 'nas_fs_mkdir', 'nas_fs_delete', 'nas_fs_upload'],
+    ui: { routes: ['#/nas'], menus: [{ group: 'AI 资源', items: ['NAS 存储'] }] },
+  },
+  {
     dir: 'console', id: 'dsh-plugin-console', label: '管理控制台（接入层）',
     depends: ['dsh-plugin-platform-core', '全部业务插件'], permissions: ['console.login'],
     services: [],
     events: [['audit.authz.denied', 'emit', '网关越权拒绝（audit 订阅计数告警）']],
     api: [
       'POST /api/tools/execute（工具桥：与 dsh ToolRuntime 同一契约）',
+      'POST /mcp（平台即 MCP Server：Streamable HTTP，initialize/tools/list/tools/call，Bearer 鉴权 + 工具级权限点）',
       'GET /api/platform/info（插件树/工具目录/集合） · GET /api/overview（工作台聚合）',
       'GET /api/assets/inventory（资产台账） · POST /api/assets/healthcheck（健康巡检） · GET /api/assets/report（成本报表）',
       '静态托管 public/ SPA（飞书级控制台）',

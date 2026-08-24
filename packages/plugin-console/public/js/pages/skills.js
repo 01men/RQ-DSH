@@ -20,6 +20,7 @@ export async function renderSkills(content, params, ctx) {
         <div class="page-desc">提交 → 静态扫描 → 两级审批 → 版本化上架。高风险 Skill 需安全团队加签，下载安装即登记依赖。</div>
       </div>
       <div class="page-actions">
+        <button class="btn btn-default" id="skill-storage">${icon('server', 14)}存储配置</button>
         <button class="btn btn-default" id="skill-mine">${icon('user', 14)}我的提交</button>
         ${session.can('skill.approve') ? `<button class="btn btn-default" id="skill-review">${icon('checkSquare', 14)}待审批</button>` : ''}
         <button class="btn btn-primary" id="skill-submit">${icon('plus', 14)}提交 Skill</button>
@@ -106,6 +107,7 @@ export async function renderSkills(content, params, ctx) {
     }
   })
   $('#skill-mine').onclick = () => { state.mode = state.mode === 'mine' ? 'market' : 'mine'; void refresh() }
+  $('#skill-storage').onclick = () => openStorageModal()
   const reviewBtn = $('#skill-review')
   if (reviewBtn) reviewBtn.onclick = () => { state.mode = state.mode === 'review' ? 'market' : 'review'; void refresh() }
   $('#skill-submit').onclick = () => openSubmitModal(ctx, refresh)
@@ -173,6 +175,13 @@ async function openSkillDetail(id, ctx, refresh) {
               <div class="timeline-title flex" style="gap:8px">v${esc(v.version)} ${statusBadge(versionStatus(v.status))}</div>
               <div class="timeline-time">提交于 ${timeAgo(v.submittedAt)}${v.publishedAt ? ' · 上架于 ' + timeAgo(v.publishedAt) : ''}</div>
               <div class="timeline-body">${esc(v.changelog)}</div>
+              ${v.package ? `
+                <div class="fs-12 mt-8" style="color:var(--text-3);display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                  ${icon('server', 12)}<span>包存储：${v.package.storage === 'nas' ? `NAS（${esc(v.package.nasId ?? '')}）` : '平台本地'}</span>
+                  ${v.package.path ? `<span class="mono text-4" style="word-break:break-all">${esc(v.package.path)}</span>` : ''}
+                  ${v.package.sizeBytes !== undefined ? `<span>· ${fmtBytes(v.package.sizeBytes)}</span>` : ''}
+                  ${v.package.uploadedAt ? `<span class="text-4">· ${timeAgo(v.package.uploadedAt)}</span>` : ''}
+                </div>` : ''}
               ${v.findings?.length ? `
                 <div class="mt-8">
                   ${v.findings.map((f) => `
@@ -293,7 +302,8 @@ function openSubmitModal(ctx, refresh) {
         ${field('版本号', inputField('version', { value: '1.0.0' }))}
         ${field('标签（逗号分隔）', inputField('tags', { placeholder: '文档,自动化' }))}
       </div>
-      ${field('SKILL.md 内容', textareaField('content', { placeholder: '# Skill 名称\n\n## 何时使用\n…\n\n## 操作步骤\n1. …', rows: 8 }), { required: true, hint: '静态扫描将检测破坏性命令、动态执行、密钥泄露等风险模式' })}`,
+      ${field('SKILL.md 内容', textareaField('content', { placeholder: '# Skill 名称\n\n## 何时使用\n…\n\n## 操作步骤\n1. …', rows: 8 }), { required: true, hint: '静态扫描将检测破坏性命令、动态执行、密钥泄露等风险模式' })}
+      ${field('Skill 包（skill.zip，选填）', '<input class="input" type="file" id="skill-pkg" accept=".zip,application/zip">', { hint: '随版本保存：上架时按存储配置写入平台本地或 NAS（见「存储配置」）' })}`,
     foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>提交（进入扫描）</button>',
   })
   modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
@@ -302,10 +312,14 @@ function openSubmitModal(ctx, refresh) {
     btn.classList.add('btn-loading')
     try {
       const data = collectForm(modal.body)
+      const pkgFile = modal.body.querySelector('#skill-pkg')?.files?.[0]
+      let packageBase64
+      if (pkgFile) packageBase64 = await readFileBase64(pkgFile)
       const result = await api.post('/api/skills', {
         name: data.name, category: data.category, summary: data.summary, version: data.version,
         content: data.content,
         tags: data.tags ? data.tags.split(/[,，]/).map((s) => s.trim()).filter(Boolean) : [],
+        ...(packageBase64 !== undefined ? { packageBase64 } : {}),
       })
       modal.close()
       if (result.status === 'rejected') {
@@ -332,6 +346,96 @@ function openSubmitModal(ctx, refresh) {
       btn.classList.remove('btn-loading')
     }
   }
+}
+
+/** Skill 包存储配置（local / NAS）：写入口需 skill.storage.write，无权限降级只读。 */
+async function openStorageModal() {
+  let data
+  try {
+    data = await api.get('/api/skill-storage')
+  } catch (error) {
+    toast(error.message, 'error')
+    return
+  }
+  const { config, nasOptions } = data
+  const canWrite = session.can('skill.storage.write')
+  const modal = openModal({
+    title: 'Skill 包存储配置',
+    body: `
+      <div class="muted-box mb-14" style="display:flex;gap:8px">
+        ${icon('info', 15)}<span>决定 Skill 上架时 skill.zip 包的存放位置：<b>平台本地</b>（内联存储）或 <b>NAS</b>（上架时上传到指定 NAS 资产的 basePath 下）。</span>
+      </div>
+      ${canWrite ? `
+      <div class="form-item">
+        <label class="form-label">存储模式</label>
+        <div class="segmented" id="st-mode">
+          <span class="segmented-item ${config.mode !== 'nas' ? 'active' : ''}" data-m="local">平台本地</span>
+          <span class="segmented-item ${config.mode === 'nas' ? 'active' : ''}" data-m="nas">NAS</span>
+        </div>
+      </div>
+      <div id="st-nas-fields" style="${config.mode === 'nas' ? '' : 'display:none'}">
+        ${nasOptions.length ? `
+          ${field('目标 NAS（仅已上线）', selectField('nasId', nasOptions.map((n) => ({ value: n.id, label: `${n.name}（${n.slug} · 根路径 ${n.rootPath ?? '/'}）` })), { value: config.nasId }), { required: true })}
+          ${field('basePath', inputField('basePath', { value: config.basePath ?? '/skillhub', placeholder: '/skillhub' }), { required: true, hint: '以 / 开头的绝对路径（如 /共享名/skillhub），上架时按 Skill 归档' })}
+        ` : '<div class="muted-box" style="color:var(--warn)">暂无「已上线」的 NAS 资产可选：请先在「NAS 存储」页纳管并上线。</div>'}
+      </div>` : `
+      <div class="desc-grid">
+        <div class="desc-item"><span class="k">当前模式</span><span class="v">${config.mode === 'nas' ? 'NAS' : '平台本地'}</span></div>
+        ${config.mode === 'nas' ? `
+          <div class="desc-item"><span class="k">目标 NAS</span><span class="v mono">${esc(config.nasId ?? '—')}</span></div>
+          <div class="desc-item"><span class="k">basePath</span><span class="v mono">${esc(config.basePath ?? '—')}</span></div>` : ''}
+        <div class="desc-item"><span class="k">最近更新</span><span class="v">${config.updatedAt ? `${timeAgo(config.updatedAt)} · ${esc(config.updatedBy ?? '')}` : '—'}</span></div>
+      </div>
+      <div class="form-hint mt-8">你当前没有 skill.storage.write 权限，仅可查看。</div>`}`,
+    foot: canWrite
+      ? '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>'
+      : '<button class="btn btn-primary" data-ok>关闭</button>',
+  })
+  if (!canWrite) return
+  let mode = config.mode === 'nas' ? 'nas' : 'local'
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.body.querySelectorAll('#st-mode .segmented-item').forEach((el) => {
+    el.onclick = () => {
+      modal.body.querySelectorAll('#st-mode .segmented-item').forEach((i) => i.classList.remove('active'))
+      el.classList.add('active')
+      mode = el.dataset.m
+      modal.body.querySelector('#st-nas-fields').style.display = mode === 'nas' ? '' : 'none'
+    }
+  })
+  modal.el.querySelector('[data-ok]').onclick = async (e) => {
+    const btn = e.currentTarget
+    const form = collectForm(modal.body)
+    if (mode === 'nas' && !nasOptions.length) return toast('暂无可用的已上线 NAS 资产', 'error')
+    btn.classList.add('btn-loading')
+    try {
+      await api.put('/api/skill-storage', mode === 'nas'
+        ? { mode, nasId: form.nasId, basePath: form.basePath }
+        : { mode })
+      toast('存储配置已保存'); modal.close()
+    } catch (error) {
+      toast(error.message, 'error')
+    } finally {
+      btn.classList.remove('btn-loading')
+    }
+  }
+}
+
+function readFileBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('读取本地文件失败'))
+    reader.onload = () => resolve(String(reader.result).split(',')[1] ?? '')
+    reader.readAsDataURL(file)
+  })
+}
+
+function fmtBytes(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '—'
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + ' GB'
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + ' MB'
+  if (n >= 1 << 10) return (n / (1 << 10)).toFixed(1) + ' KB'
+  return n + ' B'
 }
 
 function versionStatus(status) {

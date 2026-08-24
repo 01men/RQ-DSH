@@ -34,7 +34,7 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'skill_submit',
-    description: '提交 Skill 到市场（自动进入静态扫描 → 两级审批流水线）。',
+    description: '提交 Skill 到市场（自动进入静态扫描 → 两级审批流水线）。可选携带 skill.zip 包内容（base64，上架时经存储后端上传 NAS）。',
     parameters: {
       name: { type: 'string', required: true, description: 'Skill 名称' },
       content: { type: 'string', required: true, description: 'SKILL.md 全文' },
@@ -44,6 +44,7 @@ export function apply(ctx: Context) {
       authorName: { type: 'string', required: true, description: '提交人姓名' },
       orgId: { type: 'string', required: true, description: '归属组织 ID' },
       version: { type: 'string', description: '版本号（默认 1.0.0）' },
+      packageBase64: { type: 'string', description: 'skill.zip 包内容（base64，可选）' },
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args) {
@@ -79,7 +80,7 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'skill_publish',
-    description: '上架已审批通过的 Skill 版本（版本不可变，旧版保留）。',
+    description: '上架已审批通过的 Skill 版本（版本不可变，旧版保留）。存储后端为 NAS 时自动打包上传 skill.zip（fail-closed）。',
     permission: 'skill.publish',
     parameters: {
       skillId: { type: 'string', required: true, description: 'Skill ID' },
@@ -87,8 +88,9 @@ export function apply(ctx: Context) {
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args) {
-      const skill = ctx.skillHub.publish(args.skillId, args.version, 'agent-tool')
-      return { id: skill.id, status: skill.status }
+      const skill = await ctx.skillHub.publish(args.skillId, args.version, 'agent-tool')
+      const target = skill.versions.find((item) => item.version === args.version)
+      return { id: skill.id, status: skill.status, package: target?.package ?? null }
     },
   }))
 
