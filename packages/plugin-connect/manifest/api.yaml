@@ -1,0 +1,25 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-connect
+base: /api
+endpoints:
+  - POST /api/connect/enroll（公开：一次性接入码换机器凭证，按 IP 失败锁定）
+  - POST /api/connect/codes · GET /api/connect/codes · DELETE /api/connect/codes/:id（接入码管理，connect.manage）
+  - GET /api/connect/clients · POST /api/connect/clients/:id/disable · POST /api/connect/clients/:id/enable（客户端管理，connect.manage）
+  - client 角色另起本机配置页 http://127.0.0.1:7390（GET / · GET /api/status · POST /api/setup|/api/login|/api/test|/api/reset）
+tools:
+  - connect_code_create
+  - connect_codes
+  - connect_clients
+  - connect_client_disable
+  - connect_status
+  - connect_setup
+  - connect_login
+  - connect_test
+  - connect_reset
+services:
+  - key: connectClient
+    access: ctx.connectClient
+    description: 客户端半部：enroll/机器令牌缓存/工具远程代理 forward
+  - key: connectConfigServer
+    access: ctx.connectConfigServer
+    description: 客户端本机配置页服务（仅 127.0.0.1）

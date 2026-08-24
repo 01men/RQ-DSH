@@ -209,23 +209,23 @@ export class AuditService extends Service {
   // -- 集合 ---------------------------------------------------------------
 
   logs(): Collection<AuditLogRecord> {
-    return this.ctx.storage.collection<AuditLogRecord>('audit:logs')
+    return this.ctx.opsStorage.collection<AuditLogRecord>('audit:logs')
   }
 
   alertRules(): Collection<AlertRuleRecord> {
-    return this.ctx.storage.collection<AlertRuleRecord>('audit:alertRules')
+    return this.ctx.opsStorage.collection<AlertRuleRecord>('audit:alertRules')
   }
 
   alerts(): Collection<AlertEventRecord> {
-    return this.ctx.storage.collection<AlertEventRecord>('audit:alerts')
+    return this.ctx.opsStorage.collection<AlertEventRecord>('audit:alerts')
   }
 
   costs(): Collection<CostRecord> {
-    return this.ctx.storage.collection<CostRecord>('audit:costs')
+    return this.ctx.opsStorage.collection<CostRecord>('audit:costs')
   }
 
   approvals(): Collection<ApprovalRecord> {
-    return this.ctx.storage.collection<ApprovalRecord>('audit:approvals')
+    return this.ctx.opsStorage.collection<ApprovalRecord>('audit:approvals')
   }
 
   // -- 审计日志 -----------------------------------------------------------
@@ -427,7 +427,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'audit'
-export const inject = ['storage', 'platformBus', 'resourceCore', 'iam', 'usage']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'iam', 'usage']
 
 export function apply(ctx: Context) {
   ctx.plugin(AuditService)

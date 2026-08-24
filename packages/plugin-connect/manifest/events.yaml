@@ -1,0 +1,7 @@
+# 事件声明（发布/订阅，跨插件联动唯一通道）
+plugin: dsh-plugin-connect
+publish:
+  - connect.code.created        # 接入码创建（载荷：id/template/ttlMinutes）
+  - connect.client.enrolled     # 远程客户端完成接入（载荷：principalId/name/template/hostname）
+  - connect.client.disabled     # 客户端被禁用（载荷：principalId/name/reason）
+subscribe: []

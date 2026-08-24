@@ -18,7 +18,7 @@ import { seedAll } from './seed.ts'
 
 export const name = 'console'
 export const inject = [
-  'httpServer', 'storage', 'platformBus', 'tools',
+  'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'oidc', 'audit', 'usage', 'billing', 'market', 'modelGateway',
   'mcpRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry',
 ]
@@ -44,6 +44,8 @@ const PUBLIC_PATHS = new Set([
   '/api/health',
   '/api/market/developers/register',
   '/api/market/developers/login',
+  // 接入码本身即凭证（一次性 + TTL + 按 IP 失败锁定），enroll 端点公开
+  '/api/connect/enroll',
 ])
 
 export function apply(ctx: Context) {
@@ -302,7 +304,7 @@ export function apply(ctx: Context) {
       try { ctx.authn.refreshSession(refreshToken) } catch { /* 已失效 */ }
     }
     // 吊销强持久化后再响应：返回 200 后进程被杀，吊销状态不丢失（评审崩溃恢复实验）
-    await ctx.storage.flushDurable()
+    await ctx.opsStorage.flushDurable()
     exchange.ok()
   })
 
@@ -1560,14 +1562,14 @@ export function apply(ctx: Context) {
   // -- 平台信息与工具桥 -----------------------------------------------------
   guarded('GET', '/api/platform/info', 'console.login', () => {
     const plugins = [
-      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'skillhub', 'agent', 'app', 'console',
+      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'skillhub', 'agent', 'app', 'connect', 'console',
     ]
     return {
       name: '企业 AI 资源统一管理平台',
       version: '1.0.0',
       runtime: 'standalone-cordis（dsh 插件兼容）',
       plugins,
-      collections: ctx.storage.names(),
+      collections: ctx.opsStorage.names(),
       tools: ctx.tools.schemas(),
       resourceTypes: ctx.resourceCore.typesSpecs().map((spec) => ({ type: spec.type, label: spec.label, plugin: spec.plugin })),
       events: ctx.platformBus.recent(10),

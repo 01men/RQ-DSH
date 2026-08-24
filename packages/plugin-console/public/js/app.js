@@ -16,6 +16,7 @@ import { renderAudit } from './pages/audit.js'
 import { renderApprovals } from './pages/approvals.js'
 import { renderAssets } from './pages/assets.js'
 import { renderPlatform } from './pages/platform.js'
+import { renderConnect } from './pages/connect.js'
 
 const NAV = [
   { section: '总览', items: [
@@ -39,6 +40,7 @@ const NAV = [
     { path: '#/iam?tab=connectors', label: '三方集成', icon: 'link', perm: 'iam.org.read' },
   ] },
   { section: '平台', items: [
+    { path: '#/connect', label: '平台接入', icon: 'fingerprint', perm: 'connect.manage' },
     { path: '#/platform', label: '插件与工具', icon: 'puzzle', perm: 'console.login' },
   ] },
 ]
@@ -69,6 +71,7 @@ function navigate() {
     audit: renderAudit,
     approvals: renderApprovals,
     platform: renderPlatform,
+    connect: renderConnect,
   }
   const builder = builders[page] ?? renderDashboard
   renderShell(page, params, builder)

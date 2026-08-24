@@ -3,6 +3,12 @@
 ## 何时使用
 组织架构调整、账号生命周期（创建/冻结/注销）、角色与用户组维护、三方通讯录同步与冲突处理。
 
+
+## 调用方式（工具优先）
+平台已把运维能力注册为 dsh 工具，**回答现状问题（查询/盘点/排障）必须直接调用工具获取真实数据，禁止凭记忆回答**：
+- iam_org_tree / iam_org_create / iam_user_list / iam_user_create / iam_user_reset_password / iam_user_freeze / iam_role_list / iam_sync_run / iam_conflict_list
+（工具参数见各工具 schema；下文手册中的 `dshctl ...` 为「平台独立部署 + HTTP API 运维」场景的 CLI 备选，需 DSHCTL_TOKEN/DSHCTL_USER，在 dsh 会话内一般用不到。）
+
 ## 前置条件
 需要 iam.* 权限组令牌。
 

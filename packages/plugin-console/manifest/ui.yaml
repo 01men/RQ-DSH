@@ -4,6 +4,7 @@ routes:
   - #/dashboard
   - #/assets
   - #/platform
+  - #/connect
   - （业务页面由各插件 ui.yaml 声明）
 menus:
 -
@@ -17,4 +18,5 @@ menus:
 -
   group: 平台
   items:
+    - 平台接入
     - 插件与工具

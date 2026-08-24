@@ -32,7 +32,7 @@ export class AppRegistryService extends Service {
   }
 
   usage(): Collection<AppUsageRecord> {
-    return this.ctx.storage.collection<AppUsageRecord>('app:usage')
+    return this.ctx.opsStorage.collection<AppUsageRecord>('app:usage')
   }
 
   register(input: {
@@ -217,7 +217,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'app'
-export const inject = ['storage', 'platformBus', 'resourceCore', 'authn', 'audit']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'audit']
 
 export function apply(ctx: Context) {
   const registry = new AppRegistryService(ctx)

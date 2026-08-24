@@ -146,7 +146,7 @@ export class ResourceCoreService extends Service {
 
   collection(type: string): Collection<ResourceEntity> {
     const spec = this.requireSpec(type)
-    return this.ctx.storage.collection<ResourceEntity>(`entity:${spec.type}`)
+    return this.ctx.opsStorage.collection<ResourceEntity>(`entity:${spec.type}`)
   }
 
   private requireSpec(type: string): ResourceTypeSpec {
@@ -348,7 +348,7 @@ export class ResourceCoreService extends Service {
   // -- 依赖图 -------------------------------------------------------------
 
   dependencies(): Collection<DependencyRecord> {
-    return this.ctx.storage.collection<DependencyRecord>('resource:dependencies')
+    return this.ctx.opsStorage.collection<DependencyRecord>('resource:dependencies')
   }
 
   addDependency(input: { fromType: string; fromId: string; toType: string; toId: string; kind: string }): DependencyRecord {
@@ -430,7 +430,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'resource-core'
-export const inject = ['storage', 'platformBus']
+export const inject = ['opsStorage', 'platformBus']
 
 export function apply(ctx: Context) {
   ctx.plugin(ResourceCoreService)

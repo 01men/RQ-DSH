@@ -40,8 +40,8 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）207 项端到端断言
-npm run lint:manifests  # 插件清单五面 YAML 校验（50 项）
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）223 项端到端断言
+npm run lint:manifests  # 插件清单五面 YAML 校验（55 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
 
@@ -66,6 +66,7 @@ DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭
          dsh-plugin-modelgw        模型转售网关（OpenAI 兼容真实转发 / 预检 / 实测 tokens 计量）
          dsh-plugin-market         第三方与自营插件市场（契约五面 / Ed25519 验签 / L0 运行时 / 订阅代收）
          dsh-plugin-audit          四类审计日志 + 告警规则 + 成本归集 + 审批中心
+         dsh-plugin-connect        远程 dsh 接入（宿主角色：接入码/enroll/客户端管理；客户端角色：凭证申请 + 工具远程代理 + 本机配置页）
 底座     dsh-plugin-resource-core  资源本体：属性 schema + 生命周期状态机 + 依赖图
 基础层   dsh-plugin-platform-core  存储(JSON集合/原子落盘) + SQLite 事务存储 + YAML 解析 + 事件总线 + ToolRuntime-lite + HTTP
 ```
@@ -78,20 +79,86 @@ DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭
 
 - **独立宿主**（本项目默认）：`node src/main.ts` 启动完整平台（控制台 + API + 工具）。
 - **完整 dsh 运行时**：`cordis.yml` 把同一批插件挂载进 `dsh web`——此时平台注册的
-  **37 个运维工具**直接对模型可见（`provideToolRuntime: false`，使用 dsh 原生 ToolRuntime），
-  Agent 即可按自然语言运维整个平台。
+  **运维工具**直接进入 dsh 原生 ToolRuntime、对模型可见可调用（`provideToolRuntime: false`），
+  Agent 即可按自然语言运维整个平台（「列出所有 MCP 服务和健康状态」→ `mcp_service_list`，
+  「Skill 市场里能装什么」→ `skill_search`）。
 
-```bash
-# 在 deepseek-harness 源码检出中（替换 <PROJECT_ROOT> 为绝对路径）：
-pnpm dsh web --patch <PROJECT_ROOT>/cordis.yml
+**源码检出模式（本地开发）**——两条硬性要求，缺一不可：
+
+1. `cordis.yml` 中 `<PROJECT_ROOT>` 必须替换为 `file:///` URL 形式的绝对路径
+   （Windows 下裸盘符路径会被 ESM 判为 `ERR_UNSUPPORTED_ESM_URL_SCHEME`）；
+2. 本项目 `node_modules/@deepseek-ai/cordis` 必须指向 dsh 源码树的 `vendor/cordis`
+   （junction），保证插件与宿主加载**同一个 cordis 实例**——两份实例会导致
+   `ctx.plugin(类插件)` 静默失效、服务链（iam→usage→audit…）全部 `pending`：
+
+```powershell
+# 一次性设置（PowerShell，替换两处路径为你的实际检出位置）：
+Remove-Item -Recurse -Force node_modules/@deepseek-ai/cordis
+New-Item -ItemType Junction -Path node_modules/@deepseek-ai/cordis -Target D:\dsh-harness\vendor\cordis
+
+# 之后每次（在 deepseek-harness 源码检出中）：
+pnpm dsh web --patch <本项目绝对路径>/cordis.yml
 ```
 
-也可以不检出源码，直接把整个平台作为插件 bundle 安装进 dsh profile
-（根 `package.json` 声明 `dsh.bundle`，安装补丁为 `cordis.patch.yml`，路径自包含）：
+**安装模式（发布使用）**——`dsh plugin add` 走 pnpm 安装，补丁里的 entry 以
+「包名 + 子路径」声明（Node 从 profile 目录沿 node_modules 解析，无需感知安装位置）：
 
 ```bash
 dsh plugin --profile web add github:01men/ybkk-AIOS
+# 验证：dsh --profile web --dump-config 应列出全部 ops-* entry；
+# 会话中问「列出所有 MCP 服务和健康状态」，模型应调用 mcp_service_list 而非静态作答。
 ```
+
+安装模式的关键约束：`@deepseek-ai/cordis` 只在 `devDependencies`（本地开发/独立宿主用），
+**绝不能进 `dependencies`**——否则 pnpm 会把它 hoist 进 profile 的 node_modules，
+插件解析到第二份 cordis 实例，服务链整体失效（同上）。安装后插件沿
+`<profile>/node_modules → $DSH_HOME/profiles/node_modules`（dsh 自建的宿主闭包 symlink）
+解析到宿主自己的 cordis。
+
+**平台服务键已做宿主去冲突**：JSON 存储服务键为 `opsStorage`（不是 `storage`——
+dsh 宿主自带同名 `storage` 服务，曾导致 iam 等插件构造时拿到宿主服务、方法不存在而崩溃）。
+`tools` 键是**刻意共享**的接缝：独立宿主下由 ToolRuntimeLite 提供，dsh 下即原生
+ToolRuntime——37 个运维工具由此进入 dsh。
+
+**领域 Skill 手册**（`skills/dsh-ops-*/SKILL.md`）默认不随插件自动进入 dsh 技能系统
+（dsh 只扫描 `<project>/.dsh/skills`、`~/.dsh/skills` 等根目录）。要让 Agent 获得
+分领域操作手册，复制或链接一份：
+
+```bash
+# 用户级（所有会话可用）：
+cp -r skills/dsh-ops-* ~/.dsh/skills/
+# 或项目级（仅当前项目）：
+mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
+```
+
+### 远程 dsh 接入（第三种形态：免源码、免同机共享 data）
+
+其他电脑经插件市场安装本平台后（安装模式见上），无需源码检出、也无需与宿主共享
+`data/` 目录——插件树中的 `plugin-connect` 以 **client 角色**运行，向宿主平台申请
+机器凭证并把全部运维工具的执行**远程代理**到宿主（权限按模板收敛、全程审计）：
+
+```text
+宿主侧（管理员，一次性）            远程电脑（使用者，两条通道任选）
+────────────────────────          ─────────────────────────────────
+控制台「平台接入」页创建接入码   →   ① dsh 界面对 Agent 说：
+（一次性，默认 15 分钟有效，           「接入宿主 http://宿主IP:7300，
+ 模板：readonly/operator/full）        接入码 enr_xxx…」
+                                   Agent 调 connect_setup 自动申请口令
+                                   ② 浏览器打开 http://127.0.0.1:7390
+                                      本机配置页可视化填写/更新/断开
+```
+
+接入成功后：远程 dsh 里的 37 个运维工具自动切换为**转发宿主执行**（本地不再持有数据），
+另新增 `connect_status / connect_setup / connect_login / connect_test / connect_reset`
+5 个接入工具供 Agent 自助管理；宿主控制台「平台接入」页可查看已接入客户端、最近使用，
+并可随时禁用（联动吊销全部机器令牌，立即生效）。宿主侧另有 4 个接入管理工具
+（`connect_code_create / connect_codes / connect_clients / connect_client_disable`）。
+
+安全基线：接入码只存哈希（创建时一次性展示）、一次性消费、TTL 可配、按来源 IP
+接入宿主既有失败锁定（15 分钟窗口 5 次锁定）；机器凭证等价口令仅保存在远程电脑本机
+（0600）；`enroll` 端点公开但接入码本身即凭证。
+
+详细流程与验收清单见 [docs/deploy-enterprise.md](docs/deploy-enterprise.md) 第四节。
 
 ### 已融合 OS-skill 模块设计（v1.1）
 
@@ -121,7 +188,7 @@ dsh plugin --profile web add github:01men/ybkk-AIOS
 - **复式分账 ledger（第 8 步）**：账期汇总结转（费率版本快照、尾差归平台）、试算平衡、红字冲正、开发者应收。
 - **资金红线（v1.2 §六过渡）**：对公收款/开票/开发者付款通道未就位——充值仅管理员手工录入（幂等键=转账单号），
   订阅代收为 manual-settlement 登记，平台不自动扣外部资金。
-- 验收：`npm run selftest` **207/207**、`npm run lint:manifests` **50/50**；KBaaS/连接器市场/合规门户与
+- 验收：`npm run selftest` **223/223**、`npm run lint:manifests` **55/55**；KBaaS/连接器市场/合规门户与
   L1 有码沙箱为下一迭代（设计见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)）。
 
 ## 三B、评审缺陷修复与资产运营（本迭代，v1.3）
@@ -166,10 +233,11 @@ packages/
       ui.yaml               路由 + 菜单
     src/index.ts            服务 + 插件装配
     src/tools.ts            对模型暴露的工具（dsh ToolRuntime 契约）
+  plugin-connect/           远程 dsh 接入插件（宿主端点 + 客户端代理 + 本机配置页，一份代码两种角色）
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
-cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes）
+cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（191 项断言，含安全攻击演练；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（223 项断言，含安全攻击演练与远程接入链路；隔离实例 + DEMO_SEED）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -226,12 +294,14 @@ curl localhost:7300/api/overview -H "authorization: Bearer <token>"
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **207 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **223 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
 （真实 MCP/钉钉/OpenAI stub 往返、计量幂等与对账、钱包扣费与预算拦截、OIDC RS256/JWKS 全链路、
-市场验签/安装/卸载、复式分账试算平衡与红字冲正）。测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
+市场验签/安装/卸载、复式分账试算平衡与红字冲正）+ 远程 dsh 接入
+（接入码创建/掩码存储/伪造拒绝/一次性消费、机器凭证换牌、operator 模板越权拦截、
+工具桥代理路径、客户端禁用联动吊销、管理工具 RBAC）。测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
 
 ## 八、说明与边界
 

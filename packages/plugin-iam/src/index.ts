@@ -185,6 +185,7 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'market.approve', label: '审批插件', group: '插件市场' },
   { point: 'market.install', label: '安装插件', group: '插件市场' },
   { point: 'market.developer', label: '开发者门户', group: '插件市场' },
+  { point: 'connect.manage', label: '管理平台接入（接入码/远程客户端）', group: '平台接入' },
 ]
 
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [
@@ -418,7 +419,7 @@ export class IamService extends Service {
 
   /** 三方身份链接集合（活跃唯一约束：同一三方身份只能映射一个平台账号）。 */
   identityLinks(): Collection<IdentityLinkRecord> {
-    const collection = this.ctx.storage.collection<IdentityLinkRecord>('iam:identityLinks')
+    const collection = this.ctx.opsStorage.collection<IdentityLinkRecord>('iam:identityLinks')
     collection.uniqueOn('identity_link_active', (record) => `${record.provider}|${record.providerUserId}`)
     return collection
   }
@@ -470,35 +471,35 @@ export class IamService extends Service {
   // -- 集合 ---------------------------------------------------------------
 
   orgs(): Collection<OrgRecord> {
-    const collection = this.ctx.storage.collection<OrgRecord>('iam:orgs')
+    const collection = this.ctx.opsStorage.collection<OrgRecord>('iam:orgs')
     collection.uniqueOn('org_same_level_name', (org) => `${org.parentId ?? '-'}|${org.name}`)
     return collection
   }
 
   users(): Collection<UserRecord> {
-    const collection = this.ctx.storage.collection<UserRecord>('iam:users')
+    const collection = this.ctx.opsStorage.collection<UserRecord>('iam:users')
     collection.uniqueOn('user_username', (user) => user.username)
     return collection
   }
 
   roles(): Collection<RoleRecord> {
-    return this.ctx.storage.collection<RoleRecord>('iam:roles')
+    return this.ctx.opsStorage.collection<RoleRecord>('iam:roles')
   }
 
   groups(): Collection<UserGroupRecord> {
-    return this.ctx.storage.collection<UserGroupRecord>('iam:groups')
+    return this.ctx.opsStorage.collection<UserGroupRecord>('iam:groups')
   }
 
   connectorConfigs(): Collection<ConnectorConfigRecord> {
-    return this.ctx.storage.collection<ConnectorConfigRecord>('iam:connectors')
+    return this.ctx.opsStorage.collection<ConnectorConfigRecord>('iam:connectors')
   }
 
   conflicts(): Collection<SyncConflictRecord> {
-    return this.ctx.storage.collection<SyncConflictRecord>('iam:conflicts')
+    return this.ctx.opsStorage.collection<SyncConflictRecord>('iam:conflicts')
   }
 
   tenants(): Collection<TenantRecord> {
-    const collection = this.ctx.storage.collection<TenantRecord>('iam:tenants')
+    const collection = this.ctx.opsStorage.collection<TenantRecord>('iam:tenants')
     collection.uniqueOn('tenant_name', (tenant) => tenant.name)
     return collection
   }
@@ -1114,7 +1115,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'iam'
-export const inject = ['storage', 'platformBus']
+export const inject = ['opsStorage', 'platformBus']
 
 export function apply(ctx: Context) {
   ctx.plugin(IamService)

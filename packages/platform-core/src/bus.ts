@@ -54,13 +54,16 @@ export const PlatformEvents = {
   PluginInstalledEvent: 'market.plugin.installed',
   WalletChanged: 'wallet.balance.changed',
   LedgerSettled: 'billing.ledger.settled',
+  ConnectCodeCreated: 'connect.code.created',
+  ConnectClientEnrolled: 'connect.client.enrolled',
+  ConnectClientDisabled: 'connect.client.disabled',
 } as const
 
 /** 平台保留命名空间：第三方插件（source=plugin:*）禁止发射。 */
 const PLATFORM_RESERVED_PREFIXES = [
   'iam.', 'authn.', 'mcp.', 'audit.', 'skill.', 'agent.', 'app.',
   'usage.', 'billing.', 'model.', 'market.', 'developer.', 'wallet.',
-  'platform.', 'approval.', 'connector.', 'console.',
+  'platform.', 'approval.', 'connector.', 'console.', 'connect.',
 ]
 
 export class PlatformBusService extends Service {

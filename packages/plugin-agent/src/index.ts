@@ -90,11 +90,11 @@ export class AgentRegistryService extends Service {
   }
 
   bindings(): Collection<AgentBindingRecord> {
-    return this.ctx.storage.collection<AgentBindingRecord>('agent:bindings')
+    return this.ctx.opsStorage.collection<AgentBindingRecord>('agent:bindings')
   }
 
   usage(): Collection<AgentUsageRecord> {
-    return this.ctx.storage.collection<AgentUsageRecord>('agent:usage')
+    return this.ctx.opsStorage.collection<AgentUsageRecord>('agent:usage')
   }
 
   // -- 注册 -------------------------------------------------------------
@@ -317,7 +317,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'agent'
-export const inject = ['storage', 'platformBus', 'resourceCore', 'authn', 'iam', 'audit']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'iam', 'audit']
 
 export function apply(ctx: Context) {
   const registry = new AgentRegistryService(ctx)

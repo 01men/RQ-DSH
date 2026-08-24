@@ -10,8 +10,9 @@
 
 | 形态 | 进程 | 说明 | 适用 |
 |---|---|---|---|
-| A. 独立宿主（默认） | `node src/main.ts` | 一个进程提供 REST 网关 + 控制台 SPA + 37 运维工具桥 | 企业生产最小形态，控制台人工使用 |
-| B. 独立宿主 + dsh 运行时 | A 的进程 + `dsh web --patch cordis.yml` | dsh 侧插件树对模型暴露 37 个运维工具，Agent 可用自然语言运维平台；两进程**共享同一 `data/` 目录** | 需要 Agent 驱动运维的企业 |
+| A. 独立宿主（默认） | `node src/main.ts` | 一个进程提供 REST 网关 + 控制台 SPA + 41 运维工具桥（含 4 个接入管理工具） | 企业生产最小形态，控制台人工使用 |
+| B. 独立宿主 + dsh 运行时 | A 的进程 + `dsh web --patch cordis.yml` | dsh 侧插件树对模型暴露全部运维工具，Agent 可用自然语言运维平台；两进程**共享同一 `data/` 目录** | 需要 Agent 驱动运维的企业 |
+| C. 远程 dsh 接入 | 宿主（A）+ 远程电脑 `dsh plugin add` | 远程电脑经插件市场安装本平台，凭**一次性接入码**向宿主申请机器凭证；运维工具全部远程代理到宿主执行（免源码、免共享 data） | 多办公点/多人用 dsh 协作运维同一平台 |
 
 > 关键事实：`cordis.yml` 不挂载 console 插件——控制台 SPA 与 REST 始终由独立宿主进程提供；
 > dsh 侧只挂业务插件（`provideToolRuntime: false`，使用 dsh 原生 ToolRuntime）。
@@ -39,8 +40,8 @@ npm start -- --port 7300 --data ./data    # 首次启动执行基线初始化（
 # 4. 验证
 curl -X POST localhost:7300/api/auth/login -H 'content-type: application/json' \
      -d '{"username":"admin","password":"<口令>"}'        # 应返回 token
-npm run selftest                                          # 207 项断言（隔离实例，不碰生产数据）
-npm run lint:manifests                                    # 50 项清单校验
+npm run selftest                                          # 223 项断言（隔离实例，不碰生产数据）
+npm run lint:manifests                                    # 55 项清单校验
 ```
 
 进程守护（Linux systemd 示例）：
@@ -81,7 +82,62 @@ Agent 运维凭据（环境变量）：`DSHCTL_URL`（默认 `http://127.0.0.1:7
 
 ---
 
-## 四、Agent 一键下达指引（可直接整段粘贴给 dsh 自带 Agent）
+## 四、远程 dsh 接入（形态 C：插件市场安装 → 接入码 → 自动申请凭证）
+
+适用：其他电脑的 dsh 经 `dsh plugin --profile web add github:01men/ybkk-AIOS` 安装本平台后，
+不知道如何配置宿主签发的凭证/口令。整个流程**无需在远程电脑手工编辑任何配置文件**。
+
+### 4.1 宿主侧：签发一次性接入码（管理员，控制台或 CLI）
+
+```bash
+# 控制台：登录 → 左侧「平台 → 平台接入」→ 创建接入码（选模板/TTL/备注，码仅展示一次）
+# 或 CLI：
+DSHCTL_URL=http://宿主IP:7300 DSHCTL_USER=admin DSHCTL_PASS=*** \
+  node cli/dshctl.mjs connect code --template=operator --ttl=15 --remark="研发部小王"
+```
+
+权限模板（= 接入后远程客户端的权限边界）：
+
+| 模板 | 权限 |
+|---|---|
+| `readonly`（默认） | 全部查询类权限点（list/get/metrics/logs） |
+| `operator` | 只读 + MCP/Skill/Agent/应用运维与审批决策；**不含**账号与凭证管理 |
+| `full` | 全部权限（`*`），仅可信环境使用 |
+
+### 4.2 远程电脑：两条接入通道（任选其一）
+
+```text
+① Agent 通道（推荐）：在 dsh 界面直接对 Agent 说
+   「接入宿主平台，地址 http://<宿主IP>:7300，接入码 <enr_…>」
+   Agent 将调用 connect_setup 工具自动完成申请，并把 37 个运维工具切换为远程执行。
+
+② 配置页通道：浏览器打开 http://127.0.0.1:7390（远程电脑本机，插件启动时自动监听）
+   填写宿主地址 + 接入码 → 「申请接入」；后续随时可在此页更新配置、测试连接或断开。
+   已有机器凭证（mc-/cs_ 开头）时切换到「已有机器凭证」页签直接配置。
+```
+
+### 4.3 验证与运维
+
+- 远程侧：Agent 执行 `connect_status`（应显示 remote 模式、令牌有效）、`agent_list`（返回宿主数据）。
+- 宿主侧：控制台「平台接入 → 已接入客户端」出现该电脑（名称/模板/主机名/最近使用）。
+- 回收：宿主侧「禁用客户端」（原因必填留痕）→ 联动吊销全部机器令牌，远程工具调用立即 401；
+  远程侧 `connect_reset` 仅清除本机凭证。
+- 安全基线：接入码只存哈希（创建时一次性展示）、一次性消费、TTL 可配（默认 15 分钟）、
+  按来源 IP 失败锁定（15 分钟窗口 5 次）；机器凭证等价口令仅存远程本机（0600）；
+  客户端工具代理走宿主 `/api/tools/execute`，逐工具做 RBAC 校验并全程审计。
+
+### 4.4 常见问题
+
+| 现象 | 处置 |
+|---|---|
+| connect_setup 报「接入码无效」 | 码已用/过期/作废（一次性消费）；宿主侧重新创建 |
+| 报「宿主服务不可达」 | 检查宿主监听 0.0.0.0 与防火墙；地址带 `http://` 与端口 |
+| 工具执行报 403 缺权限点 | 权限模板不足；宿主侧禁用客户端后用更高模板接入码重新接入 |
+| 禁用后远程仍显示已配置 | 本机凭证仍在但已失效；远程侧执行 `connect_reset` 清除 |
+
+---
+
+## 五、Agent 一键下达指引（可直接整段粘贴给 dsh 自带 Agent）
 
 > 使用方法：把下面整段指令发给 dsh Agent，替换 `<...>` 占位符；Agent 将自行完成部署与验证并回报结果。
 > 生产环境请先人工确认占位符与口令强度；指令内置护栏（禁演示数据、不覆盖已有数据目录、高危操作走审批）。
@@ -102,7 +158,7 @@ Agent 运维凭据（环境变量）：`DSHCTL_URL`（默认 `http://127.0.0.1:7
    a. GET / 返回 200；
    b. POST /api/auth/login（admin + 口令）返回 token；
    c. GET /api/overview（Bearer token）返回 200；
-   d. npm run selftest 207/207 通过；npm run lint:manifests 50/50 通过。
+   d. npm run selftest 223/223 通过；npm run lint:manifests 55/55 通过。
 6.（可选，仅当"接入 dsh"=是）按仓库 docs/deploy-enterprise.md 第三节生成 overlay 并以
    pnpm dsh web --patch 启动，验证两进程共享同一 data/。
 7. 回报：commit hash、服务地址、admin 首登是否成功、自测结果、初始口令交付方式（不得明文贴在公开渠道）。
@@ -113,11 +169,12 @@ Agent 运维凭据（环境变量）：`DSHCTL_URL`（默认 `http://127.0.0.1:7
 - 部署完成后建议立即改掉 admin 初始口令并创建企业自有账号（参考 skills/dsh-ops-iam）。
 ```
 
-## 五、验收清单
+## 六、验收清单
 
 - [ ] `GET /` 200，控制台可登录（admin + `ADMIN_PASSWORD`）
-- [ ] `npm run selftest` 207/207、`npm run lint:manifests` 50/50
+- [ ] `npm run selftest` 223/223、`npm run lint:manifests` 55/55
 - [ ] 生产数据目录**不含**演示数据（`data/iam~users.json` 无 ops/hr/dev 等演示账号）
 - [ ] （形态 B）dsh web 启动且 Agent 能回答 `dshctl mcp list` 类问题
+- [ ] （形态 C）远程电脑 `connect_status` 显示 remote 模式；宿主「平台接入」页可见该客户端
 - [ ] 备份策略就位（data/ 目录定时冷备）
 - [ ] admin 初始口令已更换，演示口令 `Ybk@2026` 无法登录

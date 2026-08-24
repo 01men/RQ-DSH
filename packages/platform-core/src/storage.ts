@@ -171,7 +171,7 @@ class CollectionImpl<T extends RecordBase> implements Collection<T> {
 }
 
 export class StorageService extends Service {
-  static readonly provide = 'storage'
+  static readonly provide = 'opsStorage'
 
   private collections = new Map<string, CollectionImpl<RecordBase>>()
   private durableNames = new Set<string>()
@@ -186,7 +186,7 @@ export class StorageService extends Service {
   readonly dataDirPath: string
 
   constructor(ctx: Context, config: StorageConfig = {}) {
-    super(ctx, 'storage')
+    super(ctx, 'opsStorage')
     this.dataDirPath = config.dataDir ?? join(process.cwd(), "data")
     ctx.effect(() => () => {
       if (this.flushTimer) clearTimeout(this.flushTimer)

@@ -16,6 +16,7 @@ import * as mcp from '@dsh-ops/plugin-mcp'
 import * as skillhub from '@dsh-ops/plugin-skillhub'
 import * as agent from '@dsh-ops/plugin-agent'
 import * as app from '@dsh-ops/plugin-app'
+import * as connect from '@dsh-ops/plugin-connect'
 import * as consolePlugin from '@dsh-ops/plugin-console'
 
 export interface BootOptions {
@@ -25,7 +26,7 @@ export interface BootOptions {
 
 export async function bootAll(ctx: Context, options: BootOptions): Promise<void> {
   await ctx.plugin(platformCore, { dataDir: options.dataDir, http: { port: options.port } })
-  const restored = await ctx.storage.restoreAll()
+  const restored = await ctx.opsStorage.restoreAll()
   if (restored.length > 0) {
     ctx.logger('boot').info(`已从磁盘恢复 ${restored.length} 个数据集合`)
   }
@@ -41,5 +42,7 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   await ctx.plugin(agent)
   await ctx.plugin(app)
   await ctx.plugin(modelgw)
+  // 宿主角色：提供远程接入端点（接入码/enroll/客户端管理）与接入管理工具
+  await ctx.plugin(connect, { role: 'host' })
   await ctx.plugin(consolePlugin)
 }

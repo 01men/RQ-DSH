@@ -37,7 +37,7 @@ function seedBaseline(ctx: Context): void {
   ctx.iam.users().update(admin.id, { status: 'active' })
   void admin
   if (initialPassword) {
-    const file = join(ctx.storage.dataDirPath, 'admin-initial-password.txt')
+    const file = join(ctx.opsStorage.dataDirPath, 'admin-initial-password.txt')
     if (!existsSync(file)) {
       writeFileSync(file, `平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\n${initialPassword}\n`, 'utf8')
     }

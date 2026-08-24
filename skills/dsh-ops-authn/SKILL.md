@@ -3,6 +3,12 @@
 ## 何时使用
 机器凭证签发（Agent/应用/外部系统接入）、令牌签发与吊销、签名密钥轮换、on-behalf-of 链路验证。
 
+
+## 调用方式（工具优先）
+平台已把运维能力注册为 dsh 工具，**回答现状问题（查询/盘点/排障）必须直接调用工具获取真实数据，禁止凭记忆回答**：
+- authn_token_issue / authn_token_revoke / authn_token_list / authn_credential_create
+（工具参数见各工具 schema；下文手册中的 `dshctl ...` 为「平台独立部署 + HTTP API 运维」场景的 CLI 备选，需 DSHCTL_TOKEN/DSHCTL_USER，在 dsh 会话内一般用不到。）
+
 ## 前置条件
 需要 authn.* 权限组令牌。
 

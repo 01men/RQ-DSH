@@ -3,10 +3,10 @@
 ## 何时使用
 管理员/运维 Agent 需要对「企业 AI 资源管理平台」执行任何运维操作时，先读本索引找到对应的领域 Skill，再按其操作手册执行。典型场景：监控告警处理、资源上下线、审批处理、异常排查、成本分析。
 
-## 前置条件
-- 平台服务运行中（默认 http://127.0.0.1:7300，可用 `DSHCTL_URL` 覆盖）
-- 需要 ops 类权限令牌：`DSHCTL_TOKEN`，或 `DSHCTL_USER/DSHCTL_PASS`（默认 admin）
-- CLI：`node cli/dshctl.mjs <resource> <action>`（所有输出可 `--output json`）
+## 调用方式（工具优先）
+平台插件安装进 dsh 后，运维能力已注册为 dsh 工具（iam_* / authn_* / mcp_* / skill_* / agent_* / app_* / usage_* / audit_* / market_* / billing_* / connect_*）。
+**任何现状问题（查询/盘点/健康/成本）先直接调用对应工具获取真实数据，禁止凭记忆回答。**
+工具不可用（独立部署且插件未挂载）时才走 CLI 备选：`DSHCTL_TOKEN`（或 `DSHCTL_USER/DSHCTL_PASS`）+ `node cli/dshctl.mjs <resource> <action>`（输出可 `--output json`）。
 
 ## 领域 Skill 索引
 | 领域 Skill | 覆盖范围 | 关键命令前缀 |
@@ -18,6 +18,13 @@
 | dsh-ops-agent | Agent 注册/绑定/上下线/指标 | `dshctl agent` |
 | dsh-ops-app | AI 应用/拓扑/成本穿透 | `dshctl app` |
 | dsh-ops-audit | 审计日志/告警/审批中心/成本 | `dshctl audit` `dshctl approval` `dshctl cost` |
+| （平台接入） | 远程 dsh 接入码/已接入客户端管理 | `dshctl connect` |
+
+## 远程 dsh 接入（本机未配置宿主时第一步）
+- 工具执行报「尚未配置宿主服务」或 `connect_status` 显示未接入时：请使用者提供宿主地址与管理员签发的一次性接入码（`enr_` 开头），
+  调用 `connect_setup { hubUrl, enrollmentCode }` 自动申请机器凭证并切换为远程执行；或引导使用者打开本机配置页 `http://127.0.0.1:7390` 填写。
+- 已有机器凭证（`mc-`/`cs_` 开头）时用 `connect_login { hubUrl, clientId, clientSecret }`。
+- 接入/更新/断开后用 `connect_status` 或 `connect_test` 验证。接入码一次性消费且默认 15 分钟过期，失败时请管理员重新签发。
 
 ## 通用运维闭环（方法论）
 1. **诊断**：`dshctl audit alerts --unread` + `dshctl mcp list` 定位异常

@@ -117,11 +117,11 @@ export class SkillHubService extends Service {
   }
 
   skills(): Collection<SkillRecord> {
-    return this.ctx.storage.collection<SkillRecord>('skill:skills')
+    return this.ctx.opsStorage.collection<SkillRecord>('skill:skills')
   }
 
   downloads(): Collection<SkillDownloadRecord> {
-    return this.ctx.storage.collection<SkillDownloadRecord>('skill:downloads')
+    return this.ctx.opsStorage.collection<SkillDownloadRecord>('skill:downloads')
   }
 
   categories(): string[] {
@@ -411,7 +411,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'skillhub'
-export const inject = ['storage', 'platformBus', 'resourceCore', 'audit']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit']
 
 export function apply(ctx: Context) {
   ctx.plugin(SkillHubService)

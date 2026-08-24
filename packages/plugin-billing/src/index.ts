@@ -127,7 +127,7 @@ export class BillingService extends Service {
   }
 
   budgets(): Collection<BudgetRecord> {
-    const collection = this.ctx.storage.collection<BudgetRecord>('billing:budgets')
+    const collection = this.ctx.opsStorage.collection<BudgetRecord>('billing:budgets')
     collection.uniqueOn('budget_org', (item) => item.orgId)
     return collection
   }
@@ -333,7 +333,7 @@ export class BillingService extends Service {
         debits.set(`org:${row.org}`, (debits.get(`org:${row.org}`) ?? 0) + Number(row.charge_cents))
         if (row.resource.startsWith('plugin:')) {
           const pluginId = row.resource.slice(7)
-          const submission = this.ctx.storage.collection<{ developerId: string }>('market:submissions').findOne((item) => item.pluginId === pluginId)
+          const submission = this.ctx.opsStorage.collection<{ developerId: string }>('market:submissions').findOne((item) => item.pluginId === pluginId)
           const rate = COMMISSION_RATES.platform_default
           rateVersions.set(`developer:${submission?.developerId ?? 'unknown'}`, rate.version)
           const devShare = Math.floor(Number(row.charge_cents) * rate.developerShare)
@@ -416,7 +416,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'billing'
-export const inject = ['storage', 'platformBus', 'txnStore', 'usage']
+export const inject = ['opsStorage', 'platformBus', 'txnStore', 'usage']
 
 export function apply(ctx: Context) {
   ctx.plugin(BillingService)

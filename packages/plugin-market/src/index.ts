@@ -249,23 +249,23 @@ export class MarketService extends Service {
   }
 
   developers(): Collection<DeveloperRecord> {
-    const collection = this.ctx.storage.collection<DeveloperRecord>('market:developers')
+    const collection = this.ctx.opsStorage.collection<DeveloperRecord>('market:developers')
     collection.uniqueOn('developer_username', (dev) => dev.username)
     return collection
   }
 
   submissions(): Collection<PluginSubmissionRecord> {
-    const collection = this.ctx.storage.collection<PluginSubmissionRecord>('market:submissions')
+    const collection = this.ctx.opsStorage.collection<PluginSubmissionRecord>('market:submissions')
     collection.uniqueOn('submission_plugin_version', (item) => `${item.pluginId}@${item.version}`)
     return collection
   }
 
   installs(): Collection<PluginInstallRecord> {
-    return this.ctx.storage.collection<PluginInstallRecord>('market:installs')
+    return this.ctx.opsStorage.collection<PluginInstallRecord>('market:installs')
   }
 
   subscriptions(): Collection<PluginSubscriptionRecord> {
-    return this.ctx.storage.collection<PluginSubscriptionRecord>('market:subscriptions')
+    return this.ctx.opsStorage.collection<PluginSubscriptionRecord>('market:subscriptions')
   }
 
   // -- 开发者身份域（M2：独立于内部员工 iam） --------------------------------
@@ -520,7 +520,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'market'
-export const inject = ['storage', 'platformBus', 'authn', 'usage']
+export const inject = ['opsStorage', 'platformBus', 'authn', 'usage']
 
 export function apply(ctx: Context) {
   ctx.plugin(MarketService)

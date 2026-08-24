@@ -928,6 +928,67 @@ try {
   check('工具执行（iam_org_tree）', toolExec.ok && toolExec.data.isError === false && JSON.stringify(toolExec.data.value).includes('元冰可集团'))
   const toolAgentList = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'agent_list', args: { status: 'online' } } })
   check('工具执行（agent_list 过滤）', toolAgentList.ok && toolAgentList.data.value.total >= 5)
+
+  // ================================================================ 远程 dsh 接入（接入码 → 机器凭证 → 工具代理）
+  section('远程 dsh 接入（plugin-connect）')
+  check('接入管理工具已注册（connect_code_create 等）', toolList.data.tools.some((t) => t.name === 'connect_code_create' && t.permission === 'connect.manage'))
+
+  // 管理端权限边界：无 connect.manage 的角色被拒
+  const opsCodes = await api('GET', '/api/connect/codes', { token: ops })
+  check('无 connect.manage 权限创建/查看接入码被拒（403）', opsCodes.status === 403)
+
+  // 创建接入码（operator 模板）—— 接入码仅创建响应中出现一次
+  const codeCreated = await api('POST', '/api/connect/codes', { token: admin, body: { template: 'operator', ttlMinutes: 10, remark: 'selftest' } })
+  check('创建接入码（operator，一次性展示）', codeCreated.ok && codeCreated.data.code.startsWith('enr_') && codeCreated.data.ttlMinutes === 10)
+  const codesListed = await api('GET', '/api/connect/codes', { token: admin })
+  check('接入码列表只含掩码不含明文', codesListed.ok && !JSON.stringify(codesListed.data).includes(codeCreated.data.code) && codesListed.data.codes.some((c) => c.codeMask && c.status === 'active'))
+
+  // 伪造/错误接入码被拒（401）
+  const badEnroll = await api('POST', '/api/connect/enroll', { body: { enrollmentCode: 'enr_forged'.padEnd(40, 'x'), clientName: 'attacker' } })
+  check('伪造接入码 enroll 被拒', badEnroll.status === 401)
+
+  // 真实 enroll：换机器凭证
+  const enroll = await api('POST', '/api/connect/enroll', { body: { enrollmentCode: codeCreated.data.code, clientName: 'selftest-remote-dsh', meta: { hostname: 'selftest-pc', platform: 'test' } } })
+  check('接入码换机器凭证成功', enroll.ok && enroll.data.clientId.startsWith('mc-') && enroll.data.clientSecret.startsWith('cs_') && enroll.data.template === 'operator')
+
+  // 一次性消费：重放被拒
+  const enrollReplay = await api('POST', '/api/connect/enroll', { body: { enrollmentCode: codeCreated.data.code, clientName: 'replay' } })
+  check('接入码一次性消费（重放被拒）', enrollReplay.status === 401)
+
+  // 机器凭证 → 机器令牌 → REST 读权限
+  const ccLogin = await api('POST', '/api/auth/client-credentials', { body: { clientId: enroll.data.clientId, clientSecret: enroll.data.clientSecret } })
+  check('机器凭证换取机器令牌', ccLogin.ok && ccLogin.data.token.startsWith('dst1.'))
+  const machineToken = ccLogin.data.token
+  const machineOverview = await api('GET', '/api/overview', { token: machineToken })
+  check('机器令牌可读平台概览（operator 含读权限）', machineOverview.ok)
+  const machineOrgCreate = await api('POST', '/api/iam/orgs', { token: machineToken, body: { name: '越权组织' } })
+  check('operator 模板无 iam.org.write（越权被拒 403）', machineOrgCreate.status === 403)
+
+  // 机器令牌走工具桥（远程工具代理的同一条宿主路径）
+  const machineTool = await api('POST', '/api/tools/execute', { token: machineToken, body: { name: 'agent_list', args: {} } })
+  check('机器令牌经工具桥执行 agent_list', machineTool.ok && machineTool.data.isError === false && machineTool.data.value.total >= 5)
+
+  // 客户端登记与最近使用
+  const clientsListed = await api('GET', '/api/connect/clients', { token: admin })
+  const enrolled = clientsListed.data.clients.find((c) => c.clientId === enroll.data.clientId)
+  check('已接入客户端登记（模板/主机名/最近使用）', clientsListed.ok && enrolled && enrolled.template === 'operator' && enrolled.hostname === 'selftest-pc' && enrolled.lastUsedAt !== '')
+
+  // 禁用客户端 → 令牌即时失效（principal disabled 联动）
+  const disableClient = await api('POST', `/api/connect/clients/${enroll.data.clientId}/disable`, { token: admin, body: { reason: 'selftest 验证吊销联动' } })
+  check('禁用接入客户端（原因必填留痕）', disableClient.ok && disableClient.data.status === 'disabled')
+  const ccAfterDisable = await api('POST', '/api/auth/client-credentials', { body: { clientId: enroll.data.clientId, clientSecret: enroll.data.clientSecret } })
+  const machineAfterDisable = await api('GET', '/api/overview', { token: machineToken })
+  check('禁用后凭证换牌被拒、旧机器令牌即时失效', ccAfterDisable.status === 401 && machineAfterDisable.status === 401)
+
+  // 作废未使用接入码
+  const code2 = await api('POST', '/api/connect/codes', { token: admin, body: { template: 'readonly', ttlMinutes: 5 } })
+  const revokeCode = await api('DELETE', `/api/connect/codes/${code2.data.id}`, { token: admin })
+  const enrollRevoked = await api('POST', '/api/connect/enroll', { body: { enrollmentCode: code2.data.code, clientName: 'late' } })
+  check('作废未使用接入码后 enroll 被拒', revokeCode.ok && enrollRevoked.status === 401)
+
+  // 工具级 connect 管理工具（宿主侧 dsh Agent 用自然语言管理接入）
+  const toolCodeCreate = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'connect_code_create', args: { template: 'readonly', ttlMinutes: 5 } } })
+  check('工具 connect_code_create 签发接入码', toolCodeCreate.ok && toolCodeCreate.data.isError === false && toolCodeCreate.data.value.code.startsWith('enr_'))
 } finally {
   // ---------------------------------------------------------------- 收尾
   console.log('\n\x1b[90m» 停止测试实例…\x1b[0m')

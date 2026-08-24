@@ -131,15 +131,15 @@ export class McpService extends Service {
   }
 
   services(): Collection<McpServiceRecord> {
-    return this.ctx.storage.collection<McpServiceRecord>('mcp:services')
+    return this.ctx.opsStorage.collection<McpServiceRecord>('mcp:services')
   }
 
   permGroups(): Collection<McpPermGroupRecord> {
-    return this.ctx.storage.collection<McpPermGroupRecord>('mcp:permGroups')
+    return this.ctx.opsStorage.collection<McpPermGroupRecord>('mcp:permGroups')
   }
 
   calls(): Collection<McpCallRecord> {
-    return this.ctx.storage.collection<McpCallRecord>('mcp:calls')
+    return this.ctx.opsStorage.collection<McpCallRecord>('mcp:calls')
   }
 
   // -- 注册与部署 ---------------------------------------------------------
@@ -774,7 +774,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'mcp'
-export const inject = ['storage', 'platformBus', 'iam', 'audit', 'usage']
+export const inject = ['opsStorage', 'platformBus', 'iam', 'audit', 'usage']
 
 export function apply(ctx: Context) {
   const registry = new McpService(ctx)

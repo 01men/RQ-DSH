@@ -2,7 +2,7 @@
  * @dsh-ops/platform-core —— 平台基础插件。
  *
  * 提供四个基础服务（一切皆插件：基础层同样是插件）：
- *   ctx.storage      JSON 集合存储（原子落盘，可替换为 DB 实现）
+ *   ctx.opsStorage      JSON 集合存储（原子落盘，可替换为 DB 实现）
  *   ctx.platformBus  平台事件总线（插件协作唯一胶水）
  *   ctx.tools        ToolRuntime-lite（独立宿主下提供；完整 dsh 下由真 ToolRuntime 提供）
  *   ctx.httpServer   HTTP 服务（控制台 REST API 与静态资源）

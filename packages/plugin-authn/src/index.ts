@@ -129,9 +129,9 @@ export class AuthnService extends Service {
   constructor(ctx: Context) {
     super(ctx, 'authn')
     // 认证数据用 durable 集合：吊销/锁定即时落盘（fsync），返回 200 后被杀不丢失
-    this.ctx.storage.collection<TokenRecord>('authn:tokens', { durability: 'durable' })
-    this.ctx.storage.collection<LoginAttemptRecord>('authn:loginAttempts', { durability: 'durable' })
-    this.ctx.storage.collection<PrincipalRecord>('authn:principals', { durability: 'durable' })
+    this.ctx.opsStorage.collection<TokenRecord>('authn:tokens', { durability: 'durable' })
+    this.ctx.opsStorage.collection<LoginAttemptRecord>('authn:loginAttempts', { durability: 'durable' })
+    this.ctx.opsStorage.collection<PrincipalRecord>('authn:principals', { durability: 'durable' })
     this.signingSecret = this.loadOrCreateSecret()
     this.loadRetiredSecrets()
     // refresh 哈希索引：替代全表扫描（评审 M2）
@@ -171,17 +171,17 @@ export class AuthnService extends Service {
   }
 
   principals(): Collection<PrincipalRecord> {
-    return this.ctx.storage.collection<PrincipalRecord>('authn:principals')
+    return this.ctx.opsStorage.collection<PrincipalRecord>('authn:principals')
   }
 
   /** OAuth state（防 CSRF，一次性消费，10 分钟有效）。 */
   oauthStates(): Collection<OAuthStateRecord> {
-    return this.ctx.storage.collection<OAuthStateRecord>('authn:oauthStates')
+    return this.ctx.opsStorage.collection<OAuthStateRecord>('authn:oauthStates')
   }
 
   /** 三方登录未命中时的待绑定票据（5 分钟有效，一次性）。 */
   ssoTickets(): Collection<SsoTicketRecord> {
-    return this.ctx.storage.collection<SsoTicketRecord>('authn:ssoTickets')
+    return this.ctx.opsStorage.collection<SsoTicketRecord>('authn:ssoTickets')
   }
 
   // -- 会话令牌对（access + refresh 轮转链） --------------------------------
@@ -386,14 +386,14 @@ export class AuthnService extends Service {
   }
 
   tokens(): Collection<TokenRecord> {
-    return this.ctx.storage.collection<TokenRecord>('authn:tokens')
+    return this.ctx.opsStorage.collection<TokenRecord>('authn:tokens')
   }
 
   private loadOrCreateSecret(): string {
-    const file = join(this.ctx.storage.dataDirPath, 'authn-signing-secret')
+    const file = join(this.ctx.opsStorage.dataDirPath, 'authn-signing-secret')
     try {
       if (existsSync(file)) return readFileSync(file, 'utf8').trim()
-      mkdirSync(this.ctx.storage.dataDirPath, { recursive: true })
+      mkdirSync(this.ctx.opsStorage.dataDirPath, { recursive: true })
       const secret = generateSecret('sign')
       writeFileSync(file, secret, { encoding: 'utf8', mode: 0o600 })
       return secret
@@ -406,7 +406,7 @@ export class AuthnService extends Service {
 
   private loadRetiredSecrets(): void {
     try {
-      const file = join(this.ctx.storage.dataDirPath, 'authn-signing-secret-history.json')
+      const file = join(this.ctx.opsStorage.dataDirPath, 'authn-signing-secret-history.json')
       if (!existsSync(file)) return
       const stored = JSON.parse(readFileSync(file, 'utf8')) as Array<{ secret: string; retiredAt: number }>
       const cutoff = Date.now() - SECRET_GRACE_MS
@@ -416,7 +416,7 @@ export class AuthnService extends Service {
 
   private saveRetiredSecrets(): void {
     try {
-      const file = join(this.ctx.storage.dataDirPath, 'authn-signing-secret-history.json')
+      const file = join(this.ctx.opsStorage.dataDirPath, 'authn-signing-secret-history.json')
       writeFileSync(file, JSON.stringify(this.retiredSecrets, null, 2), 'utf8')
     } catch (error) {
       console.error('[authn] 退役密钥历史落盘失败（仅影响轮换宽限）', error)
@@ -434,7 +434,7 @@ export class AuthnService extends Service {
       { secret: this.signingSecret, retiredAt: Date.now() },
     ]
     this.signingSecret = generateSecret('sign')
-    const file = join(this.ctx.storage.dataDirPath, 'authn-signing-secret')
+    const file = join(this.ctx.opsStorage.dataDirPath, 'authn-signing-secret')
     writeFileSync(file, this.signingSecret, 'utf8')
     this.saveRetiredSecrets()
     return { graceMs: SECRET_GRACE_MS }
@@ -516,7 +516,7 @@ export class AuthnService extends Service {
 
   /** 登录尝试计数集合（durable：重启不清零）。 */
   loginAttempts(): Collection<LoginAttemptRecord> {
-    const collection = this.ctx.storage.collection<LoginAttemptRecord>('authn:loginAttempts')
+    const collection = this.ctx.opsStorage.collection<LoginAttemptRecord>('authn:loginAttempts')
     collection.uniqueOn('login_attempt_key', (item) => item.key)
     return collection
   }
@@ -762,7 +762,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'authn'
-export const inject = ['storage', 'platformBus', 'iam', 'httpServer']
+export const inject = ['opsStorage', 'platformBus', 'iam', 'httpServer']
 
 export function apply(ctx: Context) {
   ctx.plugin(AuthnService)

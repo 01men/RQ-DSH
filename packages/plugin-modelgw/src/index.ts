@@ -64,7 +64,7 @@ export class ModelGatewayService extends Service {
   }
 
   models(): Collection<ModelRecord> {
-    const collection = this.ctx.storage.collection<ModelRecord>('modelgw:models')
+    const collection = this.ctx.opsStorage.collection<ModelRecord>('modelgw:models')
     collection.uniqueOn('model_slug', (item) => item.slug)
     return collection
   }
@@ -170,7 +170,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'modelgw'
-export const inject = ['storage', 'usage', 'billing']
+export const inject = ['opsStorage', 'usage', 'billing']
 
 export function apply(ctx: Context) {
   ctx.plugin(ModelGatewayService)

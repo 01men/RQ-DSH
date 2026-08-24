@@ -346,7 +346,7 @@ export class UsageService extends Service {
   // -- 价格簿 ---------------------------------------------------------------
 
   priceBook(): Collection<PriceBookEntry> {
-    return this.ctx.storage.collection<PriceBookEntry>('usage:priceBook')
+    return this.ctx.opsStorage.collection<PriceBookEntry>('usage:priceBook')
   }
 
   upsertPrice(entry: Omit<PriceBookEntry, 'id' | 'createdAt' | 'updatedAt'>): PriceBookEntry {
@@ -385,7 +385,7 @@ export class UsageService extends Service {
     const usageTotals = this.totals(windowFromIso ? { from: windowFromIso } : {})
     const projections: Array<{ consumer: string; count: number; charge_cents: number; mismatch: boolean }> = []
     for (const consumerId of this.consumers.keys()) {
-      const rows = this.ctx.storage.collection<ProjectionRow>(`usage:projection:${consumerId}`).all()
+      const rows = this.ctx.opsStorage.collection<ProjectionRow>(`usage:projection:${consumerId}`).all()
         .filter((row) => (windowFromIso ? row.window >= windowFromIso.slice(0, 10) : true))
       const count = rows.reduce((sum, row) => sum + row.count, 0)
       const charge = rows.reduce((sum, row) => sum + row.charge_cents, 0)
@@ -408,7 +408,7 @@ export class UsageService extends Service {
 
   /** 消费方投影累加（供 consume() 回调内部调用）。 */
   project(consumerId: string, event: UsageEvent): void {
-    const collection = this.ctx.storage.collection<ProjectionRow>(`usage:projection:${consumerId}`)
+    const collection = this.ctx.opsStorage.collection<ProjectionRow>(`usage:projection:${consumerId}`)
     const day = event.occurred_at.slice(0, 10)
     const existing = collection.findOne((row) => row.window === day)
     if (existing) {
@@ -421,7 +421,7 @@ export class UsageService extends Service {
   // -- 运行时对账（M5：声明 vs 行为） --------------------------------------
 
   capabilityGrants(): Collection<CapabilityGrantRecord> {
-    return this.ctx.storage.collection<CapabilityGrantRecord>('usage:capabilityGrants')
+    return this.ctx.opsStorage.collection<CapabilityGrantRecord>('usage:capabilityGrants')
   }
 
   grantCapabilities(principal: string, capabilities: string[], source: string): CapabilityGrantRecord {
@@ -459,7 +459,7 @@ export class UsageService extends Service {
   }
 
   deadLetters(): Collection<DeadLetterRecord> {
-    return this.ctx.storage.collection<DeadLetterRecord>('usage:deadLetters')
+    return this.ctx.opsStorage.collection<DeadLetterRecord>('usage:deadLetters')
   }
 
   // -- 内部 -----------------------------------------------------------------
@@ -557,7 +557,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'usage'
-export const inject = ['storage', 'platformBus', 'txnStore', 'iam']
+export const inject = ['opsStorage', 'platformBus', 'txnStore', 'iam']
 
 export function apply(ctx: Context) {
   ctx.plugin(UsageService)

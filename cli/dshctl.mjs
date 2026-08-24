@@ -142,6 +142,9 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
   approval  list [--pending] | decide <id> --decision=approve|reject --opinion=
   cost      report --groupBy=app|agent|org|date
   platform  info                              插件树 / 工具目录 / 集合
+  connect   code [--template=readonly|operator|full] [--ttl=15] [--remark=]
+            （创建一次性接入码：远程 dsh 凭此申请机器凭证）
+            codes | clients | disable <clientId> --reason=<原因>
   tool      exec --name=<工具名> [--args=<JSON>]   直接调用注册的工具
   plugin    init --id=<com.vendor.name> [--dir=./my-plugin]
             （本地脚手架：契约五面 + Ed25519 发布者密钥对 + Hello World 提示词包）
@@ -673,6 +676,45 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       const data = await call('GET', '/api/platform/info')
       out({ name: data.name, version: data.version, runtime: data.runtime, plugins: data.plugins.join(', '), tools: data.tools.length, collections: data.collections.length })
       table(data.tools.map((t) => ({ name: t.name, plugin: t.plugin ?? '', description: t.description })), ['name', 'plugin', 'description'], '工具目录')
+    },
+  },
+  connect: {
+    desc: '远程 dsh 接入管理（接入码 / 已接入客户端）',
+    run: async () => {
+      const action = argv[0] ?? 'codes'
+      await ensureToken()
+      if (action === 'code') {
+        const template = flag('template', 'readonly')
+        const ttl = Number(flag('ttl', 15)) || 15
+        const data = await call('POST', '/api/connect/codes', { template, ttlMinutes: ttl, remark: String(flag('remark', '')) })
+        console.log(`\n  接入码（仅本次展示，${data.ttlMinutes} 分钟内一次性有效）：`)
+        console.log(`  ┌─────────────────────────────────────────────────────┐`)
+        console.log(`  │ ${data.code} │`)
+        console.log(`  └─────────────────────────────────────────────────────┘`)
+        console.log(`  模板：${template}（${data.template}）  过期：${data.expiresAt}`)
+        console.log(`  远程电脑 dsh 安装插件后执行：connect_setup { hubUrl, enrollmentCode } 即完成接入；`)
+        console.log(`  或让其在浏览器打开 http://127.0.0.1:7390 配置页填写。\n`)
+        return
+      }
+      if (action === 'codes') {
+        const data = await call('GET', '/api/connect/codes')
+        out(data.codes.map((c) => ({ codeMask: c.codeMask, template: c.template, status: c.status, expiresAt: c.expiresAt, usedBy: c.usedBy ?? '', remark: c.remark })), ['codeMask', 'template', 'status', 'expiresAt', 'usedBy', 'remark'], '接入码')
+        return
+      }
+      if (action === 'clients') {
+        const data = await call('GET', '/api/connect/clients')
+        out(data.clients.map((c) => ({ name: c.name, clientId: c.clientId, template: c.template, status: c.status, hostname: c.hostname, enrolledAt: c.enrolledAt, lastUsedAt: c.lastUsedAt || '' })), ['name', 'clientId', 'template', 'status', 'hostname', 'lastUsedAt'], '已接入客户端')
+        return
+      }
+      if (action === 'disable') {
+        const target = argv[1]
+        const reason = flag('reason')
+        if (!target || !reason) fail('用法：connect disable <clientId|记录ID> --reason=<原因>')
+        const data = await call('POST', `/api/connect/clients/${target}/disable`, { reason })
+        ok(`客户端已禁用（联动吊销全部令牌）：${data.id}`)
+        return
+      }
+      fail('用法：connect code [--template=readonly|operator|full] [--ttl=15] [--remark=] | codes | clients | disable <clientId> --reason=')
     },
   },
   tool: {

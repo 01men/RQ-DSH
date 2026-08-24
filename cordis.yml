@@ -1,10 +1,15 @@
 # cordis.yml —— 把本平台的插件树挂载进完整 dsh 运行时（dsh web / dsh headless）。
 #
-# 用法（在 deepseek-harness 源码检出中）：
-#   pnpm dsh web --patch <本项目绝对路径>/cordis.yml
+# 用法（在 deepseek-harness 源码检出中，两步缺一不可）：
+#   1) 先把本项目 node_modules/@deepseek-ai/cordis 链接到 dsh 源码树的 vendor/cordis
+#      （junction），保证插件与宿主是同一个 cordis 实例——两份实例会让服务链
+#      （iam→usage→audit…）全部 pending，详见 README「一份插件代码，两种宿主」
+#   2) pnpm dsh web --patch <本项目绝对路径>/cordis.yml
 #
 # 说明：
-#   - 路径必须是绝对路径，使用前替换 <PROJECT_ROOT> 为本项目实际位置
+#   - <PROJECT_ROOT> 需替换为 file:// URL 形式的绝对路径（Windows 下裸盘符路径会被
+#     ESM 判为 ERR_UNSUPPORTED_ESM_URL_SCHEME），例如 file:///D:/mycode/ybkk-AIOS
+#     （路径含中文等非 ASCII 字符时用百分号编码）
 #   - provideToolRuntime=false：完整 dsh 自带 ToolRuntime（ctx.tools），
 #     平台插件注册的 37 个运维工具将直接对模型可见、可被调用
 #   - 控制台 SPA 仍由本项目的独立进程提供（node src/main.ts），
@@ -15,6 +20,11 @@
       config:
         provideToolRuntime: false
         startHttp: false
+    # connect 必须先于业务插件加载：client 角色要在业务工具注册前完成代理包裹
+    - id: ops-connect
+      name: '<PROJECT_ROOT>/packages/plugin-connect/src/index.ts'
+      config:
+        role: client
     - id: ops-resource-core
       name: '<PROJECT_ROOT>/packages/plugin-resource-core/src/index.ts'
     - id: ops-iam

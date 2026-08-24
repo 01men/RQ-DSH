@@ -3,6 +3,12 @@
 ## 何时使用
 AI 应用注册、编排拓扑查看、应用层指标（DAU/会话/留存）、成本穿透、发布/下架生命周期。
 
+
+## 调用方式（工具优先）
+平台已把运维能力注册为 dsh 工具，**回答现状问题（查询/盘点/排障）必须直接调用工具获取真实数据，禁止凭记忆回答**：
+- app_list / app_topology / app_metrics / app_cost_breakdown
+（工具参数见各工具 schema；下文手册中的 `dshctl ...` 为「平台独立部署 + HTTP API 运维」场景的 CLI 备选，需 DSHCTL_TOKEN/DSHCTL_USER，在 dsh 会话内一般用不到。）
+
 ## 操作手册
 
 ### 场景 1：排查应用故障（拓扑定位）

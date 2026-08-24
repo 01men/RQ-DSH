@@ -13,7 +13,7 @@ const PLUGINS = [
     dir: 'platform-core', id: 'dsh-plugin-platform-core', label: '平台基础',
     depends: [], permissions: ['console.login'],
     services: [
-      ['storage', 'ctx.storage', 'JSON 集合存储（原子落盘，可替换 DB）'],
+      ['opsStorage', 'ctx.opsStorage', 'JSON 集合存储（原子落盘，可替换 DB）'],
       ['platformBus', 'ctx.platformBus', '平台事件总线（插件协作唯一胶水）'],
       ['tools', 'ctx.tools', 'ToolRuntime-lite（独立宿主；dsh 下由原生 ToolRuntime 提供）'],
       ['httpServer', 'ctx.httpServer', 'HTTP 服务：REST 路由 + 静态资源'],

@@ -27,8 +27,8 @@ logger.info(`控制台地址：http://0.0.0.0:${port}（本机访问 http://127.
 
 process.on('SIGINT', () => {
   logger.info('收到 SIGINT，正在退出…')
-  void ctx.storage.flushNow().finally(() => process.exit(0))
+  void ctx.opsStorage.flushNow().finally(() => process.exit(0))
 })
 process.on('SIGTERM', () => {
-  void ctx.storage.flushNow().finally(() => process.exit(0))
+  void ctx.opsStorage.flushNow().finally(() => process.exit(0))
 })

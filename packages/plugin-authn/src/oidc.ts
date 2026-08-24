@@ -65,13 +65,13 @@ export class OidcService extends Service {
   }
 
   clients(): Collection<OidcClientRecord> {
-    const collection = this.ctx.storage.collection<OidcClientRecord>('authn:oidcClients')
+    const collection = this.ctx.opsStorage.collection<OidcClientRecord>('authn:oidcClients')
     collection.uniqueOn('oidc_client_id', (item) => item.clientId)
     return collection
   }
 
   codes(): Collection<OidcCodeRecord> {
-    return this.ctx.storage.collection<OidcCodeRecord>('authn:oidcCodes')
+    return this.ctx.opsStorage.collection<OidcCodeRecord>('authn:oidcCodes')
   }
 
   createClient(input: { name: string; redirectUris: string[] }): { client: OidcClientRecord; clientSecret: string } {
@@ -270,13 +270,13 @@ export class OidcService extends Service {
   }
 
   private loadOrCreateKeys(): OidcKeyMaterial {
-    const file = join(this.ctx.storage.dataDirPath, 'oidc-keys.json')
+    const file = join(this.ctx.opsStorage.dataDirPath, 'oidc-keys.json')
     try {
       if (existsSync(file)) {
         const stored = JSON.parse(readFileSync(file, 'utf8')) as OidcKeyMaterial
         if (stored.privatePem && stored.publicPem && stored.kid) return stored
       }
-      mkdirSync(this.ctx.storage.dataDirPath, { recursive: true })
+      mkdirSync(this.ctx.opsStorage.dataDirPath, { recursive: true })
       const { publicKey, privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 })
       const material: OidcKeyMaterial = {
         privatePem: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
