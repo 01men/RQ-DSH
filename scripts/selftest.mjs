@@ -1643,6 +1643,33 @@ try {
   const devNasWrite = await api('POST', `/api/nas/${nasId}/fs/mkdir`, { token: dev, body: { path: '/skillhub/deny' } })
   check('developer 写操作被拒（缺 nas.write，403）', devNasWrite.status === 403)
 
+  // 二次编辑（PATCH）：属性合并更新；未携带的接入属性保持原值
+  const nasPatch = await api('PATCH', `/api/nas/${nasId}`, { token: admin, body: { attrs: { description: '自测：二次编辑后的描述', vendor: 'Synology DS925+' } } })
+  check('二次编辑（PATCH 属性合并更新）', nasPatch.ok && nasPatch.data.attrs.description === '自测：二次编辑后的描述' && nasPatch.data.attrs.vendor === 'Synology DS925+', JSON.stringify(nasPatch.error))
+  const nasAfterPatch = await api('GET', `/api/nas/${nasId}`, { token: admin })
+  check('编辑未携带的接入属性保持原值（网关地址/令牌未丢）', nasAfterPatch.ok && nasAfterPatch.data.attrs.gatewayUrl === `http://127.0.0.1:${NAS_GW_PORT}/mcp`)
+  const nasPatchFs = await api('GET', `/api/nas/${nasId}/fs`, { token: admin })
+  check('编辑后网关客户端缓存已作废（fs 调用仍通）', nasPatchFs.ok && JSON.stringify(nasPatchFs.data).includes('skillhub'))
+  const devNasPatch = await api('PATCH', `/api/nas/${nasId}`, { token: dev, body: { attrs: { description: 'x' } } })
+  check('developer 编辑被拒（缺 nas.write，403）', devNasPatch.status === 403)
+
+  // 删除（DELETE）：仅终态可删，走 上线 → 下线 → 归档 → 删除 全链
+  const nas2 = await api('POST', '/api/nas', { token: admin, body: { name: '自测待删 NAS', attrs: { description: '删除生命周期自测', gatewayUrl: `http://127.0.0.1:${NAS_GW_PORT}/mcp`, accessToken: NAS_GW_TOKEN, nasIp: NAS_GW_IP } } })
+  check('登记第二台 NAS（草稿）', nas2.ok && nas2.data.status === 'draft', JSON.stringify(nas2.error))
+  const nas2Id = nas2.data?.id
+  const delDraft = await api('DELETE', `/api/nas/${nas2Id}`, { token: admin })
+  check('非终态删除被拒（草稿需先下线/归档）', delDraft.status === 400 && !delDraft.ok)
+  const devNasDelete = await api('DELETE', `/api/nas/${nas2Id}`, { token: dev })
+  check('developer 删除被拒（缺 nas.write，403）', devNasDelete.status === 403)
+  await api('POST', `/api/nas/${nas2Id}/transition`, { token: admin, body: { action: 'online' } })
+  await api('POST', `/api/nas/${nas2Id}/transition`, { token: admin, body: { action: 'offline', note: '自测删除链路' } })
+  const nas2Archive = await api('POST', `/api/nas/${nas2Id}/transition`, { token: admin, body: { action: 'archive' } })
+  check('归档为终态', nas2Archive.ok && nas2Archive.data.status === 'archived', JSON.stringify(nas2Archive.error))
+  const nas2Delete = await api('DELETE', `/api/nas/${nas2Id}`, { token: admin })
+  check('归档后删除成功（含健康/工具缓存清理）', nas2Delete.ok && nas2Delete.data.deleted === true, JSON.stringify(nas2Delete.error))
+  const nas2Gone = await api('GET', `/api/nas/${nas2Id}`, { token: admin })
+  check('删除后详情不再可查', nas2Gone.status === 400 && !nas2Gone.ok)
+
   // ================================================================ Skill 包 NAS 存储
   section('Skill 包 NAS 存储（上架自动打包上传）')
   const storageDeny = await api('PUT', '/api/skill-storage', { token: dev, body: { mode: 'nas', nasId, basePath: '/skillhub' } })

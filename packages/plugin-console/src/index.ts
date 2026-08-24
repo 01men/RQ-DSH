@@ -1273,6 +1273,21 @@ export function apply(ctx: Context) {
     return maskNasEntity(nas)
   })
 
+  /** 删除 NAS 资产：仅终态（已归档）可删；被 Skill 包存储后端引用时拒绝。 */
+  guarded('DELETE', '/api/nas/:id', 'nas.write', (exchange) => {
+    const id = exchange.params['id']!
+    const nas = ctx.nasRegistry.get(id)
+    if (!nas) throw new Error(`NAS 资产不存在：${id}`)
+    const storage = ctx.nasRegistry.getSkillStorage()
+    if (storage.mode === 'nas' && storage.nasId === id) {
+      throw new Error('该 NAS 正作为 Skill 包存储后端，请先在「Skill 包存储」切换为 local 或其他 NAS')
+    }
+    ctx.resourceCore.remove('nas', id)
+    ctx.nasRegistry.purge(id)
+    changeLog(exchange, 'nas.delete', 'nas', id, nas.name)
+    return { deleted: true }
+  })
+
   guarded('POST', '/api/nas/:id/transition', 'nas.write', async (exchange) => {
     const { action, note } = body<{ action: string; note?: string }>(exchange)
     const info = caller(exchange)

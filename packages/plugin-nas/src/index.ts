@@ -123,6 +123,13 @@ export class NasRegistryService extends Service {
     return this.ctx.resourceCore.transition('nas', id, 'archive', actor).entity
   }
 
+  /** 删除后的关联清理：健康档案、工具发现缓存与网关客户端句柄。 */
+  purge(id: string): void {
+    this.clients.delete(id)
+    for (const record of this.health().find((item) => item.nasId === id)) this.health().remove(record.id)
+    for (const record of this.toolCache().find((item) => item.nasId === id)) this.toolCache().remove(record.id)
+  }
+
   // -- 健康与工具发现 -------------------------------------------------------
 
   /** initialize 探活：延迟 > 800ms 记 degraded；连续失败 3 次记 down 并告警。 */

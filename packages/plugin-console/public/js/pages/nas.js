@@ -71,7 +71,7 @@ export async function renderNas(content, params, ctx) {
         { title: '更新时间', width: 110, render: (item) => `<span class="fs-12 text-4">${timeAgo(item.updatedAt)}</span>` },
       ],
       rows: items,
-      onRowClick: (item) => openNasDetail(item.id, ctx),
+      onRowClick: (item) => openNasDetail(item.id, ctx, schema),
       empty: '没有匹配的 NAS 资产',
     }))
   }
@@ -91,11 +91,30 @@ export async function renderNas(content, params, ctx) {
   renderList(data.items)
   if (params.get('action') === 'create') openNasCreate(schema, ctx)
   if (params.get('action') === 'import') openNasImport(ctx)
-  if (params.get('focus')) void openNasDetail(params.get('focus'), ctx)
+  if (params.get('focus')) void openNasDetail(params.get('focus'), ctx, schema)
 }
 
-// ---------- 新建（schema 驱动，与 agents.js 同约定） ----------
-function openNasCreate(schema, ctx) {
+// ---------- 新建/编辑共用：schema 驱动表单（与 agents.js 同约定） ----------
+function renderNasSchemaField(f, value) {
+  const name = `attr_${f.key}`
+  // 编辑时令牌不回填（回显为脱敏值），留空 = 保持不变
+  const isSecret = f.key === 'accessToken' && value !== undefined
+  const text = value === undefined || value === null || isSecret ? '' : String(value)
+  const placeholder = isSecret ? '已保存，留空则保持不变' : f.placeholder
+  if (f.type === 'enum') {
+    return field(f.label, selectField(name, (f.options ?? []).map((o) => ({ value: o.value, label: o.hint ? `${o.label}（${o.hint}）` : o.label })), { value: text || String(f.defaultValue ?? '') }), { required: f.required, hint: f.hint })
+  }
+  if (f.type === 'text') {
+    return field(f.label, textareaField(name, { placeholder, rows: 2, value: text }), { required: f.required, hint: f.hint, full: true })
+  }
+  if (f.type === 'tags') {
+    const tagText = Array.isArray(value) ? value.join(', ') : text
+    return field(f.label, inputField(`tags_${f.key}`, { placeholder: '逗号分隔', value: tagText }), { hint: f.hint })
+  }
+  return field(f.label, inputField(name, { placeholder, value: text || String(f.defaultValue ?? '') }), { required: f.required, hint: f.hint })
+}
+
+function openNasForm({ title, hint, schema, initial, submitText, onSubmit }) {
   const groupsByField = new Map()
   for (const fieldSpec of schema?.fields ?? []) {
     if (!groupsByField.has(fieldSpec.group)) groupsByField.set(fieldSpec.group, [])
@@ -103,19 +122,21 @@ function openNasCreate(schema, ctx) {
   }
   const groupLabels = Object.fromEntries((schema?.groups ?? []).map((g) => [g.key, g.label]))
   const modal = openModal({
-    title: '新建 NAS 资产', wide: true,
+    title, wide: true,
     body: `
-      <div class="form-hint" style="margin-bottom:12px">必填最小集即可创建草稿；上线前需补全接入属性（网关地址 / 令牌 / 设备 IP）。</div>
+      ${hint ? `<div class="form-hint" style="margin-bottom:12px">${hint}</div>` : ''}
       <div class="form-grid">
-        ${field('资产名称', inputField('name', { placeholder: '如：研发文件服务器' }), { required: true })}
-        ${field('唯一标识', inputField('slug', { placeholder: '小写字母与中划线，留空自动生成' }))}
+        ${field('资产名称', inputField('name', { placeholder: '如：研发文件服务器', value: initial?.name ?? '' }), { required: true })}
+        ${initial
+          ? field('唯一标识', `<input class="input" value="${esc(initial.slug ?? initial.id)}" disabled>`, { hint: '标识创建后不可修改' })
+          : field('唯一标识', inputField('slug', { placeholder: '小写字母与中划线，留空自动生成' }))}
       </div>
       ${[...groupsByField.entries()].map(([group, fields]) => `
         <div class="card-title mb-8" style="margin-top:6px">${esc(groupLabels[group] ?? group)}</div>
         <div class="form-grid">
-          ${fields.map((f) => renderSchemaField(f)).join('')}
+          ${fields.map((f) => renderNasSchemaField(f, initial?.attrs?.[f.key])).join('')}
         </div>`).join('')}`,
-    foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
+    foot: `<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>${esc(submitText)}</button>`,
   })
   modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
   modal.el.querySelector('[data-ok]').onclick = async (e) => {
@@ -129,29 +150,39 @@ function openNasCreate(schema, ctx) {
     }
     btn.classList.add('btn-loading')
     try {
-      await api.post('/api/nas', { name: data.name, slug: data.slug || undefined, attrs })
-      toast('已创建（草稿），健康探活通过后可上线')
-      modal.close(); ctx.rerender()
+      await onSubmit({ name: data.name, slug: data.slug || undefined, attrs })
+      modal.close()
     } catch (error) {
       toast(error.message, 'error')
     } finally {
       btn.classList.remove('btn-loading')
     }
   }
+}
 
-  function renderSchemaField(f) {
-    const name = `attr_${f.key}`
-    if (f.type === 'enum') {
-      return field(f.label, selectField(name, (f.options ?? []).map((o) => ({ value: o.value, label: o.hint ? `${o.label}（${o.hint}）` : o.label })), { value: String(f.defaultValue ?? '') }), { required: f.required, hint: f.hint })
-    }
-    if (f.type === 'text') {
-      return field(f.label, textareaField(name, { placeholder: f.placeholder, rows: 2 }), { required: f.required, hint: f.hint, full: true })
-    }
-    if (f.type === 'tags') {
-      return field(f.label, inputField(`tags_${f.key}`, { placeholder: '逗号分隔' }), { hint: f.hint })
-    }
-    return field(f.label, inputField(name, { placeholder: f.placeholder, value: String(f.defaultValue ?? '') }), { required: f.required, hint: f.hint })
-  }
+function openNasCreate(schema, ctx) {
+  openNasForm({
+    title: '新建 NAS 资产', schema, submitText: '创建',
+    hint: '必填最小集即可创建草稿；上线前需补全接入属性（网关地址 / 令牌 / 设备 IP）。',
+    onSubmit: async (data) => {
+      await api.post('/api/nas', { name: data.name, slug: data.slug, attrs: data.attrs })
+      toast('已创建（草稿），健康探活通过后可上线')
+      ctx.rerender()
+    },
+  })
+}
+
+/** 二次编辑：复用 schema 表单回填；留空字段保持不变（含令牌）。 */
+function openNasEdit(nas, schema, ctx) {
+  openNasForm({
+    title: `编辑 NAS 资产 · ${nas.name}`, schema, initial: nas, submitText: '保存',
+    hint: '留空的属性保持原值不变；接入属性（网关/令牌/设备 IP）变更后即时生效并触发重新探活。',
+    onSubmit: async (data) => {
+      await api.patch(`/api/nas/${nas.id}`, { name: data.name, attrs: data.attrs })
+      toast('已保存')
+      ctx.rerender()
+    },
+  })
 }
 
 // ---------- mcpServers JSON 导入 ----------
@@ -209,7 +240,7 @@ function openNasImport(ctx) {
 }
 
 // ---------- 详情抽屉 ----------
-async function openNasDetail(id, ctx) {
+async function openNasDetail(id, ctx, schema) {
   const nas = await api.get(`/api/nas/${id}`)
   const canWrite = session.can('nas.write')
   const online = nas.status === 'online'
@@ -235,12 +266,14 @@ async function openNasDetail(id, ctx) {
       <div id="nas-tab-body"></div>`,
     foot: `
       <button class="btn btn-default" id="nas-health">${icon('wifi', 14)}健康探活</button>
+      ${canWrite && nas.status !== 'archived' ? `<button class="btn btn-default" id="nas-edit">${icon('edit', 14)}编辑</button>` : ''}
       ${canWrite ? `<button class="btn btn-default" id="nas-sync-tools">${icon('refresh', 14)}同步网关工具</button>` : ''}
       ${canWrite ? (nas.availableTransitions ?? []).map((t) => {
         const tone = t.action === 'online' ? 'btn-primary' : t.action === 'offline' ? 'btn-danger-ghost' : 'btn-default'
         const ic = t.action === 'online' ? 'play' : t.action === 'offline' ? 'alert' : 'box'
         return `<button class="btn ${tone}" data-action="${esc(t.action)}">${icon(ic, 14)}${esc(t.label)}</button>`
-      }).join('') : ''}`,
+      }).join('') : ''}
+      ${canWrite && nas.status === 'archived' ? `<button class="btn btn-danger-ghost" id="nas-delete">${icon('trash', 14)}删除</button>` : ''}`,
   })
 
   const tabBody = drawer.body.querySelector('#nas-tab-body')
@@ -266,7 +299,10 @@ async function openNasDetail(id, ctx) {
           <div class="desc-item"><span class="k">授权根路径</span><span class="v mono">${esc(attrs.rootPath ?? '/')}</span></div>
           <div class="desc-item"><span class="k">上传中转目录</span><span class="v mono">${esc(attrs.stagingDir ?? '默认 <dataDir>/nas-staging')}</span></div>
           <div class="desc-item"><span class="k">最近探活</span><span class="v">${nas.health?.lastProbeAt ? timeAgo(nas.health.lastProbeAt) : '—'}${nas.health?.serverName ? ` · ${esc(nas.health.serverName)}` : ''}</span></div>
-        </div>`
+        </div>
+        <div class="card-title mb-8" style="margin-top:14px">NAS 资源概览</div>
+        <div id="nas-res-overview"><div class="fs-12 text-4" style="padding:6px 0">加载中…</div></div>`
+      void loadResourceOverview(tabBody.querySelector('#nas-res-overview'))
     }
     if (tab === 'tools') {
       const tools = nas.gatewayTools ?? []
@@ -308,6 +344,56 @@ async function openNasDetail(id, ctx) {
     }
   })
   renderTab('overview')
+
+  /** NAS 资源概览：经网关 fs_list_shares / fs_get_info 实时查看基础资源（参考 synology-filestation-mcp）。 */
+  async function loadResourceOverview(host) {
+    if (!host) return
+    if (!online) {
+      host.innerHTML = `<div class="muted-box" style="display:flex;gap:8px">${icon('info', 15)}<span>仅「已上线」资产可实时查看 NAS 资源，请先上线。</span></div>`
+      return
+    }
+    try {
+      const rootPath = nas.attrs?.rootPath || '/'
+      const [sharesRaw, infoRaw] = await Promise.all([
+        api.get(`/api/nas/${nas.id}/fs`),
+        api.get(`/api/nas/${nas.id}/fs/info` + api.qs({ path: rootPath })).catch(() => null),
+      ])
+      const shares = normalizeEntries(sharesRaw, true)
+      const infoItems = infoRaw && typeof infoRaw === 'object' && !Array.isArray(infoRaw)
+        ? Object.entries(infoRaw).filter(([, v]) => ['string', 'number', 'boolean'].includes(typeof v)).slice(0, 8)
+        : []
+      host.innerHTML = `
+        <div class="fs-12 text-3 mb-8">共享文件夹（${shares.length}）· 点击跳转文件浏览：</div>
+        <div class="flex" style="gap:6px;flex-wrap:wrap">
+          ${shares.length ? shares.map((s) => `<span class="chip" data-share="${esc(s.name)}" style="cursor:pointer">${icon('box', 12)} ${esc(s.name)}</span>`).join('') : '<span class="fs-12 text-4">未查询到共享文件夹</span>'}
+        </div>
+        ${infoItems.length ? `
+          <div class="fs-12 text-3 mt-14 mb-8">授权根路径 ${esc(rootPath)} 详情：</div>
+          <div class="desc-grid">
+            ${infoItems.map(([k, v]) => `<div class="desc-item"><span class="k">${esc(k)}</span><span class="v mono">${esc(String(v))}</span></div>`).join('')}
+          </div>` : ''}`
+      host.querySelectorAll('[data-share]').forEach((el) => {
+        el.onclick = () => drawer.body.querySelector('#nas-tabs .tab[data-tab="fs"]')?.click()
+      })
+    } catch (error) {
+      host.innerHTML = `<div class="muted-box" style="color:var(--danger)">${esc(error.message)}</div>`
+    }
+  }
+
+  const editBtn = drawer.el.querySelector('#nas-edit')
+  if (editBtn) editBtn.onclick = () => openNasEdit(nas, schema, ctx)
+  const deleteBtn = drawer.el.querySelector('#nas-delete')
+  if (deleteBtn) deleteBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: `删除 NAS · ${nas.name}`, requireReason: true, danger: true, confirmText: '确认删除',
+      message: '将永久删除该资产台账（含健康档案与工具发现缓存），操作不可恢复，审计数据保留。',
+    })
+    if (!result) return
+    try {
+      await api.delete(`/api/nas/${nas.id}`)
+      toast('已删除'); drawer.close(); ctx.rerender()
+    } catch (error) { toast(error.message, 'error') }
+  }
 
   drawer.el.querySelector('#nas-health').onclick = async (e) => {
     const btn = e.currentTarget
