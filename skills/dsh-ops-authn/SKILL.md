@@ -1,7 +1,8 @@
 # Skill: dsh-ops-authn
 
 ## 何时使用
-机器凭证签发（Agent/应用/外部系统接入）、令牌签发与吊销、签名密钥轮换、on-behalf-of 链路验证。
+机器凭证签发（Agent/应用/外部系统接入）、令牌签发与吊销、签名密钥轮换、on-behalf-of 链路验证、
+OIDC 客户端（应用 SSO 接入）管理与排障。
 
 
 ## 调用方式（工具优先）
@@ -10,7 +11,7 @@
 （工具参数见各工具 schema；下文手册中的 `dshctl ...` 为「平台独立部署 + HTTP API 运维」场景的 CLI 备选，需 DSHCTL_TOKEN/DSHCTL_USER，在 dsh 会话内一般用不到。）
 
 ## 前置条件
-需要 authn.* 权限组令牌。
+需要 authn.* 权限组令牌；OIDC 客户端管理面需 authn.oidc.read（查看）/ authn.oidc.write（签发/轮换/禁用）。
 
 ## 操作手册
 
@@ -28,6 +29,20 @@
 POST /api/agents/<id>/obo-token（用户令牌发起）→ 返回 act 链：
 用户 → Agent。审计日志的「令牌链」字段可还原完整链路。
 
+### 场景 4：应用接入 SSO（OIDC 客户端）
+1. 应用 owner 在控制台「AI 应用 → 详情 → SSO 配置」签发客户端（或管理员在「认证与令牌 → OIDC 客户端」全局登记）
+2. client_secret 仅展示一次；回调地址仅允许 https:// 或 http://localhost；纯前端 SPA 选 public 类型（免 secret、强制 PKCE、无 refresh）
+3. 应用侧按 docs/app-sso-integration.md 接入（openid-client / oidc-client-ts，discovery 驱动一行式）
+4. web/h5 形态应用上线门禁：未签发有效客户端时 requestOnline 直接拒绝（APP_SSO_ENFORCE 可调）
+
+### 场景 5：OIDC 令牌/客户端排障
+- 「回跳后报 invalid_client」→ secret 已轮换（旧值立即失效）或客户端被禁用（应用下架/归档联动）
+- 「id_token 调 userinfo 401」→ 预期行为：userinfo 仅接受 access token（token_use 校验）
+- 「refresh 换发 400」→ 检查：旧值重放（整链已吊销）、scope 扩大（只允许收窄）、账号冻结（实时校验）、public 客户端（本就不发 refresh）
+- 「上线审批通过但执行失败留痕」→ 门禁点 2：审批挂单期间客户端被禁用，重新启用后再发起
+- JWKS 密钥轮换（控制台「认证与令牌」）：新 key 立即签名，旧 key 24h 宽限验签，在途令牌不掉线
+
 ## 护栏
 - clientSecret 任何情况下不得明文落库/入日志
 - 轮换签名密钥会使全部存量令牌失效，需提前公告
+- OIDC 私钥存 data 目录（oidc-keys.json，数组化多 key），生产建议迁 KMS

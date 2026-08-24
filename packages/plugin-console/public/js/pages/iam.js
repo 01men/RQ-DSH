@@ -7,6 +7,68 @@ import {
   attachDropdown, timeAgo, emptyState,
 } from '../ui.js'
 
+/** 复制到剪贴板（clipboard API 不可用时降级全选提示）。 */
+function copyText(text) {
+  return navigator.clipboard?.writeText(text)
+    .then(() => toast('已复制到剪贴板'))
+    .catch(() => toast('复制失败，请手动选择复制', 'error'))
+}
+
+/**
+ * 账号凭据展示弹窗：用户名/口令标红突出、逐项与整体一键复制；
+ * 口令支持传达过程中二次修改（指定新口令或重新随机）。
+ */
+function showUserCredentials({ userId, username, displayName, password, onDone }) {
+  let current = password
+  const modal = openModal({
+    title: `账号凭据（${esc(displayName)}）`,
+    body: `
+      <div class="form-hint" style="margin-bottom:12px">请立即复制并安全传达给本人；口令仅本次展示，传达前可在下方直接二次修改。</div>
+      <div class="muted-box mb-8" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
+        <span style="min-width:64px" class="fs-12 text-4">用户名</span>
+        <code id="cred-username" style="flex:1;font-size:15px;font-weight:700;color:var(--danger);word-break:break-all">${esc(username)}</code>
+        <button class="btn btn-default btn-sm" id="cred-copy-user">复制</button>
+      </div>
+      <div class="muted-box mb-8" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
+        <span style="min-width:64px" class="fs-12 text-4">口令</span>
+        <code id="cred-password" style="flex:1;font-size:15px;font-weight:700;color:var(--danger);word-break:break-all">${esc(current)}</code>
+        <button class="btn btn-default btn-sm" id="cred-copy-pw">复制</button>
+      </div>
+      <button class="btn btn-default btn-sm mb-8" id="cred-copy-all">${icon('check', 12)}一键复制完整凭据（用户名 + 口令）</button>
+      <div class="card-title mb-8 mt-14">二次修改口令（可选）</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input class="input" id="cred-newpw" placeholder="新口令（至少 8 位，不含中文）" autocomplete="off" style="flex:1">
+        <button class="btn btn-default" id="cred-setpw">设为该口令</button>
+        <button class="btn btn-default" id="cred-randpw">重新随机</button>
+      </div>
+      <div class="form-hint mt-8">修改后原口令立即失效，请以弹窗内最新口令为准传达。</div>`,
+    foot: '<button class="btn btn-primary" data-cancel>我已妥善传达</button>',
+  })
+  const pwEl = modal.body.querySelector('#cred-password')
+  const applyPassword = (next, note) => {
+    current = next
+    pwEl.textContent = current
+    modal.body.querySelector('#cred-newpw').value = ''
+    toast(note)
+  }
+  const resetTo = async (payload, note) => {
+    try {
+      const result = await api.post(`/api/iam/users/${userId}/reset-password`, payload)
+      applyPassword(result.initialPassword, note)
+    } catch (error) { toast(error.message, 'error') }
+  }
+  modal.body.querySelector('#cred-copy-user').onclick = () => void copyText(username)
+  modal.body.querySelector('#cred-copy-pw').onclick = () => void copyText(current)
+  modal.body.querySelector('#cred-copy-all').onclick = () => void copyText(`用户名：${username}\n口令：${current}`)
+  modal.body.querySelector('#cred-setpw').onclick = () => {
+    const next = modal.body.querySelector('#cred-newpw').value.trim()
+    if (next.length < 8) return toast('口令长度不得少于 8 位', 'error')
+    void resetTo({ password: next }, '口令已更新为指定值，请重新复制传达')
+  }
+  modal.body.querySelector('#cred-randpw').onclick = () => void resetTo({}, '已重新生成随机口令，请重新复制传达')
+  modal.el.querySelector('[data-cancel]').onclick = () => { modal.close(); onDone?.() }
+}
+
 export async function renderIam(content, params, ctx) {
   const tab = params.get('tab') ?? 'members'
   content.innerHTML = `
@@ -216,20 +278,13 @@ export async function renderIam(content, params, ctx) {
           const result = await api.post('/api/iam/users', data)
           modal.close()
           if (result.initialPassword) {
-            const pwModal = openModal({
-              title: `账号已创建（${result.displayName}）`,
-              body: `
-                <div class="form-hint" style="margin-bottom:10px">随机初始口令仅本次展示，请立即复制并安全传达给本人：</div>
-                <div class="muted-box" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
-                  <code style="font-size:14px;word-break:break-all">${esc(result.initialPassword)}</code>
-                  <button class="btn btn-default btn-sm" id="pw-copy">复制</button>
-                </div>`,
-              foot: '<button class="btn btn-primary" data-cancel>我已妥善传达</button>',
+            showUserCredentials({
+              userId: result.id,
+              username: result.username,
+              displayName: result.displayName,
+              password: result.initialPassword,
+              onDone: () => ctx.rerender(),
             })
-            pwModal.body.querySelector('#pw-copy').onclick = () => {
-              void navigator.clipboard?.writeText(result.initialPassword).then(() => toast('已复制'))
-            }
-            pwModal.el.querySelector('[data-cancel]').onclick = () => { pwModal.close(); ctx.rerender() }
           } else {
             toast('账号已创建'); ctx.rerender()
           }
@@ -392,20 +447,12 @@ export async function renderIam(content, params, ctx) {
         if (!confirmed) return
         try {
           const result = await api.post(`/api/iam/users/${user.id}/reset-password`)
-          const modal = openModal({
-            title: '重置成功（口令仅本次展示）',
-            body: `
-              <div class="form-hint" style="margin-bottom:10px">请立即复制并安全传达给本人；关闭后无法再次查看。</div>
-              <div class="muted-box" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
-                <code style="font-size:14px;word-break:break-all">${esc(result.initialPassword)}</code>
-                <button class="btn btn-default btn-sm" id="pw-copy">复制</button>
-              </div>`,
-            foot: '<button class="btn btn-primary" data-cancel>我已妥善传达</button>',
+          showUserCredentials({
+            userId: user.id,
+            username: result.username ?? user.username,
+            displayName: user.displayName,
+            password: result.initialPassword,
           })
-          modal.body.querySelector('#pw-copy').onclick = () => {
-            void navigator.clipboard?.writeText(result.initialPassword).then(() => toast('已复制'))
-          }
-          modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
         } catch (error) { toast(error.message, 'error') }
       }
       const freezeBtn = drawer.el.querySelector('#ud-freeze')
@@ -602,6 +649,9 @@ export async function renderIam(content, params, ctx) {
     const [data] = await Promise.all([api.get('/api/iam/connectors')])
     const body = $('#iam-body')
     const config = data.configs.find((c) => c.provider === 'dingtalk')
+    // 回调地址按当前访问地址自动生成（与后端发起授权时按 Host 头拼接的 redirect_uri 一致），
+    // 直接复制到钉钉开发者后台的登录重定向地址即可，无需手填。
+    const callbackUrl = `${location.origin.replace(/\/+$/, '')}/api/auth/sso`
     body.innerHTML = `
       <div class="card mb-20">
         <div class="card-head">
@@ -623,7 +673,7 @@ export async function renderIam(content, params, ctx) {
             <div class="desc-item"><span class="k">AppKey</span><span class="v mono">${esc(config?.appKey ?? '未配置')}</span></div>
             <div class="desc-item"><span class="k">AppSecret</span><span class="v mono">${esc(config?.secretMasked ?? '—')} <span class="text-4">（KMS 加密存储）</span></span></div>
             <div class="desc-item"><span class="k">扫码登录</span><span class="v">${config?.loginEnabled ? '已开启' : '未开启'}</span></div>
-            <div class="desc-item"><span class="k">回调地址</span><span class="v mono">${esc(config?.callbackUrl ?? '—')}</span></div>
+            <div class="desc-item"><span class="k">回调地址</span><span class="v mono">${esc(callbackUrl)}</span></div>
             <div class="desc-item"><span class="k">冲突策略</span><span class="v">${strategyName(config?.conflictStrategy)}</span></div>
           </div>
           <div class="flex mt-14">
@@ -658,7 +708,11 @@ export async function renderIam(content, params, ctx) {
             ${field('AppKey', inputField('appKey', { value: config?.appKey }), { required: true })}
             ${field('AppSecret', inputField('appSecret', { value: '', placeholder: '留空保持不变（加密存储）' }), { hint: '通过 KMS 托管加密，禁止明文落库' })}
             ${field('同步频率（分钟）', inputField('intervalMinutes', { value: config?.intervalMinutes ?? 60 }))}
-            ${field('回调地址', inputField('callbackUrl', { value: config?.callbackUrl }), { full: true })}
+            ${field('回调地址（自动生成）', `
+              <div class="flex" style="gap:8px">
+                <input class="input" name="callbackUrl" readonly value="${esc(callbackUrl)}" style="flex:1">
+                <button class="btn btn-default" id="conn-copy-callback">${icon('copy', 13)}复制</button>
+              </div>`, { full: true, hint: '按当前访问地址生成，请将其配置到钉钉开发者后台对应应用的登录重定向地址（redirect URI）' })}
             ${field('冲突处理策略', selectField('conflictStrategy', [
               { value: 'manual', label: '人工确认（推荐）' },
               { value: 'third_party_wins', label: '以三方为准' },
@@ -669,6 +723,9 @@ export async function renderIam(content, params, ctx) {
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
       })
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('#conn-copy-callback').onclick = () => {
+        void navigator.clipboard?.writeText(callbackUrl).then(() => toast('已复制'))
+      }
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
         try {

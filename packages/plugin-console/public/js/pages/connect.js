@@ -8,11 +8,14 @@ import {
 
 const TEMPLATE_LABEL = { readonly: '只读运维', operator: '运维（读+变更）', full: '全部权限' }
 
-export async function renderConnect(content) {
-  const [codes, clients] = await Promise.all([
+export async function renderConnect(content, params) {
+  const [codes, clients, principals, oidcClients] = await Promise.all([
     api.get('/api/connect/codes'),
     api.get('/api/connect/clients'),
+    api.get('/api/authn/principals').catch(() => null),
+    api.get('/api/authn/oidc/clients').catch(() => null),
   ])
+  const hasOverview = principals !== null || oidcClients !== null
 
   content.innerHTML = `
     <div class="page-head">
@@ -37,7 +40,8 @@ export async function renderConnect(content) {
     </div>
 
     <div class="tabs">
-      <div class="tab active" data-tab="codes">接入码 (${codes.codes.length})</div>
+      ${hasOverview ? '<div class="tab" data-tab="overview">外部接入总览</div>' : ''}
+      <div class="tab ${hasOverview ? '' : 'active'}" data-tab="codes">接入码 (${codes.codes.length})</div>
       <div class="tab" data-tab="clients">已接入客户端 (${clients.clients.length})</div>
     </div>
     <div id="connect-body"></div>`
@@ -54,8 +58,62 @@ export async function renderConnect(content) {
   })
 
   function renderTab(tab) {
-    if (tab === 'codes') renderCodes()
+    if (tab === 'overview') renderOverview()
+    else if (tab === 'codes') renderCodes()
     else renderClients()
+  }
+
+  /** 外部接入总览：机器凭证 + OIDC 客户端 + 远程 dsh 一处盘点，跳转对应管理页。 */
+  function renderOverview() {
+    const machines = (principals?.principals ?? []).filter((p) => p.type === 'machine')
+    const byRef = (type) => machines.filter((p) => p.refType === type)
+    const oidc = oidcClients?.clients ?? []
+    const oidcActive = oidc.filter((c) => c.status === 'active')
+    const refCard = (title, list, jump, icon2) => `
+      <div class="card card-pad" style="flex:1;min-width:280px">
+        <div class="flex-between mb-8">
+          <div class="card-title">${icon(icon2, 14)} ${title}（${list.length}）</div>
+          <button class="btn btn-ghost btn-sm" data-jump="${esc(jump)}">前往管理 ${icon('chevronRight', 12)}</button>
+        </div>
+        ${list.slice(0, 6).map((item) => `
+          <div class="flex" style="padding:6px 0;border-bottom:1px solid var(--border);gap:8px">
+            <span class="fs-12 grow ellipsis">${esc(item.name)}</span>
+            <span class="fs-11 text-4 mono">${esc(item.id)}</span>
+            ${statusBadge(item.status === 'active' ? 'active' : 'frozen', item.status === 'active' ? '正常' : '禁用')}
+          </div>`).join('') || '<div class="text-4 fs-12" style="padding:6px 0">暂无</div>'}
+        ${list.length > 6 ? `<div class="fs-12 text-4 mt-8">… 共 ${list.length} 项</div>` : ''}
+      </div>`
+    body.innerHTML = `
+      <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>三类「外部接入身份」一处盘点：<b>机器凭证</b>（API 调用方，按绑定资源分组）、<b>OIDC 客户端</b>（应用 SSO 登录接入）、<b>远程 dsh</b>（接入码换牌的工具代理客户端）。</span></div>
+      <div class="stat-grid mb-14" style="grid-template-columns:repeat(4,1fr)">
+        <div class="card card-pad"><div class="fs-12 text-3">机器凭证（Agent 绑定）</div><div class="col-num" style="font-size:24px;font-weight:700">${byRef('agent').length}</div></div>
+        <div class="card card-pad"><div class="fs-12 text-3">机器凭证（应用/外部）</div><div class="col-num" style="font-size:24px;font-weight:700">${byRef('app').length + byRef('external').length + machines.filter((p) => !p.refType).length}</div></div>
+        <div class="card card-pad"><div class="fs-12 text-3">OIDC 客户端（活跃）</div><div class="col-num" style="font-size:24px;font-weight:700">${oidcActive.length}/${oidc.length}</div></div>
+        <div class="card card-pad"><div class="fs-12 text-3">远程 dsh 客户端</div><div class="col-num" style="font-size:24px;font-weight:700">${clients.clients.filter((c) => c.status === 'active').length}</div></div>
+      </div>
+      <div class="flex mb-14" style="gap:14px;flex-wrap:wrap;align-items:stretch">
+        ${refCard('机器凭证 · 绑定 Agent', byRef('agent'), '#/authn', 'bot')}
+        ${refCard('机器凭证 · 应用 / 外部系统', [...byRef('app'), ...byRef('external'), ...machines.filter((p) => !p.refType)], '#/authn', 'key')}
+      </div>
+      <div class="flex mb-14" style="gap:14px;flex-wrap:wrap;align-items:stretch">
+        <div class="card card-pad" style="flex:1;min-width:280px">
+          <div class="flex-between mb-8">
+            <div class="card-title">${icon('plug', 14)} OIDC 客户端（应用 SSO / 外部登记，${oidc.length}）</div>
+            <button class="btn btn-ghost btn-sm" data-jump="#/authn">前往管理 ${icon('chevronRight', 12)}</button>
+          </div>
+          ${oidc.slice(0, 6).map((c) => `
+            <div class="flex" style="padding:6px 0;border-bottom:1px solid var(--border);gap:8px">
+              <span class="fs-12 grow ellipsis">${esc(c.name)}${c.refAppName ? ` <span class="text-4">· ${esc(c.refAppName)}</span>` : ''}</span>
+              <span class="badge ${c.clientType === 'public' ? 'badge-purple' : 'badge-info'} no-dot">${c.clientType === 'public' ? 'public' : 'confidential'}</span>
+              ${statusBadge(c.status === 'active' ? 'active' : 'frozen', c.status === 'active' ? '使用中' : '已禁用')}
+            </div>`).join('') || '<div class="text-4 fs-12" style="padding:6px 0">暂无；在「AI 应用 → SSO 配置」或「认证与令牌 → OIDC 客户端」登记</div>'}
+          ${oidc.length > 6 ? `<div class="fs-12 text-4 mt-8">… 共 ${oidc.length} 项</div>` : ''}
+        </div>
+        ${refCard('远程 dsh 已接入客户端', clients.clients, '#/connect?tab=clients', 'terminal')}
+      </div>`
+    body.querySelectorAll('[data-jump]').forEach((btn) => {
+      btn.onclick = () => { location.hash = btn.dataset.jump }
+    })
   }
 
   function codeStatus(record) {
@@ -236,8 +294,10 @@ export async function renderConnect(content) {
         toast('已全选，请按 Ctrl+C 复制', 'info')
       }
     }
-    renderConnect(content)
+    renderConnect(content, params)
   }
 
-  renderTab('codes')
+  const initialTab = params?.get('tab') === 'clients' ? 'clients' : params?.get('tab') === 'codes' ? 'codes' : (hasOverview ? 'overview' : 'codes')
+  $$('.tab').forEach((el) => { if (el.dataset.tab === initialTab) el.classList.add('active'); else el.classList.remove('active') })
+  renderTab(initialTab)
 }

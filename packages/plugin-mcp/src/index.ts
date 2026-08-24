@@ -37,6 +37,8 @@ export interface McpServiceRecord extends RecordBase {
   endpoint: string
   transport: 'stdio' | 'sse' | 'http'
   mode: 'hosted' | 'external'
+  /** 外部服务自定义请求头（如 Authorization），调用/探活/工具发现时透传。 */
+  headers?: Record<string, string>
   orgId: string
   owner: string
   status: 'draft' | 'verifying' | 'online' | 'gray' | 'unhealthy' | 'offline'
@@ -109,6 +111,107 @@ export interface InvokeResult {
   error?: string
 }
 
+/** mcpServers 配置的单个服务条目（解析结果）。 */
+export interface McpConfigEntry {
+  name: string
+  url: string
+  transport: 'http' | 'sse'
+  headers?: Record<string, string>
+  description?: string
+  /** 条目不可导入的原因（如 stdio 形态、url 缺失）。 */
+  error?: string
+}
+
+/** 单条导入结果。 */
+export interface McpImportResult {
+  name: string
+  ok: boolean
+  slug?: string
+  serviceId?: string
+  tools?: number
+  reachable?: boolean
+  status?: string
+  error?: string
+}
+
+/**
+ * 解析 mcpServers JSON（Claude Desktop / Cursor / Cherry Studio 等工具通行的形态）。
+ * 支持三种输入：标准 {"mcpServers": {...}} 包装、裸 {名称: {url, ...}} 映射、单个 {url, type} 对象。
+ * http / streamableHttp / streamable-http 归一为 http；stdio/command 形态标记为不可导入。
+ */
+export function parseMcpServersConfig(raw: string | object): McpConfigEntry[] {
+  let config: unknown
+  if (typeof raw === 'string') {
+    try {
+      config = JSON.parse(raw)
+    } catch {
+      throw new Error('配置不是合法 JSON，请粘贴完整的 mcpServers 配置文本')
+    }
+  } else {
+    config = raw
+  }
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw new Error('配置须为 JSON 对象，形如 {"mcpServers": {"服务名": {"type": "streamableHttp", "url": "https://…"}}}')
+  }
+  const obj = config as Record<string, unknown>
+  let map: Record<string, unknown> | undefined
+  if (obj.mcpServers && typeof obj.mcpServers === 'object' && !Array.isArray(obj.mcpServers)) {
+    map = obj.mcpServers as Record<string, unknown>
+  } else if (typeof obj.url === 'string') {
+    const host = (() => { try { return new URL(obj.url).hostname } catch { return 'mcp' } })()
+    map = { [host]: obj }
+  } else {
+    const values = Object.values(obj)
+    if (values.length > 0 && values.every((value) => value && typeof value === 'object' && !Array.isArray(value)
+      && (typeof (value as Record<string, unknown>).url === 'string' || typeof (value as Record<string, unknown>).command === 'string'))) {
+      map = obj
+    }
+  }
+  if (!map || Object.keys(map).length === 0) {
+    throw new Error('未识别出任何服务条目：需要 {"mcpServers": {"服务名": {"type": "...", "url": "..."}}} 形态')
+  }
+  return Object.entries(map).map(([name, server]) => normalizeServerEntry(name, server))
+}
+
+function normalizeServerEntry(name: string, server: unknown): McpConfigEntry {
+  const record = (server && typeof server === 'object' ? server : {}) as Record<string, unknown>
+  const type = String(record.type ?? '').toLowerCase()
+  const url = typeof record.url === 'string' ? record.url.trim() : ''
+  const headers = normalizeConfigHeaders(record.headers)
+  const base = {
+    name,
+    url,
+    transport: 'http' as const,
+    ...(headers ? { headers } : {}),
+    ...(typeof record.description === 'string' && record.description ? { description: record.description } : {}),
+  }
+  if (!url) {
+    const localProcess = type === 'stdio' || type === 'command' || typeof record.command === 'string'
+    return { ...base, error: localProcess
+      ? 'stdio/command 形态需在本地拉起进程，平台仅支持 http(streamableHttp)/sse 远程地址接入'
+      : '缺少 url 字段' }
+  }
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return { ...base, error: `url 不是合法地址：${url}` }
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ...base, error: `仅支持 http(s) 地址，收到 ${parsed.protocol}` }
+  }
+  return { ...base, transport: type === 'sse' ? 'sse' : 'http' }
+}
+
+function normalizeConfigHeaders(value: unknown): Record<string, string> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const out: Record<string, string> = {}
+  for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = String(val)
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
 // ---------------------------------------------------------------------------
 // 服务
 // ---------------------------------------------------------------------------
@@ -118,6 +221,8 @@ export class McpService extends Service {
 
   private probeTimer: ReturnType<typeof setInterval> | undefined
   private rateBuckets = new Map<string, number[]>()
+  /** 远端 streamable HTTP 会话缓存：endpoint → { sessionId（'' 表示无状态服务）, 过期时间 }。 */
+  private mcpSessions = new Map<string, { sessionId: string; expiresAt: number }>()
 
   constructor(ctx: Context) {
     super(ctx, 'mcpRegistry')
@@ -155,6 +260,7 @@ export class McpService extends Service {
     orgId: string
     owner: string
     tools?: McpToolSpec[]
+    headers?: Record<string, string>
     stability?: number
     /** 显式声明 demo 才使用模拟执行层；缺省一律 real（生态设计 v1.2 第 0 步）。 */
     exec?: 'real' | 'demo'
@@ -173,6 +279,7 @@ export class McpService extends Service {
       endpoint: input.endpoint ?? '',
       transport: input.transport ?? 'http',
       mode: input.mode ?? 'hosted',
+      ...(input.headers ? { headers: input.headers } : {}),
       orgId: input.orgId,
       owner: input.owner,
       status: 'draft',
@@ -187,12 +294,116 @@ export class McpService extends Service {
     })
   }
 
-  updateService(id: string, patch: Partial<Pick<McpServiceRecord, 'name' | 'description' | 'icon' | 'endpoint' | 'tools' | 'rateLimitPerMin'>>): McpServiceRecord {
+  updateService(id: string, patch: Partial<Pick<McpServiceRecord, 'name' | 'description' | 'icon' | 'endpoint' | 'tools' | 'headers' | 'rateLimitPerMin'>>): McpServiceRecord {
     const service = this.requireService(id)
     if (service.status === 'online' && patch.tools) {
       throw new Error('在线服务修改 Tool Schema 需先灰度新版本（版本不可变原则）')
     }
     return this.services().update(id, patch)
+  }
+
+  /** 连接远端 MCP 服务拉取工具清单（initialize → tools/list）；导入与同步共用。 */
+  async listRemoteTools(endpoint: string, headers?: Record<string, string>): Promise<McpToolSpec[]> {
+    const sessionId = await this.ensureSession(endpoint, headers)
+    const { payload } = await this.mcpRequest(endpoint, headers, {
+      jsonrpc: '2.0',
+      id: `dsh-list-${Date.now()}`,
+      method: 'tools/list',
+      params: {},
+    }, REAL_TRANSPORT_TIMEOUT_MS, sessionId)
+    if (payload?.error) throw new Error(`tools/list 失败：${payload.error.message ?? '未知错误'}`)
+    const tools = Array.isArray(payload?.result?.tools) ? payload.result.tools : []
+    return tools
+      .map((tool: { name?: unknown; description?: unknown; inputSchema?: unknown }) => ({
+        name: String(tool.name ?? ''),
+        description: String(tool.description ?? ''),
+        inputSchema: tool.inputSchema && typeof tool.inputSchema === 'object' && !Array.isArray(tool.inputSchema)
+          ? tool.inputSchema as Record<string, unknown>
+          : { type: 'object', properties: {} },
+        riskLevel: 'read' as const,
+      }))
+      .filter((tool: McpToolSpec) => tool.name)
+  }
+
+  /**
+   * 外部服务工具同步：以远端 tools/list 为准刷新本地清单。
+   * 绕过 updateService 的版本不可变校验——外部服务的工具清单是远端事实的镜像同步，
+   * 不是平台侧的版本变更（版本流程仍约束托管服务）。
+   */
+  async syncTools(serviceId: string): Promise<McpServiceRecord> {
+    const service = this.requireService(serviceId)
+    if (service.mode !== 'external') throw new Error('仅外部注册服务支持工具同步')
+    if (service.exec !== 'real') throw new Error('演示传输层服务不支持工具同步')
+    const tools = await this.listRemoteTools(service.endpoint, service.headers)
+    if (!tools.length) throw new Error('远端服务未返回任何工具')
+    const updated = this.services().update(serviceId, { tools })
+    this.noteBusinessSuccess(updated)
+    return updated
+  }
+
+  /**
+   * mcpServers JSON 一键导入（Claude Desktop / Cursor / Cherry Studio 等工具通行的配置形态）：
+   * 解析 → 注册外部服务（exec=real）→ initialize+tools/list 自动发现工具 →（可选）验证并上线。
+   * 单条目失败不阻断其余条目；远端不可达时保留草稿并回传原因。
+   */
+  async importServices(input: { config: string | object; orgId: string; owner: string; autoDeploy?: boolean }): Promise<{
+    imported: number
+    results: McpImportResult[]
+  }> {
+    const entries = parseMcpServersConfig(input.config)
+    const results: McpImportResult[] = []
+    for (const entry of entries) {
+      if (entry.error) {
+        results.push({ name: entry.name, ok: false, error: entry.error })
+        continue
+      }
+      try {
+        const service = this.createService({
+          name: entry.name,
+          endpoint: entry.url,
+          transport: entry.transport,
+          mode: 'external',
+          exec: 'real',
+          orgId: input.orgId,
+          owner: input.owner,
+          ...(entry.headers ? { headers: entry.headers } : {}),
+          ...(entry.description ? { description: entry.description } : {}),
+          tools: [],
+        })
+        let tools: McpToolSpec[] = []
+        let reachable = false
+        let message = ''
+        try {
+          tools = await this.listRemoteTools(service.endpoint, service.headers)
+          reachable = true
+        } catch (error) {
+          message = `工具自动发现失败：${error instanceof Error ? error.message : String(error)}`
+        }
+        this.services().update(service.id, {
+          // 不可达时清空默认三件套，避免伪工具清单进入权限组
+          ...(reachable ? { tools } : { tools: [] as McpToolSpec[] }),
+          health: { lastProbeAt: now(), status: reachable ? 'healthy' : 'unknown', latencyMs: 0, consecutiveFails: 0, breakerOpen: false },
+        })
+        let status = service.status
+        if (reachable && input.autoDeploy !== false) {
+          try {
+            await this.verifyService(service.id)
+            const deployed = await this.deployService(service.id, { grayPercent: 100, changelog: 'mcpServers 配置导入自动发布', actor: input.owner })
+            status = deployed.status
+          } catch (error) {
+            message = `${message ? `${message}；` : ''}自动发布失败：${error instanceof Error ? error.message : String(error)}`
+          }
+        }
+        results.push({
+          name: entry.name, ok: true, slug: service.slug, serviceId: service.id,
+          tools: tools.length, reachable, status,
+          ...(message ? { error: message } : {}),
+        })
+      } catch (error) {
+        results.push({ name: entry.name, ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return { imported: results.filter((item) => item.ok).length, results }
   }
 
   /** 测试环境验证：real 服务做真实 initialize 探测；demo 服务模拟探测。 */
@@ -344,27 +555,85 @@ export class McpService extends Service {
 
   /** 真实探活：MCP initialize 握手，返回延迟（ms）；失败返回 -1。 */
   private async realProbe(service: McpServiceRecord): Promise<number> {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), REAL_PROBE_TIMEOUT_MS)
     const started = Date.now()
     try {
-      const response = await fetch(service.endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: `probe-${Date.now()}`,
-          method: 'initialize',
-          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'dsh-ops-probe', version: '1.0' } },
-        }),
-        signal: controller.signal,
-      })
-      return response.ok ? Date.now() - started : -1
+      const { payload } = await this.mcpRequest(service.endpoint, service.headers, {
+        jsonrpc: '2.0',
+        id: `probe-${Date.now()}`,
+        method: 'initialize',
+        params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'dsh-ops-probe', version: '1.0' } },
+      }, REAL_PROBE_TIMEOUT_MS)
+      if (payload?.error) return -1
+      return Date.now() - started
     } catch {
       return -1
+    }
+  }
+
+  /**
+   * MCP streamable HTTP 请求基座：单 POST JSON-RPC，兼容两种响应形态——纯 JSON 与
+   * SSE 流（text/event-stream，取首个 data 帧）；透传服务自定义头（如 Authorization），
+   * 回传服务端下发的 Mcp-Session-Id 供有状态服务复用。
+   */
+  private async mcpRequest(endpoint: string, headers: Record<string, string> | undefined, message: Record<string, unknown>, timeoutMs: number, sessionId?: string): Promise<{ payload: any; sessionId?: string }> {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+          ...(headers ?? {}),
+        },
+        body: JSON.stringify(message),
+        signal: controller.signal,
+      })
+      if (!response.ok) {
+        throw new Error(`MCP 服务 HTTP ${response.status}：${(await response.text().catch(() => '')).slice(0, 200)}`)
+      }
+      const sessionIdHeader = response.headers.get('mcp-session-id') ?? undefined
+      const contentType = String(response.headers.get('content-type') ?? '')
+      const text = await response.text()
+      if (contentType.includes('text/event-stream')) {
+        for (const line of text.split('\n')) {
+          if (!line.startsWith('data:')) continue
+          const frame = line.slice(5).trim()
+          if (!frame || frame === '[DONE]') continue
+          try { return { payload: JSON.parse(frame), sessionId: sessionIdHeader } } catch { /* 跳过非 JSON 帧 */ }
+        }
+        throw new Error('MCP 服务 SSE 响应中未找到 JSON-RPC 帧')
+      }
+      if (!text) return { payload: null, sessionId: sessionIdHeader } // 202 Accepted 等空体响应（通知类消息）
+      try {
+        return { payload: JSON.parse(text), sessionId: sessionIdHeader }
+      } catch {
+        throw new Error(`MCP 服务响应不是合法 JSON：${text.slice(0, 200)}`)
+      }
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  /** 确立远端会话：initialize 握手并缓存 sessionId（无状态服务缓存 ''，避免每次重复握手）。 */
+  private async ensureSession(endpoint: string, headers?: Record<string, string>): Promise<string | undefined> {
+    const cached = this.mcpSessions.get(endpoint)
+    if (cached && cached.expiresAt > Date.now()) return cached.sessionId || undefined
+    const { payload, sessionId } = await this.mcpRequest(endpoint, headers, {
+      jsonrpc: '2.0',
+      id: `dsh-init-${Date.now()}`,
+      method: 'initialize',
+      params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'dsh-ops-gateway', version: '1.0' } },
+    }, REAL_PROBE_TIMEOUT_MS)
+    if (payload?.error) throw new Error(`initialize 失败：${payload.error.message ?? '未知错误'}`)
+    const effective = sessionId ?? ''
+    this.mcpSessions.set(endpoint, { sessionId: effective, expiresAt: Date.now() + MCP_SESSION_TTL_MS })
+    if (effective) {
+      // 有状态服务要求补发 initialized 通知；无状态服务忽略即可，失败不阻断。
+      await this.mcpRequest(endpoint, headers, { jsonrpc: '2.0', method: 'notifications/initialized' }, REAL_PROBE_TIMEOUT_MS, effective).catch(() => undefined)
+    }
+    return effective || undefined
   }
 
   // -- 权限组 -------------------------------------------------------------
@@ -500,43 +769,39 @@ export class McpService extends Service {
   }
 
   /**
-   * 真实执行传输层：按 endpoint 发起 MCP streamable-http 形态的 JSON-RPC tools/call。
+   * 真实执行传输层：MCP streamable HTTP 的 JSON-RPC tools/call。
+   * 有状态服务先经 ensureSession 取会话头；会话失效（服务端报未初始化类错误）自动重握手一次。
    * 真实延迟/错误全量计量；token 消耗从响应 usage 字段读取（缺省 0，不伪造）。
    */
   private async realTransport(service: McpServiceRecord, toolName: string, args: Record<string, unknown>): Promise<{ ok: true; result: unknown; tokens: number } | { ok: false; error: string }> {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), REAL_TRANSPORT_TIMEOUT_MS)
+    const call = (sessionId?: string) => this.mcpRequest(service.endpoint, service.headers, {
+      jsonrpc: '2.0',
+      id: `dsh-${Date.now()}`,
+      method: 'tools/call',
+      params: { name: toolName, arguments: args },
+    }, REAL_TRANSPORT_TIMEOUT_MS, sessionId)
     try {
-      const response = await fetch(service.endpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify({
-          jsonrpc: '2.0',
-          id: `dsh-${Date.now()}`,
-          method: 'tools/call',
-          params: { name: toolName, arguments: args },
-        }),
-        signal: controller.signal,
-      })
-      if (!response.ok) {
-        return { ok: false, error: `MCP 服务 HTTP ${response.status}：${(await response.text()).slice(0, 200)}` }
+      let sessionId: string | undefined
+      try {
+        sessionId = await this.ensureSession(service.endpoint, service.headers)
+      } catch { /* 握手失败不阻断：部分服务允许无会话直接调用 */ }
+      let { payload } = await call(sessionId)
+      if (payload?.error && sessionId && /session|initialized/i.test(String(payload.error.message ?? ''))) {
+        this.mcpSessions.delete(service.endpoint)
+        sessionId = await this.ensureSession(service.endpoint, service.headers).catch(() => undefined)
+        ;({ payload } = await call(sessionId))
       }
-      const payload = (await response.json()) as {
-        error?: { message?: string }
-        result?: { isError?: boolean; content?: unknown; usage?: { totalTokens?: number } }
-      }
-      if (payload.error) {
+      if (payload?.error) {
         return { ok: false, error: `MCP 服务返回错误：${payload.error.message ?? JSON.stringify(payload.error).slice(0, 200)}` }
       }
-      if (payload.result?.isError) {
+      const result = payload?.result
+      if (result?.isError) {
         return { ok: false, error: 'MCP 工具执行返回错误（isError=true）' }
       }
-      return { ok: true, result: payload.result?.content ?? payload.result ?? null, tokens: payload.result?.usage?.totalTokens ?? 0 }
+      return { ok: true, result: result?.content ?? result ?? null, tokens: result?.usage?.totalTokens ?? 0 }
     } catch (error) {
       const message = error instanceof Error ? (error.name === 'AbortError' ? `MCP 服务调用超时（${REAL_TRANSPORT_TIMEOUT_MS}ms）` : error.message) : String(error)
       return { ok: false, error: message }
-    } finally {
-      clearTimeout(timer)
     }
   }
 
@@ -709,6 +974,8 @@ export class McpService extends Service {
 const REAL_TRANSPORT_TIMEOUT_MS = 10_000
 /** real 探活超时（ms）。 */
 const REAL_PROBE_TIMEOUT_MS = 5_000
+/** 远端 MCP 会话缓存时长（ms）：到期或服务端报会话失效时重新握手。 */
+const MCP_SESSION_TTL_MS = 5 * 60_000
 
 function probeLatency(service: McpServiceRecord): number {
   // demo 探活确定性健康：失败/降级路径由 real 探活（真实 HTTP）呈现，不伪造波动。

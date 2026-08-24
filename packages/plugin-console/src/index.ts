@@ -20,7 +20,7 @@ export const name = 'console'
 export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'oidc', 'audit', 'usage', 'billing', 'market', 'modelGateway',
-  'mcpRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
+  'mcpRegistry', 'nasRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
 ]
 
 interface CallerInfo {
@@ -48,12 +48,98 @@ const PUBLIC_PATHS = new Set([
   '/api/connect/enroll',
 ])
 
+/** 动态路径的公开前缀（OIDC 授权页查询：仅回显客户端名/scope，不泄露 redirect_uri）。 */
+const PUBLIC_PATH_PREFIXES = ['/api/authn/oidc/auth-requests/']
+
+/** 从请求头推导对外基址（钉钉等真实 IdP 的 redirect_uri 需绝对 URL；反代场景优先 x-forwarded-*）。 */
+function requestOrigin(exchange: HttpExchange): string | undefined {
+  const header = (name: string): string | undefined => {
+    const value = exchange.headers[name]
+    if (value === undefined) return undefined
+    return String(Array.isArray(value) ? value[0] : value)
+  }
+  const host = header('x-forwarded-host') ?? header('host')
+  if (!host) return undefined
+  const proto = header('x-forwarded-proto') ?? 'http'
+  return `${proto}://${host}`
+}
+
+/** 服务记录对外回显时脱敏认证类请求头（存储保留原文，仅展示层掩码）。 */
+function maskServiceHeaders<T extends { headers?: Record<string, string> }>(service: T): T {
+  if (!service.headers) return service
+  const masked: Record<string, string> = {}
+  for (const [key, value] of Object.entries(service.headers)) {
+    masked[key] = /authorization|token|secret|key/i.test(key)
+      ? (value.length > 8 ? `${value.slice(0, 6)}…` : '****')
+      : value
+  }
+  return { ...service, headers: masked }
+}
+
+/** NAS 资产回显时脱敏网关访问令牌（存储保留原文，仅展示层掩码）。 */
+function maskNasEntity<T extends { attrs?: Record<string, unknown> }>(nas: T): T {
+  if (!nas.attrs || nas.attrs['accessToken'] === undefined) return nas
+  const token = String(nas.attrs['accessToken'])
+  return { ...nas, attrs: { ...nas.attrs, accessToken: token.length > 8 ? `${token.slice(0, 6)}…` : '****' } }
+}
+
+interface NasImportEntry {
+  name: string
+  url: string
+  token: string
+  nasIp: string
+  error?: string
+}
+
+/**
+ * 解析面向 NAS 纳管的 mcpServers JSON（synology-filestation-mcp 形态）：
+ * url + headers.Authorization（Bearer 令牌）+ headers["X-NAS-IP"]（设备路由）。
+ * 与 plugin-mcp 的通用导入不同，此处要求认证头与设备路由头齐备（NAS 域契约）。
+ */
+function parseNasMcpServersConfig(raw: string | object): NasImportEntry[] {
+  let config: unknown
+  if (typeof raw === 'string') {
+    try {
+      config = JSON.parse(raw)
+    } catch {
+      throw new Error('配置不是合法 JSON，请粘贴完整的 mcpServers 配置文本')
+    }
+  } else {
+    config = raw
+  }
+  const obj = config && typeof config === 'object' && !Array.isArray(config) ? config as Record<string, unknown> : null
+  if (!obj) throw new Error('配置须为 JSON 对象')
+  const map = (obj.mcpServers && typeof obj.mcpServers === 'object' && !Array.isArray(obj.mcpServers)
+    ? obj.mcpServers
+    : obj) as Record<string, unknown>
+  const entries = Object.entries(map).filter(([, value]) => value && typeof value === 'object')
+  if (entries.length === 0) throw new Error('未识别出任何服务条目：需要 {"mcpServers": {"名称": {"url": "…", "headers": {"Authorization": "Bearer …", "X-NAS-IP": "…"}}}}')
+  return entries.map(([name, server]) => {
+    const record = server as Record<string, unknown>
+    const headers = (record.headers && typeof record.headers === 'object' ? record.headers : {}) as Record<string, string>
+    const authHeader = Object.entries(headers).find(([key]) => key.toLowerCase() === 'authorization')?.[1] ?? ''
+    const nasIp = Object.entries(headers).find(([key]) => key.toLowerCase() === 'x-nas-ip')?.[1] ?? ''
+    const url = typeof record.url === 'string' ? record.url.trim() : ''
+    const base = { name, url, token: authHeader.replace(/^Bearer\s+/i, '').trim(), nasIp: String(nasIp).trim() }
+    if (!url) return { ...base, error: '缺少 url 字段' }
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { ...base, error: `仅支持 http(s) 地址，收到 ${parsed.protocol}` }
+    } catch {
+      return { ...base, error: `url 不是合法地址：${url}` }
+    }
+    if (!base.token) return { ...base, error: '缺少 headers.Authorization（Bearer 网关令牌）' }
+    if (!base.nasIp) return { ...base, error: '缺少 headers["X-NAS-IP"]（NAS 设备路由）' }
+    return base
+  })
+}
+
 export function apply(ctx: Context) {
   const http = ctx.httpServer
 
   // -- 鉴权中间件 ---------------------------------------------------------
   http.use((exchange) => {
-    if (!exchange.path.startsWith('/api/') || PUBLIC_PATHS.has(exchange.path)) return
+    if (!exchange.path.startsWith('/api/') || PUBLIC_PATHS.has(exchange.path) || PUBLIC_PATH_PREFIXES.some((prefix) => exchange.path.startsWith(prefix))) return
     const header = String(exchange.headers['authorization'] ?? '')
     if (!header.startsWith('Bearer ')) {
       exchange.fail(401, 'UNAUTHORIZED', '缺少 Bearer 令牌，请先登录')
@@ -168,7 +254,7 @@ export function apply(ctx: Context) {
   http.register('POST', '/api/auth/sso/authorize', async (exchange) => {
     const { provider, scene } = body<{ provider: string; scene?: 'web_qr' | 'h5' | 'in_app' }>(exchange)
     try {
-      exchange.ok(ctx.authn.beginSso(provider ?? 'dingtalk', scene ?? 'web_qr'))
+      exchange.ok(await ctx.authn.beginSso(provider ?? 'dingtalk', scene ?? 'web_qr', requestOrigin(exchange)))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(400, 'SSO_AUTHORIZE_FAILED', message)
@@ -361,6 +447,19 @@ export function apply(ctx: Context) {
         updatedAt: service.updatedAt,
         ...usageOf(`mcp:${service.slug}`),
       })),
+      ...ctx.nasRegistry.list().map((nas) => ({
+        type: 'nas' as const,
+        id: nas.id,
+        name: nas.name,
+        slug: nas.slug,
+        status: nas.status,
+        health: ctx.nasRegistry.healthOf(nas.id).status,
+        org: orgName(nas.orgId),
+        owner: nas.ownerId,
+        updatedAt: nas.updatedAt,
+        calls: 0,
+        chargeCents: 0,
+      })),
       ...ctx.resourceCore.list('agent').map((agent) => ({
         type: 'agent' as const,
         id: agent.id,
@@ -446,6 +545,11 @@ export function apply(ctx: Context) {
       if (!['online', 'gray', 'unhealthy'].includes(service.status)) continue
       const result = await ctx.mcpRegistry.probeService(service.id)
       checked.push({ type: 'mcp', id: service.id, name: service.name, status: result.status, latencyMs: result.latencyMs })
+    }
+    for (const nas of ctx.nasRegistry.list()) {
+      if (!['online'].includes(nas.status)) continue
+      const result = await ctx.nasRegistry.probe(nas.id)
+      checked.push({ type: 'nas', id: nas.id, name: nas.name, status: result.status, latencyMs: result.latencyMs })
     }
     for (const entity of [...ctx.resourceCore.list('agent'), ...ctx.resourceCore.list('app')]) {
       checked.push({ type: entity.type, id: entity.id, name: entity.name, status: entity.status, latencyMs: 0 })
@@ -545,8 +649,9 @@ export function apply(ctx: Context) {
   })
 
   guarded('POST', '/api/iam/users/:id/reset-password', 'iam.user.write', (exchange) => {
-    const { user, initialPassword } = ctx.iam.resetPassword(exchange.params['id']!)
-    changeLog(exchange, 'iam.user.reset_password', 'user', user.id, user.displayName, '重置为随机初始口令')
+    const { password } = body<{ password?: string }>(exchange)
+    const { user, initialPassword } = ctx.iam.resetPassword(exchange.params['id']!, password)
+    changeLog(exchange, 'iam.user.reset_password', 'user', user.id, user.displayName, password ? '设置为指定口令' : '重置为随机初始口令')
     return { id: user.id, username: user.username, initialPassword }
   })
 
@@ -696,10 +801,16 @@ export function apply(ctx: Context) {
     })),
   }))
 
+  /** 机器凭证可绑定的已注册资源（签发弹窗下拉/搜索用：选择后自动回填 refType/refId）。 */
+  guarded('GET', '/api/authn/bindable-resources', 'authn.principal.read', () => ({
+    agents: ctx.resourceCore.list('agent').map((agent) => ({ id: agent.id, name: agent.name, status: agent.status })),
+    apps: ctx.resourceCore.list('app').map((app) => ({ id: app.id, name: app.name, status: app.status })),
+  }))
+
   guarded('POST', '/api/authn/principals', 'authn.principal.write', (exchange) => {
     const input = body<{ name: string; refType?: 'agent' | 'app' | 'external'; refId?: string; scopes: string[] }>(exchange)
     const created = ctx.authn.createMachineCredential(input)
-    changeLog(exchange, 'authn.principal.create', 'principal', created.principal.id, input.name)
+    changeLog(exchange, 'authn.principal.create', 'principal', created.principal.id, input.name, input.refId ? `绑定 ${input.refType}:${input.refId}` : '')
     return { principalId: created.principal.id, clientId: created.clientId, clientSecret: created.clientSecret, note: '密钥仅此一次返回' }
   })
 
@@ -776,45 +887,130 @@ export function apply(ctx: Context) {
     return { rotated: true, graceHours: result.graceMs / 3600_000 }
   })
 
-  // OIDC 客户端登记（模式 B：外部应用以平台为 IdP）
-  guarded('POST', '/api/authn/oidc/clients', 'authn.principal.write', (exchange) => {
-    const input = body<{ name: string; redirectUris: string[] }>(exchange)
+  // OIDC 客户端管理（模式 B：外部应用以平台为 IdP；管理员全局兜底面）
+  guarded('GET', '/api/authn/oidc/clients', 'authn.oidc.read', () => ({
+    clients: ctx.oidc.listClients().map((client) => ({
+      ...client,
+      status: client.status ?? 'active',
+      clientType: client.clientType ?? 'confidential',
+      discovery: {
+        issuer: ctx.oidc.issuer(),
+        authorization_endpoint: `${ctx.oidc.issuer()}/oauth/authorize`,
+        token_endpoint: `${ctx.oidc.issuer()}/oauth/token`,
+        userinfo_endpoint: `${ctx.oidc.issuer()}/oauth/userinfo`,
+      },
+    })),
+  }))
+
+  guarded('POST', '/api/authn/oidc/clients', 'authn.oidc.write', (exchange) => {
+    const input = body<{ name: string; redirectUris: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[]; clientType?: 'confidential' | 'public' }>(exchange)
     if (!input.name || !Array.isArray(input.redirectUris) || input.redirectUris.length === 0) {
       throw new Error('name 与 redirectUris（至少一个回调地址）必填')
     }
-    const created = ctx.oidc.createClient({ name: input.name, redirectUris: input.redirectUris })
-    changeLog(exchange, 'authn.oidc.client.create', 'oidc_client', created.client.id, created.client.name)
-    return { clientId: created.client.clientId, clientSecret: created.clientSecret, redirectUris: created.client.redirectUris, note: 'clientSecret 仅此一次返回' }
+    for (const uri of input.redirectUris) {
+      let parsed: URL
+      try { parsed = new URL(uri) } catch { throw new Error(`回调地址非法：${uri}`) }
+      const localhostOk = parsed.protocol === 'http:' && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
+      if (parsed.protocol !== 'https:' && !localhostOk) throw new Error(`回调地址必须为 https:// 或 http://localhost[:port]（收到：${uri}）`)
+    }
+    const created = ctx.oidc.createClient({
+      name: input.name,
+      redirectUris: input.redirectUris,
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.consentRequired !== undefined ? { consentRequired: input.consentRequired } : {}),
+      ...(input.postLogoutUris !== undefined ? { postLogoutUris: input.postLogoutUris } : {}),
+      ...(input.clientType !== undefined ? { clientType: input.clientType } : {}),
+    })
+    changeLog(exchange, 'authn.oidc.client.create', 'oidc_client', created.client.id, created.client.name, input.clientType === 'public' ? 'public 客户端（免 secret）' : '')
+    return { clientId: created.client.clientId, clientSecret: created.clientSecret, redirectUris: created.client.redirectUris, note: created.client.clientType === 'public' ? 'public 客户端无 secret（强制 PKCE）' : 'clientSecret 仅此一次返回' }
+  })
+
+  guarded('PATCH', '/api/authn/oidc/clients/:id', 'authn.oidc.write', (exchange) => {
+    const input = body<{ name?: string; redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    const updated = ctx.oidc.updateClient(exchange.params['id']!, input)
+    changeLog(exchange, 'authn.oidc.client.update', 'oidc_client', updated.id, updated.name)
+    return updated
+  })
+
+  guarded('POST', '/api/authn/oidc/clients/:id/rotate', 'authn.oidc.write', (exchange) => {
+    const rotated = ctx.oidc.rotateSecret(exchange.params['id']!)
+    changeLog(exchange, 'authn.oidc.client.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
+    return { clientId: rotated.client.clientId, clientSecret: rotated.clientSecret, note: '新 clientSecret 仅此一次返回，旧值立即失效' }
+  })
+
+  for (const [action, label] of [['disable', '禁用'], ['enable', '启用']] as const) {
+    guarded('POST', `/api/authn/oidc/clients/:id/${action}`, 'authn.oidc.write', (exchange) => {
+      const { reason } = body<{ reason?: string }>(exchange)
+      const client = action === 'disable'
+        ? ctx.oidc.disableClient(exchange.params['id']!, reason ?? '控制台手动禁用')
+        : ctx.oidc.enableClient(exchange.params['id']!)
+      changeLog(exchange, `authn.oidc.client.${action}`, 'oidc_client', client.id, client.name, reason ?? '')
+      return client
+    })
+  }
+
+  /** JWKS 签名密钥轮换：新 key 立即签名，旧 key 24h 验签宽限（在途令牌不掉线）。 */
+  guarded('POST', '/api/authn/oidc/keys/rotate', 'authn.oidc.write', (exchange) => {
+    const result = ctx.oidc.rotateKeys()
+    changeLog(exchange, 'authn.oidc.keys.rotate', 'platform', 'oidc-keys', '', `新 kid=${result.kid}，旧 key ${result.graceHours}h 宽限`)
+    return { rotated: true, kid: result.kid, graceHours: result.graceHours }
   })
 
   guarded('GET', '/api/authn/oidc/discovery', 'authn.principal.read', () => ctx.oidc.discovery())
 
   // -- MCP ----------------------------------------------------------------
   guarded('GET', '/api/mcp/services', 'mcp.service.read', () => ({
-    services: ctx.mcpRegistry.services().all(),
+    services: ctx.mcpRegistry.services().all().map(maskServiceHeaders),
     overview: ctx.mcpRegistry.metricsOverview(),
   }))
 
   guarded('POST', '/api/mcp/services', 'mcp.service.write', (exchange) => {
-    const input = body<{ name: string; slug?: string; description?: string; icon?: string; endpoint?: string; transport?: 'stdio' | 'sse' | 'http'; mode?: 'hosted' | 'external'; orgId: string; tools?: Array<{ name: string; description: string; riskLevel?: 'read' | 'write' | 'admin' }> }>(exchange)
+    const input = body<{ name: string; slug?: string; description?: string; icon?: string; endpoint?: string; transport?: 'stdio' | 'sse' | 'http'; mode?: 'hosted' | 'external'; orgId: string; headers?: Record<string, string>; tools?: Array<{ name: string; description: string; riskLevel?: 'read' | 'write' | 'admin'; inputSchema?: Record<string, unknown> }> }>(exchange)
     const service = ctx.mcpRegistry.createService({
       ...input,
       owner: caller(exchange).name,
-      tools: input.tools?.map((tool) => ({
+      ...(input.tools ? { tools: input.tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
         riskLevel: tool.riskLevel ?? 'read',
-        inputSchema: { type: 'object', properties: {}, additionalProperties: true },
-      })),
+        // 完整透传外部工具的 inputSchema（导入链路的关键信息），仅缺省时兜底空对象
+        inputSchema: tool.inputSchema && typeof tool.inputSchema === 'object' && Object.keys(tool.inputSchema).length > 0
+          ? tool.inputSchema
+          : { type: 'object', properties: {}, additionalProperties: true },
+      })) } : {}),
     })
     changeLog(exchange, 'mcp.service.create', 'mcp_service', service.id, service.name)
-    return service
+    return maskServiceHeaders(service)
+  })
+
+  /** mcpServers JSON 一键导入：解析 → 注册外部服务 → 自动发现工具 →（默认）验证上线。 */
+  guarded('POST', '/api/mcp/import', 'mcp.service.write', async (exchange) => {
+    const input = body<{ config: string | object; autoDeploy?: boolean }>(exchange)
+    const rootOrg = ctx.iam.orgs().findOne((org) => org.parentId === null)
+    if (!rootOrg) throw new Error('组织数据未初始化，无法导入')
+    const result = await ctx.mcpRegistry.importServices({
+      config: input.config,
+      orgId: rootOrg.id,
+      owner: caller(exchange).name,
+      ...(input.autoDeploy !== undefined ? { autoDeploy: input.autoDeploy } : {}),
+    })
+    for (const item of result.results) {
+      if (item.ok && item.serviceId) changeLog(exchange, 'mcp.service.import', 'mcp_service', item.serviceId, item.name, `tools=${item.tools ?? 0} reachable=${item.reachable}`)
+    }
+    return result
+  })
+
+  /** 外部服务工具同步：以远端 tools/list 为准刷新本地工具清单。 */
+  guarded('POST', '/api/mcp/services/:id/sync-tools', 'mcp.service.write', async (exchange) => {
+    const service = await ctx.mcpRegistry.syncTools(exchange.params['id']!)
+    changeLog(exchange, 'mcp.service.syncTools', 'mcp_service', service.id, service.name, `tools=${service.tools.length}`)
+    return maskServiceHeaders(service)
   })
 
   guarded('PATCH', '/api/mcp/services/:id', 'mcp.service.write', (exchange) => {
     const service = ctx.mcpRegistry.updateService(exchange.params['id']!, body(exchange))
     changeLog(exchange, 'mcp.service.update', 'mcp_service', service.id, service.name)
-    return service
+    return maskServiceHeaders(service)
   })
 
   guarded('POST', '/api/mcp/services/:id/verify', 'mcp.service.deploy', async (exchange) => {
@@ -934,7 +1130,7 @@ export function apply(ctx: Context) {
   })
 
   guarded('POST', '/api/skills', 'skill.submit', (exchange) => {
-    const input = body<{ name: string; category?: string; tags?: string[]; summary?: string; description?: string; content: string; version?: string; changelog?: string; visibility?: 'all' | 'orgs' | 'groups'; applicableModels?: string[]; deps?: string[] }>(exchange)
+    const input = body<{ name: string; category?: string; tags?: string[]; summary?: string; description?: string; content: string; version?: string; changelog?: string; visibility?: 'all' | 'orgs' | 'groups'; applicableModels?: string[]; deps?: string[]; packageBase64?: string }>(exchange)
     const info = caller(exchange)
     const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
     const skill = ctx.skillHub.submit({
@@ -943,7 +1139,7 @@ export function apply(ctx: Context) {
       authorName: info.name,
       orgId: user?.orgId ?? 'org_unknown',
     })
-    return { id: skill.id, status: skill.status, findings: skill.versions.at(-1)?.findings ?? [] }
+    return { id: skill.id, status: skill.status, findings: skill.versions.at(-1)?.findings ?? [], hasPackage: Boolean(skill.versions.at(-1)?.packageBase64) }
   })
 
   guarded('POST', '/api/skills/:id/approve', 'skill.approve', (exchange) => {
@@ -958,10 +1154,10 @@ export function apply(ctx: Context) {
     return result
   })
 
-  guarded('POST', '/api/skills/:id/publish', 'skill.publish', (exchange) => {
+  guarded('POST', '/api/skills/:id/publish', 'skill.publish', async (exchange) => {
     const { version } = body<{ version?: string }>(exchange)
     const skill = ctx.skillHub.detail(exchange.params['id']!)
-    const result = ctx.skillHub.publish(skill.id, version ?? skill.currentVersion, caller(exchange).name)
+    const result = await ctx.skillHub.publish(skill.id, version ?? skill.currentVersion, caller(exchange).name)
     changeLog(exchange, 'skill.publish', 'skill', skill.id, skill.name)
     return result
   })
@@ -998,6 +1194,223 @@ export function apply(ctx: Context) {
     const info = caller(exchange)
     const skill = ctx.skillHub.detail(exchange.params['id']!)
     return ctx.skillHub.download(skill.id, version ?? skill.currentVersion, { id: info.userId ?? info.principalId, name: info.name })
+  })
+
+  /** skill.zip 包下载：与 NAS 上架产物同源（提交携带的原始包或 SKILL.md 现场打包）。 */
+  guarded('GET', '/api/skills/:id/package', 'skill.read', (exchange) => {
+    const skill = ctx.skillHub.detail(exchange.params['id']!)
+    const pkg = ctx.skillHub.packageOf(skill.id, exchange.query.get('version') ?? skill.currentVersion)
+    // 中文 slug 文件名：ASCII 回退 + RFC 5987 UTF-8 形式（非 Latin1 字符直接进头会损坏响应）
+    exchange.res.writeHead(200, {
+      'content-type': 'application/zip',
+      'content-length': pkg.buffer.length,
+      'content-disposition': `attachment; filename="${pkg.filename.replace(/[^\x20-\x7e"]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(pkg.filename)}`,
+      'cache-control': 'no-cache',
+    })
+    exchange.res.end(pkg.buffer)
+  })
+
+  // -- Skill 包存储配置（local / NAS 后端） --------------------------------
+  guarded('GET', '/api/skill-storage', 'skill.read', () => {
+    const config = ctx.nasRegistry.getSkillStorage()
+    return {
+      config,
+      nasOptions: ctx.nasRegistry.list({ status: 'online' }).map((nas) => ({ id: nas.id, name: nas.name, slug: nas.slug, rootPath: nas.attrs['rootPath'] })),
+    }
+  })
+
+  guarded('PUT', '/api/skill-storage', 'skill.storage.write', (exchange) => {
+    const input = body<{ mode?: 'local' | 'nas'; nasId?: string; basePath?: string }>(exchange)
+    const config = ctx.nasRegistry.setSkillStorage(input, caller(exchange).name)
+    changeLog(exchange, 'skill.storage.update', 'skill_storage', config.id, 'Skill 包存储', `${config.mode}${config.nasId ? ` → ${config.nasId}:${config.basePath}` : ''}`)
+    return config
+  })
+
+  // -- NAS 存储（FS 文件存储类资产） ----------------------------------------
+  guarded('GET', '/api/nas', 'nas.read', (exchange) => ({
+    items: ctx.nasRegistry.list({
+      status: exchange.query.get('status') ?? undefined,
+      q: exchange.query.get('q') ?? undefined,
+    }).map((nas) => ({
+      ...maskNasEntity(nas),
+      health: ctx.nasRegistry.healthOf(nas.id),
+      gatewayToolCount: ctx.nasRegistry.toolsOf(nas.id).length,
+      availableTransitions: ctx.resourceCore.availableTransitions('nas', nas.id),
+    })),
+    schema: ctx.resourceCore.typeSpec('nas')?.schema,
+    lifecycle: ctx.resourceCore.typeSpec('nas')?.lifecycle,
+  }))
+
+  guarded('GET', '/api/nas/:id', 'nas.read', (exchange) => {
+    const nas = ctx.nasRegistry.get(exchange.params['id']!)
+    if (!nas) throw new Error(`NAS 资产不存在：${exchange.params['id']}`)
+    return {
+      ...maskNasEntity(nas),
+      health: ctx.nasRegistry.healthOf(nas.id),
+      gatewayTools: ctx.nasRegistry.toolsOf(nas.id),
+      availableTransitions: ctx.resourceCore.availableTransitions('nas', nas.id),
+      audit: ctx.audit.query({ resourceType: 'nas', resourceId: nas.id, limit: 30 }).items,
+    }
+  })
+
+  guarded('POST', '/api/nas', 'nas.write', (exchange) => {
+    const input = body<{ name: string; slug?: string; attrs?: Record<string, unknown> }>(exchange)
+    const info = caller(exchange)
+    const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
+    const nas = ctx.nasRegistry.register({
+      ...input,
+      ownerId: info.userId ?? info.principalId,
+      orgId: user?.orgId ?? ctx.iam.orgs().all()[0]?.id ?? 'org_unknown',
+    })
+    changeLog(exchange, 'nas.create', 'nas', nas.id, nas.name)
+    return maskNasEntity(nas)
+  })
+
+  guarded('PATCH', '/api/nas/:id', 'nas.write', (exchange) => {
+    const input = body<{ name?: string; attrs?: Record<string, unknown> }>(exchange)
+    const nas = ctx.nasRegistry.update(exchange.params['id']!, input)
+    changeLog(exchange, 'nas.update', 'nas', nas.id, nas.name)
+    return maskNasEntity(nas)
+  })
+
+  guarded('POST', '/api/nas/:id/transition', 'nas.write', async (exchange) => {
+    const { action, note } = body<{ action: string; note?: string }>(exchange)
+    const info = caller(exchange)
+    const id = exchange.params['id']!
+    if (action === 'online') {
+      const nas = await ctx.nasRegistry.online(id, info.name)
+      changeLog(exchange, 'nas.online', 'nas', id, nas.name)
+      return maskNasEntity(nas)
+    }
+    if (action === 'offline') {
+      if (!note?.trim()) throw new Error('下线必须填写原因（护栏要求）')
+      const nas = ctx.nasRegistry.offline(id, info.name, note)
+      changeLog(exchange, 'nas.offline', 'nas', id, nas.name, note)
+      return maskNasEntity(nas)
+    }
+    if (action === 'archive') {
+      const nas = ctx.nasRegistry.archive(id, info.name)
+      changeLog(exchange, 'nas.archive', 'nas', id, nas.name)
+      return maskNasEntity(nas)
+    }
+    throw new Error(`未知操作：${action}`)
+  })
+
+  guarded('POST', '/api/nas/:id/health', 'nas.read', async (exchange) => {
+    return await ctx.nasRegistry.probe(exchange.params['id']!)
+  })
+
+  guarded('POST', '/api/nas/:id/sync-tools', 'nas.write', async (exchange) => {
+    const tools = await ctx.nasRegistry.discoverTools(exchange.params['id']!)
+    return { tools: tools.map((tool) => tool.name), count: tools.length }
+  })
+
+  /**
+   * mcpServers JSON 一键纳管 NAS（synology-filestation 形态）：
+   * {"mcpServers":{"synology-filestation":{"url":"http://gw:3000/mcp","headers":{"Authorization":"Bearer …","X-NAS-IP":"192.168.0.196"}}}}
+   * 解析 url + 认证头 + 设备路由头 → 创建资产 → 探活 → 上线 → 工具发现。
+   */
+  guarded('POST', '/api/nas/import', 'nas.write', async (exchange) => {
+    const input = body<{ config: string | object; name?: string; description?: string }>(exchange)
+    const info = caller(exchange)
+    const entries = parseNasMcpServersConfig(input.config)
+    const results: Array<{ name: string; ok: boolean; nasId?: string; reachable?: boolean; tools?: number; status?: string; error?: string }> = []
+    for (const entry of entries) {
+      if (entry.error) {
+        results.push({ name: entry.name, ok: false, error: entry.error })
+        continue
+      }
+      try {
+        const nas = ctx.nasRegistry.register({
+          name: input.name && entries.length === 1 ? input.name : entry.name,
+          attrs: {
+            description: input.description ?? `mcpServers JSON 导入（网关 ${entry.url}）`,
+            gatewayUrl: entry.url,
+            accessToken: entry.token,
+            nasIp: entry.nasIp,
+            rootPath: '/',
+            dataClass: 'internal',
+            tags: ['mcp-import'],
+          },
+          ownerId: info.userId ?? info.principalId,
+          orgId: ctx.iam.orgs().all()[0]?.id ?? 'org_unknown',
+        })
+        let reachable = false
+        let tools = 0
+        try {
+          const health = await ctx.nasRegistry.probe(nas.id)
+          reachable = health.status !== 'down'
+        } catch { reachable = false }
+        if (reachable) {
+          tools = (await ctx.nasRegistry.discoverTools(nas.id).catch(() => [])).length
+        }
+        let status = nas.status
+        if (reachable) {
+          const onlined = await ctx.nasRegistry.online(nas.id, info.name)
+          status = onlined.status
+        }
+        changeLog(exchange, 'nas.import', 'nas', nas.id, nas.name, `reachable=${reachable}`)
+        results.push({ name: entry.name, ok: true, nasId: nas.id, reachable, tools, status, ...(reachable ? {} : { error: '网关不可达：资产保留草稿，请检查地址/令牌/网络后重试上线' }) })
+      } catch (error) {
+        results.push({ name: entry.name, ok: false, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return { imported: results.filter((item) => item.ok).length, results }
+  })
+
+  guarded('GET', '/api/nas/:id/fs', 'nas.read', async (exchange) => {
+    const id = exchange.params['id']!
+    const path = exchange.query.get('path')
+    return path === null || path === '' ? await ctx.nasRegistry.listShares(id) : await ctx.nasRegistry.listFiles(id, path)
+  })
+
+  guarded('GET', '/api/nas/:id/fs/info', 'nas.read', async (exchange) => {
+    const path = exchange.query.get('path')
+    if (!path) throw new Error('缺少 path 查询参数')
+    return await ctx.nasRegistry.getInfo(exchange.params['id']!, path)
+  })
+
+  guarded('POST', '/api/nas/:id/fs/search', 'nas.read', async (exchange) => {
+    const { pattern, path } = body<{ pattern: string; path?: string }>(exchange)
+    if (!pattern) throw new Error('缺少 pattern')
+    return await ctx.nasRegistry.search(exchange.params['id']!, pattern, path ?? '/')
+  })
+
+  guarded('POST', '/api/nas/:id/fs/mkdir', 'nas.write', async (exchange) => {
+    const { path } = body<{ path: string }>(exchange)
+    const info = caller(exchange)
+    const result = await ctx.nasRegistry.mkdir(exchange.params['id']!, path, { id: info.userId ?? info.principalId, name: info.name })
+    return result
+  })
+
+  guarded('POST', '/api/nas/:id/fs/rename', 'nas.write', async (exchange) => {
+    const { path, newName } = body<{ path: string; newName: string }>(exchange)
+    const info = caller(exchange)
+    return await ctx.nasRegistry.rename(exchange.params['id']!, path, newName, { id: info.userId ?? info.principalId, name: info.name })
+  })
+
+  guarded('POST', '/api/nas/:id/fs/delete', 'nas.write', async (exchange) => {
+    const { paths } = body<{ paths: string[] }>(exchange)
+    const info = caller(exchange)
+    return await ctx.nasRegistry.delete(exchange.params['id']!, Array.isArray(paths) ? paths : [paths], { id: info.userId ?? info.principalId, name: info.name })
+  })
+
+  guarded('POST', '/api/nas/:id/fs/upload', 'nas.write', async (exchange) => {
+    const input = body<{ localFile?: string; contentBase64?: string; destPath: string }>(exchange)
+    const info = caller(exchange)
+    if (input.localFile && input.contentBase64) throw new Error('localFile 与 contentBase64 二选一')
+    const buffer = input.contentBase64 !== undefined ? Buffer.from(input.contentBase64, 'base64') : undefined
+    return await ctx.nasRegistry.uploadFile(exchange.params['id']!, {
+      ...(buffer !== undefined ? { buffer } : { localFile: input.localFile }),
+      destPath: input.destPath,
+      actor: { id: info.userId ?? info.principalId, name: info.name },
+    })
+  })
+
+  guarded('POST', '/api/nas/:id/fs/download', 'nas.read', async (exchange) => {
+    const { path } = body<{ path: string }>(exchange)
+    const info = caller(exchange)
+    return await ctx.nasRegistry.downloadFile(exchange.params['id']!, path, { id: info.userId ?? info.principalId, name: info.name })
   })
 
   // -- Agent --------------------------------------------------------------
@@ -1103,6 +1516,11 @@ export function apply(ctx: Context) {
     const id = exchange.params['id']!
     const app = ctx.resourceCore.get('app', id)
     if (!app) throw new Error(`应用不存在：${id}`)
+    // SSO 配置块（不含 secret；供详情页「SSO 配置」tab 与门禁提示使用）
+    const ssoClients = ctx.oidc.clientsForApp(id)
+    const ssoClient = ssoClients[0]
+    const { clientSecretHash, ...ssoSafe } = ssoClient ?? {}
+    void clientSecretHash
     return {
       ...app,
       metrics: ctx.appRegistry.metrics(id),
@@ -1111,6 +1529,24 @@ export function apply(ctx: Context) {
       impact: ctx.resourceCore.impact('app', id),
       availableTransitions: ctx.resourceCore.availableTransitions('app', id),
       audit: ctx.audit.query({ resourceType: 'app', resourceId: id, limit: 30 }).items,
+      sso: ssoClient
+        ? {
+          ...ssoSafe,
+          status: ssoSafe.status ?? 'active',
+          clientType: ssoSafe.clientType ?? 'confidential',
+          refAppName: ctx.resourceCore.get('app', ssoSafe.refId ?? '')?.name ?? undefined,
+          discovery: {
+            issuer: ctx.oidc.issuer(),
+            authorization_endpoint: `${ctx.oidc.issuer()}/oauth/authorize`,
+            token_endpoint: `${ctx.oidc.issuer()}/oauth/token`,
+            userinfo_endpoint: `${ctx.oidc.issuer()}/oauth/userinfo`,
+          },
+        }
+        : null,
+      ssoEnforceTypes: ((): string[] => {
+        // 门禁形态提示（与 plugin-app 同源逻辑；动态 import 避免循环依赖）
+        return String(process.env.APP_SSO_ENFORCE ?? 'web,h5').split(',').map((item) => item.trim()).filter(Boolean)
+      })(),
     }
   })
 
@@ -1146,9 +1582,82 @@ export function apply(ctx: Context) {
       return { approval, note: '下架为 L4 操作，已创建审批单' }
     }
     if (action === 'submit_trial') return ctx.resourceCore.transition('app', id, 'submit_trial', info.name).entity
-    if (action === 'archive') return ctx.resourceCore.transition('app', id, 'archive', info.name).entity
+    if (action === 'retrial') return ctx.resourceCore.transition('app', id, 'retrial', info.name).entity
+    if (action === 'archive') return ctx.appRegistry.archive(id, info.name)
     throw new Error(`未知操作：${action}`)
   })
+
+  // -- 应用 ↔ SSO 打通（owner 自助签发；全库首例 owner-based 授权） ----------------
+  const ssoApp = (exchange: HttpExchange): { id: string; name: string; ownerId: string } => {
+    const app = ctx.resourceCore.get('app', exchange.params['id']!)
+    if (!app) throw new Error(`应用不存在：${exchange.params['id']}`)
+    return { id: app.id, name: app.name, ownerId: app.ownerId }
+  }
+
+  /** owner 校验（human 且 app.ownerId === userId，或持 authn.oidc.write）；机器一律 403。 */
+  const requireSsoOwner = (exchange: HttpExchange): boolean => {
+    const app = ssoApp(exchange)
+    const info = caller(exchange)
+    const isOwner = info.kind === 'human' && Boolean(info.userId) && app.ownerId === info.userId
+    const isAdmin = info.permissions.includes('*') || info.permissions.includes('authn.oidc.write')
+    if (info.kind !== 'human' || (!isOwner && !isAdmin)) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId ?? info.principalId,
+        actorName: info.name,
+        point: `app.sso(owner:${app.id})`,
+        path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', info.kind !== 'human'
+        ? 'SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作'
+        : `仅应用 owner 或持有 authn.oidc.write 的管理员可管理「${app.name}」的 SSO 客户端`)
+      return false
+    }
+    return true
+  }
+
+  guarded('POST', '/api/apps/:id/sso-client', 'app.write', (exchange) => {
+    if (!requireSsoOwner(exchange)) return
+    const app = ssoApp(exchange)
+    const input = body<{ redirectUris: string[]; clientType?: 'confidential' | 'public'; consentRequired?: boolean; postLogoutUris?: string[]; description?: string }>(exchange)
+    const created = ctx.appRegistry.createSsoClient(app.id, input)
+    changeLog(exchange, 'app.sso.create', 'oidc_client', created.client.id, created.client.name, `应用 ${app.name} 签发（${input.clientType ?? 'confidential'}）`)
+    return {
+      clientId: created.client.clientId,
+      clientSecret: created.clientSecret,
+      redirectUris: created.client.redirectUris,
+      note: created.client.clientType === 'public' ? 'public 客户端无 secret（强制 PKCE、不发 refresh）' : 'clientSecret 仅此一次返回',
+    }
+  })
+
+  guarded('PATCH', '/api/apps/:id/sso-client', 'app.write', (exchange) => {
+    if (!requireSsoOwner(exchange)) return
+    const app = ssoApp(exchange)
+    const input = body<{ redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    const updated = ctx.appRegistry.updateSsoClient(app.id, input)
+    changeLog(exchange, 'app.sso.update', 'oidc_client', updated.id, updated.name)
+    return updated
+  })
+
+  guarded('POST', '/api/apps/:id/sso-client/rotate', 'app.write', (exchange) => {
+    if (!requireSsoOwner(exchange)) return
+    const app = ssoApp(exchange)
+    const rotated = ctx.appRegistry.rotateSsoSecret(app.id)
+    changeLog(exchange, 'app.sso.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
+    return { clientId: rotated.client.clientId, clientSecret: rotated.clientSecret, note: '新 clientSecret 仅此一次返回，旧值立即失效' }
+  })
+
+  for (const action of ['disable', 'enable'] as const) {
+    guarded('POST', `/api/apps/:id/sso-client/${action}`, 'app.write', (exchange) => {
+      if (!requireSsoOwner(exchange)) return
+      const app = ssoApp(exchange)
+      const { reason } = body<{ reason?: string }>(exchange)
+      const client = action === 'disable'
+        ? ctx.appRegistry.disableSsoClient(app.id, reason ?? `owner 手动禁用`)
+        : ctx.appRegistry.enableSsoClient(app.id)
+      changeLog(exchange, `app.sso.${action}`, 'oidc_client', client.id, client.name, reason ?? '')
+      return client
+    })
+  }
 
   // -- Audit / 审批 / 告警 --------------------------------------------------
   guarded('GET', '/api/audit/logs', 'audit.read', (exchange) => {
@@ -1563,7 +2072,7 @@ export function apply(ctx: Context) {
   guarded('GET', '/api/platform/info', 'console.login', () => {
     const versionInfo = platformVersionInfo()
     const plugins = [
-      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'skillhub', 'agent', 'app', 'connect', 'update', 'console',
+      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'nas', 'skillhub', 'agent', 'app', 'connect', 'update', 'console',
     ]
     return {
       name: '榕器|企业AI资源治理平台',
@@ -1577,6 +2086,34 @@ export function apply(ctx: Context) {
       events: ctx.platformBus.recent(10),
     }
   })
+
+  /**
+   * 工具身份注入：服务端以令牌解析的调用者身份为准，禁止调用方自填身份参数。
+   * REST 工具桥与 /mcp 端点（平台 MCP Server）共用同一套注入规则。
+   */
+  const injectToolIdentity = (name: string, inputArgs: Record<string, unknown>, info: CallerInfo): Record<string, unknown> => {
+    const args = { ...inputArgs }
+    const principalId = info.userId ?? info.principalId
+    if (name === 'mcp_invoke') {
+      args.callerType = 'user'
+      args.callerId = principalId
+      args.callerName = info.name
+    } else if (name === 'approval_decide' || name === 'skill_approve') {
+      args.approverId = principalId
+      args.approverName = info.name
+    } else if (name === 'agent_offline' || name === 'mcp_offline' || name === 'iam_sync_run') {
+      args.requesterId = principalId
+      args.requesterName = info.name
+      args.actor = info.name
+    } else if (name === 'agent_bind_user' || name === 'skill_install' || name === 'skill_publish') {
+      args.actor = info.name
+    } else if (name.startsWith('nas_fs_')) {
+      // NAS 写类工具的操作人不可自填（读类工具无身份参数）
+      args.actorId = principalId
+      args.actorName = info.name
+    }
+    return args
+  }
 
   guarded('POST', '/api/tools/execute', 'console.login', async (exchange) => {
     const input = body<{ name: string; args?: Record<string, unknown> }>(exchange)
@@ -1595,40 +2132,127 @@ export function apply(ctx: Context) {
       exchange.fail(403, 'FORBIDDEN', `缺少权限点 ${required}，请联系管理员调整角色`, { permission: required })
       return
     }
-    // 身份注入：服务端以令牌解析的调用者身份为准，禁止调用方自填身份参数
-    const args = { ...(input.args ?? {}) } as Record<string, unknown>
-    const principalId = info.userId ?? info.principalId
-    switch (input.name) {
-      case 'mcp_invoke':
-        args.callerType = 'user'
-        args.callerId = principalId
-        args.callerName = info.name
-        break
-      case 'approval_decide':
-        args.approverId = principalId
-        args.approverName = info.name
-        break
-      case 'agent_offline':
-      case 'mcp_offline':
-      case 'iam_sync_run':
-        args.requesterId = principalId
-        args.requesterName = info.name
-        args.actor = info.name
-        break
-      case 'skill_approve':
-        args.approverId = principalId
-        args.approverName = info.name
-        break
-      case 'agent_bind_user':
-      case 'skill_install':
-      case 'skill_publish':
-        args.actor = info.name
-        break
-      default:
-        break
-    }
+    const args = injectToolIdentity(input.name, input.args ?? {}, info)
     const result = await ctx.tools.execute({ name: input.name, arguments: args })
     return result
+  })
+
+  // -- MCP Server 端点：平台即 MCP 服务（与 REST/CLI/dsh 插件同一套工具与权限体系） ------
+  //
+  // Streamable HTTP（JSON-RPC 2.0 over POST /mcp）：initialize（回 mcp-session-id，无状态
+  // 服务端会话仅为客户端兼容）/ notifications/*（202）/ tools/list / tools/call / ping。
+  // 每请求 Bearer 鉴权（人/机器令牌皆可），工具级权限点 + 身份注入与 REST 工具桥完全一致。
+  // 不提供 GET SSE 长流（纯 JSON 响应形态合规）；外部 MCP 客户端接入示例：
+  //   {"mcpServers":{"dsh-ops-platform":{"url":"http://<平台>:7300/mcp","headers":{"Authorization":"Bearer <平台令牌>"}}}}
+  const mcpCallerFromToken = (exchange: HttpExchange): CallerInfo | undefined => {
+    const header = String(exchange.headers['authorization'] ?? '')
+    if (!header.startsWith('Bearer ')) {
+      exchange.res.writeHead(401, {
+        'content-type': 'application/json',
+        'www-authenticate': 'Bearer realm="dsh-ops-mcp"',
+      })
+      exchange.res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32001, message: '缺少 Bearer 令牌：/mcp 与 REST 共用同一套平台令牌' } }))
+      return undefined
+    }
+    try {
+      const verified = ctx.authn.verify(header.slice(7))
+      return {
+        kind: verified.principal.type,
+        principalId: verified.principal.id,
+        ...(verified.principal.type === 'human' && verified.principal.refId ? { userId: verified.principal.refId } : {}),
+        name: verified.principal.name,
+        permissions: verified.scopes,
+        actChain: verified.actChain,
+      } satisfies CallerInfo
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      exchange.res.writeHead(401, { 'content-type': 'application/json' })
+      exchange.res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32001, message: `令牌无效：${message}` } }))
+      return undefined
+    }
+  }
+
+  const mcpReply = (exchange: HttpExchange, payload: Record<string, unknown>, extraHeaders: Record<string, string> = {}): void => {
+    exchange.res.writeHead(200, { 'content-type': 'application/json', ...extraHeaders })
+    exchange.res.end(JSON.stringify(payload))
+  }
+
+  http.register('POST', '/mcp', async (exchange) => {
+    const info = mcpCallerFromToken(exchange)
+    if (!info) return
+    const message = exchange.body
+    if (!message || typeof message !== 'object' || Array.isArray(message)) {
+      exchange.res.writeHead(400, { 'content-type': 'application/json' })
+      exchange.res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: '请求体必须是单个 JSON-RPC 2.0 消息（暂不支持批量）' } }))
+      return
+    }
+    const id = (message as Record<string, unknown>).id
+    // 通知类消息（无 id）：确认即止
+    if (id === undefined || id === null) {
+      exchange.res.writeHead(202)
+      exchange.res.end()
+      return
+    }
+    const method = String((message as Record<string, unknown>).method ?? '')
+    const params = ((message as Record<string, unknown>).params ?? {}) as Record<string, unknown>
+    const reply = (result: unknown, extraHeaders?: Record<string, string>) => mcpReply(exchange, { jsonrpc: '2.0', id, result }, extraHeaders)
+    const replyError = (code: number, text: string) => mcpReply(exchange, { jsonrpc: '2.0', id, error: { code, message: text } })
+    switch (method) {
+      case 'initialize':
+        return reply(
+          {
+            protocolVersion: '2025-03-26',
+            capabilities: { tools: {} },
+            serverInfo: { name: 'dsh-ops-platform', title: '企业 AI 资源统一管理平台 · MCP 网关', version: platformVersionInfo().version },
+            instructions: '企业 AI 资源管理平台（IAM/MCP/Skill/Agent/应用/NAS/计量计费/审计）。工具权限与控制台账号一致：先用 nas_list / mcp_service_list / skill_search 等盘点资产，再按需调用写类工具。',
+          },
+          { 'mcp-session-id': `dshmcp-${Date.now().toString(36)}` },
+        )
+      case 'ping':
+        return reply({})
+      case 'tools/list':
+        return reply({
+          tools: ctx.tools.schemas().map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            inputSchema: tool.parameters,
+            ...(tool.permission !== undefined ? { annotations: { 'x-permission': tool.permission } } : {}),
+          })),
+        })
+      case 'tools/call': {
+        const name = String(params.name ?? '')
+        const args = (params.arguments && typeof params.arguments === 'object' ? params.arguments : {}) as Record<string, unknown>
+        const definition = ctx.tools.schemas().find((tool) => tool.name === name)
+        if (!definition) {
+          return reply({ content: [{ type: 'text', text: `未知工具：${name}` }], isError: true })
+        }
+        if (definition.permission && !info.permissions.includes('*') && !info.permissions.includes(definition.permission)) {
+          ctx.platformBus.emit('audit.authz.denied', {
+            actorId: info.userId ?? info.principalId,
+            actorName: info.name,
+            point: definition.permission,
+            path: '/mcp',
+          })
+          return reply({ content: [{ type: 'text', text: `缺少权限点 ${definition.permission}（调用方 ${info.name}），调用被拒绝` }], isError: true })
+        }
+        const result = await ctx.tools.execute({ name, arguments: injectToolIdentity(name, args, info) })
+        return reply({
+          content: result.content.length > 0 ? result.content : [{ type: 'text', text: JSON.stringify(result.value ?? null) }],
+          isError: result.isError,
+        })
+      }
+      default:
+        return replyError(-32601, `方法不存在：${method}`)
+    }
+  })
+
+  // Streamable HTTP：本端点为无会话纯 JSON 形态，GET（SSE 长流）不支持，DELETE（会话终止）恒成功
+  http.register('GET', '/mcp', (exchange) => {
+    exchange.res.writeHead(405, { 'content-type': 'application/json', allow: 'POST' })
+    exchange.res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: '本 MCP 端点为无会话纯 JSON 形态，不支持 GET SSE 长流' } }))
+  })
+  http.register('DELETE', '/mcp', (exchange) => {
+    exchange.ok({})
   })
 
   // -- 静态 SPA -----------------------------------------------------------

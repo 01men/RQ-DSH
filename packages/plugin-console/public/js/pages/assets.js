@@ -9,6 +9,7 @@ const TYPE_META = {
   app: ['AI 应用', 'app'],
   skill: ['Skill', 'sparkles'],
   model: ['模型路由', 'zap'],
+  nas: ['NAS 存储', 'server'],
 }
 
 /** 金额（分）→ 元展示。 */
@@ -54,7 +55,7 @@ export async function renderAssets(content, params, { rerender }) {
     <div class="page-head">
       <div>
         <div class="page-title">资产运营</div>
-        <div class="page-desc">企业 AI 资产统一台账：MCP 服务 / Agent / AI 应用 / Skill / 模型路由 一处盘点，运营口径的用量与成本一屏可见。</div>
+        <div class="page-desc">企业 AI 资产统一台账：MCP 服务 / Agent / AI 应用 / Skill / 模型路由 / NAS 存储 一处盘点，运营口径的用量与成本一屏可见。</div>
       </div>
       <div class="page-actions">
         <select id="asset-days" class="input" style="width:auto">
@@ -106,7 +107,7 @@ export async function renderAssets(content, params, { rerender }) {
           <thead><tr><th>资产</th><th>类型</th><th>状态</th><th>健康</th><th>归属组织</th><th>负责人</th><th style="text-align:right">近 ${esc(days)} 天调用</th><th style="text-align:right">消耗</th></tr></thead>
           <tbody>
             ${inv.items.map((item) => `
-              <tr>
+              <tr ${item.type === 'nas' ? `data-nas-id="${esc(item.id)}" style="cursor:pointer" title="打开 NAS 详情"` : ''}>
                 <td><div class="fs-13" style="font-weight:600">${esc(item.name)}</div><div class="fs-11 text-4 mono">${esc(item.slug ?? '')}</div></td>
                 <td><span class="badge badge-muted no-dot">${TYPE_META[item.type]?.[0] ?? item.type}</span></td>
                 <td>${statusBadge(item.status)}</td>
@@ -132,6 +133,9 @@ export async function renderAssets(content, params, { rerender }) {
   }
   $('#asset-days').onchange = () => go()
   $('#asset-type').onchange = () => go()
+  content.querySelectorAll('[data-nas-id]').forEach((tr) => {
+    tr.onclick = () => { location.hash = `#/nas?focus=${encodeURIComponent(tr.dataset.nasId)}` }
+  })
   let debounce
   $('#asset-q').oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => go(), 300) }
   $('#btn-healthcheck').onclick = async (e) => {

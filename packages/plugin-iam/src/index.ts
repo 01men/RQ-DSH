@@ -149,6 +149,8 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'authn.principal.write', label: '管理机器凭证', group: '统一认证' },
   { point: 'authn.token.issue', label: '签发令牌', group: '统一认证' },
   { point: 'authn.token.revoke', label: '吊销令牌', group: '统一认证' },
+  { point: 'authn.oidc.read', label: '查看 OIDC 客户端', group: '统一认证' },
+  { point: 'authn.oidc.write', label: '管理 OIDC 客户端（签发/轮换/禁用）', group: '统一认证' },
   { point: 'mcp.service.read', label: '查看 MCP 服务', group: 'MCP' },
   { point: 'mcp.service.write', label: '管理 MCP 服务', group: 'MCP' },
   { point: 'mcp.service.deploy', label: '部署/灰度 MCP', group: 'MCP' },
@@ -160,6 +162,9 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'skill.approve', label: '审批 Skill', group: 'Skill 市场' },
   { point: 'skill.publish', label: '上架/下架 Skill', group: 'Skill 市场' },
   { point: 'skill.install', label: '安装 Skill', group: 'Skill 市场' },
+  { point: 'skill.storage.write', label: '配置 Skill 包存储后端（本地/NAS）', group: 'Skill 市场' },
+  { point: 'nas.read', label: '查看 NAS 存储', group: 'NAS 存储' },
+  { point: 'nas.write', label: '管理 NAS 存储（纳管/上线/文件读写）', group: 'NAS 存储' },
   { point: 'agent.read', label: '查看 Agent', group: 'Agent 本体' },
   { point: 'agent.write', label: '管理 Agent', group: 'Agent 本体' },
   { point: 'agent.approve', label: '审批 Agent 上线', group: 'Agent 本体' },
@@ -193,10 +198,10 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [
   { code: 'super_admin', name: '平台超级管理员', builtin: true, description: '拥有全部权限点', permissions: ['*'] },
   { code: 'org_admin', name: '组织管理员', builtin: true, description: '管理本组织账号与用户组', permissions: ['console.login', 'iam.*', 'approval.read'] },
-  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'approval.read'] },
-  { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'app.read'] },
+  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS 资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'approval.read'] },
+  { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'app.read', 'app.write', 'nas.read'] },
   { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read'] },
-  { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'audit.read', 'approval.read'] },
+  { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'authn.oidc.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'nas.read', 'audit.read', 'approval.read'] },
 ]
 
 // ---------------------------------------------------------------------------
@@ -388,6 +393,13 @@ function delay(ms: number): Promise<void> {
 export class IamService extends Service {
   static readonly provide = 'iam'
 
+  /**
+   * 内置连接器实现范围（applyConnectorMode 能直接实例化的 provider）。
+   * 配置保存以「可实现」为准放行，而非「当前已注册」——否则生产基线（无 DEMO_SEED、
+   * 注册表为空）首次保存钉钉凭证会被守卫拦死，形成「先有配置才能注册、先注册才能存配置」死锁。
+   */
+  private static readonly BUILTIN_CONNECTOR_PROVIDERS: ReadonlySet<string> = new Set(['dingtalk'])
+
   private connectors = new Map<string, OrgConnector>()
   private authProviders = new Map<string, IdentityProviderAdapter>()
 
@@ -400,6 +412,11 @@ export class IamService extends Service {
       this.registerAuthProvider(new DingTalkAuthAdapter())
     }
     this.ensureDefaultTenant()
+    // 连接器/身份源注册表仅存内存：重启后须按持久化配置重建，否则 real 模式的
+    // Real*Adapter 不会恢复（扫码登录/同步将报「未注册」）。
+    for (const config of this.connectorConfigs().all()) {
+      this.applyConnectorMode(config.provider)
+    }
   }
 
   registerConnector(connector: OrgConnector): () => void {
@@ -661,14 +678,18 @@ export class IamService extends Service {
     return input.password ? { user } : { user, initialPassword: password }
   }
 
-  /** 重置为随机初始口令（仅本次返回；同时吊销令牌由冻结类事件或认证中心策略处理）。 */
-  resetPassword(id: string): { user: UserRecord; initialPassword: string } {
+  /** 重置口令：不传 password 则生成随机初始口令；传入则设置为指定口令（均仅本次返回明文）。 */
+  resetPassword(id: string, password?: string): { user: UserRecord; initialPassword: string } {
     const user = this.requireUser(id)
     if (user.status === 'deactivated') throw new Error('账号已注销，无法重置口令')
-    const password = generateSecret('init')
+    if (password !== undefined) {
+      if (password.trim().length < 8) throw new Error('口令长度不得少于 8 位')
+      if (/[\u4e00-\u9fff]/.test(password)) throw new Error('口令不得包含中文')
+    }
+    const next = password ?? generateSecret('init')
     const salt = generateSecret('salt').slice(0, 16)
-    this.users().update(id, { passwordSalt: salt, passwordHash: hashPassword(password, salt) })
-    return { user: this.users().get(id)!, initialPassword: password }
+    this.users().update(id, { passwordSalt: salt, passwordHash: hashPassword(next, salt) })
+    return { user: this.users().get(id)!, initialPassword: next }
   }
 
   importUsers(items: Array<{ username: string; displayName: string; orgId: string; title?: string; email?: string }>): { created: UserRecord[]; skipped: string[] } {
@@ -926,10 +947,11 @@ export class IamService extends Service {
     /** OpenAPI 基址覆盖（测试/专有部署）。 */
     apiBase?: string
   }): ConnectorConfigRecord {
-    if (!this.connectors.has(input.provider)) throw new Error(`未注册的连接器：${input.provider}`)
+    if (!IamService.BUILTIN_CONNECTOR_PROVIDERS.has(input.provider)) throw new Error(`未注册的连接器：${input.provider}`)
     const existing = this.connectorConfig(input.provider)
     const secret = input.appSecret ?? existing?.secretActual ?? 'demo-secret'
-    const mode = input.mode ?? (secret.startsWith('demo-') ? 'mock' : existing?.mode ?? 'mock')
+    // 非演示密钥的全新配置默认 real（表单不采集 mode，靠密钥形态推导；demo- 前缀=演示降级）。
+    const mode = input.mode ?? (secret.startsWith('demo-') ? 'mock' : existing?.mode ?? 'real')
     const payload = {
       provider: input.provider,
       enabled: input.enabled ?? existing?.enabled ?? true,

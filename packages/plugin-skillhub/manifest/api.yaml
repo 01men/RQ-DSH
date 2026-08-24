@@ -3,8 +3,10 @@ plugin: dsh-plugin-skillhub
 base: /api
 endpoints:
   - GET /api/skills?q=&category=&sort=&mine=1&pending=1 · GET /api/skills/:id
-  - POST /api/skills（提交即扫描）
+  - POST /api/skills（提交即扫描；可选 packageBase64 随传 skill.zip）
   - POST /api/skills/:id/approve|publish|deprecate|install|uninstall|rate|download
+  - GET /api/skills/:id/package?version=（拉取 skill.zip；NAS 模式经网关 fs_download 中转）
+  - GET/PUT /api/skill-storage（包存储后端配置，写需 skill.storage.write）
 tools:
   - skill_search
   - skill_submit
@@ -15,4 +17,4 @@ tools:
 services:
   - key: skillHub
     access: ctx.skillHub
-    description: 提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索
+    description: 提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索 + skill.zip 包存储（local/NAS）

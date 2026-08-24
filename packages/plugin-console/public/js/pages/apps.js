@@ -4,7 +4,7 @@ import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
-  fmtNum, fmtPct, fmtCost, timeAgo, emptyState, lineChart,
+  fmtNum, fmtPct, fmtCost, fmtTime, timeAgo, emptyState, lineChart,
 } from '../ui.js'
 import {
   dataClassLabel, riskClass, riskLabel, typeLabel, stateLabel, actionLabel,
@@ -91,6 +91,7 @@ async function openAppDetail(id, ctx) {
         <div class="tab" data-tab="metrics">应用指标</div>
         <div class="tab" data-tab="cost">成本穿透</div>
         <div class="tab" data-tab="lifecycle">生命周期</div>
+        <div class="tab" data-tab="sso">${icon('key', 13)} SSO 配置${app.sso ? (app.sso.status === 'active' ? '' : ' ⚠') : ''}</div>
       </div>
       <div id="app-tab-body"></div>`,
     foot: app.availableTransitions.map((t) => {
@@ -156,6 +157,7 @@ async function openAppDetail(id, ctx) {
             </div>`).join('')}
         </div>`
     }
+    if (tab === 'sso') renderSsoTab(tabBody, app, ctx)
   }
   drawer.body.querySelectorAll('#app-tabs .tab').forEach((el) => {
     el.onclick = () => {
@@ -194,6 +196,176 @@ async function openAppDetail(id, ctx) {
       }
     }
   }
+}
+
+/** 复制到剪贴板（降级提示）。 */
+function copyText(text) {
+  return navigator.clipboard?.writeText(text)
+    .then(() => toast('已复制到剪贴板'))
+    .catch(() => toast('复制失败，请手动选择复制', 'error'))
+}
+
+/** SSO 配置 tab：未签发 → 签发引导；已签发 → 回调管理 / 轮换 / 启停 / discovery。 */
+function renderSsoTab(holder, app, ctx) {
+  const sso = app.sso
+  const enforced = (app.ssoEnforceTypes ?? []).includes(app.attrs['appType'])
+  if (!sso) {
+    holder.innerHTML = `
+      <div class="card card-pad">
+        <div class="card-title mb-8">${icon('key', 14)} 应用身份纳管（SSO）</div>
+        <div class="fs-13 text-2 mb-8" style="line-height:1.9">
+          签发 OIDC 客户端后，应用即可按标准协议接入平台统一身份：
+          <div class="muted-box mt-8" style="font-size:12.5px">
+            ① 授权码模式跳转 <code class="mono">${esc(app.sso?.discovery?.authorization_endpoint ?? '/oauth/authorize')}</code>（强制 PKCE S256）<br>
+            ② <code class="mono">code</code> 换 <code class="mono">id_token / access_token</code>（Basic 或 Post 认证）<br>
+            ③ <code class="mono">access_token</code> 调 <code class="mono">/oauth/userinfo</code> 取用户身份（sub / org / roles / tenant），业务权限应用内自理
+          </div>
+        </div>
+        ${enforced ? `<div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--warn-border);background:var(--warn-bg)">${icon('alert', 15)}<span><b>${esc(app.attrs['appType'])} 形态应用上线门禁</b>：未完成 SSO 签发前，上线审批将被拒绝。</span></div>` : ''}
+        <button class="btn btn-primary" id="sso-issue">${icon('key', 14)}签发 SSO 客户端</button>
+        <a class="btn btn-default" href="https://github.com/01men/ybkk-AIOS/blob/main/docs/app-sso-integration.md" target="_blank" style="margin-left:8px">接入文档</a>
+      </div>`
+    holder.querySelector('#sso-issue').onclick = () => openIssueSsoModal(app, ctx)
+    return
+  }
+  const active = sso.status === 'active'
+  holder.innerHTML = `
+    <div class="card card-pad mb-14">
+      <div class="flex-between mb-8">
+        <div class="card-title">${icon('key', 14)} 已签发客户端 ${statusBadge(active ? 'active' : 'frozen', active ? '使用中' : '已禁用')}</div>
+        <span class="badge ${sso.clientType === 'public' ? 'badge-purple' : 'badge-info'} no-dot">${sso.clientType === 'public' ? 'public（免 secret · 强制 PKCE）' : 'confidential'}</span>
+      </div>
+      <div class="desc-grid mb-14">
+        <div class="desc-item"><span class="k">client_id</span><span class="v mono">${esc(sso.clientId)} <button class="btn btn-ghost btn-sm" id="sso-copy-id">复制</button></span></div>
+        <div class="desc-item"><span class="k">关联应用</span><span class="v">${esc(sso.refAppName ?? app.name)}</span></div>
+        <div class="desc-item"><span class="k">签发时间</span><span class="v">${fmtTime(sso.createdAt)}</span></div>
+      </div>
+      <div class="form-item">
+        <label class="form-label">回调地址（redirect_uris，每行一个；https:// 或 http://localhost）</label>
+        <textarea class="form-control mono" id="sso-redirects" rows="2">${esc(sso.redirectUris.join('\n'))}</textarea>
+      </div>
+      <div class="form-item">
+        <label class="form-label">登出回跳白名单（post_logout_redirect_uris，每行一个，可空）</label>
+        <textarea class="form-control mono" id="sso-postlogouts" rows="2">${esc((sso.postLogoutUris ?? []).join('\n'))}</textarea>
+      </div>
+      <label class="flex" style="gap:8px;font-size:13px;margin:6px 0 12px;cursor:pointer">
+        <input type="checkbox" id="sso-consent" ${sso.consentRequired ? 'checked' : ''} style="accent-color:var(--brand-500)">
+        <span>授权页要求用户显式勾选同意（对外部应用建议开启）</span>
+      </label>
+      <div class="flex" style="gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" id="sso-save">${icon('check', 14)}保存配置</button>
+        ${sso.clientType !== 'public' ? `<button class="btn btn-default" id="sso-rotate">${icon('refresh', 14)}轮换 secret</button>` : ''}
+        ${active
+          ? '<button class="btn btn-danger-ghost" id="sso-disable">禁用客户端</button>'
+          : '<button class="btn btn-primary" id="sso-enable">启用客户端</button>'}
+      </div>
+      ${!active && enforced ? `<div class="muted-box mt-8" style="display:flex;gap:8px;border-color:var(--warn-border);background:var(--warn-bg)">${icon('alert', 15)}<span>客户端处于禁用状态：${esc(app.attrs['appType'])} 形态应用的上线门禁将被阻断。</span></div>` : ''}
+    </div>
+    <div class="card card-pad">
+      <div class="card-title mb-8">${icon('plug', 14)} 接入端点（discovery）</div>
+      <div class="desc-grid">
+        <div class="desc-item"><span class="k">issuer</span><span class="v mono">${esc(sso.discovery.issuer)}</span></div>
+        <div class="desc-item"><span class="k">authorize</span><span class="v mono">${esc(sso.discovery.authorization_endpoint)}</span></div>
+        <div class="desc-item"><span class="k">token</span><span class="v mono">${esc(sso.discovery.token_endpoint)}</span></div>
+        <div class="desc-item"><span class="k">userinfo</span><span class="v mono">${esc(sso.discovery.userinfo_endpoint)}</span></div>
+      </div>
+      <div class="flex mt-8" style="gap:8px">
+        <button class="btn btn-default btn-sm" id="sso-copy-discovery">复制 discovery 地址</button>
+        <a class="btn btn-default btn-sm" href="https://github.com/01men/ybkk-AIOS/blob/main/docs/app-sso-integration.md" target="_blank">接入文档</a>
+      </div>
+      <div class="form-hint mt-8">应用侧按 OIDC 标准接入（openid-client / oidc-client-ts 一行 discovery 驱动）；id_token 验签公钥见 JWKS：<code class="mono">${esc(sso.discovery.issuer)}/.well-known/jwks.json</code></div>
+    </div>`
+  holder.querySelector('#sso-copy-id').onclick = () => void copyText(sso.clientId)
+  holder.querySelector('#sso-copy-discovery').onclick = () => void copyText(`${sso.discovery.issuer}/.well-known/openid-configuration`)
+  holder.querySelector('#sso-save').onclick = async () => {
+    const redirectUris = holder.querySelector('#sso-redirects').value.split('\n').map((s) => s.trim()).filter(Boolean)
+    const postLogoutUris = holder.querySelector('#sso-postlogouts').value.split('\n').map((s) => s.trim()).filter(Boolean)
+    try {
+      await api.patch(`/api/apps/${app.id}/sso-client`, { redirectUris, postLogoutUris, consentRequired: holder.querySelector('#sso-consent').checked })
+      toast('SSO 配置已保存'); openAppDetail(app.id, ctx)
+    } catch (error) { toast(error.message, 'error') }
+  }
+  const rotateBtn = holder.querySelector('#sso-rotate')
+  if (rotateBtn) rotateBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: '轮换 client_secret', danger: true, confirmText: '确认轮换',
+      message: '旧 secret <b>立即失效</b>，应用侧需同步更新。新 secret 仅展示一次。',
+    })
+    if (!result) return
+    try {
+      const rotated = await api.post(`/api/apps/${app.id}/sso-client/rotate`)
+      showSsoSecret(rotated)
+    } catch (error) { toast(error.message, 'error') }
+  }
+  const disableBtn = holder.querySelector('#sso-disable')
+  if (disableBtn) disableBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: '禁用 SSO 客户端', requireReason: true, danger: true, confirmText: '立即禁用',
+      message: '禁用后该应用的登录跳转与令牌刷新立即失败（refresh 链一并吊销）。',
+    })
+    if (!result) return
+    try {
+      await api.post(`/api/apps/${app.id}/sso-client/disable`, { reason: result.reason })
+      toast('客户端已禁用'); openAppDetail(app.id, ctx)
+    } catch (error) { toast(error.message, 'error') }
+  }
+  const enableBtn = holder.querySelector('#sso-enable')
+  if (enableBtn) enableBtn.onclick = async () => {
+    try {
+      await api.post(`/api/apps/${app.id}/sso-client/enable`)
+      toast('客户端已启用'); openAppDetail(app.id, ctx)
+    } catch (error) { toast(error.message, 'error') }
+  }
+}
+
+/** 签发 SSO 客户端弹窗（redirectUris / 类型 / 同意策略）。 */
+function openIssueSsoModal(app, ctx) {
+  const modal = openModal({
+    title: `签发 SSO 客户端 · ${app.name}`, wide: true,
+    body: `
+      <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>client_secret 仅签发后展示一次；应用按 OIDC 授权码模式接入（强制 PKCE S256）。</span></div>
+      <div class="form-grid">
+        ${field('回调地址 redirect_uris（每行一个）', `
+          <textarea class="form-control mono" name="redirectUris" rows="2" placeholder="https://app.example.com/auth/cb&#10;http://localhost:3000/cb（本机调试）"></textarea>`, { required: true, full: true, hint: '仅允许 https:// 或 http://localhost[:port]' })}
+        ${field('客户端类型', selectField('clientType', [
+          { value: 'confidential', label: 'confidential —— 有后端，持有 secret（推荐）' },
+          { value: 'public', label: 'public —— 纯前端 SPA，免 secret（强制 PKCE、不发 refresh）' },
+        ]), { full: true })}
+        <label class="flex" style="gap:8px;font-size:13px;cursor:pointer">
+          <input type="checkbox" name="consentRequired" style="accent-color:var(--brand-500)">
+          <span>授权页要求用户显式勾选同意（对外部应用建议开启）</span>
+        </label>
+      </div>`,
+    foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>签发</button>',
+  })
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async () => {
+    const data = collectForm(modal.body)
+    const redirectUris = (modal.body.querySelector('[name=redirectUris]').value).split('\n').map((s) => s.trim()).filter(Boolean)
+    try {
+      const created = await api.post(`/api/apps/${app.id}/sso-client`, {
+        redirectUris,
+        clientType: data.clientType,
+        consentRequired: data.consentRequired === true,
+      })
+      modal.close()
+      showSsoSecret(created)
+      openAppDetail(app.id, ctx)
+    } catch (error) { toast(error.message, 'error') }
+  }
+}
+
+/** 一次性 secret 展示弹窗（签发 / 轮换共用）。 */
+function showSsoSecret({ clientId, clientSecret, note }) {
+  openModal({
+    title: 'SSO 凭据（仅此一次展示）',
+    body: `
+      <div class="form-hint" style="margin-bottom:10px;color:var(--danger)">请立即复制保存，关闭后无法再次查看 client_secret。</div>
+      <div class="code-block">client_id:     ${esc(clientId)}
+${clientSecret ? `client_secret: ${esc(clientSecret)}` : '（public 客户端无 secret，凭 PKCE 保护）'}</div>
+      <div class="form-hint mt-8">${esc(note ?? '')}</div>`,
+    foot: '<button class="btn btn-primary" data-ok>已保存</button>',
+  })
 }
 
 /** SVG 树形拓扑图（手工布局，节点分列排布）。 */

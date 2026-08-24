@@ -13,6 +13,7 @@ import * as audit from '@dsh-ops/plugin-audit'
 import * as market from '@dsh-ops/plugin-market'
 import * as modelgw from '@dsh-ops/plugin-modelgw'
 import * as mcp from '@dsh-ops/plugin-mcp'
+import * as nas from '@dsh-ops/plugin-nas'
 import * as skillhub from '@dsh-ops/plugin-skillhub'
 import * as agent from '@dsh-ops/plugin-agent'
 import * as app from '@dsh-ops/plugin-app'
@@ -39,6 +40,8 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   await ctx.plugin(audit)
   await ctx.plugin(market)
   await ctx.plugin(mcp)
+  // NAS（FS 文件存储）资产：先于 skillhub 加载（skillhub 上架时经 nasRegistry 上传 skill.zip）
+  await ctx.plugin(nas)
   await ctx.plugin(skillhub)
   await ctx.plugin(agent)
   await ctx.plugin(app)

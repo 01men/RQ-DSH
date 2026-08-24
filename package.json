@@ -26,6 +26,7 @@
     "node": ">=22.6"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.1",
+    "openid-client": "^6.8.7"
   }
 }

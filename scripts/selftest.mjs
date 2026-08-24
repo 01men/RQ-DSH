@@ -6,7 +6,7 @@
  * 用法：npm run selftest
  */
 import { spawn } from 'node:child_process'
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { createHash } from 'node:crypto'
 import { rm, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -42,6 +42,32 @@ async function api(method, path, { token, body } = {}) {
   return { status: response.status, ok: payload?.ok ?? false, data: payload?.data, error: payload?.error }
 }
 
+/** 原始 HTTP 请求（OIDC 协议端点：302 Location / WWW-Authenticate / form 编码等需要原始面）。 */
+const rawReq = (method, path, { headers = {}, body } = {}) => new Promise((resolve, reject) => {
+  const req = httpRequest({ host: '127.0.0.1', port: PORT, method, path, headers }, (res) => {
+    const chunks = []
+    res.on('data', (chunk) => chunks.push(chunk))
+    res.on('end', () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }))
+  })
+  req.on('error', reject)
+  if (body !== undefined) req.write(body)
+  req.end()
+})
+const jsonBody = (raw) => { try { return JSON.parse(raw.body) } catch { return {} } }
+
+/** OIDC 授权流平台端点为原始 JSON 契约（无 {ok,data} 包裹），直连读取。 */
+const authReqInfo = async (reqId) => {
+  const raw = await rawReq('GET', `/api/authn/oidc/auth-requests/${encodeURIComponent(reqId)}`)
+  return { status: raw.status, info: jsonBody(raw) }
+}
+const authorizeConfirm = async (token, reqId, consent) => {
+  const raw = await rawReq('POST', '/api/authn/oidc/authorize', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+    body: JSON.stringify({ reqId, ...(consent !== undefined ? { consent } : {}) }),
+  })
+  return { status: raw.status, result: jsonBody(raw) }
+}
+
 // ---------------------------------------------------------------- stub 上游仓库（平台更新检查用）
 // 进程内真实 HTTP stub：raw package.json（版本 9.9.9）+ compare API（落后 2 个提交）。
 // 更新插件经 DSH_UPDATE_RAW_BASE / DSH_UPDATE_API_BASE 指向本 stub，自测不依赖外网。
@@ -69,6 +95,67 @@ const ghStub = createServer((req, res) => {
 })
 await new Promise((resolve) => ghStub.listen(GH_PORT, '127.0.0.1', resolve))
 
+// ---------------------------------------------------------------- stub NAS 文件网关
+// 进程内真实 HTTP stub，复刻 synology-filestation-mcp 契约：
+// POST /mcp（initialize / notifications/initialized / tools/list / tools/call），
+// 强制校验 Authorization: Bearer 与 X-NAS-IP 设备路由头；fs_upload 按真实网关语义
+// 在「网关进程侧」读取 local_file（同机/共享卷契约——本进程可直接读平台 staging 目录）。
+const NAS_GW_PORT = 7362
+const NAS_GW_TOKEN = 'gw-selftest-token-9f8e7d6c'
+const NAS_GW_IP = '192.168.0.196'
+const nasGwCalls = []
+const nasGwUploads = []
+const nasGwStub = createServer(async (req, res) => {
+  const json = (status, payload, headers = {}) => {
+    res.writeHead(status, { 'content-type': 'application/json', ...headers })
+    res.end(JSON.stringify(payload))
+  }
+  if (req.method !== 'POST' || req.url !== '/mcp') return json(404, { error: 'not found' })
+  if (req.headers.authorization !== `Bearer ${NAS_GW_TOKEN}`) return json(401, { jsonrpc: '2.0', id: null, error: { code: -32001, message: '网关鉴权失败' } })
+  if (req.headers['x-nas-ip'] !== NAS_GW_IP) return json(400, { jsonrpc: '2.0', id: null, error: { code: -32002, message: '未知 NAS 设备（X-NAS-IP）' } })
+  let message = null
+  try { message = JSON.parse(await readBody(req)) } catch { return json(400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } }) }
+  const sessionHeaders = { 'mcp-session-id': 'stub-session-selftest' }
+  // 通知类消息（无 id）：确认即止
+  if (message.id === undefined || message.id === null) { res.writeHead(202, sessionHeaders); res.end(); return }
+  const reply = (result) => json(200, { jsonrpc: '2.0', id: message.id, result }, sessionHeaders)
+  const replyError = (code, text) => json(200, { jsonrpc: '2.0', id: message.id, error: { code, message: text } }, sessionHeaders)
+  if (message.method === 'initialize') {
+    return reply({ protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'synology-filestation-stub', version: '1.0.0' } })
+  }
+  if (message.method === 'tools/list') {
+    const names = ['fs_list_shares', 'fs_list', 'fs_get_info', 'fs_search', 'fs_create_folder', 'fs_rename', 'fs_delete', 'fs_upload', 'fs_download', 'fs_task_status']
+    return reply({ tools: names.map((name) => ({ name, description: `stub ${name}`, inputSchema: { type: 'object' } })) })
+  }
+  if (message.method === 'tools/call') {
+    const name = String(message.params?.name ?? '')
+    const args = message.params?.arguments ?? {}
+    nasGwCalls.push({ name, args })
+    const text = (value) => reply({ content: [{ type: 'text', text: JSON.stringify(value) }] })
+    if (name === 'fs_list_shares') return text({ shares: ['homes', 'skillhub'] })
+    if (name === 'fs_list') return text({ files: [{ name: 'readme.txt', isdir: false }, { name: 'reports', isdir: true }] })
+    if (name === 'fs_get_info') return text({ path: args.path, size: 128, isdir: false })
+    if (name === 'fs_search') return text({ files: [{ path: `/found/${args.pattern}` }] })
+    if (name === 'fs_create_folder') return text({ created: args.path })
+    if (name === 'fs_rename') return text({ renamed: true, new_name: args.new_name })
+    if (name === 'fs_delete') return text({ deleted: args.paths })
+    if (name === 'fs_download') return text({ downloaded: args.path, dest_dir: args.dest_dir })
+    if (name === 'fs_task_status') return text({ taskid: args.taskid, finished: true })
+    if (name === 'fs_upload') {
+      try {
+        const buffer = await import('node:fs/promises').then((fs) => fs.readFile(String(args.local_file)))
+        nasGwUploads.push({ share: args.share, path: args.path, sizeBytes: buffer.length, magic: buffer.subarray(0, 2).toString('latin1'), content: buffer })
+        return text({ uploaded: args.path, size: buffer.length })
+      } catch (error) {
+        return reply({ content: [{ type: 'text', text: `fs_upload 网关侧读不到 local_file：${error instanceof Error ? error.message : error}` }], isError: true })
+      }
+    }
+    return replyError(-32601, `未知工具：${name}`)
+  }
+  return replyError(-32601, `方法不存在：${message.method}`)
+})
+await new Promise((resolve) => nasGwStub.listen(NAS_GW_PORT, '127.0.0.1', resolve))
+
 // ---------------------------------------------------------------- 启动隔离实例
 console.log('\x1b[90m» 启动隔离测试实例…\x1b[0m')
 await rm(DATA_DIR, { recursive: true, force: true })
@@ -83,6 +170,8 @@ const proc = spawn(process.execPath, ['src/main.ts', '--port', String(PORT), '--
     DSH_UPDATE_RAW_BASE: `http://127.0.0.1:${GH_PORT}`,
     DSH_UPDATE_API_BASE: `http://127.0.0.1:${GH_PORT}`,
     DSH_UPDATE_AUTO_CHECK: 'off',
+    // OIDC 授权请求 TTL 压到 2 秒：过期路径可在自测内确定性验证（正常流程毫秒级完成不受影响）
+    OIDC_AUTHREQ_TTL_SECONDS: '2',
   },
 })
 proc.stderr.on('data', (chunk) => process.stderr.write(`\x1b[90m[server] ${chunk}\x1b[0m`))
@@ -218,6 +307,17 @@ try {
   check('创建账号返回一次性随机初始口令', newUser.ok && typeof newUser.data.initialPassword === 'string' && newUser.data.initialPassword.length >= 16)
   const testerInitialPassword = newUser.data.initialPassword
 
+  // 口令二次修改（传达过程中改为指定口令）
+  const pwUser = await api('POST', '/api/iam/users', { token: admin, body: { username: 'pwtest01', displayName: '口令修改测试', orgId: newOrg.data.id } })
+  const pwShort = await api('POST', `/api/iam/users/${pwUser.data.id}/reset-password`, { token: admin, body: { password: 'short' } })
+  check('指定口令过短被拒（护栏）', !pwShort.ok)
+  const pwSet = await api('POST', `/api/iam/users/${pwUser.data.id}/reset-password`, { token: admin, body: { password: 'SelfTest@2026' } })
+  check('二次修改为指定口令', pwSet.ok && pwSet.data.initialPassword === 'SelfTest@2026')
+  const pwOldLogin = await api('POST', '/api/auth/login', { body: { username: 'pwtest01', password: pwUser.data.initialPassword } })
+  check('修改后原口令立即失效', pwOldLogin.status === 401)
+  const pwNewLogin = await api('POST', '/api/auth/login', { body: { username: 'pwtest01', password: 'SelfTest@2026' } })
+  check('指定口令可登录', pwNewLogin.ok)
+
   const roleList = await api('GET', '/api/iam/roles', { token: admin })
   const devRole = roleList.data.roles.find((role) => role.code === 'developer')
   const assign = await api('PATCH', `/api/iam/users/${newUser.data.id}`, { token: admin, body: { roleIds: [devRole.id] } })
@@ -279,6 +379,15 @@ try {
   section('统一认证（机器身份 / 令牌）')
   const cred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'selftest-ci', refType: 'external', scopes: ['mcp.invoke'] } })
   check('签发机器凭证（secret 一次性返回）', cred.ok && cred.data.clientSecret.startsWith('cs_'))
+
+  // 可绑定资源聚合 + 选择已注册主体自动关联（refType/refId 回填）
+  const bindable = await api('GET', '/api/authn/bindable-resources', { token: admin })
+  check('可绑定资源聚合（Agent / AI 应用清单）', bindable.ok && Array.isArray(bindable.data.agents) && bindable.data.agents.length > 0 && Array.isArray(bindable.data.apps))
+  const agentEntry = bindable.data.agents[0]
+  const credBind = await api('POST', '/api/authn/principals', { token: admin, body: { name: `agent:${agentEntry.name}`, refType: 'agent', refId: agentEntry.id, scopes: ['agent.read'] } })
+  const principalList = await api('GET', '/api/authn/principals', { token: admin })
+  const boundPrincipal = principalList.data.principals.find((p) => p.id === credBind.data.principalId)
+  check('选择已注册主体签发 → 凭据自动关联资源', credBind.ok && boundPrincipal?.refType === 'agent' && boundPrincipal?.refId === agentEntry.id)
 
   const ccBad = await api('POST', '/api/auth/client-credentials', { body: { clientId: cred.data.clientId, clientSecret: 'wrong' } })
   check('错误 client_secret 被拒', ccBad.status === 401)
@@ -508,50 +617,182 @@ try {
   check('资金完整性：余额 ≡ Σ流水（全量重放）', integrity.ok && integrity.data.ok === true && integrity.data.wallets >= 2)
   modelStub.close()
 
-  // ================================================================ 第 6 步：OIDC Provider（RS256/JWKS）
-  section('第 6 步：OIDC Provider（RS256 / JWKS / 用户状态联动）')
-  const rawApi = async (method, path, { token: bearer, body: reqBody } = {}) => {
-    const headers = { 'content-type': 'application/json' }
-    if (bearer) headers.authorization = `Bearer ${bearer}`
-    const response = await fetch(`${BASE}${path}`, { method, headers, body: reqBody === undefined ? undefined : JSON.stringify(reqBody) })
-    let json = null
-    try { json = await response.json() } catch { /* ignore */ }
-    return { status: response.status, json }
-  }
+  // ================================================================ 第 6 步：OIDC Provider（浏览器授权流 / 协议合规）
+  section('第 6 步：OIDC Provider（浏览器授权流 / RS256 / 协议合规）')
+  const discovery = await rawReq('GET', '/.well-known/openid-configuration')
+  const disco = jsonBody(discovery)
+  check('OIDC 发现文档暴露（jwks_uri / 端点 / RS256）', discovery.status === 200 && disco.jwks_uri.includes('/.well-known/jwks.json') && disco.id_token_signing_alg_values_supported.includes('RS256'))
+  check('发现文档协议面（email scope / Basic+Post 双认证 / refresh+revoke+end_session）',
+    disco.scopes_supported.includes('email')
+    && disco.token_endpoint_auth_methods_supported.includes('client_secret_basic')
+    && disco.token_endpoint_auth_methods_supported.includes('client_secret_post')
+    && disco.grant_types_supported.includes('refresh_token')
+    && Boolean(disco.revocation_endpoint) && Boolean(disco.end_session_endpoint))
+  const jwks = jsonBody(await rawReq('GET', '/.well-known/jwks.json'))
+  check('JWKS 数组化公钥（kid/kty/n）', Array.isArray(jwks.keys) && jwks.keys[0].kty === 'RSA' && jwks.keys[0].kid.length === 16 && Boolean(jwks.keys[0].n))
 
-  const discovery = await rawApi('GET', '/.well-known/openid-configuration')
-  check('OIDC 发现文档暴露（含 jwks_uri / 端点）', discovery.status === 200 && discovery.json.jwks_uri.includes('/.well-known/jwks.json') && discovery.json.id_token_signing_alg_values_supported.includes('RS256'))
-  const jwks = await rawApi('GET', '/.well-known/jwks.json')
-  check('JWKS 暴露公钥（kid/kty/n）', jwks.status === 200 && jwks.json.keys[0].kty === 'RSA' && jwks.json.keys[0].kid.length === 16 && Boolean(jwks.json.keys[0].n))
+  const oidcClient = await api('POST', '/api/authn/oidc/clients', { token: admin, body: { name: '外部 CRM 应用', redirectUris: ['https://crm.partner.example/cb'], consentRequired: false } })
+  check('登记 OIDC 客户端（secret 一次性返回）', oidcClient.ok && oidcClient.data.clientId.startsWith('oc-') && oidcClient.data.clientSecret.startsWith('ocs'))
+  const OC = oidcClient.data
 
-  const oidcClient = await api('POST', '/api/authn/oidc/clients', { token: admin, body: { name: '外部 CRM 应用', redirectUris: ['https://crm.partner.example/cb'] } })
-  check('登记 OIDC 客户端（secret 一次性返回）', oidcClient.ok && oidcClient.data.clientId.startsWith('oc-'))
-  const oidcAuthorize = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, redirectUri: 'https://crm.partner.example/cb', state: 'st-xyz', username: 'admin', password: 'Ybk@2026' } })
-  check('授权码签发（一次性 code）', oidcAuthorize.status === 200 && oidcAuthorize.json.code.length >= 32 && oidcAuthorize.json.state === 'st-xyz')
-  const oidcToken = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: oidcAuthorize.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret } })
-  check('code 换 RS256 令牌对（access + id_token）', oidcToken.status === 200 && oidcToken.json.access_token.split('.').length === 3 && oidcToken.json.id_token.split('.').length === 3)
-  const oidcCodeReplay = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: oidcAuthorize.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret } })
-  check('授权码重放被拒（单次消费）', oidcCodeReplay.status === 401)
-  const badSecret = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: 'whatever', client_id: oidcClient.data.clientId, client_secret: 'wrong' } })
-  check('client_secret 错误被拒', badSecret.status === 401)
+  // -- 第一跳校验：任一失败 → 302 平台错误页（绝不携带外部 redirect_uri，防开放重定向）--
+  const pkceVerifier = 'selftest-pkce-verifier-43-chars-aaaaaaaaaaaaaa'
+  const pkceChallenge = createHash('sha256').update(pkceVerifier).digest('base64url')
+  const authorizeQuery = (over = {}) => new URLSearchParams({
+    response_type: 'code', client_id: OC.clientId, redirect_uri: 'https://crm.partner.example/cb',
+    state: 'st-selftest', scope: 'openid profile email', code_challenge: pkceChallenge, code_challenge_method: 'S256', ...over,
+  }).toString()
+  const reqIdOf = (raw) => new URLSearchParams(String(raw.headers.location).split('?')[1] ?? '').get('req')
 
-  // 客户端本地验签（用 JWKS 公钥验证 RS256 签名 —— 外部应用真实姿势）
-  const { createPublicKey: cpk, verify: rsVerify } = await import('node:crypto')
-  const jwkKey = cpk({ key: { kty: jwks.json.keys[0].kty, n: jwks.json.keys[0].n, e: jwks.json.keys[0].e }, format: 'jwk' })
-  const [jwtH, jwtP, jwtS] = oidcToken.json.access_token.split('.')
-  const sigValid = rsVerify('RSA-SHA256', Buffer.from(`${jwtH}.${jwtP}`), jwkKey, Buffer.from(jwtS, 'base64url'))
+  const badClient = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ client_id: 'oc-forged' })}`)
+  check('无效 client_id → 302 平台错误页（Location 不含外部域）', badClient.status === 302 && String(badClient.headers.location).startsWith('/#/oauth/error') && !String(badClient.headers.location).includes('crm.partner.example'))
+  const badRedirect = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ redirect_uri: 'https://evil.example/cb' })}`)
+  check('redirect_uri 不在白名单 → 平台错误页', badRedirect.status === 302 && String(badRedirect.headers.location).startsWith('/#/oauth/error'))
+  const badScope = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ scope: 'openid profile billing:admin' })}`)
+  check('白名单外 scope → invalid_scope 错误页', badScope.status === 302 && decodeURIComponent(String(badScope.headers.location)).includes('invalid_scope'))
+  const noPkce = await rawReq('GET', `/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: OC.clientId, redirect_uri: 'https://crm.partner.example/cb', state: 'st', scope: 'openid' }).toString()}`)
+  check('缺少 PKCE → 错误页（强制 S256）', noPkce.status === 302 && String(noPkce.headers.location).startsWith('/#/oauth/error') && decodeURIComponent(String(noPkce.headers.location)).includes('PKCE'))
+  const badResponseType = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ response_type: 'token' })}`)
+  check('response_type=token → unsupported_response_type 错误页', badResponseType.status === 302 && decodeURIComponent(String(badResponseType.headers.location)).includes('unsupported_response_type'))
+
+  // -- 合法第一跳：302 平台授权页 + 公开查询不泄露 redirect_uri --
+  const goodFirst = await rawReq('GET', `/oauth/authorize?${authorizeQuery()}`)
+  check('合法授权请求 → 302 平台授权页（/#/oauth/authorize?req=）', goodFirst.status === 302 && String(goodFirst.headers.location).startsWith('/#/oauth/authorize?req='))
+  const reqId = reqIdOf(goodFirst)
+  const reqInfo = await authReqInfo(reqId)
+  check('授权请求公开查询（客户端名/scope，不泄露 redirect_uri）', reqInfo.status === 200 && reqInfo.info.clientName === '外部 CRM 应用' && reqInfo.info.scope.includes('openid') && !JSON.stringify(reqInfo.info).includes('redirect_uri'))
+
+  // -- 授权确认：机器 403 / human 通过 / 重放、伪造、过期 400 --
+  const machineAuthorize = await api('POST', '/api/authn/oidc/authorize', { token: machine, body: { reqId } })
+  check('机器身份确认授权被拒（human-only）', machineAuthorize.status === 403)
+  const authApprove = await authorizeConfirm(admin, reqId, true)
+  check('用户确认授权 → 回跳地址（code/state 原样透传 + iss 防 mix-up）', authApprove.status === 200 && authApprove.result.location.includes('code=') && authApprove.result.location.includes('state=st-selftest') && authApprove.result.location.includes('iss='))
+  const replayReq = await authorizeConfirm(admin, reqId, true)
+  check('授权请求重放被拒（单次消费）', replayReq.status === 400)
+  const forgedReq = await authorizeConfirm(admin, 'forged-req-id')
+  check('伪造 reqId 被拒', forgedReq.status === 400)
+  const expFirst = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'st-expired' })}`)
+  const expReqId = reqIdOf(expFirst)
+  await new Promise((resolve) => setTimeout(resolve, 2500))
+  const expApprove = await authorizeConfirm(admin, expReqId, true)
+  check('过期授权请求被拒（TTL 语义）', expApprove.status === 400)
+
+  // -- consent 门禁：未同意 400 / 显式拒绝 access_denied 回跳 / 同意放行 --
+  const consentClient = await api('POST', '/api/authn/oidc/clients', { token: admin, body: { name: '需同意的外部门户', redirectUris: ['https://portal.partner.example/cb'], consentRequired: true } })
+  check('登记需显式同意的客户端', consentClient.ok)
+  const ccFirst = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ client_id: consentClient.data.clientId, redirect_uri: 'https://portal.partner.example/cb', state: 'st-consent' })}`)
+  const ccReqId = reqIdOf(ccFirst)
+  const ccInfo = await authReqInfo(ccReqId)
+  check('consentRequired 状态公开回显', ccInfo.status === 200 && ccInfo.info.consentRequired === true)
+  const ccNo = await authorizeConfirm(admin, ccReqId, undefined)
+  check('未表达同意 → 400', ccNo.status === 400)
+  const ccDeny = await authorizeConfirm(admin, ccReqId, false)
+  check('显式拒绝 → access_denied 回跳（拒绝事件留痕）', ccDeny.status === 200 && ccDeny.result.location.includes('error=access_denied'))
+  const ccFirst2 = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ client_id: consentClient.data.clientId, redirect_uri: 'https://portal.partner.example/cb', state: 'st-consent2' })}`)
+  const ccOk = await authorizeConfirm(admin, reqIdOf(ccFirst2), true)
+  check('勾选同意后放行（签发 code）', ccOk.status === 200 && ccOk.result.location.includes('code='))
+
+  // -- 换牌：Basic/Post 双认证 × form/JSON 双编码、PKCE 正误、code 重放、错误码状态码 --
+  const basicAuth = Buffer.from(`${OC.clientId}:${OC.clientSecret}`).toString('base64')
+  const tokenForm = (extra = {}) => new URLSearchParams({
+    grant_type: 'authorization_code', client_id: OC.clientId, client_secret: OC.clientSecret,
+    redirect_uri: 'https://crm.partner.example/cb', code_verifier: pkceVerifier, ...extra,
+  }).toString()
+  const code1 = new URL(authApprove.result.location).searchParams.get('code')
+  const tPost = await rawReq('POST', '/oauth/token', { headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: tokenForm({ code: code1 }) })
+  const ts1 = jsonBody(tPost)
+  check('code 换令牌（client_secret_post + form 编码）', tPost.status === 200 && ts1.access_token?.split('.').length === 3 && ts1.token_type === 'Bearer')
+  check('响应契约（scope 字段 + confidential 客户端附带 refresh_token）', ts1.scope === 'openid profile email' && ts1.refresh_token?.startsWith('otr_'))
+  const oidcCodeReplay = await rawReq('POST', '/oauth/token', { headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: tokenForm({ code: code1 }) })
+  check('授权码重放被拒（单次消费 → 400 invalid_grant）', oidcCodeReplay.status === 400 && jsonBody(oidcCodeReplay).error === 'invalid_grant')
+
+  const first2 = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'st-basic' })}`)
+  const approve2 = await authorizeConfirm(admin, reqIdOf(first2), true)
+  const oidcCode2 = new URL(approve2.result.location).searchParams.get('code')
+  const tBasic = await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: `Basic ${basicAuth}` },
+    body: new URLSearchParams({ grant_type: 'authorization_code', code: oidcCode2, redirect_uri: 'https://crm.partner.example/cb', code_verifier: pkceVerifier }).toString(),
+  })
+  check('code 换令牌（client_secret_basic + Basic 头认证）', tBasic.status === 200 && jsonBody(tBasic).access_token?.split('.').length === 3)
+  const first3 = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'st-json' })}`)
+  const approve3 = await authorizeConfirm(admin, reqIdOf(first3), true)
+  const tJson = await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ grant_type: 'authorization_code', code: new URL(approve3.result.location).searchParams.get('code'), client_id: OC.clientId, client_secret: OC.clientSecret, redirect_uri: 'https://crm.partner.example/cb', code_verifier: pkceVerifier }),
+  })
+  check('code 换令牌（JSON 编码 + Post 认证）', tJson.status === 200 && jsonBody(tJson).access_token?.split('.').length === 3)
+
+  const first4 = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'st-badverifier' })}`)
+  const approve4 = await authorizeConfirm(admin, reqIdOf(first4), true)
+  const tBadVerifier = await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: tokenForm({ code: new URL(approve4.result.location).searchParams.get('code'), code_verifier: 'wrong-verifier-wrong-verifier-wrong-verifier-wrong' }),
+  })
+  check('PKCE verifier 错误 → 400 invalid_grant', tBadVerifier.status === 400 && jsonBody(tBadVerifier).error === 'invalid_grant')
+  const first5 = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'st-noverifier' })}`)
+  const approve5 = await authorizeConfirm(admin, reqIdOf(first5), true)
+  const tNoVerifier = await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', client_id: OC.clientId, client_secret: OC.clientSecret, code: new URL(approve5.result.location).searchParams.get('code') }).toString(),
+  })
+  check('PKCE 缺少 code_verifier → 400', tNoVerifier.status === 400 && JSON.stringify(tNoVerifier.body).includes('code_verifier'))
+  const tBadSecret = await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: `Basic ${Buffer.from(`${OC.clientId}:wrong-secret`).toString('base64')}` },
+    body: new URLSearchParams({ grant_type: 'authorization_code', code: 'whatever' }).toString(),
+  })
+  check('client_secret 错误 → 401 + WWW-Authenticate: Basic', tBadSecret.status === 401 && jsonBody(tBadSecret).error === 'invalid_client' && String(tBadSecret.headers['www-authenticate'] ?? '').includes('Basic'))
+
+  // -- token 类型区分 + JWKS 本地验签 + userinfo --
+  const [jwtH, jwtP, jwtS] = ts1.access_token.split('.')
   const jwtClaims = JSON.parse(Buffer.from(jwtP, 'base64url').toString('utf8'))
-  check('外部应用以 JWKS 公钥本地验签通过', sigValid === true && jwtClaims.aud === oidcClient.data.clientId && jwtClaims.iss.includes('127.0.0.1'))
+  const jwtHeader = JSON.parse(Buffer.from(jwtH, 'base64url').toString('utf8'))
+  const idClaims = JSON.parse(Buffer.from(ts1.id_token.split('.')[1], 'base64url').toString('utf8'))
+  check('token 类型打标（access/id 区分 + kid 头）', jwtClaims.token_use === 'access' && idClaims.token_use === 'id' && jwtHeader.kid === jwks.keys[0].kid && jwtClaims.aud === OC.clientId && idClaims.nonce === undefined)
+  const { createPublicKey: cpk, verify: rsVerify } = await import('node:crypto')
+  const jwkKey = cpk({ key: { kty: jwks.keys[0].kty, n: jwks.keys[0].n, e: jwks.keys[0].e }, format: 'jwk' })
+  check('外部应用以 JWKS 公钥本地验签通过', rsVerify('RSA-SHA256', Buffer.from(`${jwtH}.${jwtP}`), jwkKey, Buffer.from(jwtS, 'base64url')) === true && jwtClaims.iss.includes('127.0.0.1'))
 
-  const userInfo = await rawApi('GET', '/oauth/userinfo', { token: oidcToken.json.access_token })
-  check('userinfo 返回 NormalizedProfile（org/角色/租户）', userInfo.status === 200 && userInfo.json.sub === adminLogin.data.user.id && userInfo.json.org !== null && Array.isArray(userInfo.json.roles) && userInfo.json.roles.includes('super_admin'))
+  const userInfo = await rawReq('GET', '/oauth/userinfo', { headers: { authorization: `Bearer ${ts1.access_token}` } })
+  const ui = jsonBody(userInfo)
+  check('userinfo 返回 NormalizedProfile（org/角色/租户）', userInfo.status === 200 && ui.sub === adminLogin.data.user.id && ui.org !== null && Array.isArray(ui.roles) && ui.roles.includes('super_admin'))
+  const idAsAccess = await rawReq('GET', '/oauth/userinfo', { headers: { authorization: `Bearer ${ts1.id_token}` } })
+  check('id_token 调 userinfo 被拒（token_use 收敛）', idAsAccess.status === 401)
+  const noBearer = await rawReq('GET', '/oauth/userinfo')
+  check('userinfo 无凭证 → 401 + WWW-Authenticate: Bearer', noBearer.status === 401 && String(noBearer.headers['www-authenticate'] ?? '').includes('Bearer'))
+
+  // -- SPA 静态页（授权页/错误页由前端路由承载）--
+  const spaIndex = await rawReq('GET', '/')
+  check('SPA 静态页可达（#/oauth/* 前端路由承载）', spaIndex.status === 200 && spaIndex.body.includes('id="app"'))
+
+  // -- openid-client 冒烟（标准 SDK 一行 discovery 驱动：authorize → token → userinfo）--
+  const oc = await import('openid-client')
+  const ocConfig = await oc.discovery(new URL(BASE), OC.clientId, undefined, new oc.ClientSecretBasic(OC.clientSecret), { execute: [oc.allowInsecureRequests] })
+  const ocVerifier = oc.randomPKCECodeVerifier()
+  const ocChallenge = await oc.calculatePKCECodeChallenge(ocVerifier)
+  const ocState = oc.randomState()
+  const ocNonce = oc.randomNonce()
+  const ocRedirectTo = oc.buildAuthorizationUrl(ocConfig, {
+    redirect_uri: 'https://crm.partner.example/cb', scope: 'openid profile email',
+    state: ocState, nonce: ocNonce, code_challenge: ocChallenge, code_challenge_method: 'S256',
+  })
+  const ocFirst = await rawReq('GET', ocRedirectTo.pathname + ocRedirectTo.search)
+  check('openid-client：授权地址 302 平台授权页', ocFirst.status === 302 && String(ocFirst.headers.location).startsWith('/#/oauth/authorize?req='))
+  const ocApprove = await authorizeConfirm(admin, reqIdOf(ocFirst), true)
+  const ocTokens = await oc.authorizationCodeGrant(ocConfig, new URL(ocApprove.result.location), { pkceCodeVerifier: ocVerifier, expectedState: ocState, expectedNonce: ocNonce })
+  check('openid-client：授权码换令牌（Basic 认证 + PKCE + id_token 验签全过）', typeof ocTokens.access_token === 'string' && typeof ocTokens.id_token === 'string')
+  const ocUser = await oc.fetchUserInfo(ocConfig, ocTokens.access_token, ocTokens.claims().sub)
+  check('openid-client：userinfo 取回身份（一行 SDK 式接入闭环）', ocUser.sub === adminLogin.data.user.id && ocUser.org !== null && ocUser.roles.includes('super_admin'))
 
   // 冻结联动：OIDC 令牌即时失效（无需等过期）
-  const devAuth = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, state: 'st-dev', username: 'dev', password: 'Ybk@2026' } })
-  const devTokenOidc = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: devAuth.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret } })
+  const frozenAuth = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'st-frozen' })}`)
+  const frozenApprove = await authorizeConfirm(dev, reqIdOf(frozenAuth), true)
+  const frozenTokens = jsonBody(await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: tokenForm({ code: new URL(frozenApprove.result.location).searchParams.get('code') }),
+  }))
   const devUserFull = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('陈默'), { token: admin })).data.users[0]
   await api('POST', `/api/iam/users/${devUserFull.id}/freeze`, { token: admin, body: { reason: '第 6 步：验证 OIDC 离职/冻结联动' } })
-  const frozenInfo = await rawApi('GET', '/oauth/userinfo', { token: devTokenOidc.json.access_token })
+  const frozenInfo = await rawReq('GET', '/oauth/userinfo', { headers: { authorization: `Bearer ${frozenTokens.access_token}` } })
   check('账号冻结 → OIDC 令牌即时失效（卖点闭环）', frozenInfo.status === 401)
   // 解冻并重登：后续 MCP/Skill 段仍需 dev 令牌（冻结已即时吊销旧令牌）
   await api('POST', `/api/iam/users/${devUserFull.id}/unfreeze`, { token: admin })
@@ -690,6 +931,97 @@ try {
   const deadVerify = await api('POST', `/api/mcp/services/${deadSvc.data.id}/verify`, { token: admin })
   check('real 验证不可达 endpoint 被拒（不再恒可达）', !deadVerify.ok)
 
+  // ================================================================ MCP 配置导入（mcpServers JSON）
+  section('MCP 配置导入（mcpServers JSON 一键接入）')
+  // streamable HTTP + SSE 响应帧 + 会话头的 mock 服务（复刻 teambition 形态）
+  const mcpSseStub = createServer(async (req, res) => {
+    const raw = await readBody(req)
+    let msg = {}
+    try { msg = JSON.parse(raw) } catch { /* ignore */ }
+    const sseReply = (payload, extra = {}) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', ...extra })
+      res.end(`data: ${JSON.stringify(payload)}\n\n`)
+    }
+    const noSession = { jsonrpc: '2.0', id: msg.id, error: { code: -32600, message: 'Server not initialized: session required' } }
+    if (msg.method === 'initialize') {
+      return sseReply({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'tb-like', version: '1.0' } } }, { 'mcp-session-id': 'sess-stub-1' })
+    }
+    if (msg.method === 'notifications/initialized') { res.writeHead(202); return res.end() }
+    if (msg.method === 'tools/list') {
+      if (req.headers['mcp-session-id'] !== 'sess-stub-1') return sseReply(noSession)
+      return sseReply({ jsonrpc: '2.0', id: msg.id, result: { tools: [
+        { name: 'tb_query_task', description: '查询任务', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+        { name: 'tb_create_task', description: '创建任务', inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
+      ] } })
+    }
+    if (msg.method === 'tools/call') {
+      if (req.headers['mcp-session-id'] !== 'sess-stub-1') return sseReply(noSession)
+      const auth = req.headers.authorization ? `|auth:${req.headers.authorization}` : ''
+      return sseReply({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: `sse-echo:${msg.params?.name}${auth}` }], usage: { totalTokens: 88 } } })
+    }
+    res.writeHead(404).end('{}')
+  })
+  await new Promise((resolve) => mcpSseStub.listen(0, '127.0.0.1', resolve))
+  const ssePort = mcpSseStub.address().port
+
+  // 1. 标准形态导入（用户实际粘贴的配置样式）
+  const tbConfig = JSON.stringify({ mcpServers: { 'teambition-mcp': { type: 'streamableHttp', url: `http://127.0.0.1:${ssePort}/api/mcp?userToken=u-demo` } } })
+  const imp = await api('POST', '/api/mcp/import', { token: admin, body: { config: tbConfig } })
+  check('mcpServers JSON 一键导入', imp.ok && imp.data.imported === 1 && imp.data.results[0].ok, JSON.stringify(imp).slice(0, 300))
+  const impR = imp.data.results[0]
+  check('工具自动发现（initialize→tools/list，SSE 帧解析）', impR.tools === 2 && impR.reachable === true)
+  check('导入即验证并上线（autoDeploy）', impR.status === 'online')
+  const tbService = (await api('GET', '/api/mcp/services', { token: admin })).data.services.find((s) => s.id === impR.serviceId)
+  check('发现的工具含完整 inputSchema', tbService.tools.length === 2 && tbService.tools[0].inputSchema?.required?.[0] === 'id')
+
+  // 2. 全链路调用（SSE + 会话头 + 权限组）
+  await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
+    name: 'teambition 全放行', policies: { [impR.serviceId]: { allowedTools: '*', constraints: {} } },
+    subjects: [{ type: 'user', id: adminLogin.data.user.id, name: 'admin' }],
+  } })
+  const tbInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: impR.serviceId, tool: 'tb_query_task', args: { id: 't-1' } } })
+  check('导入服务真实调用（SSE 响应 + 会话复用）', tbInvoke.ok && tbInvoke.data.ok === true && JSON.stringify(tbInvoke.data.result).includes('sse-echo:tb_query_task'), JSON.stringify(tbInvoke).slice(0, 300))
+
+  // 3. headers 透传（Authorization）
+  const authConfig = JSON.stringify({ mcpServers: { 'authed-mcp': { type: 'http', url: `http://127.0.0.1:${ssePort}/api/mcp`, headers: { Authorization: 'Bearer tk-123' } } } })
+  const impAuth = await api('POST', '/api/mcp/import', { token: admin, body: { config: authConfig } })
+  await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
+    name: 'authed 全放行', policies: { [impAuth.data.results[0].serviceId]: { allowedTools: '*', constraints: {} } },
+    subjects: [{ type: 'user', id: adminLogin.data.user.id, name: 'admin' }],
+  } })
+  const authInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: impAuth.data.results[0].serviceId, tool: 'tb_query_task', args: {} } })
+  check('导入的认证头透传到远端（Authorization）', authInvoke.ok && authInvoke.data.ok === true && JSON.stringify(authInvoke.data.result).includes('auth:Bearer tk-123'), JSON.stringify(authInvoke).slice(0, 300))
+  const whoamiInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: impAuth.data.results[0].serviceId, tool: 'whoami', args: {} } })
+  check('清单外工具被网关拒绝（导入不越权）', whoamiInvoke.data?.status === 'denied', JSON.stringify(whoamiInvoke).slice(0, 200))
+  const authSvc = (await api('GET', '/api/mcp/services', { token: admin })).data.services.find((s) => s.id === impAuth.data.results[0].serviceId)
+  check('认证头列表回显脱敏', authSvc?.headers?.Authorization && !String(authSvc.headers.Authorization).includes('tk-123'), JSON.stringify(authSvc?.headers))
+
+  // 4. stdio/command 本地形态不支持
+  const impStdio = await api('POST', '/api/mcp/import', { token: admin, body: { config: JSON.stringify({ mcpServers: { 'local-tools': { command: 'npx', args: ['-y', 'some-mcp'] } } }) } })
+  check('stdio/command 形态标记不可导入', impStdio.ok && impStdio.data.results[0].ok === false && /stdio/.test(impStdio.data.results[0].error))
+
+  // 5. 非法 JSON
+  const impBad = await api('POST', '/api/mcp/import', { token: admin, body: { config: '{oops' } })
+  check('非法 JSON 报错（400）', !impBad.ok && impBad.status === 400 && /JSON/.test(impBad.error?.message ?? ''))
+
+  // 6. 重复导入（slug 冲突）
+  const impDup = await api('POST', '/api/mcp/import', { token: admin, body: { config: tbConfig } })
+  check('重复导入同名列出冲突', impDup.ok && impDup.data.results[0].ok === false && /已存在/.test(impDup.data.results[0].error))
+
+  // 7. 权限控制
+  const impDenied = await api('POST', '/api/mcp/import', { token: dev, body: { config: tbConfig } })
+  check('无 mcp.service.write 权限导入被拒（403）', impDenied.status === 403)
+
+  // 8. 远端不可达：导入成功但保留草稿
+  const impDead = await api('POST', '/api/mcp/import', { token: admin, body: { config: JSON.stringify({ mcpServers: { 'dead-remote': { type: 'http', url: 'http://127.0.0.1:1/mcp' } } }) } })
+  check('远端不可达：导入保留草稿并回传原因', impDead.data.results[0].ok === true && impDead.data.results[0].reachable === false && impDead.data.results[0].status === 'draft' && /发现失败/.test(impDead.data.results[0].error ?? ''), JSON.stringify(impDead).slice(0, 300))
+  const deadImported = (await api('GET', '/api/mcp/services', { token: admin })).data.services.find((s) => s.id === impDead.data.results[0].serviceId)
+  check('不可达服务不落伪工具清单', deadImported.tools.length === 0)
+
+  // 9. 在线外部服务同步工具
+  const syncRes = await api('POST', `/api/mcp/services/${impR.serviceId}/sync-tools`, { token: admin })
+  check('在线外部服务可同步工具清单', syncRes.ok && syncRes.data.tools.length === 2)
+
   // -- 钉钉真实 stub（复刻 OpenAPI 形状） ---------------------------------
   const ddUsers = {
     dd_u002: { unionId: 'dd_u002', userId: 'u002', name: '林小满', email: 'linxm@yuanbingke.com' },
@@ -816,18 +1148,7 @@ try {
   const lockAlerts = await api('GET', '/api/audit/alerts', { token: admin })
   check('锁定触发已入告警中心（暴力破解可观测）', lockAlerts.ok && JSON.stringify(lockAlerts.data.alerts).includes('登录失败锁定'))
 
-  const scopeBad = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, redirectUri: 'https://crm.partner.example/cb', state: 'st-scope', username: 'admin', password: 'Ybk@2026', scope: 'openid profile billing:admin' } })
-  check('OIDC 白名单外 scope 申请被拒', scopeBad.status === 401 && JSON.stringify(scopeBad.json).includes('scope'))
-
-  const pkceVerifier = 'selftest-pkce-verifier-43-chars-aaaaaaaaaaaaaa'
-  const pkceChallenge = createHash('sha256').update(pkceVerifier).digest('base64url')
-  const pkceAuth = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, redirectUri: 'https://crm.partner.example/cb', state: 'st-pkce', username: 'admin', password: 'Ybk@2026', code_challenge: pkceChallenge, code_challenge_method: 'S256' } })
-  const pkceNoVerifier = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: pkceAuth.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret } })
-  check('PKCE 授权码缺少 code_verifier 被拒', pkceAuth.status === 200 && pkceNoVerifier.status === 401 && JSON.stringify(pkceNoVerifier.json).includes('code_verifier'))
-
-  const pkceAuth2 = await rawApi('POST', '/oauth/authorize', { body: { clientId: oidcClient.data.clientId, redirectUri: 'https://crm.partner.example/cb', state: 'st-pkce2', username: 'admin', password: 'Ybk@2026', code_challenge: pkceChallenge, code_challenge_method: 'S256' } })
-  const pkceOk = await rawApi('POST', '/oauth/token', { body: { grant_type: 'authorization_code', code: pkceAuth2.json.code, client_id: oidcClient.data.clientId, client_secret: oidcClient.data.clientSecret, code_verifier: pkceVerifier } })
-  check('PKCE S256 正确 verifier 换牌成功', pkceOk.status === 200 && pkceOk.json.access_token.split('.').length === 3)
+  // OIDC scope 白名单 / PKCE 强制 / Basic+Post 双认证的回归断言已并入第 6 步（浏览器授权流重写）
 
   // ================================================================ 资产运营（企业 AI 资产台账 / 健康巡检 / 成本报表）
   section('资产运营（统一台账 / 健康巡检 / 成本报表）')
@@ -921,21 +1242,206 @@ try {
   check('下线后状态与凭证联动禁用', agentOffline.data.status === 'offline' && agentOffline.data.credential.status === 'disabled')
   void credBefore
 
-  // ================================================================ AI 应用
-  section('AI 应用本体')
-  const appCreate = await api('POST', '/api/apps', { token: ops, body: { name: '自测应用', attrs: { description: '自测应用', appType: 'web', url: 'https://selftest.example.com', riskLevel: 'low', dataClass: 'internal', agentIds: [targetAgent.id] }, agentIds: [targetAgent.id] } })
-  check('注册应用（编排在线 Agent）', appCreate.ok && appCreate.data.credential.clientId)
+  // ================================================================ AI 应用 ↔ SSO 打通（MVP 闭环）
+  section('AI 应用 ↔ SSO 打通（注册 → 签发 → 门禁双点 → 跳转登录）')
+  const ssoAppCreate = await api('POST', '/api/apps', { token: ops, body: { name: 'SSO 自测应用', attrs: { description: 'MVP 闭环：注册 → 签发 → 门禁 → 浏览器授权流', appType: 'web', icon: '🔐', url: 'https://sso-app.example.com', riskLevel: 'low', dataClass: 'internal', agentIds: [targetAgent.id] }, agentIds: [targetAgent.id] } })
+  check('注册应用（编排在线 Agent，owner=资源管理员）', ssoAppCreate.ok && ssoAppCreate.data.credential.clientId)
+  const ssoAppId = ssoAppCreate.data.app.id
 
-  const appOnlineReq = await api('POST', `/api/apps/${appCreate.data.app.id}/transition`, { token: ops, body: { action: 'online' } })
-  check('应用发布 L4 审批', appOnlineReq.ok)
-  await api('POST', `/api/approvals/${appOnlineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意发布' } })
-  const appDetail = await api('GET', `/api/apps/${appCreate.data.app.id}`, { token: admin })
-  check('应用拓扑穿透（app→agent→skill）', appDetail.ok && appDetail.data.topology.children.length >= 1)
-  check('应用成本穿透归集', appDetail.ok && appDetail.data.cost.length >= 1)
+  // 门禁点 1（早反馈）：未签发 SSO 客户端 → 发起上线被拒
+  const gateBlocked = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
+  check('上线门禁（点1）：未签发 SSO 客户端被拒并指路', !gateBlocked.ok && JSON.stringify(gateBlocked.error).includes('SSO'))
 
-  const offlineAgent = await api('POST', `/api/apps/${appCreate.data.app.id}/transition`, { token: ops, body: { action: 'offline', note: '自测下架' } })
-  await api('POST', `/api/approvals/${offlineAgent.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意下架' } })
-  check('应用下架 L4 审批执行', offlineAgent.ok)
+  // owner-based 授权：非 owner 开发者 / 机器身份一律 403
+  const devSso = await api('POST', `/api/apps/${ssoAppId}/sso-client`, { token: dev, body: { redirectUris: ['https://evil.example/cb'] } })
+  check('非 owner 开发者签发被拒（developer 有 app.write 但非 owner）', devSso.status === 403)
+  const machineCredAppWrite = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'sso-gate-machine', refType: 'external', scopes: ['app.write'] } })
+  const machineAppWriteLogin = await api('POST', '/api/auth/client-credentials', { body: { clientId: machineCredAppWrite.data.clientId, clientSecret: machineCredAppWrite.data.clientSecret } })
+  const machineSso = await api('POST', `/api/apps/${ssoAppId}/sso-client`, { token: machineAppWriteLogin.data.token, body: { redirectUris: ['https://evil.example/cb'] } })
+  check('机器身份签发被拒（owner 校验 human-only）', machineSso.status === 403)
+
+  // owner 签发（secret 仅一次）+ 回跳地址护栏
+  const issueSso = await api('POST', `/api/apps/${ssoAppId}/sso-client`, { token: ops, body: { redirectUris: ['https://sso-app.example.com/cb'], clientType: 'confidential', consentRequired: false } })
+  check('owner 签发 SSO 客户端（secret 一次性返回）', issueSso.ok && issueSso.data.clientId.startsWith('oc-') && issueSso.data.clientSecret.startsWith('ocs'))
+  const badUri = await api('PATCH', `/api/apps/${ssoAppId}/sso-client`, { token: ops, body: { redirectUris: ['http://insecure.example/cb'] } })
+  check('回跳地址护栏（http 非 localhost 被拒）', !badUri.ok)
+  const ssoDetail = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
+  check('应用详情返回 sso 块（无 secret 泄露）', ssoDetail.ok && ssoDetail.data.sso?.clientId === issueSso.data.clientId && !JSON.stringify(ssoDetail.data.sso).includes('Secret'))
+
+  // 门禁点 2（兜底）：审批挂单期间禁用客户端 → 审批通过但执行失败留痕
+  const onlineReq1 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
+  check('签发后发起上线（审批单快照 ssoClientId）', onlineReq1.ok && onlineReq1.data.approval.payload.ssoClientId === issueSso.data.clientId)
+  await api('POST', `/api/apps/${ssoAppId}/sso-client/disable`, { token: ops, body: { reason: '审批期间禁用（执行期复核演练）' } })
+  const approveFail = await api('POST', `/api/approvals/${onlineReq1.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '应触发执行期复核失败' } })
+  const appAfterFail = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
+  check('门禁点2：审批期间禁用 → 上线执行失败留痕', approveFail.ok && approveFail.data.status === 'failed' && String(approveFail.data.execution?.error ?? '').includes('复核') && appAfterFail.data.status !== 'online')
+
+  // 重新启用 → 再次审批 → 上线成功
+  await api('POST', `/api/apps/${ssoAppId}/sso-client/enable`, { token: ops })
+  const onlineReq2 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
+  await api('POST', `/api/approvals/${onlineReq2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意发布' } })
+  const appOnlineDetail = await api('GET', `/api/apps/${ssoAppId}`, { token: admin })
+  check('复核通过后上线成功', appOnlineDetail.data.status === 'online')
+  check('应用拓扑穿透（app→agent→skill）', appOnlineDetail.ok && appOnlineDetail.data.topology.children.length >= 1)
+  check('应用成本穿透归集', appOnlineDetail.ok && appOnlineDetail.data.cost.length >= 1)
+
+  // 完整浏览器流（应用客户端）：第一跳 → 用户确认 → 换牌 → userinfo
+  const appAuthorizeQuery = new URLSearchParams({
+    response_type: 'code', client_id: issueSso.data.clientId, redirect_uri: 'https://sso-app.example.com/cb',
+    state: 'st-app-mvp', scope: 'openid profile', code_challenge: pkceChallenge, code_challenge_method: 'S256',
+  }).toString()
+  const appFirst = await rawReq('GET', `/oauth/authorize?${appAuthorizeQuery}`)
+  check('应用客户端授权第一跳 → 平台授权页', appFirst.status === 302 && String(appFirst.headers.location).startsWith('/#/oauth/authorize?req='))
+  const appApprove = await authorizeConfirm(ops, reqIdOf(appFirst), true)
+  const appTokens = jsonBody(await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: `Basic ${Buffer.from(`${issueSso.data.clientId}:${issueSso.data.clientSecret}`).toString('base64')}` },
+    body: new URLSearchParams({ grant_type: 'authorization_code', code: new URL(appApprove.result.location).searchParams.get('code'), redirect_uri: 'https://sso-app.example.com/cb', code_verifier: pkceVerifier }).toString(),
+  }))
+  const appUserInfo = jsonBody(await rawReq('GET', '/oauth/userinfo', { headers: { authorization: `Bearer ${appTokens.access_token}` } }))
+  check('应用完整浏览器流（authorize → consent → token → userinfo）', appTokens.access_token?.split('.').length === 3 && appUserInfo.sub === opsLogin.data.user.id && appUserInfo.org !== null)
+
+  // app.updated 联动：应用改名 → 客户端名称同步
+  await api('PATCH', `/api/apps/${ssoAppId}`, { token: ops, body: { name: 'SSO 自测应用 v2' } })
+  const clientsAfterRename = await api('GET', '/api/authn/oidc/clients', { token: admin })
+  const renamedClient = clientsAfterRename.data.clients.find((c) => c.clientId === issueSso.data.clientId)
+  check('应用改名 → OIDC 客户端名称同步（app.updated 联动）', renamedClient?.name === 'SSO 自测应用 v2' && renamedClient.refAppName === 'SSO 自测应用 v2')
+
+  // 轮换：旧 secret 立即失效
+  const rotatedApp = await api('POST', `/api/apps/${ssoAppId}/sso-client/rotate`, { token: ops })
+  check('owner 轮换 secret（新值一次性返回）', rotatedApp.ok && rotatedApp.data.clientSecret.startsWith('ocs') && rotatedApp.data.clientSecret !== issueSso.data.clientSecret)
+  const rotFirst = await rawReq('GET', `/oauth/authorize?${new URLSearchParams({ ...Object.fromEntries(new URLSearchParams(appAuthorizeQuery)), state: 'st-rotate' }).toString()}`)
+  const rotApprove = await authorizeConfirm(ops, reqIdOf(rotFirst), true)
+  const rotCode = new URL(rotApprove.result.location).searchParams.get('code')
+  const oldSecretCall = await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', client_id: issueSso.data.clientId, client_secret: issueSso.data.clientSecret, code: rotCode, redirect_uri: 'https://sso-app.example.com/cb', code_verifier: pkceVerifier }).toString(),
+  })
+  check('轮换后旧 secret 被拒（401）', oldSecretCall.status === 401)
+  const rotFirst2 = await rawReq('GET', `/oauth/authorize?${new URLSearchParams({ ...Object.fromEntries(new URLSearchParams(appAuthorizeQuery)), state: 'st-rotate2' }).toString()}`)
+  const rotApprove2 = await authorizeConfirm(ops, reqIdOf(rotFirst2), true)
+  const newSecretCall = await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', client_id: issueSso.data.clientId, client_secret: rotatedApp.data.clientSecret, code: new URL(rotApprove2.result.location).searchParams.get('code'), redirect_uri: 'https://sso-app.example.com/cb', code_verifier: pkceVerifier }).toString(),
+  })
+  check('新 secret 换牌成功', newSecretCall.status === 200)
+
+  // 生命周期联动：下架 → 客户端禁用；恢复上线 → 客户端启用；归档 → 客户端禁用（终态）
+  const offlineReq1 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'offline', note: '联动演练：下架' } })
+  await api('POST', `/api/approvals/${offlineReq1.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意下架' } })
+  const afterOffline = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
+  check('应用下架 → SSO 客户端联动禁用（app.offlined）', afterOffline.data.status === 'offline' && afterOffline.data.sso?.status === 'disabled')
+  // 重新上线：下架联动禁用了客户端 → 门禁要求先重新启用（控制台 SSO tab 有警示与入口）
+  const reonlineBlocked = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
+  check('客户端禁用期间重新上线被门禁拦截', !reonlineBlocked.ok && JSON.stringify(reonlineBlocked.error).includes('SSO'))
+  await api('POST', `/api/apps/${ssoAppId}/sso-client/enable`, { token: ops })
+  await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'retrial' } })
+  const onlineReq3 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
+  await api('POST', `/api/approvals/${onlineReq3.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '再次上线' } })
+  const afterReline = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
+  check('应用恢复上线 → 客户端联动启用（app.onlined）', afterReline.data.status === 'online' && afterReline.data.sso?.status === 'active')
+  const offlineReq2 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'offline', note: '归档前下架' } })
+  await api('POST', `/api/approvals/${offlineReq2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意' } })
+  await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'archive' } })
+  const afterArchive = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
+  check('应用归档 → 客户端联动禁用（app.archived 终态）', afterArchive.data.status === 'archived' && afterArchive.data.sso?.status === 'disabled')
+
+  // ================================================================ OIDC 会话补全 + 安全闭环（P3）
+  section('OIDC 会话补全（refresh 轮转 / end_session / revoke / 密钥轮换）')
+  const ocList = await api('GET', '/api/authn/oidc/clients', { token: admin })
+  const ocRecord = ocList.data.clients.find((c) => c.clientId === OC.clientId)
+  check('OIDC 客户端全局列表（含关联应用与 discovery 元数据）', ocList.ok && Boolean(ocRecord) && ocRecord.discovery.token_endpoint.includes('/oauth/token') && ocList.data.clients.some((c) => c.refAppName === 'SSO 自测应用 v2'))
+  await api('PATCH', `/api/authn/oidc/clients/${ocRecord.id}`, { token: admin, body: { postLogoutUris: ['https://crm.partner.example/logged-out'] } })
+
+  // openid-client 联测扩充：refresh 轮转 → 旧值重放整链吊销
+  const p3Auth1 = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'p3-refresh' })}`)
+  const p3Approve1 = await authorizeConfirm(admin, reqIdOf(p3Auth1), true)
+  const p3Tokens1 = await oc.authorizationCodeGrant(ocConfig, new URL(p3Approve1.result.location), { pkceCodeVerifier: pkceVerifier, expectedState: 'p3-refresh' })
+  const p3Refreshed = await oc.refreshTokenGrant(ocConfig, p3Tokens1.refresh_token)
+  check('openid-client：refresh_token 轮转新令牌对', typeof p3Refreshed.access_token === 'string' && p3Refreshed.refresh_token !== p3Tokens1.refresh_token)
+  let replayThrew = ''
+  try { await oc.refreshTokenGrant(ocConfig, p3Tokens1.refresh_token) } catch (error) { replayThrew = String(error?.error ?? error?.message ?? error) }
+  check('旧 refresh 重放被拒', replayThrew !== '')
+  let chainDead = ''
+  try { await oc.refreshTokenGrant(ocConfig, p3Refreshed.refresh_token) } catch (error) { chainDead = String(error?.error ?? error?.message ?? error) }
+  check('重放触发整链吊销（轮转后的新 refresh 一并失效）', chainDead !== '')
+
+  // scope 只允许收窄
+  const p3Auth2 = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'p3-scope', scope: 'openid' })}`)
+  const p3Approve2 = await authorizeConfirm(admin, reqIdOf(p3Auth2), true)
+  const p3Tokens2 = await oc.authorizationCodeGrant(ocConfig, new URL(p3Approve2.result.location), { pkceCodeVerifier: pkceVerifier, expectedState: 'p3-scope' })
+  const widen = await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'refresh_token', client_id: OC.clientId, client_secret: OC.clientSecret, refresh_token: p3Tokens2.refresh_token, scope: 'openid profile email' }).toString(),
+  })
+  check('refresh 扩大 scope 被拒（只允许收窄）', widen.status === 400 && jsonBody(widen).error === 'invalid_scope')
+
+  // 冻结 → refresh 换发即时失效（安全必需：不等过期）
+  const freezeUser = await api('POST', '/api/iam/users', { token: admin, body: { username: 'ssofreeze01', displayName: 'OIDC 冻结联动', orgId: newOrg.data.id } })
+  const freezeLogin = await api('POST', '/api/auth/login', { body: { username: 'ssofreeze01', password: freezeUser.data.initialPassword } })
+  const fzAuth = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'p3-frozen' })}`)
+  const fzApprove = await authorizeConfirm(freezeLogin.data.token, reqIdOf(fzAuth), true)
+  const fzTokens = await oc.authorizationCodeGrant(ocConfig, new URL(fzApprove.result.location), { pkceCodeVerifier: pkceVerifier, expectedState: 'p3-frozen' })
+  await api('POST', `/api/iam/users/${freezeUser.data.id}/freeze`, { token: admin, body: { reason: 'refresh 联动吊销验证' } })
+  let frozenRefresh = ''
+  try { await oc.refreshTokenGrant(ocConfig, fzTokens.refresh_token) } catch (error) { frozenRefresh = String(error?.error ?? error?.message ?? error) }
+  check('账号冻结 → refresh 换发被拒（实时校验用户状态）', frozenRefresh !== '')
+
+  // end_session：合法/非法回跳 + refresh 链吊销
+  const esAuth = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'p3-endsession' })}`)
+  const esApprove = await authorizeConfirm(admin, reqIdOf(esAuth), true)
+  const esTokens = await oc.authorizationCodeGrant(ocConfig, new URL(esApprove.result.location), { pkceCodeVerifier: pkceVerifier, expectedState: 'p3-endsession' })
+  const esUrl = oc.buildEndSessionUrl(ocConfig, { id_token_hint: esTokens.id_token, post_logout_redirect_uri: 'https://crm.partner.example/logged-out', state: 'logout-st' })
+  const esOk = await rawReq('GET', esUrl.pathname + esUrl.search)
+  check('end_session 合法回跳 → 302 平台登出中转页', esOk.status === 302 && String(esOk.headers.location).startsWith('/#/oauth/logout') && String(esOk.headers.location).includes('logged-out'))
+  let esChainDead = ''
+  try { await oc.refreshTokenGrant(ocConfig, esTokens.refresh_token) } catch (error) { esChainDead = String(error?.error ?? error?.message ?? error) }
+  check('end_session 同时吊销 refresh 链（登出后不能静默续期）', esChainDead !== '')
+  const esBad = await rawReq('GET', `/oauth/end_session?${new URLSearchParams({ id_token_hint: esTokens.id_token, post_logout_redirect_uri: 'https://evil.example/x' }).toString()}`)
+  check('end_session 非法回跳 → 平台错误页（不开放重定向）', esBad.status === 302 && String(esBad.headers.location).startsWith('/#/oauth/error'))
+
+  // revoke（RFC 7009）：access jti 黑名单 + refresh 链
+  const rvAuth = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'p3-revoke' })}`)
+  const rvApprove = await authorizeConfirm(admin, reqIdOf(rvAuth), true)
+  const rvTokens = await oc.authorizationCodeGrant(ocConfig, new URL(rvApprove.result.location), { pkceCodeVerifier: pkceVerifier, expectedState: 'p3-revoke' })
+  await oc.tokenRevocation(ocConfig, rvTokens.access_token)
+  const revokedInfo = await rawReq('GET', '/oauth/userinfo', { headers: { authorization: `Bearer ${rvTokens.access_token}` } })
+  check('revoke access token → userinfo 即时 401', revokedInfo.status === 401)
+  await oc.tokenRevocation(ocConfig, rvTokens.refresh_token)
+  let revokedRefresh = ''
+  try { await oc.refreshTokenGrant(ocConfig, rvTokens.refresh_token) } catch (error) { revokedRefresh = String(error?.error ?? error?.message ?? error) }
+  check('revoke refresh token → 换发被拒', revokedRefresh !== '')
+
+  // JWKS 密钥轮换：旧 token 宽限内验签通过、新 token kid 切换、JWKS 双 key
+  const krAuth = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'p3-rotate' })}`)
+  const krApprove = await authorizeConfirm(admin, reqIdOf(krAuth), true)
+  const krTokensOld = await oc.authorizationCodeGrant(ocConfig, new URL(krApprove.result.location), { pkceCodeVerifier: pkceVerifier, expectedState: 'p3-rotate' })
+  const keysRotated = await api('POST', '/api/authn/oidc/keys/rotate', { token: admin })
+  const oldKid = JSON.parse(Buffer.from(krTokensOld.access_token.split('.')[0], 'base64url').toString('utf8')).kid
+  check('密钥轮换执行（新 kid + 24h 宽限）', keysRotated.ok && keysRotated.data.kid !== oldKid && keysRotated.data.graceHours === 24)
+  const graceInfo = await rawReq('GET', '/oauth/userinfo', { headers: { authorization: `Bearer ${krTokensOld.access_token}` } })
+  check('轮换后旧 token 宽限内仍可验签（在途不掉线）', graceInfo.status === 200)
+  const krAuth2 = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'p3-rotate2' })}`)
+  const krApprove2 = await authorizeConfirm(admin, reqIdOf(krAuth2), true)
+  const krTokensNew = await oc.authorizationCodeGrant(ocConfig, new URL(krApprove2.result.location), { pkceCodeVerifier: pkceVerifier, expectedState: 'p3-rotate2' })
+  const newKid = JSON.parse(Buffer.from(krTokensNew.access_token.split('.')[0], 'base64url').toString('utf8')).kid
+  check('新令牌切换到新 kid 签名', newKid === keysRotated.data.kid && newKid !== oldKid)
+  const jwksAfterRotate = jsonBody(await rawReq('GET', '/.well-known/jwks.json'))
+  check('JWKS 宽限期公布双公钥（旧 key 保留验签）', jwksAfterRotate.keys.length === 2 && jwksAfterRotate.keys.some((k) => k.kid === oldKid) && jwksAfterRotate.keys.some((k) => k.kid === newKid))
+
+  // public 客户端（D-a 决策）：免 secret + 强制 PKCE + 不签发 refresh（纯前端 SPA 形态）
+  const publicClient = await api('POST', '/api/authn/oidc/clients', { token: admin, body: { name: '纯前端 SPA（public）', redirectUris: ['http://localhost:5173/cb'], clientType: 'public' } })
+  check('登记 public 客户端（无 secret 返回）', publicClient.ok && !publicClient.data.clientSecret && publicClient.data.note.includes('public'))
+  const pubAuth = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ client_id: publicClient.data.clientId, redirect_uri: 'http://localhost:5173/cb', state: 'p3-public' })}`)
+  const pubApprove = await authorizeConfirm(admin, reqIdOf(pubAuth), true)
+  const pubTokens = jsonBody(await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', client_id: publicClient.data.clientId, code: new URL(pubApprove.result.location).searchParams.get('code'), redirect_uri: 'http://localhost:5173/cb', code_verifier: pkceVerifier }).toString(),
+  }))
+  check('public 客户端免 secret 换牌成功且不签发 refresh', pubTokens.access_token?.split('.').length === 3 && pubTokens.refresh_token === undefined)
+
+  // 授权事件审计留痕
+  const oidcAudit = await api('GET', '/api/audit/logs?limit=200', { token: admin })
+  check('授权事件审计留痕（granted / denied）', oidcAudit.ok && oidcAudit.data.items.some((log) => log.action === 'oidc.authorize.granted') && oidcAudit.data.items.some((log) => log.action === 'oidc.authorize.denied'))
 
   // ================================================================ 审计
   section('审计与告警与成本')
@@ -1074,11 +1580,169 @@ try {
   // 工具级 connect 管理工具（宿主侧 dsh Agent 用自然语言管理接入）
   const toolCodeCreate = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'connect_code_create', args: { template: 'readonly', ttlMinutes: 5 } } })
   check('工具 connect_code_create 签发接入码', toolCodeCreate.ok && toolCodeCreate.data.isError === false && toolCodeCreate.data.value.code.startsWith('enr_'))
+
+  // ================================================================ NAS 资产（FS 文件存储）
+  section('NAS 资产纳管（plugin-nas + 文件网关 stub）')
+
+  // 网关 stub 自身契约：错误 Bearer 被拒（证明平台调用确实携带网关令牌）
+  const gwBadToken = await fetch(`http://127.0.0.1:${NAS_GW_PORT}/mcp`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer wrong-token' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize' }),
+  })
+  check('网关 stub 校验 Bearer（错误令牌 401）', gwBadToken.status === 401)
+
+  // 用户测试配置（synology-filestation 形态）一键导入 → 创建 + 探活 + 上线 + 工具发现
+  const mcpServersConfig = JSON.stringify({
+    mcpServers: {
+      'synology-filestation': {
+        url: `http://127.0.0.1:${NAS_GW_PORT}/mcp`,
+        headers: { Authorization: `Bearer ${NAS_GW_TOKEN}`, 'X-NAS-IP': NAS_GW_IP },
+      },
+    },
+  })
+  const nasImport = await api('POST', '/api/nas/import', { token: admin, body: { config: mcpServersConfig, name: '自测群晖 NAS' } })
+  const nasImportResult = nasImport.data?.results?.[0] ?? {}
+  check('mcpServers JSON 一键导入（探活 → 上线 → 工具发现）',
+    nasImport.ok && nasImport.data.imported === 1 && nasImportResult.reachable === true && nasImportResult.status === 'online' && nasImportResult.tools === 10,
+    JSON.stringify(nasImport.error ?? nasImportResult))
+  const nasId = nasImportResult.nasId
+
+  const nasDetail = await api('GET', `/api/nas/${nasId}`, { token: admin })
+  check('详情含健康与网关工具面', nasDetail.ok && nasDetail.data.health.status === 'healthy' && nasDetail.data.gatewayTools.length === 10)
+  check('访问令牌回显脱敏（原文不落响应）', nasDetail.ok && !JSON.stringify(nasDetail.data).includes(NAS_GW_TOKEN) && String(nasDetail.data.attrs.accessToken).endsWith('…'))
+
+  const nasHealth = await api('POST', `/api/nas/${nasId}/health`, { token: admin })
+  check('手动探活（initialize 握手测延迟）', nasHealth.ok && nasHealth.data.status === 'healthy' && nasHealth.data.latencyMs >= 0)
+
+  // 文件全链（全部经网关 tools/call）
+  const nasShares = await api('GET', `/api/nas/${nasId}/fs`, { token: admin })
+  check('列出共享文件夹（fs_list_shares）', nasShares.ok && JSON.stringify(nasShares.data).includes('skillhub'))
+  const nasFiles = await api('GET', `/api/nas/${nasId}/fs?path=/skillhub`, { token: admin })
+  check('列目录（fs_list）', nasFiles.ok && JSON.stringify(nasFiles.data).includes('readme.txt'))
+  const nasMkdir = await api('POST', `/api/nas/${nasId}/fs/mkdir`, { token: admin, body: { path: '/skillhub/selftest' } })
+  check('创建目录（fs_create_folder）', nasMkdir.ok && nasGwCalls.some((c) => c.name === 'fs_create_folder' && c.args.share === 'skillhub'))
+  const nasUpload = await api('POST', `/api/nas/${nasId}/fs/upload`, {
+    token: admin,
+    body: { contentBase64: Buffer.from('PK\x03\x04selftest-file', 'latin1').toString('base64'), destPath: '/skillhub/selftest/a.zip' },
+  })
+  check('上传文件（平台 staging → 网关 fs_upload 侧读盘）', nasUpload.ok && nasGwUploads.some((u) => u.share === 'skillhub' && u.path === '/selftest/a.zip' && u.magic === 'PK'))
+  const nasSearch = await api('POST', `/api/nas/${nasId}/fs/search`, { token: admin, body: { pattern: 'report', path: '/skillhub' } })
+  check('检索文件（fs_search）', nasSearch.ok && JSON.stringify(nasSearch.data).includes('report'))
+  const nasDelete = await api('POST', `/api/nas/${nasId}/fs/delete`, { token: admin, body: { paths: ['/skillhub/selftest/a.zip'] } })
+  check('删除文件（fs_delete）', nasDelete.ok && nasGwCalls.some((c) => c.name === 'fs_delete'))
+  const nasAudit = await api('GET', `/api/audit/logs?resourceId=${nasId}&limit=20`, { token: admin })
+  check('写类文件操作审计留痕', (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.mkdir') && (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.upload'))
+
+  // RBAC：无角色 403 / developer 只读
+  const memberLogin = await api('POST', '/api/auth/login', { body: { username: 'yqz', password: 'Ybk@2026' } })
+  const member = memberLogin.data?.token
+  const memberNas = await api('GET', '/api/nas', { token: member })
+  check('无 nas.read 角色访问被拒（403）', memberNas.status === 403)
+  const devNasRead = await api('GET', '/api/nas', { token: dev })
+  check('developer 只读放行（nas.read）', devNasRead.ok)
+  const devNasWrite = await api('POST', `/api/nas/${nasId}/fs/mkdir`, { token: dev, body: { path: '/skillhub/deny' } })
+  check('developer 写操作被拒（缺 nas.write，403）', devNasWrite.status === 403)
+
+  // ================================================================ Skill 包 NAS 存储
+  section('Skill 包 NAS 存储（上架自动打包上传）')
+  const storageDeny = await api('PUT', '/api/skill-storage', { token: dev, body: { mode: 'nas', nasId, basePath: '/skillhub' } })
+  check('无 skill.storage.write 配置存储被拒（403）', storageDeny.status === 403)
+  const storageSet = await api('PUT', '/api/skill-storage', { token: admin, body: { mode: 'nas', nasId, basePath: '/skillhub' } })
+  check('配置包存储后端为已纳管 NAS 资产', storageSet.ok && storageSet.data.mode === 'nas' && storageSet.data.nasId === nasId && storageSet.data.basePath === '/skillhub')
+
+  // ① 提交自带 zip：上架时原样上传 NAS
+  const zipBuffer = Buffer.concat([Buffer.from('PK\x03\x04', 'latin1'), Buffer.from('selftest-skill-zip-payload')])
+  const pkgSubmit = await api('POST', '/api/skills', { token: admin, body: { name: '自测打包技能', content: '# 自测打包技能\n\n## 何时使用\n验证 skill.zip 随提交上传 NAS 的全链路。\n\n## 步骤\n提交即携带包内容。', category: '通用', version: '1.0.0', packageBase64: zipBuffer.toString('base64') } })
+  check('提交可携带 skill.zip（hasPackage）', pkgSubmit.ok && pkgSubmit.data.hasPackage === true, JSON.stringify(pkgSubmit.error))
+  const pkgSkillId = pkgSubmit.data?.id
+  const badZip = await api('POST', '/api/skills', { token: admin, body: { name: '坏包技能', content: '# x', category: '通用', packageBase64: Buffer.from('not-a-zip').toString('base64') } })
+  check('非 ZIP 内容（缺 PK 魔数）提交被拒', !badZip.ok)
+  await api('POST', `/api/skills/${pkgSkillId}/approve`, { token: admin, body: { level: 'domain', decision: 'approve', opinion: 'selftest' } })
+  const uploadsBefore = nasGwUploads.length
+  const pkgPublish = await api('POST', `/api/skills/${pkgSkillId}/publish`, { token: admin, body: {} })
+  const pkgUploaded = nasGwUploads[nasGwUploads.length - 1]
+  check('上架自动上传 NAS（fs_upload 收到包）', pkgPublish.ok && nasGwUploads.length === uploadsBefore + 1, JSON.stringify(pkgPublish.error))
+  check('上传产物即提交的 zip（字节级一致）', pkgUploaded?.magic === 'PK' && pkgUploaded.sizeBytes === zipBuffer.length && pkgUploaded.content.equals(zipBuffer))
+  check('上传路径契约 <basePath>/<slug>/<slug>-<version>.zip', pkgUploaded?.share === 'skillhub' && typeof pkgUploaded?.path === 'string' && pkgUploaded.path.endsWith('-1.0.0.zip'))
+  const pkgSkill = await api('GET', `/api/skills/${pkgSkillId}`, { token: admin })
+  const pkgVersion = pkgSkill.data?.versions?.find((v) => v.version === '1.0.0')
+  check('版本记录回写 package 元数据（storage=nas）', pkgVersion?.package?.storage === 'nas' && pkgVersion.package.nasId === nasId && pkgVersion.package.sizeBytes === zipBuffer.length)
+  const pkgDownload = await rawReq('GET', `/api/skills/${pkgSkillId}/package?version=1.0.0`, { headers: { authorization: `Bearer ${admin}` } })
+  check('包下载端点返回 zip（PK 头）', pkgDownload.status === 200 && pkgDownload.body.startsWith('PK'))
+
+  // ② 无 zip 提交：上架时由 SKILL.md 现场打包（platform-core zip.ts，零依赖）
+  const autoSubmit = await api('POST', '/api/skills', { token: admin, body: { name: '自测自动打包', content: '# 自测自动打包\n\n## 何时使用\n验证无 zip 提交时由 SKILL.md 现场打包上传 NAS。\n\n## 步骤\n提交 → 审批 → 上架。', category: '通用', version: '0.1.0' } })
+  await api('POST', `/api/skills/${autoSubmit.data.id}/approve`, { token: admin, body: { level: 'domain', decision: 'approve', opinion: 'selftest' } })
+  const autoPublish = await api('POST', `/api/skills/${autoSubmit.data.id}/publish`, { token: admin, body: {} })
+  const autoUploaded = nasGwUploads[nasGwUploads.length - 1]
+  check('无 zip 时由 SKILL.md 现场打包上传', autoPublish.ok && autoUploaded?.magic === 'PK' && autoUploaded.sizeBytes > 100 && autoUploaded.path.endsWith('-0.1.0.zip'), JSON.stringify(autoPublish.error))
+  check('现场打包产物含 SKILL.md 条目', autoUploaded?.content.toString('latin1').includes('SKILL.md'))
+
+  // ③ fail-closed：存储后端 NAS 非 online → 上架中止且版本不落 published
+  const draftNas = await api('POST', '/api/nas', { token: admin, body: { name: '未上线 NAS', attrs: { description: 'fail-closed 验证', gatewayUrl: `http://127.0.0.1:${NAS_GW_PORT}/mcp`, accessToken: NAS_GW_TOKEN, nasIp: NAS_GW_IP, dataClass: 'internal' } } })
+  await api('PUT', '/api/skill-storage', { token: admin, body: { mode: 'nas', nasId: draftNas.data.id, basePath: '/skillhub' } })
+  const fcSubmit = await api('POST', '/api/skills', { token: admin, body: { name: '自测中止技能', content: '# 自测中止技能\n\n## 何时使用\n验证存储后端 NAS 未上线时上架 fail-closed。\n\n## 步骤\n提交 → 审批 → 上架应中止。', category: '通用', version: '1.0.0' } })
+  await api('POST', `/api/skills/${fcSubmit.data.id}/approve`, { token: admin, body: { level: 'domain', decision: 'approve', opinion: 'selftest' } })
+  const fcPublish = await api('POST', `/api/skills/${fcSubmit.data.id}/publish`, { token: admin, body: {} })
+  check('存储后端 NAS 未上线 → 上架 fail-closed', !fcPublish.ok && JSON.stringify(fcPublish.error).includes('fail-closed'), JSON.stringify(fcPublish.error))
+  const fcSkill = await api('GET', `/api/skills/${fcSubmit.data.id}`, { token: admin })
+  check('fail-closed 后版本未标记 published', fcSkill.ok && fcSkill.data.versions.every((v) => v.status !== 'published'))
+  await api('PUT', '/api/skill-storage', { token: admin, body: { mode: 'local' } })
+  const storageBack = await api('GET', '/api/skill-storage', { token: admin })
+  check('存储后端可切回 local', storageBack.ok && storageBack.data.config.mode === 'local')
+
+  // ================================================================ 台账与巡检（NAS 接入）
+  section('资产台账与巡检（NAS 接入）')
+  const inventory = await api('GET', '/api/assets/inventory', { token: admin })
+  check('台账包含 nas 资产类型', inventory.ok && inventory.data.items.some((item) => item.type === 'nas') && (inventory.data.summary.byType.nas?.total ?? 0) >= 2)
+  const healthcheck = await api('POST', '/api/assets/healthcheck', { token: admin, body: {} })
+  check('一键巡检覆盖在线 NAS（initialize 探活 healthy）', healthcheck.ok && healthcheck.data.items.some((item) => item.type === 'nas' && item.status === 'healthy'))
+
+  // ================================================================ 平台即 MCP Server（POST /mcp）
+  section('平台即 MCP Server（POST /mcp）')
+  const mcpAnon = await rawReq('POST', '/mcp', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) })
+  check('无 Bearer 令牌 401', mcpAnon.status === 401)
+  const mcpGet = await rawReq('GET', '/mcp', { headers: { authorization: `Bearer ${admin}` } })
+  check('GET SSE 长流不支持（405，纯 JSON 形态合法）', mcpGet.status === 405)
+  const mcpInit = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'selftest', version: '1.0' } } }),
+  })
+  check('initialize 返回 serverInfo/capabilities + 会话头', mcpInit.status === 200 && jsonBody(mcpInit).result?.serverInfo?.name === 'dsh-ops-platform' && typeof mcpInit.headers['mcp-session-id'] === 'string')
+  const mcpNotify = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+  })
+  check('通知类消息 202 确认', mcpNotify.status === 202)
+  const mcpTools = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+  })
+  const mcpToolList = jsonBody(mcpTools).result?.tools ?? []
+  check('tools/list 暴露全部运维工具（40+，含 nas_*）', mcpToolList.length >= 40 && mcpToolList.some((t) => t.name === 'nas_fs_upload'), `tools=${mcpToolList.length}`)
+  const mcpCall = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'nas_list', arguments: {} } }),
+  })
+  const mcpCallResult = jsonBody(mcpCall).result
+  check('tools/call 执行成功（content blocks）', mcpCall.status === 200 && mcpCallResult?.isError === false && Array.isArray(mcpCallResult?.content), JSON.stringify(jsonBody(mcpCall)).slice(0, 200))
+  const mcpDeny = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${dev}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'nas_fs_mkdir', arguments: { nasId, path: '/skillhub/x' } } }),
+  })
+  const mcpDenyResult = jsonBody(mcpDeny).result
+  check('工具级权限点拦截（dev 缺 nas.write → isError）', mcpDeny.status === 200 && mcpDenyResult?.isError === true && JSON.stringify(mcpDenyResult).includes('nas.write'))
+  const mcpUnknown = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'resources/list', params: {} }),
+  })
+  check('未知方法 -32601', jsonBody(mcpUnknown).error?.code === -32601)
 } finally {
   // ---------------------------------------------------------------- 收尾
   console.log('\n\x1b[90m» 停止测试实例…\x1b[0m')
   proc.kill('SIGKILL')
   await new Promise((resolve) => ghStub.close(resolve))
+  await new Promise((resolve) => nasGwStub.close(resolve))
   await rm(DATA_DIR, { recursive: true, force: true }).catch(() => {})
 }
 
