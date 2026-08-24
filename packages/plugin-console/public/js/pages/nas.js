@@ -71,7 +71,7 @@ export async function renderNas(content, params, ctx) {
         { title: '更新时间', width: 110, render: (item) => `<span class="fs-12 text-4">${timeAgo(item.updatedAt)}</span>` },
       ],
       rows: items,
-      onRowClick: (item) => openNasDetail(item.id, ctx, schema),
+      onRowClick: (id) => openNasDetail(id, ctx, schema),
       empty: '没有匹配的 NAS 资产',
     }))
   }
@@ -507,7 +507,7 @@ function mountFsBrowser(host, nas, ctx) {
       ],
       rows: entries,
       rowKey: (entry, i) => entry.name ?? i,
-      onRowClick: (entry) => { if (entry.isDir) { currentPath = joinPath(currentPath, entry.name); void load() } },
+      onRowClick: (name, entry) => { if (entry?.isDir) { currentPath = joinPath(currentPath, entry.name); void load() } },
       empty: currentPath ? '空目录' : '未查询到共享文件夹',
     }))
     tableHost.querySelectorAll('tr').forEach((tr, i) => {
