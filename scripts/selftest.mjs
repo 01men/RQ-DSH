@@ -1678,22 +1678,29 @@ try {
   const devNasPatch = await api('PATCH', `/api/nas/${nasId}`, { token: dev, body: { attrs: { description: 'x' } } })
   check('developer 编辑被拒（缺 nas.write，403）', devNasPatch.status === 403)
 
-  // 删除（DELETE）：仅终态可删，走 上线 → 下线 → 归档 → 删除 全链
+  // 删除（DELETE）：草稿（从未上线，无法走到归档）可直接删；在线/已下线需先归档
   const nas2 = await api('POST', '/api/nas', { token: admin, body: { name: '自测待删 NAS', attrs: { description: '删除生命周期自测', gatewayUrl: `http://127.0.0.1:${NAS_GW_PORT}/mcp`, accessToken: NAS_GW_TOKEN, nasIp: NAS_GW_IP } } })
   check('登记第二台 NAS（草稿）', nas2.ok && nas2.data.status === 'draft', JSON.stringify(nas2.error))
   const nas2Id = nas2.data?.id
-  const delDraft = await api('DELETE', `/api/nas/${nas2Id}`, { token: admin })
-  check('非终态删除被拒（草稿需先下线/归档）', delDraft.status === 400 && !delDraft.ok)
   const devNasDelete = await api('DELETE', `/api/nas/${nas2Id}`, { token: dev })
   check('developer 删除被拒（缺 nas.write，403）', devNasDelete.status === 403)
-  await api('POST', `/api/nas/${nas2Id}/transition`, { token: admin, body: { action: 'online' } })
-  await api('POST', `/api/nas/${nas2Id}/transition`, { token: admin, body: { action: 'offline', note: '自测删除链路' } })
-  const nas2Archive = await api('POST', `/api/nas/${nas2Id}/transition`, { token: admin, body: { action: 'archive' } })
-  check('归档为终态', nas2Archive.ok && nas2Archive.data.status === 'archived', JSON.stringify(nas2Archive.error))
-  const nas2Delete = await api('DELETE', `/api/nas/${nas2Id}`, { token: admin })
-  check('归档后删除成功（含健康/工具缓存清理）', nas2Delete.ok && nas2Delete.data.deleted === true, JSON.stringify(nas2Delete.error))
+  const delDraft = await api('DELETE', `/api/nas/${nas2Id}`, { token: admin })
+  check('草稿资产可直接删除', delDraft.ok && delDraft.data.deleted === true, JSON.stringify(delDraft.error))
   const nas2Gone = await api('GET', `/api/nas/${nas2Id}`, { token: admin })
   check('删除后详情不再可查', nas2Gone.status === 400 && !nas2Gone.ok)
+
+  const nas3 = await api('POST', '/api/nas', { token: admin, body: { name: '自测归档删除 NAS', attrs: { description: '归档删除链路自测', gatewayUrl: `http://127.0.0.1:${NAS_GW_PORT}/mcp`, accessToken: NAS_GW_TOKEN, nasIp: NAS_GW_IP } } })
+  const nas3Id = nas3.data?.id
+  await api('POST', `/api/nas/${nas3Id}/transition`, { token: admin, body: { action: 'online' } })
+  const delOnline = await api('DELETE', `/api/nas/${nas3Id}`, { token: admin })
+  check('在线资产删除被拒（需先下线/归档）', delOnline.status === 400 && !delOnline.ok)
+  await api('POST', `/api/nas/${nas3Id}/transition`, { token: admin, body: { action: 'offline', note: '自测删除链路' } })
+  const delOffline = await api('DELETE', `/api/nas/${nas3Id}`, { token: admin })
+  check('已下线资产删除仍被拒（需先归档）', delOffline.status === 400 && !delOffline.ok)
+  const nas3Archive = await api('POST', `/api/nas/${nas3Id}/transition`, { token: admin, body: { action: 'archive' } })
+  check('归档为终态', nas3Archive.ok && nas3Archive.data.status === 'archived', JSON.stringify(nas3Archive.error))
+  const nas3Delete = await api('DELETE', `/api/nas/${nas3Id}`, { token: admin })
+  check('归档后删除成功（含健康/工具缓存清理）', nas3Delete.ok && nas3Delete.data.deleted === true, JSON.stringify(nas3Delete.error))
 
   // ================================================================ Skill 包 NAS 存储
   section('Skill 包 NAS 存储（上架自动打包上传）')

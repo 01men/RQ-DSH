@@ -279,12 +279,17 @@ export class ResourceCoreService extends Service {
     })
   }
 
-  remove(type: string, id: string): boolean {
+  /**
+   * 删除资源：默认仅终态可删；调用方可经 allowStates 放宽（如 NAS 允许草稿直删——
+   * 草稿从未上线，无法经 下线→归档 到达终态）。
+   */
+  remove(type: string, id: string, opts?: { allowStates?: string[] }): boolean {
     const spec = this.requireSpec(type)
     const entity = this.collection(type).get(id)
     if (!entity) return false
-    if (!spec.lifecycle.states.find((state) => state.key === entity.status)?.terminal) {
-      throw new Error(`仅终态资源可删除，当前状态 ${entity.status} 需先下线/归档`)
+    const allowed = opts?.allowStates ?? spec.lifecycle.states.filter((state) => state.terminal).map((state) => state.key)
+    if (!allowed.includes(entity.status)) {
+      throw new Error(`当前状态 ${entity.status} 不可删除（可删状态：${allowed.join(' / ')}）`)
     }
     return this.collection(type).remove(id)
   }

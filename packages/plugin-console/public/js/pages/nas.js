@@ -273,7 +273,7 @@ async function openNasDetail(id, ctx, schema) {
         const ic = t.action === 'online' ? 'play' : t.action === 'offline' ? 'alert' : 'box'
         return `<button class="btn ${tone}" data-action="${esc(t.action)}">${icon(ic, 14)}${esc(t.label)}</button>`
       }).join('') : ''}
-      ${canWrite && nas.status === 'archived' ? `<button class="btn btn-danger-ghost" id="nas-delete">${icon('trash', 14)}删除</button>` : ''}`,
+      ${canWrite && ['draft', 'archived'].includes(nas.status) ? `<button class="btn btn-danger-ghost" id="nas-delete">${icon('trash', 14)}删除</button>` : ''}`,
   })
 
   const tabBody = drawer.body.querySelector('#nas-tab-body')

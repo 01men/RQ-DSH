@@ -1273,7 +1273,7 @@ export function apply(ctx: Context) {
     return maskNasEntity(nas)
   })
 
-  /** 删除 NAS 资产：仅终态（已归档）可删；被 Skill 包存储后端引用时拒绝。 */
+  /** 删除 NAS 资产：草稿（从未上线）或已归档可删；被 Skill 包存储后端引用时拒绝。 */
   guarded('DELETE', '/api/nas/:id', 'nas.write', (exchange) => {
     const id = exchange.params['id']!
     const nas = ctx.nasRegistry.get(id)
@@ -1282,7 +1282,7 @@ export function apply(ctx: Context) {
     if (storage.mode === 'nas' && storage.nasId === id) {
       throw new Error('该 NAS 正作为 Skill 包存储后端，请先在「Skill 包存储」切换为 local 或其他 NAS')
     }
-    ctx.resourceCore.remove('nas', id)
+    ctx.resourceCore.remove('nas', id, { allowStates: ['draft', 'archived'] })
     ctx.nasRegistry.purge(id)
     changeLog(exchange, 'nas.delete', 'nas', id, nas.name)
     return { deleted: true }
