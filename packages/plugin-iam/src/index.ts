@@ -388,6 +388,13 @@ function delay(ms: number): Promise<void> {
 export class IamService extends Service {
   static readonly provide = 'iam'
 
+  /**
+   * 内置连接器实现范围（applyConnectorMode 能直接实例化的 provider）。
+   * 配置保存以「可实现」为准放行，而非「当前已注册」——否则生产基线（无 DEMO_SEED、
+   * 注册表为空）首次保存钉钉凭证会被守卫拦死，形成「先有配置才能注册、先注册才能存配置」死锁。
+   */
+  private static readonly BUILTIN_CONNECTOR_PROVIDERS: ReadonlySet<string> = new Set(['dingtalk'])
+
   private connectors = new Map<string, OrgConnector>()
   private authProviders = new Map<string, IdentityProviderAdapter>()
 
@@ -400,6 +407,11 @@ export class IamService extends Service {
       this.registerAuthProvider(new DingTalkAuthAdapter())
     }
     this.ensureDefaultTenant()
+    // 连接器/身份源注册表仅存内存：重启后须按持久化配置重建，否则 real 模式的
+    // Real*Adapter 不会恢复（扫码登录/同步将报「未注册」）。
+    for (const config of this.connectorConfigs().all()) {
+      this.applyConnectorMode(config.provider)
+    }
   }
 
   registerConnector(connector: OrgConnector): () => void {
@@ -926,10 +938,11 @@ export class IamService extends Service {
     /** OpenAPI 基址覆盖（测试/专有部署）。 */
     apiBase?: string
   }): ConnectorConfigRecord {
-    if (!this.connectors.has(input.provider)) throw new Error(`未注册的连接器：${input.provider}`)
+    if (!IamService.BUILTIN_CONNECTOR_PROVIDERS.has(input.provider)) throw new Error(`未注册的连接器：${input.provider}`)
     const existing = this.connectorConfig(input.provider)
     const secret = input.appSecret ?? existing?.secretActual ?? 'demo-secret'
-    const mode = input.mode ?? (secret.startsWith('demo-') ? 'mock' : existing?.mode ?? 'mock')
+    // 非演示密钥的全新配置默认 real（表单不采集 mode，靠密钥形态推导；demo- 前缀=演示降级）。
+    const mode = input.mode ?? (secret.startsWith('demo-') ? 'mock' : existing?.mode ?? 'real')
     const payload = {
       provider: input.provider,
       enabled: input.enabled ?? existing?.enabled ?? true,

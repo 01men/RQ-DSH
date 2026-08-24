@@ -258,8 +258,12 @@ export class AuthnService extends Service {
 
   // -- 三方登录（IdentityProviderAdapter 链路，融合 auth-identity docs/03/04）--
 
-  /** 发起三方授权：生成一次性 state，返回（模拟）授权地址。 */
-  beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app'): { authorizeUrl: string | null; state: string } {
+  /**
+   * 发起三方授权：生成一次性 state，返回授权地址。
+   * 钉钉等真实 IdP 要求 redirect_uri 为绝对 URL，origin 由调用方从请求头推导后传入；
+   * 缺省时回落相对路径（仅本地/mock 链路可用）。
+   */
+  async beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app', origin?: string): Promise<{ authorizeUrl: string | null; state: string }> {
     const adapter = this.ctx.iam.getAuthProvider(provider)
     const state = randomUUID().replace(/-/g, '')
     this.oauthStates().insert({
@@ -268,8 +272,8 @@ export class AuthnService extends Service {
       provider,
       scene,
     })
-    const redirectUri = '/api/auth/sso'
-    return { authorizeUrl: adapter.buildAuthorizeUrl(scene, state, redirectUri), state }
+    const redirectUri = origin ? `${origin.replace(/\/+$/, '')}/api/auth/sso` : '/api/auth/sso'
+    return { authorizeUrl: await adapter.buildAuthorizeUrl(scene, state, redirectUri), state }
   }
 
   /**

@@ -117,7 +117,6 @@ async function seedDemo(ctx: Context): Promise<void> {
     loginEnabled: true,
     conflictStrategy: 'manual',
     intervalMinutes: 60,
-    callbackUrl: 'https://ops.yuanbingke.com/api/callback/dingtalk',
   })
 
   // -- MCP 服务（演示数据：exec 显式 demo，SLO/计费不统计） --------------------

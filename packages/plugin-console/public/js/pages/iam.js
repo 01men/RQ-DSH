@@ -602,6 +602,9 @@ export async function renderIam(content, params, ctx) {
     const [data] = await Promise.all([api.get('/api/iam/connectors')])
     const body = $('#iam-body')
     const config = data.configs.find((c) => c.provider === 'dingtalk')
+    // 回调地址按当前访问地址自动生成（与后端发起授权时按 Host 头拼接的 redirect_uri 一致），
+    // 直接复制到钉钉开发者后台的登录重定向地址即可，无需手填。
+    const callbackUrl = `${location.origin.replace(/\/+$/, '')}/api/auth/sso`
     body.innerHTML = `
       <div class="card mb-20">
         <div class="card-head">
@@ -623,7 +626,7 @@ export async function renderIam(content, params, ctx) {
             <div class="desc-item"><span class="k">AppKey</span><span class="v mono">${esc(config?.appKey ?? '未配置')}</span></div>
             <div class="desc-item"><span class="k">AppSecret</span><span class="v mono">${esc(config?.secretMasked ?? '—')} <span class="text-4">（KMS 加密存储）</span></span></div>
             <div class="desc-item"><span class="k">扫码登录</span><span class="v">${config?.loginEnabled ? '已开启' : '未开启'}</span></div>
-            <div class="desc-item"><span class="k">回调地址</span><span class="v mono">${esc(config?.callbackUrl ?? '—')}</span></div>
+            <div class="desc-item"><span class="k">回调地址</span><span class="v mono">${esc(callbackUrl)}</span></div>
             <div class="desc-item"><span class="k">冲突策略</span><span class="v">${strategyName(config?.conflictStrategy)}</span></div>
           </div>
           <div class="flex mt-14">
@@ -658,7 +661,11 @@ export async function renderIam(content, params, ctx) {
             ${field('AppKey', inputField('appKey', { value: config?.appKey }), { required: true })}
             ${field('AppSecret', inputField('appSecret', { value: '', placeholder: '留空保持不变（加密存储）' }), { hint: '通过 KMS 托管加密，禁止明文落库' })}
             ${field('同步频率（分钟）', inputField('intervalMinutes', { value: config?.intervalMinutes ?? 60 }))}
-            ${field('回调地址', inputField('callbackUrl', { value: config?.callbackUrl }), { full: true })}
+            ${field('回调地址（自动生成）', `
+              <div class="flex" style="gap:8px">
+                <input class="input" name="callbackUrl" readonly value="${esc(callbackUrl)}" style="flex:1">
+                <button class="btn btn-default" id="conn-copy-callback">${icon('copy', 13)}复制</button>
+              </div>`, { full: true, hint: '按当前访问地址生成，请将其配置到钉钉开发者后台对应应用的登录重定向地址（redirect URI）' })}
             ${field('冲突处理策略', selectField('conflictStrategy', [
               { value: 'manual', label: '人工确认（推荐）' },
               { value: 'third_party_wins', label: '以三方为准' },
@@ -669,6 +676,9 @@ export async function renderIam(content, params, ctx) {
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
       })
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('#conn-copy-callback').onclick = () => {
+        void navigator.clipboard?.writeText(callbackUrl).then(() => toast('已复制'))
+      }
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
         try {
