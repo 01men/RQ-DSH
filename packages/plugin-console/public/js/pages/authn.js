@@ -105,16 +105,25 @@ export async function renderAuthn(content, params, ctx) {
   }
   renderTab('principals')
 
-  $('#authn-credential').onclick = () => {
+  $('#authn-credential').onclick = async () => {
+    // 已注册的可绑定主体：选择后自动回填 refType/refId（凭据与资源真正关联），外部系统仍可手填
+    let bindable
+    try {
+      bindable = await api.get('/api/authn/bindable-resources')
+    } catch (error) { toast(error.message, 'error'); return }
+    const entries = [
+      ...bindable.agents.map((a) => ({ value: `agent:${a.id}`, refType: 'agent', refId: a.id, name: a.name, label: `Agent · ${a.name}（${a.status}）`, search: `${a.name} agent ${a.id}`.toLowerCase() })),
+      ...bindable.apps.map((a) => ({ value: `app:${a.id}`, refType: 'app', refId: a.id, name: a.name, label: `AI 应用 · ${a.name}（${a.status}）`, search: `${a.name} app 应用 ${a.id}`.toLowerCase() })),
+    ]
     const modal = openModal({
       title: '签发机器凭证（Client Credentials）', wide: true,
       body: `
         <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>用于 Agent / 应用 / 外部系统以机器身份接入平台。Secret 仅在创建后展示一次。</span></div>
         <div class="form-grid">
-          ${field('主体名称', inputField('name', { placeholder: '如 agent:my-agent / external:ci-system' }), { required: true })}
-          ${field('绑定类型', selectField('refType', [
-            { value: 'external', label: '外部系统' }, { value: 'agent', label: 'Agent' }, { value: 'app', label: 'AI 应用' },
-          ]))}
+          ${field('绑定主体（可搜索已注册的 Agent / AI 应用）', `
+            <input class="input" id="cred-bind-q" placeholder="输入关键词过滤，或直接下拉选择" autocomplete="off">
+            <select class="select" id="cred-bind" style="margin-top:6px"></select>`, { required: true, full: true })}
+          <div id="cred-name-holder" class="form-item full"></div>
           ${field('权限范围', selectField('scope', [
             { value: 'mcp.invoke', label: 'MCP 调用' },
             { value: 'skill.read', label: 'Skill 只读' },
@@ -123,11 +132,46 @@ export async function renderAuthn(content, params, ctx) {
         </div>`,
       foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>签发</button>',
     })
+    const bindSelect = modal.body.querySelector('#cred-bind')
+    const nameHolder = modal.body.querySelector('#cred-name-holder')
+    const renderOptions = (query) => {
+      const q = (query ?? '').trim().toLowerCase()
+      const visible = q ? entries.filter((e) => e.search.includes(q)) : entries
+      const selected = bindSelect.value
+      bindSelect.innerHTML =
+        `<option value="external">外部系统（手动填写名称）</option>` +
+        visible.map((e) => `<option value="${esc(e.value)}">${esc(e.label)}</option>`).join('')
+      if (selected && [...bindSelect.options].some((o) => o.value === selected)) bindSelect.value = selected
+      // 已选主体被过滤掉时，select 回落到外部系统——名称/关联区必须同步刷新，避免残留旧关联
+      renderNameField()
+    }
+    const current = () => entries.find((e) => e.value === bindSelect.value)
+    const renderNameField = () => {
+      const entry = current()
+      if (entry) {
+        nameHolder.innerHTML = `
+          <label class="form-label">自动关联</label>
+          <div class="muted-box" style="display:flex;align-items:center;gap:8px">
+            ${icon('link', 14)}
+            <span>主体名称 <code class="mono">${esc(`${entry.refType}:${entry.name}`)}</code> · 关联 ${esc(entry.refType)} <code class="mono">${esc(entry.refId)}</code></span>
+          </div>`
+      } else {
+        nameHolder.innerHTML = field('主体名称', inputField('name', { placeholder: '如 external:ci-system' }), { required: true })
+      }
+    }
+    renderOptions('')
+    modal.body.querySelector('#cred-bind-q').oninput = (event) => renderOptions(event.target.value)
+    bindSelect.onchange = renderNameField
     modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
     modal.el.querySelector('[data-ok]').onclick = async () => {
       const data = collectForm(modal.body)
+      const entry = current()
+      const payload = entry
+        ? { name: `${entry.refType}:${entry.name}`, refType: entry.refType, refId: entry.refId, scopes: [data.scope] }
+        : { name: data.name, refType: 'external', scopes: [data.scope] }
+      if (!payload.name) return toast('外部系统需填写主体名称', 'error')
       try {
-        const result = await api.post('/api/authn/principals', { name: data.name, refType: data.refType, scopes: [data.scope] })
+        const result = await api.post('/api/authn/principals', payload)
         modal.close()
         openModal({
           title: '凭证已签发（仅此一次展示）',

@@ -218,6 +218,17 @@ try {
   check('创建账号返回一次性随机初始口令', newUser.ok && typeof newUser.data.initialPassword === 'string' && newUser.data.initialPassword.length >= 16)
   const testerInitialPassword = newUser.data.initialPassword
 
+  // 口令二次修改（传达过程中改为指定口令）
+  const pwUser = await api('POST', '/api/iam/users', { token: admin, body: { username: 'pwtest01', displayName: '口令修改测试', orgId: newOrg.data.id } })
+  const pwShort = await api('POST', `/api/iam/users/${pwUser.data.id}/reset-password`, { token: admin, body: { password: 'short' } })
+  check('指定口令过短被拒（护栏）', !pwShort.ok)
+  const pwSet = await api('POST', `/api/iam/users/${pwUser.data.id}/reset-password`, { token: admin, body: { password: 'SelfTest@2026' } })
+  check('二次修改为指定口令', pwSet.ok && pwSet.data.initialPassword === 'SelfTest@2026')
+  const pwOldLogin = await api('POST', '/api/auth/login', { body: { username: 'pwtest01', password: pwUser.data.initialPassword } })
+  check('修改后原口令立即失效', pwOldLogin.status === 401)
+  const pwNewLogin = await api('POST', '/api/auth/login', { body: { username: 'pwtest01', password: 'SelfTest@2026' } })
+  check('指定口令可登录', pwNewLogin.ok)
+
   const roleList = await api('GET', '/api/iam/roles', { token: admin })
   const devRole = roleList.data.roles.find((role) => role.code === 'developer')
   const assign = await api('PATCH', `/api/iam/users/${newUser.data.id}`, { token: admin, body: { roleIds: [devRole.id] } })
@@ -279,6 +290,15 @@ try {
   section('统一认证（机器身份 / 令牌）')
   const cred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'selftest-ci', refType: 'external', scopes: ['mcp.invoke'] } })
   check('签发机器凭证（secret 一次性返回）', cred.ok && cred.data.clientSecret.startsWith('cs_'))
+
+  // 可绑定资源聚合 + 选择已注册主体自动关联（refType/refId 回填）
+  const bindable = await api('GET', '/api/authn/bindable-resources', { token: admin })
+  check('可绑定资源聚合（Agent / AI 应用清单）', bindable.ok && Array.isArray(bindable.data.agents) && bindable.data.agents.length > 0 && Array.isArray(bindable.data.apps))
+  const agentEntry = bindable.data.agents[0]
+  const credBind = await api('POST', '/api/authn/principals', { token: admin, body: { name: `agent:${agentEntry.name}`, refType: 'agent', refId: agentEntry.id, scopes: ['agent.read'] } })
+  const principalList = await api('GET', '/api/authn/principals', { token: admin })
+  const boundPrincipal = principalList.data.principals.find((p) => p.id === credBind.data.principalId)
+  check('选择已注册主体签发 → 凭据自动关联资源', credBind.ok && boundPrincipal?.refType === 'agent' && boundPrincipal?.refId === agentEntry.id)
 
   const ccBad = await api('POST', '/api/auth/client-credentials', { body: { clientId: cred.data.clientId, clientSecret: 'wrong' } })
   check('错误 client_secret 被拒', ccBad.status === 401)

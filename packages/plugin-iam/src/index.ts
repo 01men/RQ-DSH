@@ -673,14 +673,18 @@ export class IamService extends Service {
     return input.password ? { user } : { user, initialPassword: password }
   }
 
-  /** 重置为随机初始口令（仅本次返回；同时吊销令牌由冻结类事件或认证中心策略处理）。 */
-  resetPassword(id: string): { user: UserRecord; initialPassword: string } {
+  /** 重置口令：不传 password 则生成随机初始口令；传入则设置为指定口令（均仅本次返回明文）。 */
+  resetPassword(id: string, password?: string): { user: UserRecord; initialPassword: string } {
     const user = this.requireUser(id)
     if (user.status === 'deactivated') throw new Error('账号已注销，无法重置口令')
-    const password = generateSecret('init')
+    if (password !== undefined) {
+      if (password.trim().length < 8) throw new Error('口令长度不得少于 8 位')
+      if (/[\u4e00-\u9fff]/.test(password)) throw new Error('口令不得包含中文')
+    }
+    const next = password ?? generateSecret('init')
     const salt = generateSecret('salt').slice(0, 16)
-    this.users().update(id, { passwordSalt: salt, passwordHash: hashPassword(password, salt) })
-    return { user: this.users().get(id)!, initialPassword: password }
+    this.users().update(id, { passwordSalt: salt, passwordHash: hashPassword(next, salt) })
+    return { user: this.users().get(id)!, initialPassword: next }
   }
 
   importUsers(items: Array<{ username: string; displayName: string; orgId: string; title?: string; email?: string }>): { created: UserRecord[]; skipped: string[] } {

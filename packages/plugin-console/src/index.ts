@@ -570,8 +570,9 @@ export function apply(ctx: Context) {
   })
 
   guarded('POST', '/api/iam/users/:id/reset-password', 'iam.user.write', (exchange) => {
-    const { user, initialPassword } = ctx.iam.resetPassword(exchange.params['id']!)
-    changeLog(exchange, 'iam.user.reset_password', 'user', user.id, user.displayName, '重置为随机初始口令')
+    const { password } = body<{ password?: string }>(exchange)
+    const { user, initialPassword } = ctx.iam.resetPassword(exchange.params['id']!, password)
+    changeLog(exchange, 'iam.user.reset_password', 'user', user.id, user.displayName, password ? '设置为指定口令' : '重置为随机初始口令')
     return { id: user.id, username: user.username, initialPassword }
   })
 
@@ -721,10 +722,16 @@ export function apply(ctx: Context) {
     })),
   }))
 
+  /** 机器凭证可绑定的已注册资源（签发弹窗下拉/搜索用：选择后自动回填 refType/refId）。 */
+  guarded('GET', '/api/authn/bindable-resources', 'authn.principal.read', () => ({
+    agents: ctx.resourceCore.list('agent').map((agent) => ({ id: agent.id, name: agent.name, status: agent.status })),
+    apps: ctx.resourceCore.list('app').map((app) => ({ id: app.id, name: app.name, status: app.status })),
+  }))
+
   guarded('POST', '/api/authn/principals', 'authn.principal.write', (exchange) => {
     const input = body<{ name: string; refType?: 'agent' | 'app' | 'external'; refId?: string; scopes: string[] }>(exchange)
     const created = ctx.authn.createMachineCredential(input)
-    changeLog(exchange, 'authn.principal.create', 'principal', created.principal.id, input.name)
+    changeLog(exchange, 'authn.principal.create', 'principal', created.principal.id, input.name, input.refId ? `绑定 ${input.refType}:${input.refId}` : '')
     return { principalId: created.principal.id, clientId: created.clientId, clientSecret: created.clientSecret, note: '密钥仅此一次返回' }
   })
 
