@@ -186,7 +186,7 @@ export const connectHostApi = {
         clientSecret: credential.clientSecret,
         principalId: credential.principal.id,
         template: record.template,
-        hub: { name: config.hubName ?? '企业 AI 资源统一管理平台', version: config.hubVersion ?? '1.0.0' },
+        hub: { name: config.hubName ?? '榕器|企业AI资源治理平台', version: config.hubVersion ?? '1.0.0' },
         notice: '机器凭证仅本次返回，请妥善保存；后续用它在 /api/auth/client-credentials 换取机器令牌',
       })
     })
