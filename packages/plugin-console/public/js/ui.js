@@ -5,6 +5,10 @@ import { icon, PATHS } from './icons.js'
 export function h(html) {
   const tpl = document.createElement('template')
   tpl.innerHTML = html.trim()
+  if (tpl.content.children.length > 1) {
+    // h() 只返回首个顶层元素，多根内容会被静默丢弃；多元素场景请传字符串给 openModal/openDrawer
+    console.warn('h(): 输入含多个顶层元素，仅返回第一个（其余被丢弃，请改用字符串）', tpl.content.children)
+  }
   return tpl.content.firstElementChild
 }
 export function esc(value) {

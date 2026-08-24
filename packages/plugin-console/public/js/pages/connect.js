@@ -2,7 +2,7 @@
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
 import {
-  h, $, $$, esc, toast, openModal, closeModal, confirmDialog,
+  h, $, $$, esc, toast, openModal, confirmDialog,
   renderTable, statusBadge, collectForm, field, inputField, selectField, fmtTime, timeAgo,
 } from '../ui.js'
 
@@ -174,13 +174,13 @@ export async function renderConnect(content) {
           <div><span class="text-4">接入时间：</span>${fmtTime(client.enrolledAt)}</div>
           <div><span class="text-4">最近使用：</span>${client.lastUsedAt ? timeAgo(client.lastUsedAt) : '未调用'} · 活跃令牌 ${client.activeTokens} 个</div>
         </div>`),
-      foot: h('<button class="btn btn-default" onclick="closeModal()">关闭</button>'),
+      foot: '<button class="btn btn-default" data-cancel>关闭</button>',
     })
   }
 
   function openCreateCode() {
     const templates = clients.templates ?? []
-    openModal({
+    const modal = openModal({
       title: '创建接入码（一次性）',
       body: h(`
         <form id="connect-code-form">
@@ -188,29 +188,30 @@ export async function renderConnect(content) {
           ${field('有效分钟数', inputField('ttlMinutes', { value: '15' }), { hint: '超时未使用自动过期（1-1440）' })}
           ${field('用途备注', inputField('remark', { placeholder: '如：研发部小王的办公电脑 dsh' }), { hint: '便于审计与识别使用方' })}
         </form>`),
-      foot: h(`
-        <button class="btn btn-default" onclick="closeModal()">取消</button>
-        <button class="btn btn-primary" id="connect-code-submit">创建并展示接入码</button>`),
-      onClose: () => {},
+      // foot 传字符串：openModal 走 innerHTML，可含多个按钮（h() 只取 firstElementChild 会丢按钮）
+      foot: `
+        <button class="btn btn-default" data-cancel>取消</button>
+        <button class="btn btn-primary" id="connect-code-submit">创建并展示接入码</button>`,
     })
-    $('#connect-code-submit').onclick = async () => {
-      const values = collectForm($('#connect-code-form'))
+    modal.el.querySelector('#connect-code-submit').onclick = async () => {
+      const values = collectForm(modal.el.querySelector('#connect-code-form'))
       try {
         const created = await api.post('/api/connect/codes', {
           template: values.template,
           ttlMinutes: Number(values.ttlMinutes) || 15,
           remark: values.remark ?? '',
         })
-        closeModal()
+        modal.close()
         showOneTimeCode(created)
       } catch (error) { toast(error.message, 'error') }
     }
   }
 
   function showOneTimeCode(created) {
-    openModal({
+    const modal = openModal({
       title: '接入码已创建（仅展示这一次）',
-      body: h(`
+      // body 传字符串：含多个顶层元素（h() 只取 firstElementChild 会丢内容）
+      body: `
         <div class="fs-13 text-4 mb-8">请立即复制并发送给远程电脑的使用者（有效至 ${fmtTime(created.expiresAt)}）：</div>
         <div class="flex" style="gap:8px;align-items:center">
           <code class="mono" id="connect-one-time-code" style="flex:1;padding:12px;border-radius:8px;background:var(--bg-2);font-size:14px;word-break:break-all">${esc(created.code)}</code>
@@ -220,16 +221,16 @@ export async function renderConnect(content) {
           远程电脑安装插件后，在 dsh 界面对 Agent 说：<br>
           <span class="mono">「接入宿主平台，地址 &lt;本机局域网地址:端口&gt;，接入码 &lt;上面的码&gt;」</span><br>
           Agent 将执行 <span class="mono">connect_setup</span> 自动申请口令；也可打开远程电脑的 <span class="mono">http://127.0.0.1:7390</span> 配置页填写。
-        </div>`),
-      foot: h('<button class="btn btn-primary" onclick="closeModal()">我已保存</button>'),
+        </div>`,
+      foot: '<button class="btn btn-primary" data-cancel>我已保存</button>',
     })
-    $('#connect-copy-code').onclick = async () => {
+    modal.el.querySelector('#connect-copy-code').onclick = async () => {
       try {
         await navigator.clipboard.writeText(created.code)
         toast('已复制到剪贴板')
       } catch {
         const range = document.createRange()
-        range.selectNode($('#connect-one-time-code'))
+        range.selectNode(modal.el.querySelector('#connect-one-time-code'))
         getSelection().removeAllRanges()
         getSelection().addRange(range)
         toast('已全选，请按 Ctrl+C 复制', 'info')
