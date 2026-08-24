@@ -55,7 +55,7 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'agent_offline',
-    description: '下线 Agent（L4 高危：生成审批单，双人确认后自动执行；联动吊销机器凭证并通知绑定用户）。必须给出 reason。',
+    description: '下线 Agent（L4 高危：生成审批单，审批通过后自动执行；联动吊销机器凭证并通知绑定用户）。必须给出 reason。',
     permission: 'agent.offline',
     parameters: {
       agentId: { type: 'string', required: true, description: 'Agent ID' },

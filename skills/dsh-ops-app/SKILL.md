@@ -21,7 +21,7 @@ AI 应用注册、编排拓扑查看、应用层指标（DAU/会话/留存）、
 全平台视角：`dshctl cost report --groupBy=app|org|date`
 
 ### 场景 3：发布/下架（L4）
-POST /api/apps/<id>/transition {action:"online"|"offline"} → 审批单 → 双人确认自动执行。
+POST /api/apps/<id>/transition {action:"online"|"offline"} → 审批单 → 单人审批通过自动执行。
 下架联动吊销应用机器凭证。
 
 ## 护栏

@@ -87,7 +87,7 @@ pnpm dsh web --patch /tmp/ops-overlay.yml
 
 Agent 运维凭据（环境变量）：`DSHCTL_URL`（默认 `http://127.0.0.1:7300`）、
 `DSHCTL_USER` / `DSHCTL_PASS`（建议 ops 类账号，勿用 admin 常驻）、或 `DSHCTL_TOKEN`。
-日常运维让 Agent 读 `skills/dsh-ops-admin/SKILL.md` 即可（诊断→取证→dry-run 预演→执行→验证闭环，L4 高危操作自动走双人审批）。
+日常运维让 Agent 读 `skills/dsh-ops-admin/SKILL.md` 即可（诊断→取证→dry-run 预演→执行→验证闭环，L4 高危操作自动走审批单）。
 
 ---
 

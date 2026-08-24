@@ -11,7 +11,7 @@ export async function renderApprovals(content, params, ctx) {
     <div class="page-head">
       <div>
         <div class="page-title">审批中心</div>
-        <div class="page-desc">Skill 上架、Agent 上线、L4 高危操作（下线/吊销/删除）全平台汇聚；发起人与审批人不得为同一人（双人确认）。</div>
+        <div class="page-desc">Skill 上架、Agent 上线、L4 高危操作（下线/吊销/删除）全平台汇聚；有审批权限即可单人通过。</div>
       </div>
     </div>
     <div class="tabs">
@@ -119,7 +119,7 @@ function openDecision(id, decision, ctx) {
     body: `
       ${decision === 'approve' ? `
         <div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--ok-border);background:var(--ok-bg)">
-          ${icon('check', 15)}<span>通过后将<b>自动执行</b>对应的高危操作（执行结果会回写审批单）。双人确认原则：发起人不可自审。</span>
+          ${icon('check', 15)}<span>通过后将<b>自动执行</b>对应的高危操作（执行结果会回写审批单）。</span>
         </div>` : ''}
       ${field('审批意见', textareaField('opinion', { placeholder: decision === 'approve' ? '如：已确认影响面，同意执行' : '请说明驳回原因…' }), { required: true })}`,
     foot: `<button class="btn btn-default" data-cancel>取消</button><button class="btn ${decision === 'approve' ? 'btn-primary' : 'btn-danger'}" data-ok>${decision === 'approve' ? '确认通过' : '确认驳回'}</button>`,

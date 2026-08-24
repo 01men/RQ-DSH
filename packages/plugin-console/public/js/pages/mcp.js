@@ -260,12 +260,12 @@ async function openServiceDetail(id, ctx) {
   if (offlineBtn) offlineBtn.onclick = async () => {
     const result = await confirmDialog({
       title: '下线 MCP 服务（L4）', requireReason: true, danger: true, confirmText: '提交审批',
-      message: `下线 <b>${esc(svcData.name)}</b> 是高危操作，将生成审批单，双人确认后自动执行。所有依赖该服务的 Agent 调用会立即失败。`,
+      message: `下线 <b>${esc(svcData.name)}</b> 是高危操作，将生成审批单，审批通过后自动执行。所有依赖该服务的 Agent 调用会立即失败。`,
     })
     if (!result) return
     try {
       const response = await api.post(`/api/mcp/services/${svcData.id}/offline`, { reason: result.reason })
-      toast('已创建 L4 审批单，等待双人确认')
+      toast('已创建 L4 审批单，等待审批')
       drawer.close(); ctx.rerender()
       void response
     } catch (error) { toast(error.message, 'error') }

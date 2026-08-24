@@ -408,9 +408,6 @@ export class AuditService extends Service {
     const approval = this.approvals().get(id)
     if (!approval) throw new Error(`审批单不存在：${id}`)
     if (approval.status !== 'pending') throw new Error(`审批单已处理（${approval.status}）`)
-    if (approval.requesterId === approverId) {
-      throw new Error('发起人与审批人不能是同一人（双人确认原则）')
-    }
     if (decision === 'reject') {
       const updated = this.approvals().update(id, {
         status: 'rejected', approverId, approverName,

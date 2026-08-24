@@ -501,7 +501,7 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
         const reason = flag('reason')
         if (!reason) fail('offline 必须提供 --reason（L4 护栏）')
         const data = await call('POST', `/api/mcp/services/${id}/offline`, { reason: String(reason), viaApproval: true })
-        ok(`已创建 L4 审批单：${data.approval.id}（双人确认后自动执行）`)
+        ok(`已创建 L4 审批单：${data.approval.id}（审批通过后自动执行）`)
         return
       }
       if (action === 'invoke') {

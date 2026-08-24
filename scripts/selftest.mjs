@@ -1062,21 +1062,29 @@ try {
       if (token !== 'ut-STUB-OK') return jsonReply(401, { code: 'invalid.token' })
       return jsonReply(200, { ...ddUsers.dd_u002, corpId: 'ding-real' })
     }
-    if (url.pathname === '/v1.0/contact/departments/listByParent') {
-      if (req.headers['x-acs-dingtalk-access-token'] !== 'corp-token-stub') return jsonReply(401, { code: 'invalid.token' })
-      return jsonReply(200, { result: [{ deptId: 500, name: '真实连接器部门' }] })
+    if (url.pathname === '/topapi/v2/department/listsubid') {
+      if (url.searchParams.get('access_token') !== 'corp-token-stub') return jsonReply(200, { errcode: 40014, errmsg: 'invalid access_token' })
+      const body = JSON.parse(raw || '{}')
+      if (body.dept_id === 1) return jsonReply(200, { errcode: 0, errmsg: 'ok', result: { dept_id_list: [500] } })
+      return jsonReply(200, { errcode: 0, errmsg: 'ok', result: { dept_id_list: [] } })
     }
-    if (url.pathname === '/v1.0/contact/users/findByDept') {
-      if (req.headers['x-acs-dingtalk-access-token'] !== 'corp-token-stub') return jsonReply(401, { code: 'invalid.token' })
-      if (url.searchParams.get('deptId') !== '500') return jsonReply(200, { result: [], hasMore: false })
-      return jsonReply(200, { result: [{ ...ddUsers.dd_u020, deptId: 500 }], hasMore: false })
+    if (url.pathname === '/topapi/v2/department/get') {
+      if (url.searchParams.get('access_token') !== 'corp-token-stub') return jsonReply(200, { errcode: 40014, errmsg: 'invalid access_token' })
+      const body = JSON.parse(raw || '{}')
+      return jsonReply(200, { errcode: 0, errmsg: 'ok', result: { dept_id: body.dept_id, name: body.dept_id === 1 ? '真实企业根' : '真实连接器部门' } })
+    }
+    if (url.pathname === '/topapi/v2/user/list') {
+      if (url.searchParams.get('access_token') !== 'corp-token-stub') return jsonReply(200, { errcode: 40014, errmsg: 'invalid access_token' })
+      const body = JSON.parse(raw || '{}')
+      if (body.dept_id !== 500) return jsonReply(200, { errcode: 0, errmsg: 'ok', result: { list: [], has_more: false } })
+      return jsonReply(200, { errcode: 0, errmsg: 'ok', result: { list: [{ unionid: 'dd_u020', userid: 'u020', name: '真实连接用户', job_number: 'DD0020', title: '真实目录工程师', email: 'real@yuanbingke.com', active: true }], has_more: false } })
     }
     res.writeHead(404).end('{}')
   })
   await new Promise((resolve) => ddStub.listen(0, '127.0.0.1', resolve))
   const ddPort = ddStub.address().port
 
-  const putConnector = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-real', appKey: 'stub-key', appSecret: 'stub-secret', mode: 'real', apiBase: `http://127.0.0.1:${ddPort}`, enabled: true, conflictStrategy: 'manual' } })
+  const putConnector = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-real', appKey: 'stub-key', appSecret: 'stub-secret', mode: 'real', apiBase: `http://127.0.0.1:${ddPort}`, oapiBase: `http://127.0.0.1:${ddPort}`, enabled: true, conflictStrategy: 'manual' } })
   check('连接器切换真实模式', putConnector.ok && putConnector.data.mode === 'real')
   const connTest = await api('POST', '/api/iam/connectors/dingtalk/test', { token: admin })
   check('真实连接器健康检查（mock:false）', connTest.ok && connTest.data.ok === true && connTest.data.mock === false)
@@ -1237,15 +1245,12 @@ try {
   const bind = await api('POST', `/api/agents/${selfAgent.id}/bindings`, { token: admin, body: { userId: devUser.id } })
   check('绑定用户（授权留痕）', bind.ok)
 
-  // L4 上线：发起人（dev）→ 审批人（admin，双人确认）
-  const onlineRequest = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: ops, body: { action: 'online', note: '自测上线' } })
+  // L4 上线：单人审批制——发起人（admin）自审通过
+  const onlineRequest = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: admin, body: { action: 'online', note: '自测上线' } })
   check('上线生成 L4 审批单', onlineRequest.ok && onlineRequest.data.approval.status === 'pending')
 
-  const selfApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: dev, body: { decision: 'approve', opinion: '试图自审' } })
-  check('发起人不可自审（双人原则）', !selfApprove.ok)
-
-  const approve = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意上线' } })
-  check('审批通过自动执行上线', approve.ok && approve.data.status === 'executed')
+  const selfApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '自审通过' } })
+  check('发起人可自审，单人审批通过自动执行上线', selfApprove.ok && selfApprove.data.status === 'executed')
   const agentAfter = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
   check('Agent 状态已上线', agentAfter.data.status === 'online')
 

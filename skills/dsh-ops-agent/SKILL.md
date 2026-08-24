@@ -30,7 +30,7 @@ agent.write / agent.approve 权限；上线审批需第二管理员配合。
 ### 场景 3：上线流程
 1. 确认治理属性齐备（否则接口会给出具体缺失项）
 2. 试运行：`dshctl agent ... transition submit_trial`（限定用户组）
-3. 上线：POST /api/agents/<id>/transition {action:"online"} → 审批单 → 双人确认
+3. 上线：POST /api/agents/<id>/transition {action:"online"} → 审批单 → 单人审批通过
 
 ## 护栏
 - offline 必须给 reason；上线/下线均为 L4 审批

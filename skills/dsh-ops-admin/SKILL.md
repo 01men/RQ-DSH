@@ -39,7 +39,7 @@
 1. **诊断**：`dshctl audit alerts --unread` + `dshctl mcp list` 定位异常
 2. **取证**：`dshctl audit logs --resourceId=<id>` 回溯操作链
 3. **预演**：变更命令带 `--dry-run` 查看影响面
-4. **执行**：L4 高危操作生成审批单（`--reason` 必填），等待双人确认自动执行
+4. **执行**：L4 高危操作生成审批单（`--reason` 必填），有审批权限者单人通过即自动执行
 5. **验证**：`dshctl <resource> get <id>` 确认终态 + 审计回写
 
 ## 护栏（全局）

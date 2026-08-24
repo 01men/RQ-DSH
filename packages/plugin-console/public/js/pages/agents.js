@@ -309,7 +309,7 @@ token:    ${esc(result.token.slice(0, 64))}…</div>`,
           danger: !isOnline,
           confirmText: '提交审批',
           message: isOnline
-            ? `上线 <b>${esc(agent.name)}</b> 需要另一管理员审批确认（双人原则）。`
+            ? `上线 <b>${esc(agent.name)}</b> 将生成审批单，有审批权限的管理员通过后自动执行。`
             : `下线 <b>${esc(agent.name)}</b> 后：机器凭证立即吊销、${agent.boundUsers.length} 名绑定用户收到通知、审计数据保留。`,
         })
         if (!result) return
@@ -317,7 +317,7 @@ token:    ${esc(result.token.slice(0, 64))}…</div>`,
           const response = await api.post(`/api/agents/${agent.id}/transition`, {
             action: transition.action, note: result.reason ?? '上线申请',
           })
-          toast('已创建审批单（双人确认后自动执行）')
+          toast('已创建审批单（审批通过后自动执行）')
           drawer.close(); ctx.rerender()
           void response
         } catch (error) { toast(error.message, 'error') }

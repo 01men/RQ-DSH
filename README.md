@@ -340,7 +340,7 @@ cordis.patch.yml            dsh.bundle 安装补丁（dsh plugin add）
 | AI 应用本体（§6） | 应用 schema、编排拓扑（SVG 一图穿透）、DAU/留存、成本穿透 |
 | 应用 SSO 纳管（§6/App SSO） | OIDC Provider 浏览器授权流、owner 自助签发、上线门禁双点、refresh/end_session/revoke、冻结即时失效 |
 | 安全与审计（§7） | 四类日志、告警规则引擎、越权计数告警、成本多维报表 |
-| L4 护栏（§4.4） | 上线/下线/下架/吊销强制审批单，双人确认（发起人不可自审），执行结果回写 |
+| L4 护栏（§4.4） | 上线/下线/下架/吊销强制审批单，有审批权限者单人通过即执行，执行结果回写 |
 
 ## 五、控制台交互（飞书式）
 
@@ -387,7 +387,7 @@ curl -X POST localhost:7300/mcp -H "authorization: Bearer <token>" -H 'content-t
 
 `npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **375 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
-Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
+Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批（发起人可自审）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
 （真实 MCP/钉钉/OpenAI stub 往返、计量幂等与对账、钱包扣费与预算拦截、OIDC RS256/JWKS 全链路、
 市场验签/安装/卸载、复式分账试算平衡与红字冲正）+ 远程 dsh 接入
