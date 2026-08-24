@@ -181,7 +181,7 @@ async function refreshBadges() {
     const targets = { approvals: overview.approvals?.pending ?? 0, alerts: overview.alerts?.unread ?? 0 }
     for (const section of NAV) {
       for (const item of section.items) {
-        if (!item._badgeEl) continue
+        if (!item._badgeEl || !item.badge) continue
         const count = targets[item.badge] ?? 0
         item._badgeEl.textContent = String(count)
         item._badgeEl.classList.toggle('hidden', count === 0)

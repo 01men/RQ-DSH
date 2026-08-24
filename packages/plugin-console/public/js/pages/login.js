@@ -53,21 +53,26 @@ export function renderLogin(app) {
 
         <form class="login-form" id="login-form-dingtalk" style="display:none">
           <div id="ding-step-authorize">
-            <div style="text-align:center;padding:10px 0 6px">
-              <div style="width:180px;height:180px;margin:0 auto;border-radius:16px;background:
-                radial-gradient(120px 120px at 30% 25%, #e0e7ff, transparent),
-                radial-gradient(120px 120px at 75% 80%, #ede9fe, transparent), #f8f9fb;
-                border:1px solid var(--border);display:grid;place-items:center;position:relative">
-                <div style="color:var(--brand-500)">${icon('fingerprint', 64)}</div>
-                <div style="position:absolute;bottom:12px;font-size:12px;color:var(--text-3)">使用钉钉扫码授权登录</div>
+            <button class="btn btn-primary btn-lg btn-block" id="ding-oauth-go" type="button">前往钉钉扫码授权</button>
+            <div class="form-hint" style="margin:8px 0 4px">整页跳转钉钉授权：本机已登录钉钉自动识别身份，未登录则出二维码扫码。授权成功自动回跳登录。</div>
+            <details style="margin-top:12px">
+              <summary class="form-hint" style="cursor:pointer">手动输入授权码（演示/mock 备用）</summary>
+              <div style="text-align:center;padding:10px 0 6px">
+                <div style="width:180px;height:180px;margin:0 auto;border-radius:16px;background:
+                  radial-gradient(120px 120px at 30% 25%, #e0e7ff, transparent),
+                  radial-gradient(120px 120px at 75% 80%, #ede9fe, transparent), #f8f9fb;
+                  border:1px solid var(--border);display:grid;place-items:center;position:relative">
+                  <div style="color:var(--brand-500)">${icon('fingerprint', 64)}</div>
+                  <div style="position:absolute;bottom:12px;font-size:12px;color:var(--text-3)">使用钉钉扫码授权登录</div>
+                </div>
               </div>
-            </div>
-            <div class="form-item" style="margin-top:16px">
-              <label class="form-label">钉钉授权码</label>
-              <input class="input input-lg" id="login-ding-code" placeholder="请输入钉钉扫码授权码">
-              <div class="form-hint">走完整 OAuth2 链路：authorize 签发 state → code 换令牌 → unionId 归一化。code 5 分钟内仅可消费一次。</div>
-            </div>
-            <button class="btn btn-primary btn-lg btn-block" id="login-ding-submit" type="submit">免密登录</button>
+              <div class="form-item" style="margin-top:16px">
+                <label class="form-label">钉钉授权码</label>
+                <input class="input input-lg" id="login-ding-code" placeholder="请输入钉钉扫码授权码">
+                <div class="form-hint">走完整 OAuth2 链路：authorize 签发 state → code 换令牌 → unionId 归一化。code 5 分钟内仅可消费一次。</div>
+              </div>
+              <button class="btn btn-primary btn-lg btn-block" id="login-ding-submit" type="submit">免密登录</button>
+            </details>
           </div>
           <div id="ding-step-pending" style="display:none">
             <div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--brand-200);background:var(--brand-50)">
@@ -132,7 +137,37 @@ export function renderLogin(app) {
     e.preventDefault()
     void doLogin({ username: $('#login-username').value.trim(), password: $('#login-password').value }, '/api/auth/login')
   }
+  $('#ding-oauth-go').onclick = async () => {
+    const btn = $('#ding-oauth-go')
+    btn.classList.add('btn-loading')
+    try {
+      const auth = await api.post('/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr' })
+      if (!auth.authorizeUrl) throw new Error('身份源未返回授权地址（可能为 mock 模式），请改用手动输入授权码')
+      // 必须整页跳转：弹窗/iframe 会被第三方 Cookie 策略拦截导致授权失败
+      window.location.href = auth.authorizeUrl
+    } catch (error) {
+      toast(error.message, 'error')
+      btn.classList.remove('btn-loading')
+    }
+  }
+
   let dingTicket = ''
+  // 承接扫码回跳：callback 页把「首次使用三方身份」的待绑定票据暂存 localStorage
+  try {
+    const pendingRaw = localStorage.getItem('heng_ops_sso_pending')
+    if (pendingRaw) {
+      localStorage.removeItem('heng_ops_sso_pending')
+      const pending = JSON.parse(pendingRaw)
+      dingTicket = pending.pendingTicket ?? ''
+      if (dingTicket) {
+        document.querySelector('#login-tabs .segmented-item[data-tab="dingtalk"]')?.click()
+        $('#ding-pending-name').textContent = pending.profileName ?? ''
+        $('#ding-step-authorize').style.display = 'none'
+        $('#ding-step-pending').style.display = ''
+      }
+    }
+  } catch { /* 票据损坏则忽略，走常规登录 */ }
+
   tabDing.onsubmit = async (e) => {
     e.preventDefault()
     const btn = $('#login-ding-submit')

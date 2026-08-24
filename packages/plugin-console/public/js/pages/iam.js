@@ -421,23 +421,55 @@ export async function renderIam(content, params, ctx) {
           } catch (error) { toast(error.message, 'error') }
         }
       }
-      drawer.el.querySelector('#ud-bind').onclick = () => {
+      drawer.el.querySelector('#ud-bind').onclick = async () => {
+        // 钉钉 real 模式下优先扫码授权绑定（自动识别身份，不手工输入 unionId）；
+        // 手工录入降级为备用（mock/演示/其他平台）。
+        let dingtalkReal = false
+        try {
+          const data = await api.get('/api/iam/connectors')
+          dingtalkReal = Boolean((data?.configs ?? []).find((c) => c.provider === 'dingtalk' && c.enabled && c.mode === 'real'))
+        } catch { /* 查询失败时仅提供手工录入 */ }
         const modal = openModal({
           title: '绑定三方身份',
           body: `
             ${field('三方平台', selectField('provider', [{ value: 'dingtalk', label: '钉钉' }, { value: 'feishu', label: '飞书' }, { value: 'wecom', label: '企业微信' }]))}
-            ${field('三方 unionId', inputField('unionId', { placeholder: '如 dd_u002' }), { required: true })}
-            ${field('三方昵称', inputField('displayName'))}
-            ${field('二次验证码', inputField('verifyCode', { placeholder: '演示环境任意 6 位数字' }), { hint: '一人一号原则：同一三方身份只能绑定一个平台账号' })}`,
-          foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>绑定</button>',
+            <div id="bind-oauth" ${dingtalkReal ? '' : 'style="display:none"'}>
+              <div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--brand-200);background:var(--brand-50)">
+                ${icon('info', 15)}<span>无需填写任何 ID：点击按钮跳转钉钉授权，本机已登录钉钉将自动识别身份，未登录则扫码确认，授权后自动完成绑定。</span>
+              </div>
+              <button class="btn btn-primary btn-block" id="bind-oauth-go">${icon('link', 14)}钉钉扫码授权绑定</button>
+            </div>
+            <details id="bind-manual-wrap" ${dingtalkReal ? '' : 'open'} style="margin-top:${dingtalkReal ? '14px' : '0'}">
+              <summary class="fs-12 text-3" style="cursor:pointer;margin-bottom:10px">管理员手动绑定（备用）</summary>
+              ${field('三方 unionId', inputField('unionId', { placeholder: '如 dd_u002' }), { required: !dingtalkReal })}
+              ${field('三方昵称', inputField('displayName'))}
+              ${field('二次验证码', inputField('verifyCode', { placeholder: '演示环境任意 6 位数字' }), { hint: '一人一号原则：同一三方身份只能绑定一个平台账号' })}
+              <button class="btn btn-default btn-block" id="bind-manual-go">手动绑定</button>
+            </details>`,
+          foot: '<button class="btn btn-default" data-cancel>关闭</button>',
         })
         modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
-        modal.el.querySelector('[data-ok]').onclick = async () => {
+        const providerValue = () => modal.body.querySelector('[name="provider"]')?.value ?? 'dingtalk'
+        modal.el.querySelector('#bind-oauth-go')?.addEventListener('click', async (e) => {
+          const btn = e.currentTarget
+          btn.classList.add('btn-loading')
+          try {
+            if (providerValue() !== 'dingtalk') throw new Error('扫码授权绑定当前仅支持钉钉')
+            const auth = await api.post('/api/auth/sso/bind/authorize', { provider: 'dingtalk', targetUserId: user.id })
+            if (!auth.authorizeUrl) throw new Error('身份源未返回授权地址（可能为 mock 模式），请改用手动绑定')
+            // 必须整页跳转：弹窗/iframe 会被第三方 Cookie 策略拦截导致授权失败
+            window.location.href = auth.authorizeUrl
+          } catch (error) {
+            toast(error.message, 'error')
+            btn.classList.remove('btn-loading')
+          }
+        })
+        modal.el.querySelector('#bind-manual-go')?.addEventListener('click', async () => {
           try {
             await api.post(`/api/iam/users/${user.id}/bindings`, { ...collectForm(modal.body), verifyCode: collectForm(modal.body).verifyCode || '123456' })
             toast('绑定成功'); modal.close(); drawer.close(); ctx.rerender()
           } catch (error) { toast(error.message, 'error') }
-        }
+        })
       }
       drawer.el.querySelector('#ud-resetpw').onclick = async () => {
         const confirmed = await confirmDialog({

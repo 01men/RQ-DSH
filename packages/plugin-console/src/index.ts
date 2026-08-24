@@ -36,6 +36,7 @@ const PUBLIC_PATHS = new Set([
   '/api/auth/login',
   '/api/auth/sso',
   '/api/auth/sso/authorize',
+  '/api/auth/sso/callback',
   '/api/auth/sso/bind',
   '/api/auth/sso/register',
   '/api/auth/refresh',
@@ -313,6 +314,96 @@ export function apply(ctx: Context) {
       exchange.fail(401, 'SSO_BIND_FAILED', message)
     }
   })
+
+  // -- 扫码/自动识别绑定三方身份（不手工输入 unionId） -------------------------
+
+  /**
+   * 发起绑定授权（须登录）。缺省绑定当前登录账号本人；
+   * 指定 targetUserId 为他人绑定（需 iam.user.write，扫码人即被绑定的钉钉身份）。
+   */
+  http.register('POST', '/api/auth/sso/bind/authorize', async (exchange) => {
+    const { provider, targetUserId } = body<{ provider?: string; targetUserId?: string }>(exchange)
+    const info = caller(exchange)
+    const userId = targetUserId ?? info.userId
+    if (!userId) {
+      exchange.fail(401, 'UNAUTHORIZED', '仅平台账号（人）可发起三方身份绑定')
+      return
+    }
+    if (userId !== info.userId && !info.permissions.includes('*') && !info.permissions.includes('iam.user.write')) {
+      exchange.fail(403, 'FORBIDDEN', '为其他账号发起绑定需要 iam.user.write 权限')
+      return
+    }
+    if (!ctx.iam.users().get(userId)) {
+      exchange.fail(400, 'BAD_REQUEST', `账号不存在：${userId}`)
+      return
+    }
+    try {
+      exchange.ok(await ctx.authn.beginSso(provider ?? 'dingtalk', 'web_qr', requestOrigin(exchange), { purpose: 'bind', userId }))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      exchange.fail(400, 'SSO_BIND_AUTHORIZE_FAILED', message)
+    }
+  })
+
+  /**
+   * 钉钉 OAuth 浏览器回跳（公开，无需会话）：按 state 用途分发——
+   * bind：完成扫码绑定并渲染结果页；login：完成登录并写 localStorage 后进入控制台。
+   * 同时挂在 /api/auth/sso（与钉钉后台已配置的重定向 URL 兼容）。
+   */
+  const handleSsoCallback = async (exchange: HttpExchange): Promise<void> => {
+    const code = exchange.query.get('authCode') ?? exchange.query.get('code') ?? ''
+    const state = exchange.query.get('state') ?? ''
+    const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!)
+    const render = (title: string, bodyHtml: string, script = ''): void => {
+      exchange.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      exchange.res.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#1f2329}
+.card{background:#fff;border-radius:16px;padding:40px 48px;box-shadow:0 8px 30px rgba(0,0,0,.06);text-align:center;max-width:420px}
+.card h2{margin:0 0 12px;font-size:20px}.card p{margin:6px 0;color:#646a73;font-size:14px;line-height:1.7}
+.card a{color:#3370ff;text-decoration:none}.ok{color:#34a853;font-size:44px}.bad{color:#f54a45;font-size:44px}</style>
+</head><body><div class="card">${bodyHtml}</div>${script}</body></html>`)
+    }
+    if (!code || !state) {
+      render('授权回调异常', `<div class="bad">✕</div><h2>回调参数缺失</h2><p>缺少 code/state，请从控制台重新发起授权。</p><p><a href="/">返回控制台</a></p>`)
+      return
+    }
+    try {
+      const peeked = ctx.authn.peekOAuthState(state)
+      if (peeked.purpose === 'bind') {
+        const result = await ctx.authn.completeSsoBind(code, state)
+        ctx.audit.record({
+          type: 'change', actorType: 'human', actorId: result.userId,
+          actorName: ctx.iam.users().get(result.userId)?.displayName ?? result.userId,
+          action: 'iam.user.bind', resourceType: 'user', resourceId: result.userId,
+          resourceName: result.displayName, result: 'ok', detail: `${result.provider} 扫码授权绑定`,
+        })
+        render('绑定成功', `<div class="ok">✓</div><h2>钉钉身份绑定成功</h2><p>已绑定：<b>${escapeHtml(result.displayName)}</b></p><p>即将自动返回控制台…</p><p><a href="/#/iam">立即返回</a></p>`,
+          '<script>setTimeout(()=>{location.href="/#/iam"},2000)</script>')
+        return
+      }
+      const result = await ctx.authn.completeSso(peeked.provider, code, state)
+      if (result.kind === 'pending') {
+        // 未命中身份链接：回登录页走「绑定已有账号 / 注册新账号」分支
+        render('首次登录', `<h2>首次使用该三方身份</h2><p>正在返回登录页完成绑定/注册…</p>`,
+          `<script>localStorage.setItem('heng_ops_sso_pending', JSON.stringify({ pendingTicket: ${JSON.stringify(result.pendingTicket)}, profileName: ${JSON.stringify(result.profileName)} })); location.replace('/#/login')</script>`)
+        return
+      }
+      const user = ctx.iam.users().get(result.userId)!
+      const sessionUser = {
+        id: user.id, username: user.username, displayName: user.displayName,
+        orgId: user.orgId, roleIds: user.roleIds,
+        roles: user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.name).filter(Boolean),
+        permissions: ctx.iam.userPermissions(user.id),
+      }
+      render('登录成功', `<div class="ok">✓</div><h2>欢迎回来，${escapeHtml(user.displayName)}</h2><p>正在进入控制台…</p>`,
+        `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))}); location.replace('/#/dashboard')</script>`)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      render('操作失败', `<div class="bad">✕</div><h2>三方授权失败</h2><p>${escapeHtml(message)}</p><p><a href="/">返回控制台</a></p>`)
+    }
+  }
+  http.register('GET', '/api/auth/sso', handleSsoCallback)
+  http.register('GET', '/api/auth/sso/callback', handleSsoCallback)
 
   http.register('POST', '/api/auth/sso/register', async (exchange) => {
     const { pendingTicket } = body<{ pendingTicket: string }>(exchange)
@@ -762,7 +853,7 @@ export function apply(ctx: Context) {
   }))
 
   guarded('PUT', '/api/iam/connectors/:provider', 'iam.connector.write', (exchange) => {
-    const input = body<{ corpId: string; appKey: string; appSecret?: string; enabled?: boolean; syncOrgRoot?: string; intervalMinutes?: number; callbackUrl?: string; loginEnabled?: boolean; conflictStrategy?: 'third_party_wins' | 'platform_wins' | 'manual'; mode?: 'real' | 'mock'; apiBase?: string }>(exchange)
+    const input = body<{ corpId: string; appKey: string; appSecret?: string; enabled?: boolean; syncOrgRoot?: string; intervalMinutes?: number; callbackUrl?: string; loginEnabled?: boolean; conflictStrategy?: 'third_party_wins' | 'platform_wins' | 'manual'; mode?: 'real' | 'mock'; apiBase?: string; oapiBase?: string }>(exchange)
     const config = ctx.iam.upsertConnectorConfig({ provider: exchange.params['provider']! as 'dingtalk', ...input })
     changeLog(exchange, 'iam.connector.update', 'connector', config.id, config.provider)
     const { secretActual, ...safe } = config

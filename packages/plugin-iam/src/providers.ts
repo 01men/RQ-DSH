@@ -61,6 +61,8 @@ export interface DingTalkCredentials {
   appSecret: string
   /** OpenAPI 基址（默认 https://api.dingtalk.com；测试/专有部署可指向本地 stub）。 */
   apiBase?: string
+  /** 通讯录 topapi 基址（默认 https://oapi.dingtalk.com；测试/专有部署可指向本地 stub）。 */
+  oapiBase?: string
 }
 
 /** 钉钉演示目录（mock 模式与 OrgConnector 共享同一份远端数据）。 */

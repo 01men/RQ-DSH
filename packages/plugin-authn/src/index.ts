@@ -71,6 +71,10 @@ export interface TokenRecord extends RecordBase {
 export interface OAuthStateRecord extends RecordBase {
   provider: string
   scene: string
+  /** 用途隔离：login=三方登录；bind=已登录账号绑定三方身份（防拿绑定 state 换登录）。 */
+  purpose?: 'login' | 'bind'
+  /** purpose=bind 时锁定的目标平台账号（authorize 时服务端从会话取，前端不可指定）。 */
+  userId?: string
   createdAt: string
   consumedAt?: string
 }
@@ -262,8 +266,10 @@ export class AuthnService extends Service {
    * 发起三方授权：生成一次性 state，返回授权地址。
    * 钉钉等真实 IdP 要求 redirect_uri 为绝对 URL，origin 由调用方从请求头推导后传入；
    * 缺省时回落相对路径（仅本地/mock 链路可用）。
+   * options.purpose='bind' 时用于「已登录账号扫码绑定三方身份」：state 锁定目标 userId，
+   * 回调由 GET /api/auth/sso/callback 承接（与登录用途隔离，见 completeSso）。
    */
-  async beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app', origin?: string): Promise<{ authorizeUrl: string | null; state: string }> {
+  async beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app', origin?: string, options: { purpose?: 'login' | 'bind'; userId?: string } = {}): Promise<{ authorizeUrl: string | null; state: string }> {
     const adapter = this.ctx.iam.getAuthProvider(provider)
     const state = randomUUID().replace(/-/g, '')
     this.oauthStates().insert({
@@ -271,8 +277,13 @@ export class AuthnService extends Service {
       createdAt: new Date().toISOString(),
       provider,
       scene,
+      purpose: options.purpose ?? 'login',
+      ...(options.userId !== undefined ? { userId: options.userId } : {}),
     })
-    const redirectUri = origin ? `${origin.replace(/\/+$/, '')}/api/auth/sso` : '/api/auth/sso'
+    // redirect_uri 优先用连接器配置里的 callbackUrl（须与钉钉后台「安全设置」白名单逐字一致）；
+    // 未配置时回落 origin 推导的 /api/auth/sso/callback。
+    const configured = this.ctx.iam.connectorConfig(provider)?.callbackUrl?.trim()
+    const redirectUri = configured || (origin ? `${origin.replace(/\/+$/, '')}/api/auth/sso/callback` : '/api/auth/sso/callback')
     return { authorizeUrl: await adapter.buildAuthorizeUrl(scene, state, redirectUri), state }
   }
 
@@ -285,6 +296,7 @@ export class AuthnService extends Service {
     const stateRecord = this.oauthStates().get(state)
     if (!stateRecord) throw new Error('state 无效（未发起授权或已消费）')
     if (stateRecord.consumedAt) throw new Error('state 已被使用（防重放）')
+    if (stateRecord.purpose === 'bind') throw new Error('state 用途为账号绑定，不能用于登录')
     if (Date.now() - new Date(stateRecord.createdAt).getTime() > 10 * 60_000) throw new Error('state 已过期')
     this.oauthStates().update(state, { consumedAt: new Date().toISOString() })
 
@@ -317,6 +329,57 @@ export class AuthnService extends Service {
       expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
     })
     return { kind: 'pending', pendingTicket: ticket, profileName: profile.name }
+  }
+
+  /** 读取 state 记录的用途（回调路由分发用；不消费）。 */
+  peekOAuthState(state: string): { provider: string; purpose: 'login' | 'bind'; userId?: string } {
+    const record = this.oauthStates().get(state)
+    if (!record) throw new Error('state 无效（未发起授权或已消费）')
+    return {
+      provider: record.provider,
+      purpose: record.purpose ?? 'login',
+      ...(record.userId !== undefined ? { userId: record.userId } : {}),
+    }
+  }
+
+  /**
+   * 完成扫码绑定（purpose=bind）：state 一次性消费 → Adapter 链换 unionId
+   * → 绑定到 state 锁定的平台账号。全程无需手工输入任何三方 ID。
+   * 「一人一号」由 identityLinks 引擎级唯一约束兜底。
+   */
+  async completeSsoBind(code: string, state: string): Promise<{ userId: string; provider: string; displayName: string; providerUserId: string }> {
+    const stateRecord = this.oauthStates().get(state)
+    if (!stateRecord) throw new Error('state 无效（未发起授权或已消费）')
+    if (stateRecord.consumedAt) throw new Error('state 已被使用（防重放）')
+    if ((stateRecord.purpose ?? 'login') !== 'bind') throw new Error('state 用途不是账号绑定')
+    if (!stateRecord.userId) throw new Error('绑定目标账号缺失，请重新发起绑定')
+    if (Date.now() - new Date(stateRecord.createdAt).getTime() > 10 * 60_000) throw new Error('state 已过期')
+    this.oauthStates().update(state, { consumedAt: new Date().toISOString() })
+
+    const adapter = this.ctx.iam.getAuthProvider(stateRecord.provider)
+    const tokenSet = await adapter.exchangeCode(code) // code 一次性，重放抛 ProviderAuthError
+    const raw = await adapter.getUserInfo(tokenSet)
+    const profile = adapter.normalizeProfile(raw)
+
+    const user = this.ctx.iam.users().get(stateRecord.userId)
+    if (!user) throw new Error('绑定目标账号不存在')
+    if (user.status === 'deactivated') throw new Error('绑定目标账号已注销')
+    const existing = this.ctx.iam.findLinkByProfile(stateRecord.provider, profile.providerUserId)
+    if (existing && existing.userId !== user.id) {
+      throw new Error('该钉钉身份已绑定其他平台账号（一人一号）')
+    }
+    if (user.bindings.some((item) => item.provider === stateRecord.provider) && !existing) {
+      throw new Error('该账号已绑定钉钉身份，请先解绑再重新绑定')
+    }
+    if (!existing) {
+      this.ctx.iam.linkIdentity(user.id, {
+        provider: stateRecord.provider as 'dingtalk',
+        providerUserId: profile.providerUserId,
+        corpId: profile.corpId,
+        displayName: profile.name,
+      }, 'sso-bind-oauth')
+    }
+    return { userId: user.id, provider: stateRecord.provider, displayName: profile.name, providerUserId: profile.providerUserId }
   }
 
   /** 待绑定票据 → 绑定已有平台账号（校验密码）→ 建立身份链接并登录。 */

@@ -102,6 +102,8 @@ export interface ConnectorConfigRecord extends RecordBase {
   mode: 'real' | 'mock'
   /** OpenAPI 基址覆盖（测试/专有部署指向本地）。 */
   apiBase?: string
+  /** 通讯录 topapi 基址覆盖（默认 https://oapi.dingtalk.com）。 */
+  oapiBase?: string
   lastSyncAt?: string
   lastSyncResult?: { ok: boolean; created: number; updated: number; conflicts: number; frozen: number; message: string }
 }
@@ -263,22 +265,31 @@ export class DingTalkConnector implements OrgConnector {
 
 /**
  * 钉钉连接器（真实 OpenAPI）：通讯录分页拉取，目录映射到 RemoteDirectory。
- * 链路：企业内部应用 accessToken（POST /v1.0/oauth2/accessToken）
- *   → 部门树（POST /v1.0/contact/departments/listByParent，自根遍历）
- *   → 部门成员（POST /v1.0/contact/users/findByDept 分页）。
+ * 链路：企业内部应用 accessToken（POST api.dingtalk.com/v1.0/oauth2/accessToken）
+ *   → 部门树（oapi topapi/v2/department/listsubid + department/get，自根 BFS）
+ *   → 部门成员（oapi topapi/v2/user/list 分页）。
+ * 接口失败（HTTP 非 2xx 或 errcode != 0）一律抛出带 errmsg 的错误——
+ * 历史教训：静默返回空目录会让同步「成功」但 0 条数据，故障无法察觉。
  */
 export class RealDingTalkConnector implements OrgConnector {
   provider = 'dingtalk'
   label = '钉钉'
   private corpTokenCache: { token: string; expiresAt: number } | undefined
   private readonly credentials: DingTalkCredentials
+  /** 同步根部门 ID（缺省 1=企业根）。 */
+  private readonly syncOrgRoot: string
 
-  constructor(credentials: DingTalkCredentials) {
+  constructor(credentials: DingTalkCredentials, options: { syncOrgRoot?: string } = {}) {
     this.credentials = credentials
+    this.syncOrgRoot = options.syncOrgRoot?.trim() || '1'
   }
 
   private get apiBase(): string {
     return this.credentials.apiBase ?? 'https://api.dingtalk.com'
+  }
+
+  private get oapiBase(): string {
+    return this.credentials.oapiBase ?? 'https://oapi.dingtalk.com'
   }
 
   private async corpAccessToken(): Promise<string> {
@@ -298,25 +309,41 @@ export class RealDingTalkConnector implements OrgConnector {
     return payload.accessToken
   }
 
-  async fetchDirectory(): Promise<RemoteDirectory> {
+  /** 调 oapi topapi：access_token 走 query；errcode != 0 即抛错（不静默吞错）。 */
+  private async topapi<T>(path: string, body: Record<string, unknown>): Promise<T & { errcode?: number; errmsg?: string }> {
     const token = await this.corpAccessToken()
-    const orgs: RemoteDirectory['orgs'] = [{ remoteId: '1', name: this.credentials.corpId, parentRemoteId: null }]
+    const response = await fetch(`${this.oapiBase}${path}?access_token=${encodeURIComponent(token)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const payload = (await response.json().catch(() => ({}))) as T & { errcode?: number; errmsg?: string }
+    if (!response.ok || (payload.errcode ?? 0) !== 0) {
+      throw new Error(`钉钉接口 ${path} 调用失败（HTTP ${response.status}，errcode ${payload.errcode ?? '-'}：${payload.errmsg ?? '无错误信息'}）`)
+    }
+    return payload
+  }
+
+  async fetchDirectory(): Promise<RemoteDirectory> {
+    const rootId = this.syncOrgRoot
+    const rootInfo = await this.getDepartment(rootId)
+    const orgs: RemoteDirectory['orgs'] = [{ remoteId: rootId, name: rootInfo.name, parentRemoteId: null }]
     const users: RemoteDirectory['users'] = []
     // 自根部门 BFS（上限 3 层 / 每层 50 部门，防御异常目录）
-    let frontier = ['1']
+    let frontier = [rootId]
     for (let depth = 0; depth < 3 && frontier.length > 0; depth++) {
       const next: string[] = []
       for (const deptId of frontier.slice(0, 50)) {
-        const children = await this.listDepartments(token, deptId)
-        for (const child of children) {
-          orgs.push({ remoteId: String(child.deptId), name: child.name, parentRemoteId: deptId })
-          next.push(String(child.deptId))
+        for (const childId of await this.listSubDepartmentIds(deptId)) {
+          const child = await this.getDepartment(childId)
+          orgs.push({ remoteId: childId, name: child.name, parentRemoteId: deptId })
+          next.push(childId)
         }
       }
       frontier = next
     }
     for (const org of orgs) {
-      const members = await this.listUsers(token, org.remoteId)
+      const members = await this.listUsers(org.remoteId)
       for (const member of members) {
         if (users.some((user) => user.remoteId === member.remoteId)) continue
         users.push({ ...member, orgRemoteId: org.remoteId })
@@ -325,47 +352,45 @@ export class RealDingTalkConnector implements OrgConnector {
     return { orgs, users }
   }
 
-  private async listDepartments(token: string, deptId: string): Promise<Array<{ deptId: number; name: string }>> {
-    const response = await fetch(`${this.apiBase}/v1.0/contact/departments/listByParent?deptId=${encodeURIComponent(deptId)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-acs-dingtalk-access-token': token },
-      body: JSON.stringify({ maxResults: 100 }),
-    })
-    if (!response.ok) return []
-    const payload = (await response.json().catch(() => ({}))) as { result?: Array<{ deptId: number; name: string }> }
-    return payload.result ?? []
+  /** 部门详情（取名；根部门 dept_id=1 返回企业名）。 */
+  private async getDepartment(deptId: string): Promise<{ name: string }> {
+    const payload = await this.topapi<{ result?: { name?: string } }>('/topapi/v2/department/get', { dept_id: Number(deptId) })
+    return { name: payload.result?.name ?? `部门 ${deptId}` }
   }
 
-  private async listUsers(token: string, deptId: string): Promise<RemoteDirectory['users']> {
+  /** 下一级子部门 ID 列表（不受授权范围限制）。 */
+  private async listSubDepartmentIds(deptId: string): Promise<string[]> {
+    const payload = await this.topapi<{ result?: { dept_id_list?: number[] } }>('/topapi/v2/department/listsubid', { dept_id: Number(deptId) })
+    return (payload.result?.dept_id_list ?? []).map(String)
+  }
+
+  private async listUsers(deptId: string): Promise<RemoteDirectory['users']> {
     const users: RemoteDirectory['users'] = []
     let cursor = 0
     for (let page = 0; page < 10; page++) {
-      const response = await fetch(`${this.apiBase}/v1.0/contact/users/findByDept?deptId=${encodeURIComponent(deptId)}&cursor=${cursor}&size=100`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-acs-dingtalk-access-token': token },
-        body: JSON.stringify({}),
-      })
-      if (!response.ok) break
-      const payload = (await response.json().catch(() => ({}))) as {
-        result?: Array<{ unionId?: string; userId?: string; name?: string; jobNumber?: string; title?: string; email?: string; active?: boolean }>
-        hasMore?: boolean
-        nextToken?: number
-      }
-      for (const item of payload.result ?? []) {
-        const remoteId = item.unionId ?? item.userId
+      const payload = await this.topapi<{
+        result?: {
+          has_more?: boolean
+          next_cursor?: number
+          list?: Array<{ unionid?: string; userid?: string; name?: string; job_number?: string; title?: string; email?: string; org_email?: string; active?: boolean }>
+        }
+      }>('/topapi/v2/user/list', { dept_id: Number(deptId), cursor, size: 100 })
+      const result = payload.result ?? {}
+      for (const item of result.list ?? []) {
+        const remoteId = item.unionid ?? item.userid
         if (!remoteId) continue
         users.push({
           remoteId,
           name: item.name ?? remoteId,
-          jobNumber: item.jobNumber ?? remoteId,
+          jobNumber: item.job_number || remoteId,
           title: item.title ?? '',
           orgRemoteId: deptId,
-          email: item.email ?? '',
+          email: item.email || item.org_email || '',
           active: item.active ?? true,
         })
       }
-      if (!payload.hasMore) break
-      cursor = Number(payload.nextToken ?? cursor + 100)
+      if (!result.has_more) break
+      cursor = Number(result.next_cursor ?? cursor + 100)
     }
     return users
   }
@@ -946,6 +971,8 @@ export class IamService extends Service {
     mode?: 'real' | 'mock'
     /** OpenAPI 基址覆盖（测试/专有部署）。 */
     apiBase?: string
+    /** 通讯录 topapi 基址覆盖（默认 https://oapi.dingtalk.com）。 */
+    oapiBase?: string
   }): ConnectorConfigRecord {
     if (!IamService.BUILTIN_CONNECTOR_PROVIDERS.has(input.provider)) throw new Error(`未注册的连接器：${input.provider}`)
     const existing = this.connectorConfig(input.provider)
@@ -966,6 +993,7 @@ export class IamService extends Service {
       conflictStrategy: input.conflictStrategy ?? existing?.conflictStrategy ?? 'manual',
       mode,
       ...(input.apiBase !== undefined ? { apiBase: input.apiBase } : existing?.apiBase !== undefined ? { apiBase: existing.apiBase } : {}),
+      ...(input.oapiBase !== undefined ? { oapiBase: input.oapiBase } : existing?.oapiBase !== undefined ? { oapiBase: existing.oapiBase } : {}),
     }
     const saved = existing
       ? this.connectorConfigs().update(existing.id, payload)
@@ -985,8 +1013,9 @@ export class IamService extends Service {
           appKey: config.appKey,
           appSecret: config.secretActual,
           ...(config.apiBase !== undefined ? { apiBase: config.apiBase } : {}),
+          ...(config.oapiBase !== undefined ? { oapiBase: config.oapiBase } : {}),
         }
-        this.registerConnector(new RealDingTalkConnector(credentials))
+        this.registerConnector(new RealDingTalkConnector(credentials, { syncOrgRoot: config.syncOrgRoot }))
         this.registerAuthProvider(new RealDingTalkAuthAdapter(credentials))
       } else if (config.mode === 'mock') {
         // 显式声明 mock（演示/联调）：仅 DEMO_SEED 环境允许注册 mock 身份源，
@@ -1007,12 +1036,23 @@ export class IamService extends Service {
     return connector.healthCheck()
   }
 
-  /** 全量同步：目录映射 + 冲突入队 + 离职联动。 */
+  /** 全量同步：目录映射 + 冲突入队 + 离职联动。失败同样落 lastSyncResult（ok:false），避免「点了没反应」。 */
   async syncConnector(provider: string, actor: string): Promise<{ created: number; updated: number; conflicts: number; frozen: number; message: string }> {
     const config = this.connectorConfig(provider)
     if (!config || !config.enabled) throw new Error(`连接器未启用：${provider}`)
     const connector = this.connectors.get(provider)
     if (!connector) throw new Error(`未注册的连接器：${provider}`)
+    try {
+      return await this.runSync(provider, actor, config, connector)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const result = { ok: false, created: 0, updated: 0, conflicts: 0, frozen: 0, message: `同步失败：${message}` }
+      this.connectorConfigs().update(config.id, { lastSyncAt: new Date().toISOString(), lastSyncResult: result })
+      throw error
+    }
+  }
+
+  private async runSync(provider: string, actor: string, config: ConnectorConfigRecord, connector: OrgConnector): Promise<{ created: number; updated: number; conflicts: number; frozen: number; message: string }> {
     const directory = await connector.fetchDirectory()
 
     const remoteOrgToId = new Map<string, string>()
@@ -1088,7 +1128,7 @@ export class IamService extends Service {
       }
     }
 
-    const result = { created, updated, conflicts, frozen, message: `同步完成：新建 ${created}，更新 ${updated}，冲突 ${conflicts}，离职冻结 ${frozen}` }
+    const result = { ok: true, created, updated, conflicts, frozen, message: `同步完成：新建 ${created}，更新 ${updated}，冲突 ${conflicts}，离职冻结 ${frozen}` }
     this.connectorConfigs().update(config.id, { lastSyncAt: new Date().toISOString(), lastSyncResult: result })
     this.ctx.platformBus.emit(PlatformEvents.ConnectorSynced, { provider, actor, ...result })
     return result
