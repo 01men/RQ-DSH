@@ -188,6 +188,19 @@ export class ConnectClientService extends Service {
 
   // ---------------------------------------------------------------- 状态探测
 
+  /**
+   * 心跳上报（接入方 → 宿主主动推送）：POST /api/connect/heartbeat，
+   * 携带运行元信息（工具数 / 运行版本 / uptime），宿主侧「平台接入」可见最近心跳。
+   * 未配置宿主时静默跳过；失败由调用方记录（noteError），不抛出阻断定时器。
+   */
+  async heartbeat(meta: { tools?: number; version?: string; uptimeSec?: number } = {}): Promise<void> {
+    if (!this.config) return
+    const token = await this.machineToken()
+    await this.hubCall(this.config.hubUrl, 'POST', '/api/connect/heartbeat', meta, {
+      authorization: `Bearer ${token}`,
+    })
+  }
+
   /** 连通性探测（不要求已配置凭证）：宿主健康 + 平台信息。 */
   async probeHub(hubUrl?: string): Promise<{ reachable: boolean; health?: unknown; platform?: { name: string; version: string; tools: number }; error?: string }> {
     const base = normalizeBaseUrl(hubUrl ?? this.config?.hubUrl ?? '')

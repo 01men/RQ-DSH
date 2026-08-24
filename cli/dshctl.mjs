@@ -145,6 +145,11 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
             offline <id> --reason=<原因> --requesterId= --requesterName=   （L4 审批）
             bind <id> --userId=
   app       list | get <id> | metrics <id> | topology <id> | cost <id>
+            report <id> [--dau= --sessions= --avg-depth= --retention7= --date=]   （应用指标主动上报）
+  usage     record --org= --subject= --principal= --resource= --meter=key:value:unit[,...]
+                                            （计量事件主动推送，schema v1 + 幂等键）
+            [--idempotency-key= --tenant-id=]
+            events [--principal= --resource= --limit=] | totals [--principal= --from=]
   audit     logs [--type= --resourceId= --limit=] | alerts [--unread]
   approval  list [--pending] | decide <id> --decision=approve|reject --opinion=
   cost      report --groupBy=app|agent|org|date
@@ -748,6 +753,21 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       }
       if (action === 'get') { out(await call('GET', `/api/apps/${id}`)); return }
       if (action === 'metrics') { out((await call('GET', `/api/apps/${id}`)).metrics); return }
+      if (action === 'report') {
+        if (!id) fail('用法：app report <id> [--dau=] [--sessions=] [--avg-depth=] [--retention7=] [--date=YYYY-MM-DD]')
+        const input = {}
+        for (const [flagName, key] of [['dau', 'dau'], ['sessions', 'sessions'], ['avg-depth', 'avgDepth'], ['retention7', 'retention7']]) {
+          const value = flag(flagName)
+          if (value !== undefined && value !== true) input[key] = Number(value)
+        }
+        const date = flag('date')
+        if (date && date !== true) input.date = String(date)
+        if (Object.keys(input).length === 0) fail('至少上报一项指标：--dau= / --sessions= / --avg-depth= / --retention7=（可选 --date= 补录历史）')
+        const data = await call('POST', `/api/apps/${id}/metrics-report`, input)
+        ok('应用指标已上报（宿主侧已记录）')
+        out(data)
+        return
+      }
       if (action === 'topology') { out((await call('GET', `/api/apps/${id}`)).topology); return }
       if (action === 'cost') { table((await call('GET', `/api/apps/${id}`)).cost, ['agentName', 'llmTokens', 'toolCalls', 'costYuan'], '成本穿透'); return }
       fail(`未知动作：app ${action}`)
@@ -809,6 +829,50 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       const data = await call('GET', '/api/platform/info')
       out({ name: data.name, version: data.version, runtime: data.runtime, plugins: data.plugins.join(', '), tools: data.tools.length, collections: data.collections.length })
       table(data.tools.map((t) => ({ name: t.name, plugin: t.plugin ?? '', description: t.description })), ['name', 'plugin', 'description'], '工具目录')
+    },
+  },
+  usage: {
+    desc: '计量事件（推送式上报 / 查询）',
+    run: async () => {
+      const action = argv[0] ?? 'events'
+      await ensureToken()
+      if (action === 'record') {
+        const metersRaw = argOf('--meter')
+        const input = {
+          org: argOf('--org'), subject: argOf('--subject'), principal: argOf('--principal'), resource: argOf('--resource'),
+        }
+        if (!input.org || !input.subject || !input.principal || !input.resource || !metersRaw) {
+          fail('用法：usage record --org=<orgId> --subject=user:<id>|agent:<id> --principal=org:<id>|plugin:<id>|platform --resource=model:<slug>|mcp:<slug>|plugin:<id> --meter=key:value:unit[,...] [--idempotency-key=] [--tenant-id=]')
+        }
+        const meters = String(metersRaw).split(',').map((item) => {
+          const [key, value, unit] = item.split(':')
+          if (!key || value === undefined || Number.isNaN(Number(value)) || !unit) fail(`--meter 项格式非法：${item}（应为 key:value:unit）`)
+          return { key, value: Number(value), unit }
+        })
+        const body = { ...input, meters }
+        if (argOf('--idempotency-key')) body.idempotency_key = argOf('--idempotency-key')
+        if (argOf('--tenant-id')) body.tenant_id = argOf('--tenant-id')
+        const data = await call('POST', '/api/usage/record', body)
+        ok(`计量事件已登记：${data.event_id}（charge=${data.pricing.charge_cents}分）`)
+        return
+      }
+      if (action === 'events') {
+        const search = new URLSearchParams()
+        if (flag('principal')) search.set('principal', flag('principal'))
+        if (flag('resource')) search.set('resource', flag('resource'))
+        if (flag('limit')) search.set('limit', String(flag('limit')))
+        const data = await call('GET', '/api/usage/events' + (search.size ? `?${search}` : ''))
+        out(data.items.map((e) => ({ event_id: e.event_id, resource: e.resource, subject: e.subject, meters: e.meters.map((m) => `${m.key}=${m.value}${m.unit}`).join(','), charge: e.pricing.charge_cents, time: e.occurred_at?.slice(0, 19).replace('T', ' ') })), ['event_id', 'resource', 'subject', 'meters', 'charge', 'time'], '计量事件')
+        return
+      }
+      if (action === 'totals') {
+        const search = new URLSearchParams()
+        if (flag('principal')) search.set('principal', flag('principal'))
+        if (flag('from')) search.set('from', flag('from'))
+        out(await call('GET', '/api/usage/totals' + (search.size ? `?${search}` : '')))
+        return
+      }
+      fail('用法：usage record --org= --subject= --principal= --resource= --meter=key:value:unit[,...] | events [--principal= --resource= --limit=] | totals [--principal= --from=]')
     },
   },
   connect: {

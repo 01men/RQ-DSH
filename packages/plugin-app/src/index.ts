@@ -251,14 +251,22 @@ export class AppRegistryService extends Service {
 
   // -- 应用层指标 ---------------------------------------------------------
 
-  recordUsage(appId: string, usage: { dau?: number; sessions?: number; avgDepth?: number }): void {
-    const date = new Date().toISOString().slice(0, 10)
+  /**
+   * 记录应用层指标（外部应用主动上报通道：REST /api/apps/:id/metrics-report、
+   * 工具 app_metrics_report、CLI app report 均汇入此方法）。
+   * 语义：同日 DAU 取最大、会话数累加；可指定 date 补录历史（YYYY-MM-DD）。
+   */
+  recordUsage(appId: string, usage: { dau?: number; sessions?: number; avgDepth?: number; retention7?: number; date?: string }): void {
+    if (!this.ctx.resourceCore.get('app', appId)) throw new Error(`应用不存在：${appId}`)
+    const date = usage.date ?? new Date().toISOString().slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`date 格式非法：${date}（应为 YYYY-MM-DD）`)
     const existing = this.usage().findOne((item) => item.appId === appId && item.date === date)
     if (existing) {
       this.usage().update(existing.id, {
         dau: Math.max(existing.dau, usage.dau ?? existing.dau),
         sessions: existing.sessions + (usage.sessions ?? 0),
         avgDepth: usage.avgDepth ?? existing.avgDepth,
+        retention7: usage.retention7 ?? existing.retention7,
       })
     } else {
       this.usage().insert({
@@ -268,7 +276,7 @@ export class AppRegistryService extends Service {
         dau: usage.dau ?? 0,
         sessions: usage.sessions ?? 0,
         avgDepth: usage.avgDepth ?? 0,
-        retention7: 0,
+        retention7: usage.retention7 ?? 0,
       })
     }
   }

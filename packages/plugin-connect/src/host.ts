@@ -41,6 +41,10 @@ export interface ConnectClientRecord extends RecordBase {
   enrolledBy: string
   enrolledAt: string
   status: 'active' | 'disabled'
+  /** 最近一次心跳时间（客户端接入后周期性主动上报，宿主侧做接入资产存活监测）。 */
+  lastHeartbeatAt?: string
+  /** 心跳携带的运行元信息（客户端自报，未校验口径，仅作观测展示）。 */
+  heartbeat?: { tools?: number; version?: string; uptimeSec?: number }
 }
 
 export type TemplateName = 'readonly' | 'operator' | 'full'
@@ -189,6 +193,24 @@ export const connectHostApi = {
         hub: { name: config.hubName ?? '榕器|企业AI资源治理平台', version: config.hubVersion ?? '1.0.0' },
         notice: '机器凭证仅本次返回，请妥善保存；后续用它在 /api/auth/client-credentials 换取机器令牌',
       })
+    })
+
+    // -- 客户端心跳（接入方主动推送存活/运行元信息；高频不入审计，避免刷爆日志） ----
+    http.register('POST', '/api/connect/heartbeat', (exchange) => {
+      const info = exchange.principal as { principalId?: string } | undefined
+      if (!info?.principalId) { exchange.fail(401, 'UNAUTHORIZED', '缺少 Bearer 令牌'); return }
+      const client = clientsCollection(ctx).findOne((item) => item.principalId === info.principalId)
+      if (!client) { exchange.fail(404, 'NOT_FOUND', '该身份未登记为接入客户端（仅远程 dsh 客户端可上报心跳）'); return }
+      const input = (exchange.body ?? {}) as { tools?: number; version?: string; uptimeSec?: number }
+      clientsCollection(ctx).update(client.id, {
+        lastHeartbeatAt: new Date().toISOString(),
+        heartbeat: {
+          ...(typeof input.tools === 'number' ? { tools: Math.max(0, Math.floor(input.tools)) } : {}),
+          ...(typeof input.version === 'string' ? { version: input.version.slice(0, 40) } : {}),
+          ...(typeof input.uptimeSec === 'number' ? { uptimeSec: Math.max(0, Math.floor(input.uptimeSec)) } : {}),
+        },
+      })
+      exchange.ok({ ok: true, clientId: client.clientId, template: client.template })
     })
 
     // -- 接入码管理 ----------------------------------------------------------
@@ -372,7 +394,7 @@ export const connectHostTools = {
 
     t.register(defineTool({
       name: 'connect_clients',
-      description: '列出已接入的远程 dsh/Agent 客户端（含权限模板、最近使用、令牌数）。',
+      description: '列出已接入的远程 dsh/Agent 客户端（含权限模板、最近使用、最近心跳、令牌数）。',
       permission: 'connect.manage',
       parameters: {},
       output: { type: 'object', additionalProperties: true },
@@ -384,6 +406,7 @@ export const connectHostTools = {
             name: client.name, clientId: client.clientId, template: client.template,
             hostname: client.hostname, platform: client.platform,
             enrolledAt: client.enrolledAt, status: client.status,
+            lastHeartbeatAt: client.lastHeartbeatAt ?? '', heartbeat: client.heartbeat ?? {},
             activeTokens: ctx.authn.activeTokenCount(client.principalId),
           })),
         }

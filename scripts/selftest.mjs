@@ -548,6 +548,22 @@ try {
   const chainTotals = await api('GET', '/api/usage/totals', { token: admin })
   check('app 复合验收：拓扑 + 成本穿透 + 计量管道三链齐备', compoundAppDetail.ok && compoundAppDetail.data.topology.children.length >= 1 && compoundAppDetail.data.cost.length >= 1 && chainTotals.ok && chainTotals.data.count >= 2, JSON.stringify({ app: compoundAppDetail.ok ? { topo: compoundAppDetail.data.topology.children.length, cost: compoundAppDetail.data.cost.length } : compoundAppDetail, totals: chainTotals }))
 
+  // 应用指标主动上报（接入方 → 宿主的推送通道：REST / 工具 / CLI 同一契约）
+  const reportDate = new Date(Date.now() - 5 * 86_400_000).toISOString().slice(0, 10)
+  const sessionsBefore = (await api('GET', `/api/apps/${anyApp.id}`, { token: admin })).data.metrics.sessions
+  const appReport = await api('POST', `/api/apps/${anyApp.id}/metrics-report`, { token: admin, body: { dau: 777, sessions: 1234, avgDepth: 3.5, retention7: 0.42 } })
+  check('应用指标上报端点写入成功（DAU/留存即生效）', appReport.ok && appReport.data.dau >= 777 && appReport.data.retention7 === 0.42)
+  const appReportBackfill = await api('POST', `/api/apps/${anyApp.id}/metrics-report`, { token: admin, body: { date: reportDate, dau: 100, sessions: 200 } })
+  check('应用指标可指定日期补录历史（同日已有记录则会话累加）', appReportBackfill.ok && appReportBackfill.data.sessions === sessionsBefore + 1234 + 200 && appReportBackfill.data.series.some((row) => row.date === reportDate))
+  const appReportBadDate = await api('POST', `/api/apps/${anyApp.id}/metrics-report`, { token: admin, body: { date: '2026/07/01', dau: 1 } })
+  check('应用指标日期格式非法被拒（400）', appReportBadDate.status === 400)
+  const appReportGhost = await api('POST', '/api/apps/app_ghost/metrics-report', { token: admin, body: { dau: 1 } })
+  check('不存在应用上报被拒（400）', appReportGhost.status === 400)
+  const appReportDenied = await api('POST', `/api/apps/${anyApp.id}/metrics-report`, { token: auditor, body: { dau: 1 } })
+  check('无 app.write 上报应用指标被拒（403）', appReportDenied.status === 403)
+  const appReportTool = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'app_metrics_report', args: { appId: anyApp.id, dau: 888 } } })
+  check('工具 app_metrics_report 上报（同日 DAU 取最大）', appReportTool.ok && appReportTool.data.isError === false && appReportTool.data.value.reported === true && appReportTool.data.value.metrics.dau === 888)
+
   // dshctl plugin init 脚手架（真实生成文件）
   const { execFile } = await import('node:child_process')
   const scaffoldDir = join(DATA_DIR, 'scaffold-plugin')
@@ -1559,10 +1575,19 @@ try {
   const machineTool = await api('POST', '/api/tools/execute', { token: machineToken, body: { name: 'agent_list', args: {} } })
   check('机器令牌经工具桥执行 agent_list', machineTool.ok && machineTool.data.isError === false && machineTool.data.value.total >= 5)
 
+  // 客户端心跳主动推送（宿主侧接入资产存活监测）
+  const hb = await api('POST', '/api/connect/heartbeat', { token: machineToken, body: { tools: 42, version: 'v22.14.0', uptimeSec: 600 } })
+  check('接入客户端心跳上报成功', hb.ok && hb.data.clientId === enroll.data.clientId)
+  const hbAdmin = await api('POST', '/api/connect/heartbeat', { token: admin, body: {} })
+  check('非接入客户端身份心跳被拒（404）', hbAdmin.status === 404)
+  const hbAnon = await api('POST', '/api/connect/heartbeat', { body: {} })
+  check('心跳端点强制 Bearer 鉴权（401）', hbAnon.status === 401)
+
   // 客户端登记与最近使用
   const clientsListed = await api('GET', '/api/connect/clients', { token: admin })
   const enrolled = clientsListed.data.clients.find((c) => c.clientId === enroll.data.clientId)
   check('已接入客户端登记（模板/主机名/最近使用）', clientsListed.ok && enrolled && enrolled.template === 'operator' && enrolled.hostname === 'selftest-pc' && enrolled.lastUsedAt !== '')
+  check('宿主侧可见客户端心跳与元信息', enrolled.lastHeartbeatAt !== '' && enrolled.heartbeat?.tools === 42 && enrolled.heartbeat?.uptimeSec === 600)
 
   // 禁用客户端 → 令牌即时失效（principal disabled 联动）
   const disableClient = await api('POST', `/api/connect/clients/${enroll.data.clientId}/disable`, { token: admin, body: { reason: 'selftest 验证吊销联动' } })

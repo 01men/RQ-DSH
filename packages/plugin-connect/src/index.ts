@@ -25,6 +25,8 @@ export interface ConnectConfig {
   dataDir?: string
   /** 客户端本机配置页监听（默认 127.0.0.1:7390；host=0.0.0.0 可局域网访问）。 */
   configServer?: { port?: number; host?: string }
+  /** 心跳间隔分钟数（默认 5；0 = 关闭心跳推送）。 */
+  heartbeatIntervalMinutes?: number
 }
 
 export const name = 'connect'
@@ -62,9 +64,28 @@ function applyClient(ctx: Context, config: ConnectConfig): void {
     ctx.logger('connect').error(`接入配置页启动失败（端口 ${server.port}）：`, error)
   })
 
+  // -- 心跳推送：接入后周期性向宿主上报存活与运行元信息（宿主侧接入资产监测） ------
+  // 默认 5 分钟一轮，heartbeatIntervalMinutes=0 关闭；未接入时静默跳过，失败仅记录 lastError。
+  const heartbeatMinutes = config.heartbeatIntervalMinutes ?? 5
+  if (heartbeatMinutes > 0) {
+    const bootAt = Date.now()
+    const beat = (): void => {
+      if (!client.hasHub()) return
+      let tools = 0
+      try { tools = ctx.tools.schemas?.().length ?? 0 } catch { /* dsh 原生运行时接口差异时降级为 0 */ }
+      void client.heartbeat({ tools, version: process.version, uptimeSec: Math.floor((Date.now() - bootAt) / 1000) })
+        .catch((error: unknown) => client.noteError(`heartbeat: ${error instanceof Error ? error.message : String(error)}`))
+    }
+    const timer = setInterval(beat, heartbeatMinutes * 60_000)
+    timer.unref?.()
+    const first = setTimeout(beat, 10_000) // 接入配置完成后 10s 内先发一次，宿主侧立即可见
+    first.unref?.()
+    // cordis ctx.effect(fn)：fn 返回清理函数，须双层箭头（否则注册时即执行）
+    ctx.effect(() => () => { clearInterval(timer); clearTimeout(first) })
+  }
+
   // -- Agent 工具：安装完插件后，Agent 用自然语言即可完成口令申请与配置更新 ----
   const t = ctx.tools
-
   t.register(defineTool({
     name: 'connect_status',
     description: '查看当前与宿主平台的接入状态（是否已配置、宿主可达性、机器令牌状态、工具执行模式 local/remote、最近错误）。',

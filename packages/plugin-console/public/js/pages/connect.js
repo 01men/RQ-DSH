@@ -177,6 +177,7 @@ export async function renderConnect(content, params) {
         { title: '来源主机', render: (c) => `<span class="mono fs-12">${esc(c.hostname || '—')}</span><div class="col-sub fs-11">${esc(c.platform || '')}</div>` },
         { title: '接入时间', width: 150, render: (c) => `<span class="fs-12 text-3">${fmtTime(c.enrolledAt)}</span>` },
         { title: '最近使用', width: 120, render: (c) => `<span class="fs-12 ${c.lastUsedAt ? '' : 'text-4'}">${c.lastUsedAt ? timeAgo(c.lastUsedAt) : '未调用'}</span>` },
+        { title: '最近心跳', width: 120, render: (c) => `<span class="fs-12 ${c.lastHeartbeatAt ? '' : 'text-4'}">${c.lastHeartbeatAt ? timeAgo(c.lastHeartbeatAt) : '未上报'}</span>${c.heartbeat?.tools !== undefined ? `<div class="col-sub fs-11">工具 ${c.heartbeat.tools}${c.heartbeat?.uptimeSec !== undefined ? ` · 运行 ${Math.floor(c.heartbeat.uptimeSec / 60)}min` : ''}</div>` : ''}` },
         { title: '状态', width: 100, render: (c) => statusBadge(c.status === 'active' ? 'active' : 'frozen', c.status === 'active' ? '正常' : '已禁用') },
         {
           title: '', width: 90,
@@ -231,6 +232,7 @@ export async function renderConnect(content, params) {
           <div><span class="text-4">来源主机：</span><span class="mono">${esc(client.hostname || '—')}</span>（${esc(client.platform || '未知平台')}）</div>
           <div><span class="text-4">接入时间：</span>${fmtTime(client.enrolledAt)}</div>
           <div><span class="text-4">最近使用：</span>${client.lastUsedAt ? timeAgo(client.lastUsedAt) : '未调用'} · 活跃令牌 ${client.activeTokens} 个</div>
+          <div><span class="text-4">最近心跳：</span>${client.lastHeartbeatAt ? timeAgo(client.lastHeartbeatAt) : '未上报'}${client.heartbeat?.tools !== undefined ? ` · 工具 ${client.heartbeat.tools} 个` : ''}${client.heartbeat?.version ? ` · ${esc(client.heartbeat.version)}` : ''}${client.heartbeat?.uptimeSec !== undefined ? ` · 在线 ${Math.floor(client.heartbeat.uptimeSec / 60)} 分钟` : ''}</div>
         </div>`),
       foot: '<button class="btn btn-default" data-cancel>关闭</button>',
     })

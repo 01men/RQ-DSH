@@ -40,8 +40,8 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）244 项端到端断言
-npm run lint:manifests  # 插件清单五面 YAML 校验（60 项）
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）375 项端到端断言
+npm run lint:manifests  # 插件清单五面 YAML 校验（65 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
 
@@ -163,7 +163,9 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
 
 接入成功后：远程 dsh 里的 37 个运维工具自动切换为**转发宿主执行**（本地不再持有数据），
 另新增 `connect_status / connect_setup / connect_login / connect_test / connect_reset`
-5 个接入工具供 Agent 自助管理；宿主控制台「平台接入」页可查看已接入客户端、最近使用，
+5 个接入工具供 Agent 自助管理；客户端接入后默认每 5 分钟向 `POST /api/connect/heartbeat`
+**主动推送心跳**（存活 + 工具数/运行版本/uptime 元信息，`heartbeatIntervalMinutes=0` 可关闭），
+宿主控制台「平台接入」页可查看已接入客户端、最近使用与最近心跳，
 并可随时禁用（联动吊销全部机器令牌，立即生效）。宿主侧另有 4 个接入管理工具
 （`connect_code_create / connect_codes / connect_clients / connect_client_disable`）。
 
@@ -262,6 +264,10 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
   与平台会话（30min/7d）独立可调；授权码与授权请求 5 分钟单次消费。
 - **「平台接入」外部接入总览**：机器凭证（按绑定资源分组）+ OIDC 客户端（含关联应用）+ 远程 dsh
   客户端一处盘点，跳转对应管理页。
+- **应用指标主动上报（接入即监测）**：外部应用可向宿主推送产品指标——`POST /api/apps/:id/metrics-report`
+  （`app.write`）/ `app_metrics_report` 工具 / CLI `app report` 三端同契约（DAU/会话/会话深度/7 日留存，
+  同日 DAU 取最大、会话累加，可指定 `date` 补录历史）；计量事件推送走 `POST /api/usage/record`
+  （`usage.write`，schema v1 + 幂等键，CLI `usage record`），宿主侧据此外部应用全生命周期监测。
 - **一行 SDK 式接入验证**：selftest 内置 openid-client（v6）冒烟——discovery 驱动走通 authorize →
   token → userinfo → refresh → revoke → end_session 全链（标准客户端真实姿势回归）。
 
@@ -311,7 +317,7 @@ packages/
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（365 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（375 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -362,6 +368,9 @@ node cli/dshctl.mjs nas import --config='{"mcpServers":{"synology-filestation":{
 node cli/dshctl.mjs nas files <id> --path=/skillhub    # 文件浏览（shares/mkdir/upload/delete/search 同组）
 node cli/dshctl.mjs skill submit --name=<名> --content-file=SKILL.md --package=skill.zip
 node cli/dshctl.mjs skill storage set --mode=nas --nas-id=<id> --base-path=/skillhub
+node cli/dshctl.mjs app report <id> --dau=320 --sessions=580 --retention7=0.45   # 应用指标主动上报（可 --date= 补录）
+node cli/dshctl.mjs usage record --org=<orgId> --subject=agent:<id> --principal=org:<orgId> \
+     --resource=mcp:<slug> --meter=tokens:1200:token,calls:3:次 --idempotency-key=<业务单号>
 ```
 
 ```bash
@@ -376,7 +385,7 @@ curl -X POST localhost:7300/mcp -H "authorization: Bearer <token>" -H 'content-t
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **365 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **375 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
@@ -392,7 +401,9 @@ authorize→token→userinfo→refresh→revoke→end_session）+ **NAS 与平�
 （进程内真实 synology-filestation stub（校验 Bearer + X-NAS-IP，fs_upload 真实读盘）：
 mcpServers JSON 导入→探活→上线→工具发现、文件全链与审计留痕、RBAC 读写分离、
 Skill 包上架自动上传（字节级校验 / 无包现场打包 / NAS 未上线 fail-closed）、台账巡检覆盖、
-`/mcp` 端点 401/initialize/tools-list/tools-call/工具级越权/-32601）。
+`/mcp` 端点 401/initialize/tools-list/tools-call/工具级越权/-32601）+ **接入方主动推送**
+（应用指标上报：当日写入/历史补录累加/日期格式与应用存在性校验/RBAC 403/`app_metrics_report` 工具；
+接入客户端心跳：机器令牌上报与宿主可见、非客户端身份 404、无令牌 401）。
 测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
 
 ## 八、说明与边界

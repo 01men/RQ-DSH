@@ -1584,6 +1584,16 @@ export function apply(ctx: Context) {
     return app
   })
 
+  // 应用指标主动上报（接入方 → 宿主推送通道；同日 DAU 取最大、会话累加，可指定 date 补录）
+  guarded('POST', '/api/apps/:id/metrics-report', 'app.write', (exchange) => {
+    const id = exchange.params['id']!
+    const input = body<{ dau?: number; sessions?: number; avgDepth?: number; retention7?: number; date?: string }>(exchange)
+    ctx.appRegistry.recordUsage(id, input)
+    const app = ctx.resourceCore.get('app', id)!
+    changeLog(exchange, 'app.metrics.report', 'app', id, app.name, `dau=${input.dau ?? '-'} sessions=${input.sessions ?? '-'} date=${input.date ?? '当日'}`)
+    return ctx.appRegistry.metrics(id)
+  })
+
   guarded('POST', '/api/apps/:id/transition', 'app.write', (exchange) => {
     const { action, note } = body<{ action: string; note?: string }>(exchange)
     const info = caller(exchange)

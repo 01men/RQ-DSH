@@ -3,8 +3,9 @@ plugin: dsh-plugin-connect
 base: /api
 endpoints:
   - POST /api/connect/enroll（公开：一次性接入码换机器凭证，按 IP 失败锁定）
+  - POST /api/connect/heartbeat（客户端心跳主动上报：存活 + 运行元信息，Bearer 机器令牌；高频不入审计）
   - POST /api/connect/codes · GET /api/connect/codes · DELETE /api/connect/codes/:id（接入码管理，connect.manage）
-  - GET /api/connect/clients · POST /api/connect/clients/:id/disable · POST /api/connect/clients/:id/enable（客户端管理，connect.manage）
+  - GET /api/connect/clients · POST /api/connect/clients/:id/disable · POST /api/connect/clients/:id/enable（客户端管理，connect.manage；列表含 lastHeartbeatAt）
   - client 角色另起本机配置页 http://127.0.0.1:7390（GET / · GET /api/status · POST /api/setup|/api/login|/api/test|/api/reset）
 tools:
   - connect_code_create

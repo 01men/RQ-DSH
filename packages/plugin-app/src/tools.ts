@@ -55,6 +55,32 @@ export function apply(ctx: Context) {
   }))
 
   t.register(defineTool({
+    name: 'app_metrics_report',
+    description: '上报应用层产品指标（DAU/会话数/会话深度/7 日留存，可指定 date 补录历史）。外部 AI 应用接入后据此向宿主推送运行指标，宿主侧做全生命周期监测。',
+    permission: 'app.write',
+    parameters: {
+      appId: { type: 'string', required: true, description: '应用 ID' },
+      dau: { type: 'integer', description: '日活跃用户数（同日多次上报取最大值）' },
+      sessions: { type: 'integer', description: '会话数（同日多次上报累加）' },
+      avgDepth: { type: 'number', description: '平均会话深度' },
+      retention7: { type: 'number', description: '7 日留存（0-1 小数）' },
+      date: { type: 'string', description: '指标日期 YYYY-MM-DD（默认今天；补录历史时指定）' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const appId = String(args.appId)
+      ctx.appRegistry.recordUsage(appId, {
+        ...(args.dau !== undefined ? { dau: Number(args.dau) } : {}),
+        ...(args.sessions !== undefined ? { sessions: Number(args.sessions) } : {}),
+        ...(args.avgDepth !== undefined ? { avgDepth: Number(args.avgDepth) } : {}),
+        ...(args.retention7 !== undefined ? { retention7: Number(args.retention7) } : {}),
+        ...(args.date !== undefined && args.date !== '' ? { date: String(args.date) } : {}),
+      })
+      return { reported: true, metrics: ctx.appRegistry.metrics(appId) }
+    },
+  }))
+
+  t.register(defineTool({
     name: 'app_cost_breakdown',
     description: '成本穿透：应用 → Agent → MCP/模型 的 Token/调用/成本归集。',
     parameters: {
