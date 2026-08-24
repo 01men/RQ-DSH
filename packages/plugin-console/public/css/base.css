@@ -725,3 +725,30 @@ textarea.form-control { height: auto; min-height: 88px; padding: 9px 12px; resiz
 .oauth-actions { display: flex; gap: 10px; margin-top: 6px; }
 .oauth-actions .btn { flex: 1; }
 .oauth-error-ic { width: 52px; height: 52px; border-radius: 14px; background: #fef2f2; border: 1px solid #fecaca; display: grid; place-items: center; margin: 6px 0 16px; }
+
+/* ============ 资产运营页增强 ============ */
+/* 负责人首字母头像 */
+.avatar-sm {
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+  display: inline-grid; place-items: center;
+  background: var(--brand-50); color: var(--brand-600);
+  font-size: 11px; font-weight: 600;
+  border: 1px solid var(--brand-200);
+}
+.owner-cell { display: inline-flex; align-items: center; gap: 7px; max-width: 180px; }
+.org-cell { display: inline-flex; align-items: center; gap: 6px; color: var(--text-4); }
+.org-cell .fs-12 { color: var(--text-2); }
+/* Top 榜序号徽标 */
+.rank {
+  width: 18px; height: 18px; border-radius: 5px; flex-shrink: 0;
+  display: inline-grid; place-items: center;
+  background: var(--surface-2); color: var(--text-3);
+  font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums;
+}
+.rank.rank-top { background: var(--brand-50); color: var(--brand-600); border: 1px solid var(--brand-200); }
+/* 表格空状态 */
+.tbl-empty {
+  padding: 34px 0; text-align: center; color: var(--text-4); font-size: 12.5px;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+}
+.tbl-empty svg { color: var(--border-strong); }

@@ -20,12 +20,25 @@ function statusBadge(status) {
     : ['gray', 'trial'].includes(status) ? 'badge-info'
     : ['offline', 'down', 'unhealthy'].includes(status) ? 'badge-danger'
     : ['draft', 'pending', 'pending_approval'].includes(status) ? 'badge-warn' : 'badge-muted'
-  return `<span class="badge ${tone} no-dot">${esc(status)}</span>`
+  return `<span class="badge ${tone}">${esc(status)}</span>`
 }
 
 function healthBadge(health) {
   const tone = health === 'healthy' ? 'badge-ok' : health === 'degraded' ? 'badge-warn' : health === 'down' ? 'badge-danger' : 'badge-muted'
-  return `<span class="badge ${tone} no-dot">${esc(health ?? 'unknown')}</span>`
+  return `<span class="badge ${tone}">${esc(health ?? 'unknown')}</span>`
+}
+
+/** 类型徽章：小图标 + 名称。 */
+function typeBadge(type) {
+  const meta = TYPE_META[type]
+  return `<span class="badge badge-muted no-dot">${icon(meta?.[1] ?? 'box', 12)} ${esc(meta?.[0] ?? type)}</span>`
+}
+
+/** 负责人：圆形首字母头像 + 名字。 */
+function ownerCell(owner) {
+  if (!owner) return '<span class="fs-12 text-4">—</span>'
+  const initial = esc(owner.trim().charAt(0).toUpperCase() || '?')
+  return `<span class="owner-cell"><span class="avatar-sm">${initial}</span><span class="fs-12 ellipsis">${esc(owner)}</span></span>`
 }
 
 function trendSvg(byDay) {
@@ -66,22 +79,43 @@ export async function renderAssets(content, params, { rerender }) {
     </div>
 
     <div class="stat-grid mb-20">
-      <div class="stat-card"><div class="stat-label">纳管资产</div><div class="stat-value">${inv.items.length}</div><div class="stat-foot">${Object.entries(inv.summary.byType).map(([t, v]) => `${TYPE_META[t]?.[0] ?? t} ${v.total}`).join(' · ')}</div></div>
-      <div class="stat-card"><div class="stat-label">在服务资产</div><div class="stat-value">${Object.values(inv.summary.byType).reduce((s, v) => s + v.inService, 0)}</div><div class="stat-foot">online / gray / published</div></div>
-      <div class="stat-card"><div class="stat-label">健康异常</div><div class="stat-value" style="color:${inv.summary.unhealthy > 0 ? 'var(--danger)' : 'inherit'}">${inv.summary.unhealthy}</div><div class="stat-foot">down / degraded</div></div>
-      <div class="stat-card"><div class="stat-label">${esc(days)} 天资产消耗</div><div class="stat-value">${fmtCents(inv.summary.chargeCents30d)}</div><div class="stat-foot">计量口径（列表价含税）</div></div>
+      <div class="stat-card">
+        <div class="stat-icon" style="background:var(--brand-50);color:var(--brand-500)">${icon('layers', 18)}</div>
+        <div class="stat-value">${inv.items.length}</div>
+        <div class="stat-label">纳管资产</div>
+        <div class="stat-foot">${Object.entries(inv.summary.byType).map(([t, v]) => `${TYPE_META[t]?.[0] ?? t} ${v.total}`).join(' · ')}</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon" style="background:var(--ok-bg);color:#047857">${icon('activity', 18)}</div>
+        <div class="stat-value">${Object.values(inv.summary.byType).reduce((s, v) => s + v.inService, 0)}</div>
+        <div class="stat-label">在服务资产</div>
+        <div class="stat-foot">online / gray / published</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon" style="background:${inv.summary.unhealthy > 0 ? 'var(--danger-bg)' : 'var(--ok-bg)'};color:${inv.summary.unhealthy > 0 ? '#b91c1c' : '#047857'}">${icon(inv.summary.unhealthy > 0 ? 'alert' : 'shieldCheck', 18)}</div>
+        <div class="stat-value" style="color:${inv.summary.unhealthy > 0 ? 'var(--danger)' : 'inherit'}">${inv.summary.unhealthy}</div>
+        <div class="stat-label">健康异常</div>
+        <div class="stat-foot">down / degraded</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-icon" style="background:var(--purple-bg);color:#6d28d9">${icon('coins', 18)}</div>
+        <div class="stat-value">${fmtCents(inv.summary.chargeCents30d)}</div>
+        <div class="stat-label">${esc(days)} 天资产消耗</div>
+        <div class="stat-foot">计量口径（列表价含税）</div>
+      </div>
     </div>
 
     <div class="grid-2 mb-20" style="grid-template-columns:1.1fr 1fr;align-items:start">
       <div class="card">
         <div class="card-head"><span class="card-title">${icon('zap', 15)} 消耗 Top 资产</span><span class="card-sub">近 ${esc(days)} 天 · 计量口径</span></div>
         <div class="card-body" style="padding-top:8px">
-          ${report.topResources.slice(0, 8).map((row) => `
-            <div class="flex" style="padding:8px 0;border-bottom:1px solid var(--border);gap:8px">
-              <span class="fs-13 ellipsis" style="max-width:44%">${esc(row.label)}</span>
-              <span class="fs-11 text-4 mono grow">${esc(row.resource)}</span>
-              <span class="fs-12" style="font-weight:600">${fmtCents(row.charge_cents)}</span>
-              <span class="fs-11 text-4" style="min-width:56px;text-align:right">${row.count} 次</span>
+          ${report.topResources.slice(0, 8).map((row, i) => `
+            <div class="flex" style="padding:9px 0;border-bottom:1px solid var(--border);gap:10px;align-items:center">
+              <span class="rank ${i < 3 ? 'rank-top' : ''}">${i + 1}</span>
+              <span class="fs-13 ellipsis" style="max-width:40%">${esc(row.label)}</span>
+              <span class="fs-11 text-4 mono grow ellipsis">${esc(row.resource)}</span>
+              <span class="fs-12 col-num" style="font-weight:600">${fmtCents(row.charge_cents)}</span>
+              <span class="fs-11 text-4 col-num" style="min-width:56px;text-align:right">${row.count} 次</span>
             </div>`).join('') || '<span class="text-4 fs-12">暂无计量数据</span>'}
         </div>
       </div>
@@ -94,31 +128,36 @@ export async function renderAssets(content, params, { rerender }) {
     <div class="card">
       <div class="card-head">
         <span class="card-title">${icon('layers', 15)} 资产台账（${inv.total}）</span>
-        <div class="flex" style="gap:8px">
-          <input id="asset-q" class="input" placeholder="搜索名称 / 组织 / 负责人…" style="width:220px" value="${esc(params.get('q') ?? '')}">
+        <div class="card-head-actions">
+          <div class="search-input">${icon('search')}<input id="asset-q" class="input" placeholder="搜索名称 / 组织 / 负责人…" style="width:220px" value="${esc(params.get('q') ?? '')}"></div>
           <select id="asset-type" class="input" style="width:auto">
             <option value="">全部类型</option>
             ${Object.entries(TYPE_META).map(([t, meta]) => `<option value="${t}" ${typeFilter === t ? 'selected' : ''}>${meta[0]}</option>`).join('')}
           </select>
         </div>
       </div>
-      <div class="card-body" style="padding-top:0">
-        <table class="table">
-          <thead><tr><th>资产</th><th>类型</th><th>状态</th><th>健康</th><th>归属组织</th><th>负责人</th><th style="text-align:right">近 ${esc(days)} 天调用</th><th style="text-align:right">消耗</th></tr></thead>
-          <tbody>
-            ${inv.items.map((item) => `
-              <tr ${item.type === 'nas' ? `data-nas-id="${esc(item.id)}" style="cursor:pointer" title="打开 NAS 详情"` : ''}>
-                <td><div class="fs-13" style="font-weight:600">${esc(item.name)}</div><div class="fs-11 text-4 mono">${esc(item.slug ?? '')}</div></td>
-                <td><span class="badge badge-muted no-dot">${TYPE_META[item.type]?.[0] ?? item.type}</span></td>
-                <td>${statusBadge(item.status)}</td>
-                <td>${healthBadge(item.health)}</td>
-                <td class="fs-12">${esc(item.org)}</td>
-                <td class="fs-12">${esc(item.owner)}</td>
-                <td class="fs-12" style="text-align:right">${item.calls}</td>
-                <td class="fs-13" style="text-align:right;font-weight:600">${item.chargeCents > 0 ? fmtCents(item.chargeCents) : '—'}</td>
-              </tr>`).join('')}
-          </tbody>
-        </table>
+      <div class="card-body" style="padding:10px 8px 14px">
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead><tr><th>资产</th><th>类型</th><th>状态</th><th>健康</th><th>归属组织</th><th>负责人</th><th style="text-align:right">近 ${esc(days)} 天调用</th><th style="text-align:right">消耗</th></tr></thead>
+            <tbody>
+              ${inv.items.length ? inv.items.map((item) => `
+                <tr ${item.type === 'nas' ? `data-nas-id="${esc(item.id)}" style="cursor:pointer" title="打开 NAS 详情"` : ''}>
+                  <td><div class="col-strong">${esc(item.name)}</div><div class="col-sub mono">${esc(item.slug ?? '')}</div></td>
+                  <td>${typeBadge(item.type)}</td>
+                  <td>${statusBadge(item.status)}</td>
+                  <td>${healthBadge(item.health)}</td>
+                  <td><span class="org-cell">${icon('building', 12)}<span class="fs-12">${esc(item.org)}</span></span></td>
+                  <td>${ownerCell(item.owner)}</td>
+                  <td class="col-num fs-12" style="text-align:right">${item.calls}</td>
+                  <td class="col-num col-strong" style="text-align:right">${item.chargeCents > 0 ? fmtCents(item.chargeCents) : '—'}</td>
+                </tr>`).join('') : `
+                <tr><td colspan="8">
+                  <div class="tbl-empty">${icon('search', 28)}<span>暂无匹配资产，试试调整搜索或类型筛选</span></div>
+                </td></tr>`}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>`
 
