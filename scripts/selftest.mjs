@@ -690,6 +690,97 @@ try {
   const deadVerify = await api('POST', `/api/mcp/services/${deadSvc.data.id}/verify`, { token: admin })
   check('real 验证不可达 endpoint 被拒（不再恒可达）', !deadVerify.ok)
 
+  // ================================================================ MCP 配置导入（mcpServers JSON）
+  section('MCP 配置导入（mcpServers JSON 一键接入）')
+  // streamable HTTP + SSE 响应帧 + 会话头的 mock 服务（复刻 teambition 形态）
+  const mcpSseStub = createServer(async (req, res) => {
+    const raw = await readBody(req)
+    let msg = {}
+    try { msg = JSON.parse(raw) } catch { /* ignore */ }
+    const sseReply = (payload, extra = {}) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream', ...extra })
+      res.end(`data: ${JSON.stringify(payload)}\n\n`)
+    }
+    const noSession = { jsonrpc: '2.0', id: msg.id, error: { code: -32600, message: 'Server not initialized: session required' } }
+    if (msg.method === 'initialize') {
+      return sseReply({ jsonrpc: '2.0', id: msg.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'tb-like', version: '1.0' } } }, { 'mcp-session-id': 'sess-stub-1' })
+    }
+    if (msg.method === 'notifications/initialized') { res.writeHead(202); return res.end() }
+    if (msg.method === 'tools/list') {
+      if (req.headers['mcp-session-id'] !== 'sess-stub-1') return sseReply(noSession)
+      return sseReply({ jsonrpc: '2.0', id: msg.id, result: { tools: [
+        { name: 'tb_query_task', description: '查询任务', inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] } },
+        { name: 'tb_create_task', description: '创建任务', inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
+      ] } })
+    }
+    if (msg.method === 'tools/call') {
+      if (req.headers['mcp-session-id'] !== 'sess-stub-1') return sseReply(noSession)
+      const auth = req.headers.authorization ? `|auth:${req.headers.authorization}` : ''
+      return sseReply({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: `sse-echo:${msg.params?.name}${auth}` }], usage: { totalTokens: 88 } } })
+    }
+    res.writeHead(404).end('{}')
+  })
+  await new Promise((resolve) => mcpSseStub.listen(0, '127.0.0.1', resolve))
+  const ssePort = mcpSseStub.address().port
+
+  // 1. 标准形态导入（用户实际粘贴的配置样式）
+  const tbConfig = JSON.stringify({ mcpServers: { 'teambition-mcp': { type: 'streamableHttp', url: `http://127.0.0.1:${ssePort}/api/mcp?userToken=u-demo` } } })
+  const imp = await api('POST', '/api/mcp/import', { token: admin, body: { config: tbConfig } })
+  check('mcpServers JSON 一键导入', imp.ok && imp.data.imported === 1 && imp.data.results[0].ok, JSON.stringify(imp).slice(0, 300))
+  const impR = imp.data.results[0]
+  check('工具自动发现（initialize→tools/list，SSE 帧解析）', impR.tools === 2 && impR.reachable === true)
+  check('导入即验证并上线（autoDeploy）', impR.status === 'online')
+  const tbService = (await api('GET', '/api/mcp/services', { token: admin })).data.services.find((s) => s.id === impR.serviceId)
+  check('发现的工具含完整 inputSchema', tbService.tools.length === 2 && tbService.tools[0].inputSchema?.required?.[0] === 'id')
+
+  // 2. 全链路调用（SSE + 会话头 + 权限组）
+  await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
+    name: 'teambition 全放行', policies: { [impR.serviceId]: { allowedTools: '*', constraints: {} } },
+    subjects: [{ type: 'user', id: adminLogin.data.user.id, name: 'admin' }],
+  } })
+  const tbInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: impR.serviceId, tool: 'tb_query_task', args: { id: 't-1' } } })
+  check('导入服务真实调用（SSE 响应 + 会话复用）', tbInvoke.ok && tbInvoke.data.ok === true && JSON.stringify(tbInvoke.data.result).includes('sse-echo:tb_query_task'), JSON.stringify(tbInvoke).slice(0, 300))
+
+  // 3. headers 透传（Authorization）
+  const authConfig = JSON.stringify({ mcpServers: { 'authed-mcp': { type: 'http', url: `http://127.0.0.1:${ssePort}/api/mcp`, headers: { Authorization: 'Bearer tk-123' } } } })
+  const impAuth = await api('POST', '/api/mcp/import', { token: admin, body: { config: authConfig } })
+  await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
+    name: 'authed 全放行', policies: { [impAuth.data.results[0].serviceId]: { allowedTools: '*', constraints: {} } },
+    subjects: [{ type: 'user', id: adminLogin.data.user.id, name: 'admin' }],
+  } })
+  const authInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: impAuth.data.results[0].serviceId, tool: 'tb_query_task', args: {} } })
+  check('导入的认证头透传到远端（Authorization）', authInvoke.ok && authInvoke.data.ok === true && JSON.stringify(authInvoke.data.result).includes('auth:Bearer tk-123'), JSON.stringify(authInvoke).slice(0, 300))
+  const whoamiInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: impAuth.data.results[0].serviceId, tool: 'whoami', args: {} } })
+  check('清单外工具被网关拒绝（导入不越权）', whoamiInvoke.data?.status === 'denied', JSON.stringify(whoamiInvoke).slice(0, 200))
+  const authSvc = (await api('GET', '/api/mcp/services', { token: admin })).data.services.find((s) => s.id === impAuth.data.results[0].serviceId)
+  check('认证头列表回显脱敏', authSvc?.headers?.Authorization && !String(authSvc.headers.Authorization).includes('tk-123'), JSON.stringify(authSvc?.headers))
+
+  // 4. stdio/command 本地形态不支持
+  const impStdio = await api('POST', '/api/mcp/import', { token: admin, body: { config: JSON.stringify({ mcpServers: { 'local-tools': { command: 'npx', args: ['-y', 'some-mcp'] } } }) } })
+  check('stdio/command 形态标记不可导入', impStdio.ok && impStdio.data.results[0].ok === false && /stdio/.test(impStdio.data.results[0].error))
+
+  // 5. 非法 JSON
+  const impBad = await api('POST', '/api/mcp/import', { token: admin, body: { config: '{oops' } })
+  check('非法 JSON 报错（400）', !impBad.ok && impBad.status === 400 && /JSON/.test(impBad.error?.message ?? ''))
+
+  // 6. 重复导入（slug 冲突）
+  const impDup = await api('POST', '/api/mcp/import', { token: admin, body: { config: tbConfig } })
+  check('重复导入同名列出冲突', impDup.ok && impDup.data.results[0].ok === false && /已存在/.test(impDup.data.results[0].error))
+
+  // 7. 权限控制
+  const impDenied = await api('POST', '/api/mcp/import', { token: dev, body: { config: tbConfig } })
+  check('无 mcp.service.write 权限导入被拒（403）', impDenied.status === 403)
+
+  // 8. 远端不可达：导入成功但保留草稿
+  const impDead = await api('POST', '/api/mcp/import', { token: admin, body: { config: JSON.stringify({ mcpServers: { 'dead-remote': { type: 'http', url: 'http://127.0.0.1:1/mcp' } } }) } })
+  check('远端不可达：导入保留草稿并回传原因', impDead.data.results[0].ok === true && impDead.data.results[0].reachable === false && impDead.data.results[0].status === 'draft' && /发现失败/.test(impDead.data.results[0].error ?? ''), JSON.stringify(impDead).slice(0, 300))
+  const deadImported = (await api('GET', '/api/mcp/services', { token: admin })).data.services.find((s) => s.id === impDead.data.results[0].serviceId)
+  check('不可达服务不落伪工具清单', deadImported.tools.length === 0)
+
+  // 9. 在线外部服务同步工具
+  const syncRes = await api('POST', `/api/mcp/services/${impR.serviceId}/sync-tools`, { token: admin })
+  check('在线外部服务可同步工具清单', syncRes.ok && syncRes.data.tools.length === 2)
+
   // -- 钉钉真实 stub（复刻 OpenAPI 形状） ---------------------------------
   const ddUsers = {
     dd_u002: { unionId: 'dd_u002', userId: 'u002', name: '林小满', email: 'linxm@yuanbingke.com' },

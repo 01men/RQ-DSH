@@ -48,6 +48,31 @@ const PUBLIC_PATHS = new Set([
   '/api/connect/enroll',
 ])
 
+/** 从请求头推导对外基址（钉钉等真实 IdP 的 redirect_uri 需绝对 URL；反代场景优先 x-forwarded-*）。 */
+function requestOrigin(exchange: HttpExchange): string | undefined {
+  const header = (name: string): string | undefined => {
+    const value = exchange.headers[name]
+    if (value === undefined) return undefined
+    return String(Array.isArray(value) ? value[0] : value)
+  }
+  const host = header('x-forwarded-host') ?? header('host')
+  if (!host) return undefined
+  const proto = header('x-forwarded-proto') ?? 'http'
+  return `${proto}://${host}`
+}
+
+/** 服务记录对外回显时脱敏认证类请求头（存储保留原文，仅展示层掩码）。 */
+function maskServiceHeaders<T extends { headers?: Record<string, string> }>(service: T): T {
+  if (!service.headers) return service
+  const masked: Record<string, string> = {}
+  for (const [key, value] of Object.entries(service.headers)) {
+    masked[key] = /authorization|token|secret|key/i.test(key)
+      ? (value.length > 8 ? `${value.slice(0, 6)}…` : '****')
+      : value
+  }
+  return { ...service, headers: masked }
+}
+
 export function apply(ctx: Context) {
   const http = ctx.httpServer
 
@@ -168,7 +193,7 @@ export function apply(ctx: Context) {
   http.register('POST', '/api/auth/sso/authorize', async (exchange) => {
     const { provider, scene } = body<{ provider: string; scene?: 'web_qr' | 'h5' | 'in_app' }>(exchange)
     try {
-      exchange.ok(ctx.authn.beginSso(provider ?? 'dingtalk', scene ?? 'web_qr'))
+      exchange.ok(await ctx.authn.beginSso(provider ?? 'dingtalk', scene ?? 'web_qr', requestOrigin(exchange)))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(400, 'SSO_AUTHORIZE_FAILED', message)
@@ -791,30 +816,57 @@ export function apply(ctx: Context) {
 
   // -- MCP ----------------------------------------------------------------
   guarded('GET', '/api/mcp/services', 'mcp.service.read', () => ({
-    services: ctx.mcpRegistry.services().all(),
+    services: ctx.mcpRegistry.services().all().map(maskServiceHeaders),
     overview: ctx.mcpRegistry.metricsOverview(),
   }))
 
   guarded('POST', '/api/mcp/services', 'mcp.service.write', (exchange) => {
-    const input = body<{ name: string; slug?: string; description?: string; icon?: string; endpoint?: string; transport?: 'stdio' | 'sse' | 'http'; mode?: 'hosted' | 'external'; orgId: string; tools?: Array<{ name: string; description: string; riskLevel?: 'read' | 'write' | 'admin' }> }>(exchange)
+    const input = body<{ name: string; slug?: string; description?: string; icon?: string; endpoint?: string; transport?: 'stdio' | 'sse' | 'http'; mode?: 'hosted' | 'external'; orgId: string; headers?: Record<string, string>; tools?: Array<{ name: string; description: string; riskLevel?: 'read' | 'write' | 'admin'; inputSchema?: Record<string, unknown> }> }>(exchange)
     const service = ctx.mcpRegistry.createService({
       ...input,
       owner: caller(exchange).name,
-      tools: input.tools?.map((tool) => ({
+      ...(input.tools ? { tools: input.tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
         riskLevel: tool.riskLevel ?? 'read',
-        inputSchema: { type: 'object', properties: {}, additionalProperties: true },
-      })),
+        // 完整透传外部工具的 inputSchema（导入链路的关键信息），仅缺省时兜底空对象
+        inputSchema: tool.inputSchema && typeof tool.inputSchema === 'object' && Object.keys(tool.inputSchema).length > 0
+          ? tool.inputSchema
+          : { type: 'object', properties: {}, additionalProperties: true },
+      })) } : {}),
     })
     changeLog(exchange, 'mcp.service.create', 'mcp_service', service.id, service.name)
-    return service
+    return maskServiceHeaders(service)
+  })
+
+  /** mcpServers JSON 一键导入：解析 → 注册外部服务 → 自动发现工具 →（默认）验证上线。 */
+  guarded('POST', '/api/mcp/import', 'mcp.service.write', async (exchange) => {
+    const input = body<{ config: string | object; autoDeploy?: boolean }>(exchange)
+    const rootOrg = ctx.iam.orgs().findOne((org) => org.parentId === null)
+    if (!rootOrg) throw new Error('组织数据未初始化，无法导入')
+    const result = await ctx.mcpRegistry.importServices({
+      config: input.config,
+      orgId: rootOrg.id,
+      owner: caller(exchange).name,
+      ...(input.autoDeploy !== undefined ? { autoDeploy: input.autoDeploy } : {}),
+    })
+    for (const item of result.results) {
+      if (item.ok && item.serviceId) changeLog(exchange, 'mcp.service.import', 'mcp_service', item.serviceId, item.name, `tools=${item.tools ?? 0} reachable=${item.reachable}`)
+    }
+    return result
+  })
+
+  /** 外部服务工具同步：以远端 tools/list 为准刷新本地工具清单。 */
+  guarded('POST', '/api/mcp/services/:id/sync-tools', 'mcp.service.write', async (exchange) => {
+    const service = await ctx.mcpRegistry.syncTools(exchange.params['id']!)
+    changeLog(exchange, 'mcp.service.syncTools', 'mcp_service', service.id, service.name, `tools=${service.tools.length}`)
+    return maskServiceHeaders(service)
   })
 
   guarded('PATCH', '/api/mcp/services/:id', 'mcp.service.write', (exchange) => {
     const service = ctx.mcpRegistry.updateService(exchange.params['id']!, body(exchange))
     changeLog(exchange, 'mcp.service.update', 'mcp_service', service.id, service.name)
-    return service
+    return maskServiceHeaders(service)
   })
 
   guarded('POST', '/api/mcp/services/:id/verify', 'mcp.service.deploy', async (exchange) => {

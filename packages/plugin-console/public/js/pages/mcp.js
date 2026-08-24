@@ -120,6 +120,7 @@ async function openServiceDetail(id, ctx) {
       <div id="svc-tab-body"></div>`,
     foot: `
       <button class="btn btn-default" id="svc-health">${icon('wifi', 14)}健康探测</button>
+      ${svcData.mode === 'external' && svcData.exec === 'real' ? `<button class="btn btn-default" id="svc-sync-tools">${icon('refresh', 14)}同步工具</button>` : ''}
       ${svcData.status !== 'offline' ? `<button class="btn btn-default" id="svc-gray">${icon('trending', 14)}${svcData.status === 'gray' ? '调整灰度' : '灰度发布'}</button>` : ''}
       ${svcData.status !== 'offline' ? `<button class="btn btn-danger-ghost" id="svc-offline">${icon('alert', 14)}下线服务</button>` : ''}
       ${svcData.status === 'draft' ? `<button class="btn btn-primary" id="svc-verify">${icon('play', 14)}测试验证</button>` : ''}`,
@@ -243,6 +244,16 @@ async function openServiceDetail(id, ctx) {
       drawer.close(); ctx.rerender()
     } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
   }
+  const syncToolsBtn = drawer.el.querySelector('#svc-sync-tools')
+  if (syncToolsBtn) syncToolsBtn.onclick = async (e) => {
+    const btn = e.currentTarget
+    btn.classList.add('btn-loading')
+    try {
+      const updated = await api.post(`/api/mcp/services/${svcData.id}/sync-tools`)
+      toast(`工具清单已同步：${updated.tools.length} 个工具`)
+      drawer.close(); ctx.rerender()
+    } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
+  }
   const grayBtn = drawer.el.querySelector('#svc-gray')
   if (grayBtn) grayBtn.onclick = () => openGrayDialog(svcData, drawer, ctx)
   const offlineBtn = drawer.el.querySelector('#svc-offline')
@@ -331,13 +342,14 @@ function openDeployWizard(ctx) {
       el.classList.toggle('done', index + 1 < step)
     })
     prevBtn.style.visibility = step === 1 ? 'hidden' : ''
-    nextBtn.textContent = step === 3 ? '验证并发布' : '下一步'
+    nextBtn.textContent = step === 3 ? (state.source === 'import' ? '导入并上线' : '验证并发布') : '下一步'
     if (step === 1) {
       bodyEl.innerHTML = `
-        <div class="card-grid" style="grid-template-columns:1fr 1fr 1fr">
+        <div class="card-grid" style="grid-template-columns:1fr 1fr">
+          ${sourceCard('import', '配置导入（JSON）', '粘贴 Claude / Cursor 等工具的 mcpServers 配置，自动注册并发现工具', 'clipboard')}
+          ${sourceCard('endpoint', '外部服务注册', '手动登记 endpoint 与传输协议', 'globe')}
           ${sourceCard('template', '平台模板', '容器化托管，提供运行时模板与镜像', 'box')}
           ${sourceCard('image', '自有镜像', '指定容器镜像，由平台托管部署', 'server')}
-          ${sourceCard('endpoint', '外部服务注册', '仅登记 endpoint 与健康检查', 'globe')}
         </div>`
       bodyEl.querySelectorAll('[data-source]').forEach((card) => {
         card.onclick = () => {
@@ -346,6 +358,17 @@ function openDeployWizard(ctx) {
           card.classList.add('selected')
         }
       })
+    }
+    if (step === 2 && state.source === 'import') {
+      bodyEl.innerHTML = `
+        <div class="form-grid">
+          <div class="form-item full">
+            <label class="form-label">MCP 配置 JSON<span class="req">*</span></label>
+            <textarea class="form-control" name="config" rows="10" style="font-family:var(--mono);font-size:12px" placeholder='${esc(JSON.stringify({ mcpServers: { 'teambition-mcp': { type: 'streamableHttp', url: 'https://open.teambition.com/api/mcp?userToken=你的令牌' } } }, null, 2))}'>${esc(state.config ?? '')}</textarea>
+            <div class="form-hint">支持 Claude Desktop / Cursor / Cherry Studio 等工具通行的 mcpServers 格式；http、streamableHttp、sse 类型均可导入，导入后自动拉取远端工具清单并上线。token 已含在 url 中的配置可直接粘贴。</div>
+          </div>
+        </div>`
+      return
     }
     if (step === 2) {
       const isExternal = state.source === 'endpoint'
@@ -371,6 +394,42 @@ function openDeployWizard(ctx) {
           el.classList.add('active')
         }
       })
+    }
+    if (step === 3 && state.source === 'import') {
+      let entries = []
+      let parseError = ''
+      try {
+        const parsed = JSON.parse(state.config)
+        const map = parsed?.mcpServers && typeof parsed.mcpServers === 'object' ? parsed.mcpServers : parsed
+        entries = Object.entries(map).map(([name, conf]) => ({ name, url: conf?.url ?? '', type: conf?.type ?? 'http' }))
+      } catch (error) { parseError = error.message }
+      bodyEl.innerHTML = `
+        <div class="grid-2">
+          <div>
+            <div class="card-title mb-8">将导入以下服务</div>
+            ${parseError
+              ? `<div class="muted-box" style="color:var(--danger)">${esc(parseError)}</div>`
+              : entries.map((entry) => `
+                <div class="card card-pad mb-8">
+                  <div class="flex-between">
+                    <span style="font-weight:600">${esc(entry.name)}</span>
+                    <span class="badge badge-muted no-dot">${esc(entry.type)}</span>
+                  </div>
+                  <div class="fs-12 text-3 mt-4 mono" style="word-break:break-all">${esc(entry.url || '（缺少 url，将被跳过）')}</div>
+                </div>`).join('')}
+            ${checkItem(true, '导入后自动连接服务并发现工具清单')}
+            ${checkItem(true, '连接成功将自动测试验证并发布上线（草稿保留可回退）')}
+          </div>
+          <div>
+            <div class="card-title mb-8">导入说明</div>
+            <div class="code-block">POST /api/mcp/import
+mode: external
+exec: real
+tools: 远端自动发现（tools/list）</div>
+            <div class="form-hint mt-8">导入的服务与手动注册一致：经网关统一鉴权、限流熔断；在「权限组」为用户/Agent 授权后即可调用。</div>
+          </div>
+        </div>`
+      return
     }
     if (step === 3) {
       const yaml = `# 配置预览（api.yaml 片段）
@@ -404,13 +463,28 @@ tools: []           # 部署后在「工具」页登记`
     }
     if (step === 2) {
       collect()
+      if (state.source === 'import') {
+        if (!state.config?.trim()) return toast('请粘贴 MCP 配置 JSON', 'error')
+        try { JSON.parse(state.config) } catch { return toast('配置不是合法 JSON，请检查后重试', 'error') }
+        step = 3; renderStep(); return
+      }
       if (!state.name) return toast('请填写服务名称', 'error')
       step = 3; renderStep(); return
     }
-    // 发布
     collect()
     nextBtn.classList.add('btn-loading')
     try {
+      if (state.source === 'import') {
+        const result = await api.post('/api/mcp/import', { config: state.config })
+        const failures = result.results.filter((item) => !item.ok)
+        if (result.imported > 0) toast(`已导入 ${result.imported} 个服务（工具已自动发现并上线）`)
+        if (failures.length) {
+          toast(`未导入：${failures.map((item) => `${item.name}（${item.error}）`).join('；')}`.slice(0, 160), 'error')
+          if (result.imported === 0) return
+        }
+        modal.close(); ctx.rerender()
+        return
+      }
       await api.post('/api/mcp/services', {
         name: state.name, slug: state.slug || undefined, description: state.description,
         endpoint: state.endpoint || undefined,
