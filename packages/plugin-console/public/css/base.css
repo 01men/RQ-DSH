@@ -1,5 +1,5 @@
 /* ============================================================
-   衡 · 企业 AI 资源管理平台 —— 设计系统
+   榕器|企业AI资源治理平台 —— 设计系统
    设计语言：飞书式企业级 + Linear 质感
    ============================================================ */
 
@@ -113,6 +113,11 @@ button { font-family: inherit; }
   color: #fff;
   box-shadow: 0 4px 12px rgba(79, 110, 247, 0.4);
   flex-shrink: 0;
+}
+.brand-logo {
+  background: none;
+  box-shadow: none;
+  object-fit: contain;
 }
 .brand-name { font-size: 15px; font-weight: 600; letter-spacing: 0.2px; white-space: nowrap; }
 .brand-sub { font-size: 10.5px; color: var(--text-4); white-space: nowrap; margin-top: 1px; }

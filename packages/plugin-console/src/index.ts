@@ -1566,7 +1566,7 @@ export function apply(ctx: Context) {
       'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'skillhub', 'agent', 'app', 'connect', 'update', 'console',
     ]
     return {
-      name: '企业 AI 资源统一管理平台',
+      name: '榕器|企业AI资源治理平台',
       version: versionInfo.version,
       installMode: versionInfo.installMode,
       runtime: 'standalone-cordis（dsh 插件兼容）',

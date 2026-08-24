@@ -83,9 +83,9 @@ function renderShell(page, params, builder) {
     <div class="layout">
       <aside class="sidebar">
         <div class="sidebar-brand">
-          <div class="brand-mark">衡</div>
+          <img class="brand-mark brand-logo" src="/rongqi_ai.png" alt="榕器">
           <div>
-            <div class="brand-name">AI 资源管理平台</div>
+            <div class="brand-name" style="white-space:normal;font-size:13px;line-height:1.35">榕器|企业AI资源治理平台</div>
             <div class="brand-sub">DeepSeek Harness · 一切皆插件</div>
           </div>
         </div>

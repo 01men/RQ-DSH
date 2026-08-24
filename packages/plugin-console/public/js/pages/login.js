@@ -9,8 +9,8 @@ export function renderLogin(app) {
       <div class="login-hero">
         <div class="login-hero-inner">
           <div style="display:flex;align-items:center;gap:14px">
-            <div class="brand-mark" style="width:46px;height:46px;font-size:22px;border-radius:12px">衡</div>
-            <div style="font-size:19px;font-weight:600;letter-spacing:2px">HENG · AI OPS</div>
+            <img class="brand-mark brand-logo" src="/rongqi_ai.png" alt="榕器" style="width:46px;height:46px;border-radius:12px">
+            <div style="font-size:19px;font-weight:600;letter-spacing:2px">榕器 · 企业AI资源治理平台</div>
           </div>
           <h1>企业 AI 资源<br>统一纳管与治理平台</h1>
           <p>组织账号、MCP 服务、Skill 市场、Agent 本体、AI 应用——五类资源一套身份、一套权限、一套审计。</p>
