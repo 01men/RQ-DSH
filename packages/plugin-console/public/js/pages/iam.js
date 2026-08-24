@@ -510,14 +510,17 @@ export async function renderIam(content, params, ctx) {
       tr.onclick = () => renderPermPanel(role)
       rowsEl.appendChild(tr)
     })
-    $('#role-add').onclick = () => {
+    /** 角色表单弹窗：role 为空为新建，传入 role 为编辑（code 不可改，预填并回显权限勾选）。 */
+    const openRoleModal = (role) => {
+      const isEdit = !!role
+      const has = (point) => role && (role.permissions.includes('*') || role.permissions.includes(point) || role.permissions.some((p) => p.endsWith('.*') && point.startsWith(p.slice(0, -1))))
       const modal = openModal({
-        title: '新建角色', wide: true,
+        title: isEdit ? `编辑角色：${esc(role.name)}` : '新建角色', wide: true,
         body: `
           <div class="form-grid">
-            ${field('角色名称', inputField('name'), { required: true })}
-            ${field('角色 code', inputField('code', { placeholder: '小写字母，如 data_steward' }), { required: true })}
-            ${field('描述', inputField('description'), { full: true })}
+            ${field('角色名称', inputField('name', { value: role?.name ?? '' }), { required: true })}
+            ${isEdit ? field('角色 code', `<code class="mono" style="line-height:32px">${esc(role.code)}</code>`, { hint: 'code 创建后不可修改' }) : field('角色 code', inputField('code', { placeholder: '小写字母，如 data_steward' }), { required: true })}
+            ${field('描述', inputField('description', { value: role?.description ?? '' }), { full: true })}
           </div>
           <div class="card-title mb-8">权限点（菜单 + API + 数据范围）</div>
           <div style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px" id="new-role-perms">
@@ -525,23 +528,30 @@ export async function renderIam(content, params, ctx) {
               <div style="padding:6px 4px">
                 <div class="fs-12" style="font-weight:600;color:var(--text-2)">${esc(group)}</div>
                 ${perms.map((p) => `<label class="flex" style="padding:3px 0;font-size:12.5px;cursor:pointer">
-                  <input type="checkbox" name="perm" value="${esc(p.point)}" style="accent-color:var(--brand-500)">
+                  <input type="checkbox" name="perm" value="${esc(p.point)}" ${has(p.point) ? 'checked' : ''} style="accent-color:var(--brand-500)">
                   <span>${esc(p.label)}</span><span class="mono text-4" style="margin-left:auto">${esc(p.point)}</span>
                 </label>`).join('')}
               </div>`).join('')}
           </div>`,
-        foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
+        foot: `<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>${isEdit ? '保存' : '创建'}</button>`,
       })
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
         const permissions = [...modal.body.querySelectorAll('input[name=perm]:checked')].map((el) => el.value)
         try {
-          await api.post('/api/iam/roles', { name: data2.name, code: data2.code, description: data2.description, permissions })
-          toast('角色已创建'); modal.close(); ctx.rerender()
+          if (isEdit) {
+            await api.patch(`/api/iam/roles/${role.id}`, { name: data2.name, description: data2.description, permissions })
+            toast('角色已更新（权限实时生效）')
+          } else {
+            await api.post('/api/iam/roles', { name: data2.name, code: data2.code, description: data2.description, permissions })
+            toast('角色已创建')
+          }
+          modal.close(); ctx.rerender()
         } catch (error) { toast(error.message, 'error') }
       }
     }
+    $('#role-add').onclick = () => openRoleModal(null)
 
     function renderPermPanel(role) {
       const panel = $('#perm-panel')
@@ -552,6 +562,7 @@ export async function renderIam(content, params, ctx) {
             <div class="card-title">${esc(role.name)} ${role.builtin ? '<span class="badge badge-muted no-dot">内置</span>' : ''}</div>
             <div class="fs-12 text-3 mt-8">${esc(role.description)}</div>
           </div>
+          ${role.builtin ? '' : `<button class="btn btn-default btn-sm" id="role-edit">${icon('edit', 13)}编辑角色</button>`}
         </div>
         ${[...groups.entries()].map(([group, perms]) => `
           <div style="margin-bottom:12px">
@@ -563,6 +574,8 @@ export async function renderIam(content, params, ctx) {
                 <span class="mono text-4" style="margin-left:auto">${esc(p.point)}</span>
               </div>`).join('')}
           </div>`).join('')}`
+      const editBtn = panel.querySelector('#role-edit')
+      if (editBtn) editBtn.onclick = () => openRoleModal(role)
     }
   }
 
