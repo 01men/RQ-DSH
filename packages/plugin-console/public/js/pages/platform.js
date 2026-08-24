@@ -2,6 +2,7 @@
 import { api } from '../api.js'
 import { icon } from '../icons.js'
 import { h, $, $$, esc, timeAgo } from '../ui.js'
+import { openUpdateDrawer } from '../update.js'
 
 export async function renderPlatform(content) {
   const info = await api.get('/api/platform/info')
@@ -15,6 +16,8 @@ export async function renderPlatform(content) {
     skillhub: ['业务域', 'Skill 市场：扫描 / 审批 / 版本化上架', 'sparkles'],
     agent: ['业务域', 'Agent 本体：注册 / 绑定 / 监测 / 生命周期', 'bot'],
     app: ['业务域', 'AI 应用：编排 / 指标 / 成本穿透', 'app'],
+    connect: ['业务域', '远程接入：接入码 / 客户端 / 工具代理', 'fingerprint'],
+    update: ['平台维护', '上游版本检查 / 通知 / 一键升级', 'refresh'],
     console: ['接入层', 'REST 网关 / 控制台 SPA / 种子数据', 'globe'],
   }
 
@@ -25,6 +28,7 @@ export async function renderPlatform(content) {
         <div class="page-desc">运行中的平台 = 一棵 cordis 插件树。每个业务域都是可独立启停的插件，工具契约与 dsh 原生 ToolRuntime 对齐。</div>
       </div>
       <div class="page-actions">
+        <button class="badge badge-brand no-dot" id="btn-platform-version" title="查看平台更新" style="cursor:pointer;border:0">版本 v${esc(info.version)}${info.installMode === 'bundle' ? '（市场安装）' : ''}</button>
         <span class="badge badge-brand no-dot">运行时：${esc(info.runtime)}</span>
         <span class="badge badge-ok no-dot">${info.plugins.length} 个插件在线</span>
       </div>
@@ -86,4 +90,7 @@ export async function renderPlatform(content) {
         </div>
       </div>
     </div>`
+
+  const versionBtn = $('#btn-platform-version')
+  if (versionBtn) versionBtn.onclick = () => void openUpdateDrawer()
 }

@@ -17,6 +17,7 @@ import * as skillhub from '@dsh-ops/plugin-skillhub'
 import * as agent from '@dsh-ops/plugin-agent'
 import * as app from '@dsh-ops/plugin-app'
 import * as connect from '@dsh-ops/plugin-connect'
+import * as update from '@dsh-ops/plugin-update'
 import * as consolePlugin from '@dsh-ops/plugin-console'
 
 export interface BootOptions {
@@ -44,5 +45,7 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   await ctx.plugin(modelgw)
   // 宿主角色：提供远程接入端点（接入码/enroll/客户端管理）与接入管理工具
   await ctx.plugin(connect, { role: 'host' })
+  // 平台自更新：上游版本检查（自动+手动）与一键升级（source 形态）
+  await ctx.plugin(update)
   await ctx.plugin(consolePlugin)
 }

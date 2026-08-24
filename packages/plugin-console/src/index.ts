@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { existsSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
-import { createPluginContext } from '../../platform-core/src/index.ts'
+import { createPluginContext, platformVersionInfo } from '../../platform-core/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import { seedAll } from './seed.ts'
 
@@ -20,7 +20,7 @@ export const name = 'console'
 export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'oidc', 'audit', 'usage', 'billing', 'market', 'modelGateway',
-  'mcpRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry',
+  'mcpRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
 ]
 
 interface CallerInfo {
@@ -1561,12 +1561,14 @@ export function apply(ctx: Context) {
 
   // -- 平台信息与工具桥 -----------------------------------------------------
   guarded('GET', '/api/platform/info', 'console.login', () => {
+    const versionInfo = platformVersionInfo()
     const plugins = [
-      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'skillhub', 'agent', 'app', 'connect', 'console',
+      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'skillhub', 'agent', 'app', 'connect', 'update', 'console',
     ]
     return {
       name: '企业 AI 资源统一管理平台',
-      version: '1.0.0',
+      version: versionInfo.version,
+      installMode: versionInfo.installMode,
       runtime: 'standalone-cordis（dsh 插件兼容）',
       plugins,
       collections: ctx.opsStorage.names(),

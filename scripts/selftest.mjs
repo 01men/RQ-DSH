@@ -42,13 +42,48 @@ async function api(method, path, { token, body } = {}) {
   return { status: response.status, ok: payload?.ok ?? false, data: payload?.data, error: payload?.error }
 }
 
+// ---------------------------------------------------------------- stub 上游仓库（平台更新检查用）
+// 进程内真实 HTTP stub：raw package.json（版本 9.9.9）+ compare API（落后 2 个提交）。
+// 更新插件经 DSH_UPDATE_RAW_BASE / DSH_UPDATE_API_BASE 指向本 stub，自测不依赖外网。
+const GH_PORT = 7361
+const ghStub = createServer((req, res) => {
+  const url = req.url ?? ''
+  if (url.endsWith('/package.json')) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ name: 'dsh-enterprise-ops', version: '9.9.9' }))
+    return
+  }
+  if (url.includes('/compare/')) {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({
+      behind_by: 2,
+      commits: [
+        { sha: 'f1111111111111111111111111111111111111111', commit: { message: 'feat: 上游演示提交一', author: { name: '上游作者', date: '2026-08-24T02:00:00Z' } } },
+        { sha: 'a2222222222222222222222222222222222222222', commit: { message: 'fix: 上游演示提交二', author: { name: '上游作者', date: '2026-08-24T03:00:00Z' } } },
+      ],
+    }))
+    return
+  }
+  res.writeHead(404, { 'content-type': 'application/json' })
+  res.end('{}')
+})
+await new Promise((resolve) => ghStub.listen(GH_PORT, '127.0.0.1', resolve))
+
 // ---------------------------------------------------------------- 启动隔离实例
 console.log('\x1b[90m» 启动隔离测试实例…\x1b[0m')
 await rm(DATA_DIR, { recursive: true, force: true })
 await mkdir(DATA_DIR, { recursive: true })
 const proc = spawn(process.execPath, ['src/main.ts', '--port', String(PORT), '--data', DATA_DIR], {
   stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...process.env, DEMO_SEED: '1' },  // 自测基于完整演示种子（隔离实例，不触碰生产 data/）
+  // DEMO_SEED：自测基于完整演示种子（隔离实例，不触碰生产 data/）
+  // DSH_UPDATE_*：更新检查指向本进程 stub 上游；关闭启动自动首查保证断言确定性
+  env: {
+    ...process.env,
+    DEMO_SEED: '1',
+    DSH_UPDATE_RAW_BASE: `http://127.0.0.1:${GH_PORT}`,
+    DSH_UPDATE_API_BASE: `http://127.0.0.1:${GH_PORT}`,
+    DSH_UPDATE_AUTO_CHECK: 'off',
+  },
 })
 proc.stderr.on('data', (chunk) => process.stderr.write(`\x1b[90m[server] ${chunk}\x1b[0m`))
 
@@ -929,6 +964,56 @@ try {
   const toolAgentList = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'agent_list', args: { status: 'online' } } })
   check('工具执行（agent_list 过滤）', toolAgentList.ok && toolAgentList.data.value.total >= 5)
 
+  // ================================================================ 平台自更新（版本检查 / 权限 / dry-run / 审计联动）
+  section('平台自更新（plugin-update）')
+  check('更新工具已注册（update_status 等）', toolList.data.tools.some((t) => t.name === 'update_status' && t.permission === 'platform.update.read'))
+
+  const updStatus0 = await api('GET', '/api/update/status', { token: admin })
+  check('更新状态可读（版本取自根 package.json=1.1.0）', updStatus0.ok && updStatus0.data.currentVersion === '1.1.0')
+  check('安装形态识别为 source（git 检出）', updStatus0.data.installMode === 'source')
+  check('环境变量关闭自动检查生效（DSH_UPDATE_AUTO_CHECK=off）', updStatus0.data.autoCheck === false)
+  check('未检查时无最新版本快照', updStatus0.data.latest === null)
+
+  const updAnon = await api('GET', '/api/update/status')
+  check('匿名访问更新状态被拒（401）', updAnon.status === 401)
+
+  const updCheck1 = await api('POST', '/api/update/check', { token: admin })
+  check('手动检查成功（stub 上游）', updCheck1.ok && updCheck1.data.latest?.version === '9.9.9')
+  check('发现新版本（1.1.0 → 9.9.9）', updCheck1.data.hasUpdate === true && updCheck1.data.updateKind === 'version')
+  check('提交对比生效（落后 2 个提交）', updCheck1.data.behindBy === 2 && updCheck1.data.recentCommits.length === 2 && updCheck1.data.recentCommits[0].sha === 'a222222')
+
+  const updCheck2 = await api('POST', '/api/update/check', { token: admin })
+  check('手动检查 60 秒冷却（429）', updCheck2.status === 429)
+
+  const updEvents = await api('GET', '/api/platform/info', { token: admin })
+  check('已广播 platform.update.available 事件', updEvents.data.events.some((e) => e.name === 'platform.update.available'))
+  const updAudit = await api('GET', '/api/audit/logs?q=platform.update.available&limit=10', { token: admin })
+  check('audit 联动留痕（platform.update.available）', (updAudit.data?.items ?? []).some((l) => l.action === 'platform.update.available'))
+
+  const hrForUpdate = await api('POST', '/api/auth/login', { body: { username: 'hr', password: 'Ybk@2026' } })
+  const hrToken2 = hrForUpdate.data?.token
+  const updApplyDenied = await api('POST', '/api/update/apply', { token: hrToken2, body: { reason: '越权尝试' } })
+  check('无权限用户执行升级被拒（403）', updApplyDenied.status === 403)
+
+  const updDry = await api('POST', '/api/update/apply', { token: admin, body: { dryRun: true } })
+  check('dry-run 预演返回步骤且不执行任何变更', updDry.ok && updDry.data.dryRun === true && Array.isArray(updDry.data.steps) && updDry.data.steps.length === 3)
+  check('dry-run 附带待拉取提交清单', Array.isArray(updDry.data.incomingCommits) && updDry.data.incomingCommits.length === 2)
+
+  const updApplyNoReason = await api('POST', '/api/update/apply', { token: admin, body: {} })
+  check('正式升级缺少原因被拒（400）', updApplyNoReason.status === 400)
+
+  const updDismiss = await api('POST', '/api/update/settings', { token: admin, body: { dismissedVersion: '9.9.9' } })
+  check('忽略指定版本（横幅静默）', updDismiss.ok && updDismiss.data.dismissed === true)
+  const updRestore = await api('POST', '/api/update/settings', { token: admin, body: { dismissedVersion: null } })
+  check('恢复更新提醒', updRestore.ok && updRestore.data.dismissed === false)
+  const updAutoOn = await api('POST', '/api/update/settings', { token: admin, body: { autoCheck: true, intervalHours: 24 } })
+  check('开启自动检查（每 24h）', updAutoOn.ok && updAutoOn.data.autoCheck === true && updAutoOn.data.intervalHours === 24)
+
+  const updTool = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'update_status', args: {} } })
+  check('Agent 工具 update_status 可用', updTool.ok && updTool.data.isError === false && updTool.data.value.currentVersion === '1.1.0')
+  const updToolApply = await api('POST', '/api/tools/execute', { token: hrToken2, body: { name: 'update_apply', args: { reason: '越权尝试' } } })
+  check('工具级权限拦截 update_apply（403）', updToolApply.status === 403)
+
   // ================================================================ 远程 dsh 接入（接入码 → 机器凭证 → 工具代理）
   section('远程 dsh 接入（plugin-connect）')
   check('接入管理工具已注册（connect_code_create 等）', toolList.data.tools.some((t) => t.name === 'connect_code_create' && t.permission === 'connect.manage'))
@@ -993,6 +1078,7 @@ try {
   // ---------------------------------------------------------------- 收尾
   console.log('\n\x1b[90m» 停止测试实例…\x1b[0m')
   proc.kill('SIGKILL')
+  await new Promise((resolve) => ghStub.close(resolve))
   await rm(DATA_DIR, { recursive: true, force: true }).catch(() => {})
 }
 

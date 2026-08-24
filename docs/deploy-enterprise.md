@@ -40,8 +40,8 @@ npm start -- --port 7300 --data ./data    # 首次启动执行基线初始化（
 # 4. 验证
 curl -X POST localhost:7300/api/auth/login -H 'content-type: application/json' \
      -d '{"username":"admin","password":"<口令>"}'        # 应返回 token
-npm run selftest                                          # 223 项断言（隔离实例，不碰生产数据）
-npm run lint:manifests                                    # 55 项清单校验
+npm run selftest                                          # 244 项断言（隔离实例，不碰生产数据）
+npm run lint:manifests                                    # 60 项清单校验
 ```
 
 进程守护（Linux systemd 示例）：
@@ -58,10 +58,19 @@ Restart=always
 运维要点：
 
 - **备份**：冷备整个 `--data` 目录即可（JSON 原子落盘 + SQLite WAL）。资金/计量数据在 `txnstore.db`。
-- **升级**：`git pull && npm install && systemctl restart ops-platform`；先跑 `npm run selftest` 再切换流量。
+- **升级（v1.1+ 内置更新检查）**：平台默认每 24h 自动向上游 GitHub 仓库发起一次版本检查（可在控制台
+  顶栏「平台更新」抽屉或 `dshctl update set` 调整/关闭）；发现新版本时控制台顶栏出现「可更新」徽标，
+  并广播 `platform.update.available` 事件（审计留痕）。升级方式按安装形态二选一：
+  - **源码检出（source）**：控制台抽屉「一键升级」或 `dshctl update apply --dry-run` 预演后
+    `dshctl update apply --reason="…"`（内部执行 `git pull --ff-only` + `npm install`，本地有未提交
+    修改会安全失败而非强改），随后 `systemctl restart ops-platform` 生效；先跑 `npm run selftest` 再切换流量。
+  - **插件市场安装（bundle）**：在宿主 dsh 侧执行 `dsh plugin update github:01men/ybkk-AIOS`，重启 dsh 宿主。
+  - Agent 亦可在会话中直接说「检查平台更新」/「升级平台」（`update_status` / `update_check` / `update_apply` 工具）。
 - **对外发布**：用 Nginx 等反代 7300 并做 TLS；平台自身按 Bearer 令牌鉴权。
 - **企业定制**（按需）：钉钉真实连接器（`mode: real` + `apiBase`，控制台「组织与账号 → 三方集成」配置）；
   OIDC 对外声明 `OIDC_ISSUER` 环境变量；OIDC 私钥生产建议迁 KMS。
+- **内网/限流环境**：更新检查走 GitHub API（未认证限额 60 次/时/IP，可设 `GITHUB_TOKEN` 提额）；
+  私有镜像用 `DSH_UPDATE_API_BASE` / `DSH_UPDATE_RAW_BASE` 环境变量覆盖。
 - **资金边界**：支付/对公/开票通道为手工过渡态，接入前请阅读 README「三A 资金红线」。
 
 ## 三、dsh 运行时接入（形态 B，启用 Agent 运维）
@@ -158,7 +167,7 @@ DSHCTL_URL=http://宿主IP:7300 DSHCTL_USER=admin DSHCTL_PASS=*** \
    a. GET / 返回 200；
    b. POST /api/auth/login（admin + 口令）返回 token；
    c. GET /api/overview（Bearer token）返回 200；
-   d. npm run selftest 223/223 通过；npm run lint:manifests 55/55 通过。
+   d. npm run selftest 244/244 通过；npm run lint:manifests 60/60 通过。
 6.（可选，仅当"接入 dsh"=是）按仓库 docs/deploy-enterprise.md 第三节生成 overlay 并以
    pnpm dsh web --patch 启动，验证两进程共享同一 data/。
 7. 回报：commit hash、服务地址、admin 首登是否成功、自测结果、初始口令交付方式（不得明文贴在公开渠道）。
@@ -172,7 +181,7 @@ DSHCTL_URL=http://宿主IP:7300 DSHCTL_USER=admin DSHCTL_PASS=*** \
 ## 六、验收清单
 
 - [ ] `GET /` 200，控制台可登录（admin + `ADMIN_PASSWORD`）
-- [ ] `npm run selftest` 223/223、`npm run lint:manifests` 55/55
+- [ ] `npm run selftest` 244/244、`npm run lint:manifests` 60/60
 - [ ] 生产数据目录**不含**演示数据（`data/iam~users.json` 无 ops/hr/dev 等演示账号）
 - [ ] （形态 B）dsh web 启动且 Agent 能回答 `dshctl mcp list` 类问题
 - [ ] （形态 C）远程电脑 `connect_status` 显示 remote 模式；宿主「平台接入」页可见该客户端

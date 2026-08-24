@@ -5,8 +5,8 @@ endpoints:
   - # 平台自身无业务 REST；由 console 插件聚合暴露
 
 services:
-  - key: storage
-    access: ctx.storage
+  - key: opsStorage
+    access: ctx.opsStorage
     description: JSON 集合存储（原子落盘，可替换 DB）
   - key: platformBus
     access: ctx.platformBus

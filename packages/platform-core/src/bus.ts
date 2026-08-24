@@ -57,6 +57,8 @@ export const PlatformEvents = {
   ConnectCodeCreated: 'connect.code.created',
   ConnectClientEnrolled: 'connect.client.enrolled',
   ConnectClientDisabled: 'connect.client.disabled',
+  UpdateAvailable: 'platform.update.available',
+  UpdateApplied: 'platform.update.applied',
 } as const
 
 /** 平台保留命名空间：第三方插件（source=plugin:*）禁止发射。 */

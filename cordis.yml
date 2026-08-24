@@ -11,7 +11,7 @@
 #     ESM 判为 ERR_UNSUPPORTED_ESM_URL_SCHEME），例如 file:///D:/mycode/ybkk-AIOS
 #     （路径含中文等非 ASCII 字符时用百分号编码）
 #   - provideToolRuntime=false：完整 dsh 自带 ToolRuntime（ctx.tools），
-#     平台插件注册的 37 个运维工具将直接对模型可见、可被调用
+#     平台插件注册的全部运维工具将直接对模型可见、可被调用
 #   - 控制台 SPA 仍由本项目的独立进程提供（node src/main.ts），
 #     两个进程共享同一 data/ 目录即可管理同一份数据
 - insert:
@@ -49,3 +49,6 @@
       name: '<PROJECT_ROOT>/packages/plugin-app/src/index.ts'
     - id: ops-modelgw
       name: '<PROJECT_ROOT>/packages/plugin-modelgw/src/index.ts'
+    # 平台自更新：上游版本检查 + Agent 工具（update_status/update_check/update_apply）
+    - id: ops-update
+      name: '<PROJECT_ROOT>/packages/plugin-update/src/index.ts'

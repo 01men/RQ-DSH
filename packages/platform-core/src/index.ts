@@ -22,6 +22,7 @@ export * from './ids.ts'
 export * from './sqlite.ts'
 export * from './yaml.ts'
 export * from './plugin-ctx.ts'
+export * from './version.ts'
 
 export interface PlatformCoreConfig {
   dataDir?: string

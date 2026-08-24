@@ -12,7 +12,7 @@
 #
 # 行为与 cordis.yml 一致：
 #   - provideToolRuntime=false：复用 dsh 原生 ToolRuntime（服务键 tools），
-#     平台插件注册的 37 个运维工具将直接进入 dsh 工具注册表、对模型可见、可被调用
+#     平台插件注册的全部运维工具将直接进入 dsh 工具注册表、对模型可见、可被调用
 #   - startHttp=false：控制台 SPA 仍由独立进程提供（node src/main.ts），
 #     两个进程共享同一 data/ 目录即可管理同一份数据
 - insert:
@@ -54,3 +54,6 @@
       name: dsh-enterprise-ops/packages/plugin-app/src/index.ts
     - id: ops-modelgw
       name: dsh-enterprise-ops/packages/plugin-modelgw/src/index.ts
+    # 平台自更新：上游版本检查 + Agent 工具（发现新版本提示升级，source 形态可一键执行）
+    - id: ops-update
+      name: dsh-enterprise-ops/packages/plugin-update/src/index.ts

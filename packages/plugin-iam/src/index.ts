@@ -186,6 +186,8 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'market.install', label: '安装插件', group: '插件市场' },
   { point: 'market.developer', label: '开发者门户', group: '插件市场' },
   { point: 'connect.manage', label: '管理平台接入（接入码/远程客户端）', group: '平台接入' },
+  { point: 'platform.update.read', label: '查看/触发平台更新检查', group: '平台维护' },
+  { point: 'platform.update.apply', label: '执行平台升级（git pull + npm install）', group: '平台维护' },
 ]
 
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [

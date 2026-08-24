@@ -17,6 +17,7 @@ import { renderApprovals } from './pages/approvals.js'
 import { renderAssets } from './pages/assets.js'
 import { renderPlatform } from './pages/platform.js'
 import { renderConnect } from './pages/connect.js'
+import { mountUpdateBadge, openUpdateDrawer } from './update.js'
 
 const NAV = [
   { section: '总览', items: [
@@ -100,6 +101,7 @@ function renderShell(page, params, builder) {
           </div>
           <div class="topbar-right">
             <button class="icon-btn" id="btn-refresh" title="刷新数据">${icon('refresh')}</button>
+            <div style="position:relative" id="update-host"></div>
             <div style="position:relative" id="alert-host"></div>
             <div class="avatar" id="avatar" title="${esc(session.user?.displayName ?? '')}">${esc((session.user?.displayName ?? '?').slice(0, 1))}</div>
           </div>
@@ -145,8 +147,13 @@ function renderShell(page, params, builder) {
   $('#cmdk-trigger').onclick = () => openCmdk()
   $('#avatar').onclick = () => openCmdk()
 
-  // 徽标（待审批/未读告警）
+  // 徽标（待审批/未读告警）与平台更新提示
   void refreshBadges()
+  void mountUpdateBadge()
+
+  // 平台更新：30 分钟轮询一次徽标（自动检查的结果会在页面切换时自然刷新）
+  clearInterval(window.__updatePoll)
+  window.__updatePoll = setInterval(() => { if (session.token) void mountUpdateBadge() }, 30 * 60 * 1000)
 
   const content = $('#page-content')
   builder(content, params, { rerender: navigate })

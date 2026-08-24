@@ -3,10 +3,13 @@
  *   plugin.yaml（id/version/依赖/权限）+ manifest/{api,permissions,events,ui}.yaml
  * 这些声明是插件对外的契约文档（api.yaml 为唯一事实源，CLI/Skill/Web 三端对齐）。
  */
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const ROOT = process.cwd()
+
+// 版本唯一事实源：根 package.json（plugin.yaml/manifest 与根版本一处同步，不再散落硬编码）
+const VERSION = String(JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version ?? '0.0.0')
 
 const PLUGINS = [
   {
@@ -187,6 +190,24 @@ const PLUGINS = [
       menus: [{ group: '总览', items: ['工作台'] }, { group: '治理与运营', items: ['资产运营'] }, { group: '平台', items: ['插件与工具'] }],
     },
   },
+  {
+    dir: 'update', id: 'dsh-plugin-update', label: '平台自更新（版本检查/通知/一键升级）',
+    depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam'], permissions: ['platform.update.read', 'platform.update.apply'],
+    services: [
+      ['update', 'ctx.update', '上游版本检查（自动+手动）/ 更新通知 / source 形态一键升级（git pull + npm install）'],
+    ],
+    events: [
+      ['platform.update.available', 'emit', '发现上游新版本（audit 订阅留痕）'],
+      ['platform.update.applied', 'emit', '一键升级执行完成'],
+    ],
+    api: [
+      'GET /api/update/status（全部登录用户：顶栏更新横幅）',
+      'POST /api/update/check（platform.update.read，60s 冷却）',
+      'POST /api/update/settings · POST /api/update/apply（platform.update.apply，apply 支持 dry-run）',
+    ],
+    tools: ['update_status', 'update_check', 'update_apply'],
+    ui: { routes: ['顶栏更新徽标 + 更新抽屉（无独立页面）'], menus: [] },
+  },
 ]
 
 const yml = (value, indent = 0) => {
@@ -218,7 +239,7 @@ for (const plugin of PLUGINS) {
   write(join(pkgDir, 'plugin.yaml'), `
 # 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
 id: ${plugin.id}
-version: 1.0.0
+version: ${VERSION}
 label: ${plugin.label}
 depends: [${plugin.depends.map((d) => `'${d}'`).join(', ')}]
 provides:

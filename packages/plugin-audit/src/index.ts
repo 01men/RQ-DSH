@@ -151,6 +151,22 @@ export class AuditService extends Service {
     ctx.platformBus.on(PlatformEvents.AgentOfflined, auditOf('change', 'agent.offline'))
     ctx.platformBus.on(PlatformEvents.AppOnlined, auditOf('change', 'app.online'))
     ctx.platformBus.on(PlatformEvents.AppOfflined, auditOf('change', 'app.offline'))
+    ctx.platformBus.on(PlatformEvents.UpdateAvailable, (payload) => {
+      const p = payload as { currentVersion: string; latestVersion: string; behindBy: number }
+      this.record({
+        type: 'change', actorType: 'system', actorId: 'update-checker', actorName: '平台更新检查',
+        action: 'platform.update.available', resourceType: 'platform', resourceId: 'self', resourceName: '平台升级',
+        result: 'ok', detail: `上游新版本 ${p.currentVersion} → ${p.latestVersion}${p.behindBy > 0 ? `（落后 ${p.behindBy} 提交）` : ''}`,
+      })
+    })
+    ctx.platformBus.on(PlatformEvents.UpdateApplied, (payload) => {
+      const p = payload as { from: string; to: string; reason: string; actor: string }
+      this.record({
+        type: 'change', actorType: 'human', actorId: 'update-apply', actorName: p.actor,
+        action: 'platform.update.applied', resourceType: 'platform', resourceId: 'self', resourceName: '平台升级',
+        result: 'ok', detail: `${p.from} → ${p.to}，原因：${p.reason}`,
+      })
+    })
     ctx.platformBus.on(PlatformEvents.ApprovalCreated, auditOf('change', 'approval.create'))
     ctx.platformBus.on(PlatformEvents.ApprovalDecided, (payload) => {
       const p = payload as { approvalId: string; title: string; approved: boolean; approverName: string }

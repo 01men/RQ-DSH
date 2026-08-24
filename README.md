@@ -40,10 +40,22 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）223 项端到端断言
-npm run lint:manifests  # 插件清单五面 YAML 校验（55 项）
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）244 项端到端断言
+npm run lint:manifests  # 插件清单五面 YAML 校验（60 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
+
+### 平台自更新（v1.1+）
+
+两类安装形态（GitHub 源码检出 / dsh 插件市场安装）都能感知上游仓库新版本，**是否升级永远由管理员决定**：
+
+- **自动检查**：默认每 24h 一次（启动 15s 后首查），比对远端 `package.json` 版本 + GitHub compare 提交差；
+  发现新版本 → 控制台顶栏「可更新」徽标 + `platform.update.available` 事件（audit 留痕）。控制台抽屉可开关/调频。
+- **手动升级**：控制台顶栏徽标 → 抽屉「一键升级」（source 形态：`git pull --ff-only` + `npm install`，支持
+  dry-run 预演、原因留痕、完成后提示重启）；CLI：`dshctl update status | check | apply [--dry-run]`；
+  Agent 工具：`update_status` / `update_check` / `update_apply`。bundle 形态给出 `dsh plugin update` 指引。
+- **内网/限流**：`GITHUB_TOKEN` 提升限额；`DSH_UPDATE_API_BASE` / `DSH_UPDATE_RAW_BASE` 指向私有镜像；
+  `DSH_UPDATE_AUTO_CHECK=off` 关闭自动检查。权限点：`platform.update.read`（查看/检查）、`platform.update.apply`（升级）。
 
 > **企业部署 / Agent 一键接入**：部署 runbook、dsh 运行时接入与「可直接下达给 dsh 自带 Agent 的一键部署指引」
 > 见 [docs/deploy-enterprise.md](docs/deploy-enterprise.md)；日常运维 Agent 指引见 `skills/dsh-ops-admin/SKILL.md`。
@@ -67,6 +79,7 @@ DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭
          dsh-plugin-market         第三方与自营插件市场（契约五面 / Ed25519 验签 / L0 运行时 / 订阅代收）
          dsh-plugin-audit          四类审计日志 + 告警规则 + 成本归集 + 审批中心
          dsh-plugin-connect        远程 dsh 接入（宿主角色：接入码/enroll/客户端管理；客户端角色：凭证申请 + 工具远程代理 + 本机配置页）
+         dsh-plugin-update         平台自更新：上游版本检查（自动+手动）→ 通知 → source 形态一键升级（git pull + npm install，dry-run/审计/权限点）
 底座     dsh-plugin-resource-core  资源本体：属性 schema + 生命周期状态机 + 依赖图
 基础层   dsh-plugin-platform-core  存储(JSON集合/原子落盘) + SQLite 事务存储 + YAML 解析 + 事件总线 + ToolRuntime-lite + HTTP
 ```
@@ -188,7 +201,7 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
 - **复式分账 ledger（第 8 步）**：账期汇总结转（费率版本快照、尾差归平台）、试算平衡、红字冲正、开发者应收。
 - **资金红线（v1.2 §六过渡）**：对公收款/开票/开发者付款通道未就位——充值仅管理员手工录入（幂等键=转账单号），
   订阅代收为 manual-settlement 登记，平台不自动扣外部资金。
-- 验收：`npm run selftest` **223/223**、`npm run lint:manifests` **55/55**；KBaaS/连接器市场/合规门户与
+- 验收：`npm run selftest` **244/244**、`npm run lint:manifests` **60/60**；KBaaS/连接器市场/合规门户与
   L1 有码沙箱为下一迭代（设计见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)）。
 
 ## 三B、评审缺陷修复与资产运营（本迭代，v1.3）
@@ -237,7 +250,7 @@ packages/
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（223 项断言，含安全攻击演练与远程接入链路；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（244 项断言，含安全攻击演练、远程接入与平台更新链路；隔离实例 + DEMO_SEED）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -294,7 +307,7 @@ curl localhost:7300/api/overview -H "authorization: Bearer <token>"
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **223 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **244 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 双人审批（含自审拦截）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增

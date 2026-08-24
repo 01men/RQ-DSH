@@ -1,0 +1,9 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-update
+events:
+  - name: platform.update.available
+    mode: emit
+    description: 发现上游新版本（audit 订阅留痕）
+  - name: platform.update.applied
+    mode: emit
+    description: 一键升级执行完成

@@ -4,7 +4,7 @@
 管理员/运维 Agent 需要对「企业 AI 资源管理平台」执行任何运维操作时，先读本索引找到对应的领域 Skill，再按其操作手册执行。典型场景：监控告警处理、资源上下线、审批处理、异常排查、成本分析。
 
 ## 调用方式（工具优先）
-平台插件安装进 dsh 后，运维能力已注册为 dsh 工具（iam_* / authn_* / mcp_* / skill_* / agent_* / app_* / usage_* / audit_* / market_* / billing_* / connect_*）。
+平台插件安装进 dsh 后，运维能力已注册为 dsh 工具（iam_* / authn_* / mcp_* / skill_* / agent_* / app_* / usage_* / audit_* / market_* / billing_* / connect_* / update_*）。
 **任何现状问题（查询/盘点/健康/成本）先直接调用对应工具获取真实数据，禁止凭记忆回答。**
 工具不可用（独立部署且插件未挂载）时才走 CLI 备选：`DSHCTL_TOKEN`（或 `DSHCTL_USER/DSHCTL_PASS`）+ `node cli/dshctl.mjs <resource> <action>`（输出可 `--output json`）。
 
@@ -19,6 +19,15 @@
 | dsh-ops-app | AI 应用/拓扑/成本穿透 | `dshctl app` |
 | dsh-ops-audit | 审计日志/告警/审批中心/成本 | `dshctl audit` `dshctl approval` `dshctl cost` |
 | （平台接入） | 远程 dsh 接入码/已接入客户端管理 | `dshctl connect` |
+| （平台更新） | 上游版本检查/一键升级/自动检查偏好 | `dshctl update` |
+
+## 平台更新（版本检查 / 一键升级）
+- 检查上游：`update_check`（60s 冷却）或 `update_status`；发现新版本会自动广播事件并留审计记录。
+- 升级（仅 source 安装形态）：先 `update_apply { dryRun: true }` 预演，向使用者确认后
+  `update_apply { reason: "<升级原因>" }`（git pull --ff-only + npm install），**完成后提醒使用者重启平台进程**；
+  本地有未提交修改会安全失败，请使用者人工处理后再试。
+- bundle 安装形态：工具会返回宿主侧指引（`dsh plugin update github:01men/ybkk-AIOS`），按指引转述即可。
+- 升级是管理员权限（platform.update.apply）；检查/查看为 platform.update.read。
 
 ## 远程 dsh 接入（本机未配置宿主时第一步）
 - 工具执行报「尚未配置宿主服务」或 `connect_status` 显示未接入时：请使用者提供宿主地址与管理员签发的一次性接入码（`enr_` 开头），

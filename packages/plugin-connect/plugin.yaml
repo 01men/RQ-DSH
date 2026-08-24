@@ -1,6 +1,6 @@
 # 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
 id: dsh-plugin-connect
-version: 1.0.0
+version: 1.1.0
 label: 远程接入（dsh 插件市场安装形态的凭证申请与工具代理）
 depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam', 'dsh-plugin-authn']
 provides:

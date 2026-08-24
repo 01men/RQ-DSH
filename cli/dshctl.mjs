@@ -142,6 +142,9 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
   approval  list [--pending] | decide <id> --decision=approve|reject --opinion=
   cost      report --groupBy=app|agent|org|date
   platform  info                              插件树 / 工具目录 / 集合
+  update    status | check                    平台版本与上游更新状态 / 立即检查（60s 冷却）
+            apply [--dry-run] [--reason=<原因>]  一键升级（git pull + npm install，source 形态）
+            set [--auto=on|off] [--hours=24]   自动检查偏好
   connect   code [--template=readonly|operator|full] [--ttl=15] [--remark=]
             （创建一次性接入码：远程 dsh 凭此申请机器凭证）
             codes | clients | disable <clientId> --reason=<原因>
@@ -730,6 +733,71 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
         return
       }
       fail('用法：tool exec --name=<工具名> [--args=<JSON>]')
+    },
+  },
+  update: {
+    desc: '平台自更新（上游版本检查 / 一键升级）',
+    run: async () => {
+      const action = argv[0] ?? 'status'
+      await ensureToken()
+      if (action === 'status') {
+        const data = await call('GET', '/api/update/status')
+        if (OUTPUT === 'json') { console.log(JSON.stringify(data, null, 2)); return }
+        out({
+          当前版本: `v${data.currentVersion}`,
+          安装形态: data.installMode === 'source' ? '源码检出（git，可一键升级）' : '插件市场安装（bundle，宿主侧升级）',
+          上游仓库: `${data.repo}@${data.branch}`,
+          上游最新: data.latest ? `v${data.latest.version}（检查于 ${data.latest.checkedAt}）` : '未检查',
+          有可用更新: data.hasUpdate ? `是（${data.updateKind === 'version' ? '新版本' : `上游领先 ${data.behindBy} 个提交`}）` : '否',
+          自动检查: data.autoCheck ? `每 ${data.intervalHours} 小时` : '关闭',
+          最近检查: data.lastCheckedAt || '从未',
+          ...(data.lastError ? { 上次异常: data.lastError } : {}),
+        })
+        if (data.hasUpdate && (data.recentCommits ?? []).length > 0 && OUTPUT !== 'json') {
+          console.log('\n  上游新增提交：')
+          for (const commit of data.recentCommits.slice(0, 10)) console.log(`   ${commit.sha}  ${commit.message}`)
+        }
+        return
+      }
+      if (action === 'check') {
+        const data = await call('POST', '/api/update/check')
+        ok(data.hasUpdate ? `发现新版本：v${data.currentVersion} → v${data.latest?.version ?? '?'}${data.behindBy > 0 ? `（上游领先 ${data.behindBy} 个提交）` : ''}` : `已是最新版本（v${data.currentVersion}）`)
+        return
+      }
+      if (action === 'apply') {
+        const dryRun = DRY_RUN === true || flag('dry-run', false) === true
+        const reason = String(flag('reason', ''))
+        if (dryRun) {
+          const plan = await call('POST', '/api/update/apply', { dryRun: true })
+          console.log('\n  升级预演（不执行任何变更）：')
+          for (const step of plan.steps ?? []) console.log(`   · ${step}`)
+          for (const commit of plan.incomingCommits ?? []) console.log(`   ↑ ${commit}`)
+          return
+        }
+        if (!reason) fail('正式升级必须 --reason=<原因>（留痕要求）；先看影响面可加 --dry-run')
+        const proceed = ASSUME_YES || await confirm()
+        if (!proceed) { console.log('已取消'); return }
+        const data = await call('POST', '/api/update/apply', { reason })
+        if (data.supported === false) {
+          console.log(`\n  ${data.instructions}\n`)
+          return
+        }
+        ok(data.notice ?? '升级完成')
+        if (data.gitOutput) console.log(`\n  git 输出摘要：\n${String(data.gitOutput).split('\n').slice(0, 8).map((line) => `   ${line}`).join('\n')}`)
+        return
+      }
+      if (action === 'set') {
+        const input = {}
+        const auto = flag('auto', undefined)
+        if (auto !== undefined) input.autoCheck = auto === 'on' || auto === true
+        const hours = flag('hours', undefined)
+        if (hours !== undefined) input.intervalHours = Number(hours) || 0
+        if (!Object.keys(input).length) fail('用法：update set [--auto=on|off] [--hours=24]')
+        const data = await call('POST', '/api/update/settings', input)
+        ok(`自动检查：${data.autoCheck ? `每 ${data.intervalHours} 小时` : '关闭'}`)
+        return
+      }
+      fail('用法：update status | check | apply [--dry-run] [--reason=<原因>] | set [--auto=on|off] [--hours=24]')
     },
   },
 }

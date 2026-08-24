@@ -1,0 +1,15 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-update
+base: /api
+endpoints:
+  - GET /api/update/status（全部登录用户：顶栏更新横幅）
+  - POST /api/update/check（platform.update.read，60s 冷却）
+  - POST /api/update/settings · POST /api/update/apply（platform.update.apply，apply 支持 dry-run）
+tools:
+  - update_status
+  - update_check
+  - update_apply
+services:
+  - key: update
+    access: ctx.update
+    description: 上游版本检查（自动+手动）/ 更新通知 / source 形态一键升级（git pull + npm install）
