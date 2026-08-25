@@ -1822,6 +1822,22 @@ try {
     body: JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'resources/list', params: {} }),
   })
   check('未知方法 -32601', jsonBody(mcpUnknown).error?.code === -32601)
+
+  // ================================================================ /docs 静态发布（文档目录随服务可访问）
+  section('/docs 静态发布（接入指南等文档直接可读）')
+  const docIndex = await rawReq('GET', '/docs')
+  check('/docs 目录索引页（HTML + 列出接入指南）', docIndex.status === 200 && String(docIndex.headers['content-type']).startsWith('text/html') && docIndex.body.includes('app-sso-integration.md'))
+  const docFile = await rawReq('GET', '/docs/app-sso-integration.md')
+  check('/docs/app-sso-integration.md 可读（markdown + 正文）', docFile.status === 200 && String(docFile.headers['content-type']).startsWith('text/markdown') && docFile.body.includes('OIDC') && docFile.body.includes('接入'))
+  const docMissing = await rawReq('GET', '/docs/not-exists.md')
+  check('/docs 未知文档 404', docMissing.status === 404)
+  // 路径穿越探测：字面 .. 与编码 %2e%2e 均被 URL 解析归一化（WHATWG 规范视编码点段为点段）→ 回落 SPA 兜底页，不泄露文件
+  const docTraverseLiteral = await rawReq('GET', '/docs/../package.json')
+  check('/docs 字面 .. 穿越 → SPA 兜底页（不泄露文件）', docTraverseLiteral.status === 200 && String(docTraverseLiteral.headers['content-type']).startsWith('text/html') && !docTraverseLiteral.body.includes('"name": "dsh-enterprise-ops"'))
+  const docTraverseEncoded = await rawReq('GET', '/docs/%2e%2e/package.json')
+  check('/docs 编码 %2e%2e 穿越 → SPA 兜底页（不泄露文件）', docTraverseEncoded.status === 200 && String(docTraverseEncoded.headers['content-type']).startsWith('text/html') && !docTraverseEncoded.body.includes('"name": "dsh-enterprise-ops"'))
+  const spaStillOk = await rawReq('GET', '/')
+  check('SPA 静态兜底不受影响（/ 仍返回控制台首页）', spaStillOk.status === 200 && String(spaStillOk.headers['content-type']).startsWith('text/html') && spaStillOk.body.includes('榕器'))
 } finally {
   // ---------------------------------------------------------------- 收尾
   console.log('\n\x1b[90m» 停止测试实例…\x1b[0m')

@@ -55,6 +55,7 @@ const MIME: Record<string, string> = {
   '.ico': 'image/x-icon',
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
   '.map': 'application/json',
 }
 
@@ -230,12 +231,15 @@ export class HttpServerService extends Service {
         return
       }
 
-      for (const entry of this.staticDirs) {
-        const prefix = entry.prefix.replace(/\/$/, '')
-        if (url.pathname === prefix || url.pathname.startsWith(`${prefix}/`)) {
-          await this.serveFromDir(exchange, entry, url.pathname.slice(prefix.length))
-          return
-        }
+      // 静态目录最长前缀优先（/docs 等子路径挂载先于 / 兜底；同长保持注册顺序）
+      const staticCandidates = this.staticDirs
+        .map((entry) => ({ entry, prefix: entry.prefix.replace(/\/$/, '') }))
+        .filter(({ prefix }) => url.pathname === prefix || url.pathname.startsWith(`${prefix}/`))
+        .sort((a, b) => b.prefix.length - a.prefix.length)
+      if (staticCandidates.length > 0) {
+        const best = staticCandidates[0]!
+        await this.serveFromDir(exchange, best.entry, url.pathname.slice(best.prefix.length))
+        return
       }
       if (this.staticDirs.length > 0) {
         // SPA 兜底：非 /api 请求回落到第一个静态目录的 fallback 页

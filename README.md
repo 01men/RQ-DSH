@@ -40,7 +40,7 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）390 项端到端断言
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）395 项端到端断言
 npm run lint:manifests  # 插件清单五面 YAML 校验（65 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
@@ -384,11 +384,13 @@ curl localhost:7300/api/overview -H "authorization: Bearer <token>"
 # 平台即 MCP Server（任意 MCP 客户端可接入）
 curl -X POST localhost:7300/mcp -H "authorization: Bearer <token>" -H 'content-type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+# /docs 静态发布：docs 目录随服务可读（接入指南等，浏览器直接打开）
+curl http://localhost:7300/docs/app-sso-integration.md
 ```
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **390 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **395 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批（发起人可自审）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增

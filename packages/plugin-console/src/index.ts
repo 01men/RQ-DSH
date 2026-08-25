@@ -9,7 +9,7 @@
  */
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
 import { createPluginContext, platformVersionInfo } from '../../platform-core/src/index.ts'
@@ -2375,6 +2375,24 @@ export function apply(ctx: Context) {
   const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public')
   if (existsSync(publicDir)) {
     http.serveStatic('/', publicDir, '/index.html')
+  }
+
+  // -- /docs 静态发布：仓库/安装包内 docs 目录（应用接入指南等文档随服务可直接访问） ----
+  // 源码检出与 dsh plugin add 两种形态下本文件均位于 <root>/packages/plugin-console/src/，
+  // docs 目录恒为 <root>/docs。公开无鉴权（与控制台 SPA 同级；内容均为已公开的仓库文档）。
+  const docsDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'docs')
+  if (existsSync(docsDir)) {
+    http.serveStatic('/docs', docsDir)
+    http.register('GET', '/docs', (exchange) => {
+      const escapeHtml = (text: string) => text.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch] ?? ch)
+      const files = readdirSync(docsDir).filter((name) => name.endsWith('.md')).sort()
+      const items = files.map((name) => {
+        const hint = name === 'app-sso-integration.md' ? '（应用统一身份接入指南）' : ''
+        return `<li><a href="/docs/${encodeURIComponent(name)}">${escapeHtml(name)}</a>${hint}</li>`
+      }).join('')
+      exchange.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      exchange.res.end(`<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>榕器 · 平台文档</title><style>body{font-family:system-ui,-apple-system,'Segoe UI',sans-serif;max-width:640px;margin:48px auto;padding:0 16px;color:#1f2328}h1{font-size:20px}li{margin:8px 0;font-size:14px}a{color:#2563eb}</style></head><body><h1>榕器 · 平台文档</h1><p>以下文档随本服务发布，可直接打开阅读：</p><ul>${items}</ul></body></html>`)
+    })
   }
 
   // -- 拓扑节点名称补全（skill 等非 resource-core 类型） ----------------------
