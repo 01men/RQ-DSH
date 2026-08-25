@@ -1343,9 +1343,7 @@ export function apply(ctx: Context) {
     const input = body<{ serviceId: string; tool: string; args?: Record<string, unknown> }>(exchange)
     const info = caller(exchange)
     return await ctx.mcpRegistry.invoke({
-      type: info.kind === 'human' ? 'user' : info.kind === 'machine' ? 'app' : 'user',
-      id: info.userId ?? info.principalId,
-      name: info.name,
+      ...resolveMcpCaller(info),
       ...(info.actChain.length > 0 ? { actChain: info.actChain } : {}),
       ...(info.actChain.length > 0 ? { onBehalfOf: info.actChain[0]!.name } : {}),
     }, input.serviceId, input.tool, input.args ?? {})
@@ -2425,6 +2423,18 @@ export function apply(ctx: Context) {
   })
 
   /**
+   * MCP 网关调用方身份解析：权限组 subjects 以 agent/app 资源 ID 授权，
+   * 机器令牌需经 principal 的 refType/refId 反查归属资源，否则 agent 主体永远命中不了。
+   */
+  const resolveMcpCaller = (info: CallerInfo): { type: 'user' | 'agent' | 'app'; id: string; name: string } => {
+    if (info.kind === 'human') return { type: 'user', id: info.userId ?? info.principalId, name: info.name }
+    const principal = ctx.authn.principals().get(info.principalId)
+    if (principal?.refType === 'agent' && principal.refId) return { type: 'agent', id: principal.refId, name: info.name }
+    if (principal?.refType === 'app' && principal.refId) return { type: 'app', id: principal.refId, name: info.name }
+    return { type: 'app', id: info.principalId, name: info.name }
+  }
+
+  /**
    * 工具身份注入：服务端以令牌解析的调用者身份为准，禁止调用方自填身份参数。
    * REST 工具桥与 /mcp 端点（平台 MCP Server）共用同一套注入规则。
    */
@@ -2432,9 +2442,10 @@ export function apply(ctx: Context) {
     const args = { ...inputArgs }
     const principalId = info.userId ?? info.principalId
     if (name === 'mcp_invoke') {
-      args.callerType = 'user'
-      args.callerId = principalId
-      args.callerName = info.name
+      const mcpCaller = resolveMcpCaller(info)
+      args.callerType = mcpCaller.type
+      args.callerId = mcpCaller.id
+      args.callerName = mcpCaller.name
     } else if (name === 'approval_decide' || name === 'skill_approve') {
       args.approverId = principalId
       args.approverName = info.name

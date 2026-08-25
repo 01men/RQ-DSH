@@ -882,6 +882,34 @@ try {
     check('只读约束拦截写工具', invokeWrite.data?.status === 'denied' && String(invokeWrite.data.error).includes('只读'), JSON.stringify(invokeWrite).slice(0, 300))
   }
 
+  // 回归：Agent 机器凭证身份解析（权限组 subject type=agent 必须能命中）
+  const agentMcp = await api('POST', '/api/agents', { token: admin, body: { name: '自测MCP机器人', attrs: { description: 'MCP 鉴权回归', model: 'deepseek-chat', riskLevel: 'low', avatar: '🤖' } } })
+  check('注册 Agent（MCP 鉴权回归用）', agentMcp.ok && agentMcp.data.credential?.clientId)
+  const agentMcpId = agentMcp.data.agent.id
+  const agentCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: agentMcp.data.credential.clientId, clientSecret: agentMcp.data.credential.clientSecret } })
+  check('Agent 机器凭证换令牌', agentCc.ok && agentCc.data.token)
+  const agentToken = agentCc.data.token
+
+  const agentInvokeDenied = await api('POST', '/api/mcp/invoke', { token: agentToken, body: { serviceId: svcId, tool: 'selftest-search_search', args: { query: '未授权' } } })
+  check('未授权 Agent 被网关拒绝', agentInvokeDenied.ok && agentInvokeDenied.data.status === 'denied', JSON.stringify(agentInvokeDenied).slice(0, 300))
+
+  const pgAgent = await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
+    name: '自测Agent权限组', policies: { [svcId]: { allowedTools: '*', constraints: { readOnly: true } } },
+    subjects: [{ type: 'agent', id: agentMcpId }],
+  } })
+  check('创建 Agent 主体权限组', pgAgent.ok)
+
+  const agentInvokeOk = await api('POST', '/api/mcp/invoke', { token: agentToken, body: { serviceId: svcId, tool: 'selftest-search_search', args: { query: '自测' } } })
+  check('Agent 主体命中权限组放行', agentInvokeOk.ok && agentInvokeOk.data.ok === true, JSON.stringify(agentInvokeOk).slice(0, 300))
+
+  const agentMcpCall = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${agentToken}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 90, method: 'tools/call', params: { name: 'mcp_invoke', arguments: { serviceId: svcId, tool: 'selftest-search_search', args: { query: '自测' } } } }),
+  })
+  const agentMcpText = jsonBody(agentMcpCall).result?.content?.[0]?.text ?? ''
+  const agentMcpInvoke = (() => { try { return JSON.parse(agentMcpText) } catch { return {} } })()
+  check('Agent 机器令牌经 /mcp mcp_invoke 放行', agentMcpCall.status === 200 && agentMcpInvoke.status === 'ok', agentMcpText.slice(0, 300))
+
   const metrics = await api('GET', `/api/mcp/services/${svcId}/metrics`, { token: admin })
   check('调用监控指标（调用方/工具/序列）', metrics.ok && metrics.data.calls >= 1 && metrics.data.toolStats.length > 0 && metrics.data.series.length === 60)
 
