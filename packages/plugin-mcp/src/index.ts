@@ -482,6 +482,16 @@ export class McpService extends Service {
     })
   }
 
+  /** 删除后的关联清理：远端会话与限流缓存一并清除；调用明细与审计数据保留。 */
+  purgeService(id: string): void {
+    const service = this.requireService(id)
+    this.mcpSessions.delete(service.endpoint)
+    for (const key of [...this.rateBuckets.keys()]) {
+      if (key.startsWith(`${id}:`)) this.rateBuckets.delete(key)
+    }
+    this.services().remove(id)
+  }
+
   // -- 健康探活 -----------------------------------------------------------
 
   async probeService(id: string): Promise<{ status: string; latencyMs: number }> {

@@ -386,6 +386,15 @@ export class SkillHubService extends Service {
       .filter((item): item is { id: string; name: string; owner: string } => item !== null)
   }
 
+  /** 删除后的关联清理：安装依赖边、下载登记与技能记录；审计数据保留。 */
+  purge(skillId: string): void {
+    for (const record of this.ctx.resourceCore.dependencies().find((item) => item.kind === 'skill' && item.toId === skillId)) {
+      this.ctx.resourceCore.dependencies().remove(record.id)
+    }
+    for (const record of this.downloads().find((item) => item.skillId === skillId)) this.downloads().remove(record.id)
+    this.skills().remove(skillId)
+  }
+
   // -- 下载 / 安装 --------------------------------------------------------
 
   download(skillId: string, version: string, user: { id: string; name: string }): { content: string } {

@@ -233,6 +233,16 @@ export class AgentRegistryService extends Service {
     return this.ctx.resourceCore.transition('agent', agentId, 'submit_trial', actor).entity
   }
 
+  /** 删除后的关联清理：用户绑定、依赖边与机器凭证（禁用即吊销全部令牌）；用量记录与审计数据保留。 */
+  purge(agentId: string): void {
+    for (const binding of this.bindings().find((item) => item.agentId === agentId)) this.bindings().remove(binding.id)
+    for (const record of this.ctx.resourceCore.dependencies().find((item) => item.fromId === agentId || item.toId === agentId)) {
+      this.ctx.resourceCore.dependencies().remove(record.id)
+    }
+    const principal = this.machinePrincipal(agentId)
+    if (principal && principal.status === 'active') this.ctx.authn.disablePrincipal(principal.id, 'Agent 删除联动')
+  }
+
   // -- 监测 -------------------------------------------------------------
 
   recordUsage(agentId: string, usage: { sessions?: number; calls: number; okCalls: number; tokens: number; latencyMs: number }): void {

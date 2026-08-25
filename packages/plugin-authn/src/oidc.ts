@@ -133,6 +133,12 @@ export class OidcService extends Service {
 
   constructor(ctx: Context) {
     super(ctx, 'oidc')
+    if (!process.env.OIDC_ISSUER) {
+      ctx.logger('oidc').warn(
+        '未配置 OIDC_ISSUER，issuer 回落为 http://127.0.0.1:<port>，仅供本机调试；' +
+        '跨机/内网部署必须显式声明对外地址（见 docs/app-sso-integration.md），否则跨机浏览器无法访问授权页',
+      )
+    }
     this.keys = this.loadOrCreateKeys()
     this.registerRoutes()
     this.cleanupExpired()

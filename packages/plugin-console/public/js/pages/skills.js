@@ -164,7 +164,8 @@ async function openSkillDetail(id, ctx, refresh) {
       ${skill.status === 'published' && session.can('skill.install') ? `<button class="btn btn-primary" id="sk-install">${icon('plus', 14)}安装到 Agent</button>` : ''}
       ${session.can('skill.approve') && (current?.status === 'pending_domain' || current?.status === 'pending_security') ? `<button class="btn btn-primary" id="sk-approve">${icon('check', 14)}审批</button>` : ''}
       ${session.can('skill.approve') && current?.status === 'approved' && skill.status !== 'published' ? `<button class="btn btn-primary" id="sk-publish">${icon('send', 14)}上架</button>` : ''}
-      ${session.can('skill.publish') && skill.status === 'published' ? `<button class="btn btn-danger-ghost" id="sk-deprecate">${icon('alert', 14)}弃用</button>` : ''}`,
+      ${session.can('skill.publish') && skill.status === 'published' ? `<button class="btn btn-danger-ghost" id="sk-deprecate">${icon('alert', 14)}弃用</button>` : ''}
+      ${session.can('skill.publish') && ['deprecated', 'offline'].includes(skill.status) ? `<button class="btn btn-danger-ghost" id="sk-delete">${icon('trash', 14)}删除</button>` : ''}`,
   })
 
   const tabBody = drawer.body.querySelector('#sk-tab-body')
@@ -295,6 +296,19 @@ async function openSkillDetail(id, ctx, refresh) {
       toast('已弃用')
     }
     drawer.close(); refresh?.()
+  }
+
+  const deleteBtn = drawer.el.querySelector('#sk-delete')
+  if (deleteBtn) deleteBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: `删除 Skill · ${skill.name}`, requireReason: true, danger: true, confirmText: '确认删除',
+      message: '将永久删除该 Skill 记录（含全部版本与下载/安装登记），操作不可恢复；审计数据保留。',
+    })
+    if (!result) return
+    try {
+      await api.delete(`/api/skills/${skill.id}`)
+      toast('已删除'); drawer.close(); refresh?.()
+    } catch (error) { toast(error.message, 'error') }
   }
 }
 

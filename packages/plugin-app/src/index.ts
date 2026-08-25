@@ -164,6 +164,18 @@ export class AppRegistryService extends Service {
     return result.entity
   }
 
+  /** 删除后的关联清理：编排依赖边清除、SSO 客户端与机器凭证禁用；客户端记录与用量/审计数据保留。 */
+  purge(appId: string): void {
+    for (const record of this.ctx.resourceCore.dependencies().find((item) => item.fromType === 'app' && item.fromId === appId)) {
+      this.ctx.resourceCore.dependencies().remove(record.id)
+    }
+    for (const client of this.ctx.oidc.clientsForApp(appId)) {
+      if (OidcService.isClientActive(client)) this.ctx.oidc.disableClient(client.id, '应用删除联动')
+    }
+    const principal = this.ctx.authn.principals().findOne((item) => item.refType === 'app' && item.refId === appId)
+    if (principal && principal.status === 'active') this.ctx.authn.disablePrincipal(principal.id, '应用删除联动')
+  }
+
   // -- SSO 客户端（应用 ↔ 平台身份源打通；owner 自助签发） ----------------------
 
   /** 上线门禁覆盖的应用形态（APP_SSO_ENFORCE，默认 web,h5；空串可关闭门禁）。 */

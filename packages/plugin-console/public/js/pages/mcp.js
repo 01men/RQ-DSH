@@ -123,7 +123,8 @@ async function openServiceDetail(id, ctx) {
       ${svcData.mode === 'external' && svcData.exec === 'real' ? `<button class="btn btn-default" id="svc-sync-tools">${icon('refresh', 14)}同步工具</button>` : ''}
       ${svcData.status !== 'offline' ? `<button class="btn btn-default" id="svc-gray">${icon('trending', 14)}${svcData.status === 'gray' ? '调整灰度' : '灰度发布'}</button>` : ''}
       ${svcData.status !== 'offline' ? `<button class="btn btn-danger-ghost" id="svc-offline">${icon('alert', 14)}下线服务</button>` : ''}
-      ${svcData.status === 'draft' ? `<button class="btn btn-primary" id="svc-verify">${icon('play', 14)}测试验证</button>` : ''}`,
+      ${svcData.status === 'draft' ? `<button class="btn btn-primary" id="svc-verify">${icon('play', 14)}测试验证</button>` : ''}
+      ${svcData.status === 'offline' ? `<button class="btn btn-danger-ghost" id="svc-delete">${icon('trash', 14)}删除服务</button>` : ''}`,
   })
 
   const tabBody = drawer.body.querySelector('#svc-tab-body')
@@ -278,6 +279,19 @@ async function openServiceDetail(id, ctx) {
       await api.post(`/api/mcp/services/${svcData.id}/verify`)
       toast('测试环境验证通过'); drawer.close(); ctx.rerender()
     } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
+  }
+
+  const deleteBtn = drawer.el.querySelector('#svc-delete')
+  if (deleteBtn) deleteBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: `删除 MCP 服务 · ${svcData.name}`, requireReason: true, danger: true, confirmText: '确认删除',
+      message: `将永久删除 <b>${esc(svcData.name)}</b> 的服务登记（含工具清单与探活状态），操作不可恢复；调用明细与审计数据保留。`,
+    })
+    if (!result) return
+    try {
+      await api.delete(`/api/mcp/services/${svcData.id}`)
+      toast('已删除'); drawer.close(); ctx.rerender()
+    } catch (error) { toast(error.message, 'error') }
   }
 }
 

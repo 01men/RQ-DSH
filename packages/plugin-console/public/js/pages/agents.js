@@ -7,6 +7,13 @@ import {
   fmtNum, fmtPct, timeAgo, emptyState, sparkline, lineChart,
 } from '../ui.js'
 
+/** 复制到剪贴板（降级提示）。 */
+function copyText(text) {
+  return navigator.clipboard?.writeText(text)
+    .then(() => toast('已复制到剪贴板'))
+    .catch(() => toast('复制失败，请手动选择复制', 'error'))
+}
+
 export async function renderAgents(content, params, ctx) {
   const data = await api.get('/api/agents')
   const agents = data.agents
@@ -187,15 +194,16 @@ async function openAgentDetail(id, ctx) {
       if (oboBtn) oboBtn.onclick = async () => {
         try {
           const result = await api.post(`/api/agents/${agent.id}/obo-token`)
-          openModal({
+          const modal = openModal({
             title: '身份透传令牌（on-behalf-of）',
             body: `
-              <div class="form-hint" style="margin-bottom:10px">该令牌携带完整 act 链：用户 → Agent。下游 MCP 可识别真实操作人，审计可还原完整链路。</div>
-              <div class="code-block">act 链: ${esc(result.actChain.map((a) => `${a.name}(${a.type})`).join(' → '))}
+              <div class="form-hint" style="margin-bottom:10px">该令牌携带完整 act 链：用户 → Agent。下游 MCP 可识别真实操作人，审计可还原完整链路。令牌仅本次完整展示，请立即复制保存。</div>
+              <div class="code-block" style="white-space:pre-wrap;word-break:break-all">act 链: ${esc(result.actChain.map((a) => `${a.name}(${a.type})`).join(' → '))}
 
-token:    ${esc(result.token.slice(0, 64))}…</div>`,
-            foot: '<button class="btn btn-primary" data-ok>关闭</button>',
+token:    ${esc(result.token)}</div>`,
+            foot: `<button class="btn btn-default" id="obo-copy">${icon('copy', 13)}复制完整令牌</button><button class="btn btn-primary" data-ok>关闭</button>`,
           })
+          modal.el.querySelector('#obo-copy').onclick = () => void copyText(result.token)
         } catch (error) { toast(error.message, 'error') }
       }
     }
@@ -346,6 +354,19 @@ token:    ${esc(result.token.slice(0, 64))}…</div>`,
       }
     }
   }
+
+  const deleteBtn = drawer.el.querySelector('#ag-delete')
+  if (deleteBtn) deleteBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: `删除 Agent · ${agent.name}`, requireReason: true, danger: true, confirmText: '确认删除',
+      message: `将永久删除 <b>${esc(agent.name)}</b>：解绑全部绑定用户、吊销机器凭证、清理依赖关系，操作不可恢复；用量与审计数据保留。`,
+    })
+    if (!result) return
+    try {
+      await api.delete(`/api/agents/${agent.id}`)
+      toast('已删除'); drawer.close(); ctx.rerender()
+    } catch (error) { toast(error.message, 'error') }
+  }
 }
 
 function footForStatus(agent, ctx) {
@@ -353,7 +374,9 @@ function footForStatus(agent, ctx) {
     const isL4 = t.action === 'online' || t.action === 'offline'
     return `<button class="btn ${isL4 ? 'btn-primary' : 'btn-default'}" data-action="${esc(t.action)}">${icon(t.action === 'online' ? 'play' : t.action === 'offline' ? 'alert' : 'chevronRight', 14)}${esc(t.label)}</button>`
   }).join('')
-  return buttons || '<button class="btn btn-default" disabled>终态（已归档）</button>'
+  const deleteBtn = ['draft', 'archived'].includes(agent.status)
+    ? `<button class="btn btn-danger-ghost" id="ag-delete">${icon('trash', 14)}删除</button>` : ''
+  return buttons + deleteBtn || '<button class="btn btn-default" disabled>终态（已归档）</button>'
 }
 
 function openAgentCreate(schema, ctx) {

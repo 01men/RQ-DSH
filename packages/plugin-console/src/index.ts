@@ -1278,6 +1278,21 @@ export function apply(ctx: Context) {
     return service
   })
 
+  /** 删除 MCP 服务：仅已下线可删；被权限组引用时拒绝；调用明细与审计数据保留。 */
+  guarded('DELETE', '/api/mcp/services/:id', 'mcp.service.write', (exchange) => {
+    const id = exchange.params['id']!
+    const service = ctx.mcpRegistry.services().get(id)
+    if (!service) throw new Error(`MCP 服务不存在：${id}`)
+    if (service.status !== 'offline') throw new Error(`当前状态 ${service.status} 不可删除，请先下线服务`)
+    const referencingGroups = ctx.mcpRegistry.permGroups().find((group) => Object.keys(group.policies).includes(id))
+    if (referencingGroups.length > 0) {
+      throw new Error(`该服务仍被权限组引用（${referencingGroups.map((group) => group.name).join('、')}），请先从权限组中移除`)
+    }
+    ctx.mcpRegistry.purgeService(id)
+    changeLog(exchange, 'mcp.service.delete', 'mcp_service', id, service.name)
+    return { deleted: true }
+  })
+
   guarded('POST', '/api/mcp/services/:id/health', 'mcp.service.deploy', async (exchange) => {
     return await ctx.mcpRegistry.healthCheck(exchange.params['id']!)
   })
@@ -1397,6 +1412,25 @@ export function apply(ctx: Context) {
     const result = ctx.skillHub.deprecate(exchange.params['id']!, caller(exchange).name, reason, force)
     changeLog(exchange, 'skill.deprecate', 'skill', result.skill.id, result.skill.name, reason)
     return result
+  })
+
+  /** 删除 Skill：仅已弃用/强制下架可删；被未归档 Agent 引用时拒绝；审计数据保留。 */
+  guarded('DELETE', '/api/skills/:id', 'skill.publish', (exchange) => {
+    const id = exchange.params['id']!
+    const skill = ctx.skillHub.skills().get(id)
+    if (!skill) throw new Error(`Skill 不存在：${id}`)
+    if (!['deprecated', 'offline'].includes(skill.status)) {
+      throw new Error(`当前状态 ${skill.status} 不可删除，请先弃用该 Skill`)
+    }
+    const referencing = ctx.resourceCore.dependencies().find((record) => record.kind === 'skill' && record.toId === id)
+      .map((record) => ctx.resourceCore.get('agent', record.fromId))
+      .filter((agent) => agent !== undefined && agent.status !== 'archived')
+    if (referencing.length > 0) {
+      throw new Error(`该 Skill 仍被 ${referencing.map((agent) => agent!.name).join('、')} 引用，请先卸载或归档相关 Agent`)
+    }
+    ctx.skillHub.purge(id)
+    changeLog(exchange, 'skill.delete', 'skill', id, skill.name)
+    return { deleted: true }
   })
 
   guarded('POST', '/api/skills/:id/install', 'skill.install', (exchange) => {
@@ -1723,6 +1757,23 @@ export function apply(ctx: Context) {
     return { unbound: true }
   })
 
+  /** 删除 Agent：草稿（从未上线）或已归档可删；被未归档资源（如 AI 应用）引用时拒绝。 */
+  guarded('DELETE', '/api/agents/:id', 'agent.write', (exchange) => {
+    const id = exchange.params['id']!
+    const agent = ctx.resourceCore.get('agent', id)
+    if (!agent) throw new Error(`Agent 不存在：${id}`)
+    const referencing = ctx.resourceCore.dependencies().find((record) => record.toType === 'agent' && record.toId === id)
+      .map((record) => (ctx.resourceCore.typeSpec(record.fromType) ? ctx.resourceCore.get(record.fromType, record.fromId) : undefined))
+      .filter((entity) => entity !== undefined && entity.status !== 'archived')
+    if (referencing.length > 0) {
+      throw new Error(`该 Agent 仍被 ${referencing.map((entity) => entity!.name).join('、')} 引用，请先解除引用或归档引用方`)
+    }
+    ctx.resourceCore.remove('agent', id, { allowStates: ['draft', 'archived'] })
+    ctx.agentRegistry.purge(id)
+    changeLog(exchange, 'agent.delete', 'agent', id, agent.name)
+    return { deleted: true }
+  })
+
   guarded('POST', '/api/agents/:id/transition', 'agent.approve', (exchange) => {
     const { action, note } = body<{ action: string; note?: string }>(exchange)
     const info = caller(exchange)
@@ -1816,6 +1867,17 @@ export function apply(ctx: Context) {
     const app = ctx.appRegistry.updateApp(exchange.params['id']!, body(exchange))
     changeLog(exchange, 'app.update', 'app', app.id, app.name)
     return app
+  })
+
+  /** 删除应用：草稿（从未上线）或已归档可删；级联清除依赖边、禁用 SSO 客户端与机器凭证（记录保留）。 */
+  guarded('DELETE', '/api/apps/:id', 'app.write', (exchange) => {
+    const id = exchange.params['id']!
+    const app = ctx.resourceCore.get('app', id)
+    if (!app) throw new Error(`应用不存在：${id}`)
+    ctx.resourceCore.remove('app', id, { allowStates: ['draft', 'archived'] })
+    ctx.appRegistry.purge(id)
+    changeLog(exchange, 'app.delete', 'app', id, app.name)
+    return { deleted: true }
   })
 
   // 应用指标主动上报（接入方 → 宿主推送通道；同日 DAU/UV 取最大、会话/PV 累加，可指定 date 补录）
@@ -2302,6 +2364,16 @@ export function apply(ctx: Context) {
     })
     changeLog(exchange, 'modelgw.model.upsert', 'model', model.id, model.slug)
     return model
+  })
+
+  /** 删除模型：从模型目录移除登记；计量与审计数据保留。 */
+  guarded('DELETE', '/api/modelgw/models/:id', 'modelgw.admin', (exchange) => {
+    const id = exchange.params['id']!
+    const model = ctx.modelGateway.models().get(id)
+    if (!model) throw new Error(`模型不存在：${id}`)
+    ctx.modelGateway.models().remove(id)
+    changeLog(exchange, 'modelgw.delete', 'model', id, model.slug)
+    return { deleted: true }
   })
 
   guarded('POST', '/api/modelgw/invoke', 'modelgw.invoke', async (exchange) => {

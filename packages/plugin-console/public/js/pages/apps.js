@@ -98,10 +98,11 @@ async function openAppDetail(id, ctx) {
         <div class="tab" data-tab="sso">${icon('key', 13)} SSO 配置${app.sso ? (app.sso.status === 'active' ? '' : ' ⚠') : ''}</div>
       </div>
       <div id="app-tab-body"></div>`,
-    foot: app.availableTransitions.map((t) => {
+    foot: (app.availableTransitions.map((t) => {
       const isL4 = t.action === 'online' || t.action === 'offline'
       return `<button class="btn ${isL4 ? 'btn-primary' : 'btn-default'}" data-action="${esc(t.action)}">${icon(t.action === 'online' ? 'play' : t.action === 'offline' ? 'alert' : 'chevronRight', 14)}${esc(t.label)}</button>`
-    }).join('') || '<button class="btn btn-default" disabled>终态</button>',
+    }).join('') || '<button class="btn btn-default" disabled>终态</button>')
+      + (['draft', 'archived'].includes(app.status) ? `<button class="btn btn-danger-ghost" id="app-delete">${icon('trash', 14)}删除</button>` : ''),
   })
 
   const tabBody = drawer.body.querySelector('#app-tab-body')
@@ -203,6 +204,19 @@ async function openAppDetail(id, ctx) {
         } catch (error) { toast(error.message, 'error') }
       }
     }
+  }
+
+  const deleteBtn = drawer.el.querySelector('#app-delete')
+  if (deleteBtn) deleteBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: `删除应用 · ${app.name}`, requireReason: true, danger: true, confirmText: '确认删除',
+      message: `将永久删除 <b>${esc(app.name)}</b>：清除编排依赖、禁用 SSO 客户端与机器凭证，操作不可恢复；指标与审计数据保留。`,
+    })
+    if (!result) return
+    try {
+      await api.delete(`/api/apps/${app.id}`)
+      toast('已删除'); drawer.close(); ctx.rerender()
+    } catch (error) { toast(error.message, 'error') }
   }
 }
 
