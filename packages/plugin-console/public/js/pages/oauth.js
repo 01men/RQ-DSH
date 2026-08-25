@@ -1,6 +1,7 @@
 /**
  * OAuth 协议页（平台作为身份源 IdP 的三个对外页面，独立于控制台外壳）：
- *   #/oauth/authorize?req=<id> —— 授权确认（无会话渲染登录面板；有会话按需 consent）
+ *   #/oauth/authorize?req=<id> —— 授权确认（无会话渲染登录面板：账号密码 + 钉钉免密，连接器启用时；
+ *                                  有会话按需 consent）
  *   #/oauth/error?error=…     —— 协议错误页（静态展示，error_description 一律转义）
  *   #/oauth/logout?…          —— RP 发起登出中转（清平台会话后带 state 跳回应用）
  * 说明：本页直连原始 fetch（不经 api.js 会话拦截），保证协议流不被控制台跳转劫持。
@@ -79,6 +80,10 @@ export async function renderOauthAuthorize(app, params) {
 function renderLoginPanel(app, reqId, info) {
   app.innerHTML = pageShell(`
     <div class="oauth-sub" style="margin-bottom:14px">登录平台账号后继续授权给 <b>${esc(info.clientName)}</b></div>
+    <div class="segmented" style="margin-bottom:18px" id="oauth-login-tabs">
+      <span class="segmented-item active" data-tab="password">账号密码</span>
+      <span class="segmented-item" data-tab="dingtalk">钉钉扫码</span>
+    </div>
     <form id="oauth-login-form">
       <div class="form-item">
         <label class="form-label">用户名</label>
@@ -89,7 +94,62 @@ function renderLoginPanel(app, reqId, info) {
         <input class="input input-lg" id="oauth-login-pass" type="password" placeholder="密码" autocomplete="current-password">
       </div>
       <button class="btn btn-primary btn-lg btn-block" id="oauth-login-submit" type="submit">登录并继续</button>
-    </form>`)
+    </form>
+    <div id="oauth-login-dingtalk" style="display:none">
+      <div id="oauth-ding-step-authorize">
+        <div style="text-align:center;padding:4px 0 2px">
+          <div style="width:148px;height:148px;margin:0 auto;border-radius:14px;background:
+            radial-gradient(100px 100px at 30% 25%, #e0e7ff, transparent),
+            radial-gradient(100px 100px at 75% 80%, #ede9fe, transparent), #f8f9fb;
+            border:1px solid var(--border);display:grid;place-items:center;position:relative">
+            <div style="color:var(--brand-500)">${icon('fingerprint', 52)}</div>
+            <div style="position:absolute;bottom:10px;font-size:11px;color:var(--text-3)">使用钉钉扫码授权登录</div>
+          </div>
+        </div>
+        <div class="form-item" style="margin-top:14px">
+          <label class="form-label">钉钉授权码</label>
+          <input class="input input-lg" id="oauth-ding-code" placeholder="请输入钉钉扫码授权码">
+        </div>
+        <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-submit">免密登录并继续</button>
+      </div>
+      <div id="oauth-ding-step-pending" style="display:none">
+        <div class="muted-box" style="display:flex;gap:8px;margin-bottom:14px">
+          ${icon('info', 15)}<span>首次使用该钉钉身份（<b id="oauth-ding-pending-name"></b>）。按「一人一号」原则，请绑定已有平台账号，或注册新账号。</span>
+        </div>
+        <div class="tabs" style="margin-bottom:14px">
+          <div class="tab active" data-ptab="bind">绑定已有账号</div>
+          <div class="tab" data-ptab="register">注册新账号</div>
+        </div>
+        <div id="oauth-ding-bind-panel">
+          <div class="form-item"><label class="form-label">平台用户名</label><input class="input input-lg" id="oauth-ding-bind-username" placeholder="平台账号用户名"></div>
+          <div class="form-item"><label class="form-label">密码</label><input class="input input-lg" id="oauth-ding-bind-password" type="password" placeholder="平台账号密码"></div>
+          <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-bind-submit">验证并绑定</button>
+        </div>
+        <div id="oauth-ding-register-panel" style="display:none">
+          <div class="form-hint" style="margin-bottom:12px">将以三方身份自动注册平台账号（默认进入首个组织），并建立身份链接。</div>
+          <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-register-submit">注册并继续</button>
+        </div>
+        <button class="btn btn-ghost btn-block" style="margin-top:8px" id="oauth-ding-pending-back">返回重试</button>
+      </div>
+      <div class="form-hint" id="oauth-ding-tip" style="margin-top:10px"></div>
+    </div>`)
+  // 三方登录入口按平台连接器配置显隐（与主登录页同一探测端点与规则）
+  void rawJson('GET', '/api/auth/providers').then((result) => {
+    const hasDingtalk = (result.payload?.data?.providers ?? []).some((item) => item.provider === 'dingtalk')
+    if (!hasDingtalk) app.querySelector('#oauth-login-tabs').style.display = 'none'
+  }).catch(() => { /* 查询失败时保持默认展示 */ })
+  const tabPassword = app.querySelector('#oauth-login-form')
+  const tabDingtalk = app.querySelector('#oauth-login-dingtalk')
+  app.querySelectorAll('#oauth-login-tabs .segmented-item').forEach((el) => {
+    el.onclick = () => {
+      app.querySelectorAll('#oauth-login-tabs .segmented-item').forEach((item) => item.classList.remove('active'))
+      el.classList.add('active')
+      const isPassword = el.dataset.tab === 'password'
+      tabPassword.style.display = isPassword ? '' : 'none'
+      tabDingtalk.style.display = isPassword ? 'none' : ''
+    }
+  })
+
   const form = app.querySelector('#oauth-login-form')
   form.onsubmit = async (event) => {
     event.preventDefault()
@@ -110,6 +170,85 @@ function renderLoginPanel(app, reqId, info) {
       if (tip) tip.textContent = error.message
       else form.insertAdjacentHTML('beforeend', `<div class="form-hint" id="oauth-login-tip" style="color:var(--danger);margin-top:10px">${esc(error.message)}</div>`)
     }
+  }
+
+  // 钉钉免密登录（与主登录页同一端点链：authorize 签发 state → code 换会话 → 首次身份走绑定/注册）
+  let dingTicket = ''
+  const dingTip = (text) => { app.querySelector('#oauth-ding-tip').textContent = text }
+  const finishSsoLogin = (data) => {
+    session.save(data.token, data.user)
+    if (data.refreshToken) session.saveRefresh(data.refreshToken)
+    renderConsent(app, reqId, info)
+  }
+  const unwrap = (result, fallback) => {
+    if (result.status !== 200 || !result.payload?.ok) throw new Error(result.payload?.error?.message ?? fallback)
+    return result.payload.data
+  }
+  app.querySelector('#oauth-ding-submit').onclick = async () => {
+    const btn = app.querySelector('#oauth-ding-submit')
+    btn.classList.add('btn-loading')
+    try {
+      const code = app.querySelector('#oauth-ding-code').value.trim()
+      if (!code) throw new Error('请输入钉钉授权码（演示环境为工号，如 DD0002）')
+      dingTip('')
+      const auth = unwrap(await rawJson('POST', '/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr' }), '钉钉登录暂不可用')
+      const data = unwrap(await rawJson('POST', '/api/auth/sso', { provider: 'dingtalk', code, state: auth.state }), '钉钉登录失败')
+      if (data.kind === 'pending') {
+        dingTicket = data.pendingTicket
+        app.querySelector('#oauth-ding-pending-name').textContent = data.profileName
+        app.querySelector('#oauth-ding-step-authorize').style.display = 'none'
+        app.querySelector('#oauth-ding-step-pending').style.display = ''
+        return
+      }
+      finishSsoLogin(data)
+    } catch (error) {
+      dingTip(error.message)
+    } finally {
+      btn.classList.remove('btn-loading')
+    }
+  }
+  app.querySelectorAll('#oauth-login-dingtalk .tab[data-ptab]').forEach((el) => {
+    el.onclick = () => {
+      app.querySelectorAll('#oauth-login-dingtalk .tab[data-ptab]').forEach((t) => t.classList.remove('active'))
+      el.classList.add('active')
+      app.querySelector('#oauth-ding-bind-panel').style.display = el.dataset.ptab === 'bind' ? '' : 'none'
+      app.querySelector('#oauth-ding-register-panel').style.display = el.dataset.ptab === 'register' ? '' : 'none'
+    }
+  })
+  app.querySelector('#oauth-ding-bind-submit').onclick = async () => {
+    const btn = app.querySelector('#oauth-ding-bind-submit')
+    btn.classList.add('btn-loading')
+    try {
+      dingTip('')
+      const data = unwrap(await rawJson('POST', '/api/auth/sso/bind', {
+        pendingTicket: dingTicket,
+        username: app.querySelector('#oauth-ding-bind-username').value.trim(),
+        password: app.querySelector('#oauth-ding-bind-password').value,
+      }), '绑定失败')
+      finishSsoLogin(data)
+    } catch (error) {
+      dingTip(error.message)
+    } finally {
+      btn.classList.remove('btn-loading')
+    }
+  }
+  app.querySelector('#oauth-ding-register-submit').onclick = async () => {
+    const btn = app.querySelector('#oauth-ding-register-submit')
+    btn.classList.add('btn-loading')
+    try {
+      dingTip('')
+      const data = unwrap(await rawJson('POST', '/api/auth/sso/register', { pendingTicket: dingTicket }), '注册失败')
+      finishSsoLogin(data)
+    } catch (error) {
+      dingTip(error.message)
+    } finally {
+      btn.classList.remove('btn-loading')
+    }
+  }
+  app.querySelector('#oauth-ding-pending-back').onclick = () => {
+    dingTip('')
+    app.querySelector('#oauth-ding-step-pending').style.display = 'none'
+    app.querySelector('#oauth-ding-step-authorize').style.display = ''
   }
 }
 

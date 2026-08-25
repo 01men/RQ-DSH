@@ -1321,6 +1321,27 @@ try {
   const appUserInfo = jsonBody(await rawReq('GET', '/oauth/userinfo', { headers: { authorization: `Bearer ${appTokens.access_token}` } }))
   check('应用完整浏览器流（authorize → consent → token → userinfo）', appTokens.access_token?.split('.').length === 3 && appUserInfo.sub === opsLogin.data.user.id && appUserInfo.org !== null)
 
+  // 钉钉身份驱动同一条授权流（授权页登录面板「钉钉扫码」入口对应的端点链）：
+  // providers 探测入口显隐 → sso 免密登录换平台会话 → 该会话完成 consent → 换牌 → userinfo 身份一致
+  const dingProviders = await api('GET', '/api/auth/providers')
+  check('授权页可探测钉钉登录入口（providers 公开回显）', dingProviders.ok && dingProviders.data.providers.some((p) => p.provider === 'dingtalk'))
+  const dingAuth = await api('POST', '/api/auth/sso/authorize', { body: { provider: 'dingtalk', scene: 'web_qr' } })
+  const dingSso = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0002', state: dingAuth.data.state } })
+  check('钉钉身份在授权页登录（sso hit 签发平台会话令牌）', dingSso.ok && dingSso.data.kind === 'hit' && Boolean(dingSso.data.token))
+  const dingFirst = await rawReq('GET', `/oauth/authorize?${new URLSearchParams({
+    response_type: 'code', client_id: issueSso.data.clientId, redirect_uri: 'https://sso-app.example.com/cb',
+    state: 'st-app-ding', scope: 'openid profile', code_challenge: pkceChallenge, code_challenge_method: 'S256',
+  }).toString()}`)
+  const dingApprove = await authorizeConfirm(dingSso.data.token, reqIdOf(dingFirst), true)
+  const dingTokens = jsonBody(await rawReq('POST', '/oauth/token', {
+    headers: { 'content-type': 'application/x-www-form-urlencoded', authorization: `Basic ${Buffer.from(`${issueSso.data.clientId}:${issueSso.data.clientSecret}`).toString('base64')}` },
+    body: new URLSearchParams({ grant_type: 'authorization_code', code: new URL(dingApprove.result.location).searchParams.get('code'), redirect_uri: 'https://sso-app.example.com/cb', code_verifier: pkceVerifier }).toString(),
+  }))
+  const dingUserInfo = jsonBody(await rawReq('GET', '/oauth/userinfo', { headers: { authorization: `Bearer ${dingTokens.access_token}` } }))
+  check('钉钉身份完整浏览器流（sso 登录 → consent → token → userinfo 身份一致）',
+    dingFirst.status === 302 && dingApprove.status === 200 && dingTokens.access_token?.split('.').length === 3
+    && dingUserInfo.sub === dingSso.data.user.id && dingUserInfo.preferred_username === dingSso.data.user.username)
+
   // app.updated 联动：应用改名 → 客户端名称同步
   await api('PATCH', `/api/apps/${ssoAppId}`, { token: ops, body: { name: 'SSO 自测应用 v2' } })
   const clientsAfterRename = await api('GET', '/api/authn/oidc/clients', { token: admin })

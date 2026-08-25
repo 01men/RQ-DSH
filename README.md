@@ -40,7 +40,7 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）375 项端到端断言
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）390 项端到端断言
 npm run lint:manifests  # 插件清单五面 YAML 校验（65 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
@@ -243,6 +243,9 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
   失败一律 302 平台错误页（绝不携带外部 redirect_uri，防开放重定向）；`POST /api/authn/oidc/authorize`
   用户确认（human-only，consent 卡片）→ code/state/iss（RFC 9207）回跳。
   **旧账密式 `POST /oauth/authorize` 已删除**。
+- **授权页登录面板支持钉钉免密**：无平台会话的授权页内嵌登录面板提供「账号密码 / 钉钉扫码」双入口
+  （钉钉入口按 `/api/auth/providers` 连接器配置显隐）——钉钉用户在授权页内即可完成免密登录
+  （首次身份走绑定/注册分支），无需预登录控制台，随后直接进入授权确认，全程闭环在 SSO 流内。
 - **换牌协议面**：`client_secret_basic` + `client_secret_post` 双认证 × form/JSON 双编码；错误码状态码
   归位（invalid_grant→400、invalid_client→401+WWW-Authenticate）；access/id token 打标 `token_use`；
   userinfo 校验 token 类型与 aud 受众，email claim 按 scope 裁剪；JWKS 数组化（kid 匹配验签）。
@@ -385,7 +388,7 @@ curl -X POST localhost:7300/mcp -H "authorization: Bearer <token>" -H 'content-t
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **375 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **390 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批（发起人可自审）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
@@ -397,7 +400,8 @@ Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批�
 换牌 Basic+Post × form+JSON、PKCE 正误、code 重放、token_use 收敛、JWKS 本地验签、
 MVP 闭环：门禁双点（含审批期间禁用→执行失败留痕）、owner 校验（非 owner/机器 403）、
 secret 轮换旧值即废、offline/online/updated/archived 四事件联动、openid-client 冒烟
-authorize→token→userinfo→refresh→revoke→end_session）+ **NAS 与平台 MCP 端点**
+authorize→token→userinfo→refresh→revoke→end_session、钉钉身份驱动授权流
+（providers 入口探测 → 授权页 sso 免密登录 → consent → 换牌 → userinfo 身份一致））+ **NAS 与平台 MCP 端点**
 （进程内真实 synology-filestation stub（校验 Bearer + X-NAS-IP，fs_upload 真实读盘）：
 mcpServers JSON 导入→探活→上线→工具发现、文件全链与审计留痕、RBAC 读写分离、
 Skill 包上架自动上传（字节级校验 / 无包现场打包 / NAS 未上线 fail-closed）、台账巡检覆盖、
