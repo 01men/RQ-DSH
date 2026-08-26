@@ -1028,10 +1028,12 @@ export function apply(ctx: Context) {
 
   // -- Authn --------------------------------------------------------------
   guarded('GET', '/api/authn/principals', 'authn.principal.read', () => ({
-    principals: ctx.authn.principals().all().map((principal) => ({
-      ...principal,
-      activeTokens: ctx.authn.activeTokenCount(principal.id),
-    })),
+    principals: ctx.authn.principals().all().map((principal) => {
+      // 脱敏：clientSecretHash 为签名级凭证哈希，一律不外发
+      const { clientSecretHash, ...safe } = principal
+      void clientSecretHash
+      return { ...safe, activeTokens: ctx.authn.activeTokenCount(principal.id) }
+    }),
   }))
 
   /** 机器凭证可绑定的已注册资源（签发弹窗下拉/搜索用：选择后自动回填 refType/refId）。 */
@@ -1052,6 +1054,31 @@ export function apply(ctx: Context) {
     const principal = ctx.authn.disablePrincipal(exchange.params['id']!, reason ?? '手动禁用')
     changeLog(exchange, 'authn.principal.disable', 'principal', principal.id, principal.name, reason ?? '')
     return principal
+  })
+
+  guarded('POST', '/api/authn/principals/:id/enable', 'authn.principal.write', (exchange) => {
+    const principal = ctx.authn.enablePrincipal(exchange.params['id']!)
+    changeLog(exchange, 'authn.principal.enable', 'principal', principal.id, principal.name)
+    return principal
+  })
+
+  guarded('PATCH', '/api/authn/principals/:id', 'authn.principal.write', (exchange) => {
+    const { scopes } = body<{ scopes: string[] }>(exchange)
+    if (!Array.isArray(scopes) || scopes.some((scope) => typeof scope !== 'string')) {
+      exchange.fail(400, 'BAD_REQUEST', 'scopes 必填（字符串数组）')
+      return
+    }
+    const principal = ctx.authn.updateMachineScopes(exchange.params['id']!, scopes)
+    changeLog(exchange, 'authn.principal.scopes', 'principal', principal.id, principal.name, scopes.join(','))
+    const { clientSecretHash, ...safe } = principal
+    void clientSecretHash
+    return safe
+  })
+
+  guarded('POST', '/api/authn/principals/:id/rotate-secret', 'authn.principal.write', (exchange) => {
+    const rotated = ctx.authn.rotateMachineCredential(exchange.params['id']!)
+    changeLog(exchange, 'authn.principal.rotate', 'principal', rotated.principal.id, rotated.principal.name, '旧 secret 立即失效')
+    return { clientId: rotated.principal.clientId, clientSecret: rotated.clientSecret, note: '新 clientSecret 仅此一次返回，旧值立即失效，存量令牌已全部吊销' }
   })
 
   guarded('GET', '/api/authn/tokens', 'authn.principal.read', (exchange) => {
@@ -1695,21 +1722,38 @@ export function apply(ctx: Context) {
   })
 
   // -- Agent --------------------------------------------------------------
-  guarded('GET', '/api/agents', 'agent.read', () => ({
-    agents: ctx.resourceCore.list('agent').map((agent) => ({
-      ...agent,
-      metrics: ctx.agentRegistry.metrics(agent.id),
-      boundUserCount: ctx.agentRegistry.bindings().find((item) => item.agentId === agent.id).length,
-      availableTransitions: ctx.resourceCore.availableTransitions('agent', agent.id),
-    })),
-    schema: ctx.resourceCore.typeSpec('agent')?.schema,
-    lifecycle: ctx.resourceCore.typeSpec('agent')?.lifecycle,
-  }))
+  /** 机器身份读台账审计：接入提示词以「带机器令牌 GET /api/agents」为接入验证话术，此处让其成为事实。
+   *  只记机器身份（人类控制台读操作高频，全量记录成噪音；机器读台账低频且带治理含义）。 */
+  const machineAudit = (exchange: HttpExchange, resourceId: string, resourceName: string): void => {
+    const info = caller(exchange)
+    if (info.kind !== 'machine') return
+    ctx.audit.record({
+      type: 'auth', actorType: 'machine', actorId: info.principalId, actorName: info.name,
+      action: 'agent.verify', resourceType: 'agent', resourceId, resourceName,
+      result: 'ok', detail: '机器身份访问 Agent 台账（接入验证/资产探测留痕）',
+      ...(info.actChain.length > 0 ? { actChain: info.actChain } : {}),
+    })
+  }
+
+  guarded('GET', '/api/agents', 'agent.read', (exchange) => {
+    machineAudit(exchange, '-', 'Agent 台账')
+    return {
+      agents: ctx.resourceCore.list('agent').map((agent) => ({
+        ...agent,
+        metrics: ctx.agentRegistry.metrics(agent.id),
+        boundUserCount: ctx.agentRegistry.bindings().find((item) => item.agentId === agent.id).length,
+        availableTransitions: ctx.resourceCore.availableTransitions('agent', agent.id),
+      })),
+      schema: ctx.resourceCore.typeSpec('agent')?.schema,
+      lifecycle: ctx.resourceCore.typeSpec('agent')?.lifecycle,
+    }
+  })
 
   guarded('GET', '/api/agents/:id', 'agent.read', (exchange) => {
     const id = exchange.params['id']!
     const agent = ctx.resourceCore.get('agent', id)
     if (!agent) throw new Error(`Agent 不存在：${id}`)
+    machineAudit(exchange, id, agent.name)
     const principal = ctx.agentRegistry.machinePrincipal(id)
     return {
       ...agent,

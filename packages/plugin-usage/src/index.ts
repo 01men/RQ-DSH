@@ -153,7 +153,15 @@ export class UsageService extends Service {
     this.validate(input)
     const tenant = input.tenant_id ?? this.resolveTenant(input.org)
     const price = this.priceOf(input.resource)
-    const meter = input.meters.find((item) => item.key === price.meter_key) ?? { key: price.meter_key, value: 0, unit: 'unit' }
+    // 硬校验：事件必须携带价格簿计价键（宁可拒绝不可静默 0 计费——
+    // 价格簿对调用方不可见（usage.admin），错误信息直接携带期望键供自纠）
+    if (!input.meters.some((item) => item.key === price.meter_key)) {
+      throw new Error(
+        `计量键不匹配：资源 ${input.resource} 按价格簿 ${price.pattern} 以「${price.meter_key}」计价，` +
+        `收到 [${input.meters.map((m) => m.key).join(', ')}]。请按 ${price.meter_key} 重报，不要编造计量键`,
+      )
+    }
+    const meter = input.meters.find((item) => item.key === price.meter_key)!
     const charge = Math.round((meter.value / price.units_per_step) * price.list_cents_per_unit)
     const cost = Math.round((meter.value / price.units_per_step) * price.cost_cents_per_unit)
     const event: UsageEvent = {

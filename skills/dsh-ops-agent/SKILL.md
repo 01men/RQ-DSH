@@ -25,7 +25,9 @@ agent.write / agent.approve 权限；上线审批需第二管理员配合。
 
 ### 场景 2：注册新 Agent
 `dshctl agent create --name=<名称> --model=deepseek-chat --riskLevel=low`
-→ 返回机器凭证（仅一次）。补全 systemPromptVersion/dataClass 后方可上线。
+→ 返回机器凭证（仅一次；scopes 含 mcp.invoke/skill.read/agent.read/usage.write，Agent 可自推直连消耗的计量）。
+补全 systemPromptVersion/dataClass 后方可上线。
+凭证 secret 丢失/泄露：找管理员执行 `dshctl credential rotate <principalId>` 轮换（clientId 不变、旧值立即失效），无需重新注册。
 
 ### 场景 3：上线流程
 1. 确认治理属性齐备（否则接口会给出具体缺失项）

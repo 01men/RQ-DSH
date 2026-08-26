@@ -422,6 +422,35 @@ try {
   const revokedUse = await api('GET', '/api/auth/me', { token: issueToken.data.token })
   check('吊销后令牌失效', revokedUse.status === 401)
 
+  // 机器凭证治理：scopes 编辑（联动吊销）/ 密钥轮换 / 列表 hash 脱敏
+  const govCred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'gov-machine', refType: 'external', scopes: ['agent.read'] } })
+  const govCc1 = await api('POST', '/api/auth/client-credentials', { body: { clientId: govCred.data.clientId, clientSecret: govCred.data.clientSecret } })
+  check('治理夹具：签发 agent.read 机器凭证并换牌', govCc1.ok)
+
+  const scopesPatch = await api('PATCH', `/api/authn/principals/${govCred.data.principalId}`, { token: admin, body: { scopes: ['agent.read', 'usage.write'] } })
+  check('调整权限范围 200', scopesPatch.ok && scopesPatch.data.scopes.join(',') === 'agent.read,usage.write')
+  const oldTokenAfterPatch = await api('GET', '/api/agents', { token: govCc1.data.token })
+  check('调整 scopes 后旧令牌联动吊销（收权即时生效）', oldTokenAfterPatch.status === 401)
+  const govCc2 = await api('POST', '/api/auth/client-credentials', { body: { clientId: govCred.data.clientId, clientSecret: govCred.data.clientSecret } })
+  check('重新换牌按新范围签发', govCc2.ok && govCc2.data.principal.scopes.join(',') === 'agent.read,usage.write')
+
+  const scopesTypo = await api('PATCH', `/api/authn/principals/${govCred.data.principalId}`, { token: admin, body: { scopes: ['usage.wrtie'] } })
+  check('拼错权限点被拒（权限目录校验）', !scopesTypo.ok && JSON.stringify(scopesTypo.error).includes('非法权限点'))
+  const scopesStarMix = await api('PATCH', `/api/authn/principals/${govCred.data.principalId}`, { token: admin, body: { scopes: ['*', 'agent.read'] } })
+  check("'*' 与其他权限点混用被拒", !scopesStarMix.ok)
+  const createTypo = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'typo-machine', refType: 'external', scopes: ['usage.wrtie'] } })
+  check('创建凭证即校验权限点（入口防拼错）', !createTypo.ok && JSON.stringify(createTypo.error).includes('非法权限点'))
+
+  const rotateCred = await api('POST', `/api/authn/principals/${govCred.data.principalId}/rotate-secret`, { token: admin })
+  check('轮换 clientSecret（clientId 不变 + note 提示 + 无 hash 外发）', rotateCred.ok && rotateCred.data.clientId === govCred.data.clientId && !!rotateCred.data.note && !JSON.stringify(rotateCred.data).includes('Hash'))
+  const oldSecretAfterRotate = await api('POST', '/api/auth/client-credentials', { body: { clientId: govCred.data.clientId, clientSecret: govCred.data.clientSecret } })
+  check('旧 secret 换牌立即 401', oldSecretAfterRotate.status === 401)
+  const newSecretLogin = await api('POST', '/api/auth/client-credentials', { body: { clientId: rotateCred.data.clientId, clientSecret: rotateCred.data.clientSecret } })
+  check('新 secret 换牌 200', newSecretLogin.ok)
+
+  const principalsList = await api('GET', '/api/authn/principals', { token: admin })
+  check('身份列表不再外发 clientSecretHash', principalsList.ok && !JSON.stringify(principalsList.data).includes('clientSecretHash'))
+
   // ================================================================ 第 1 步：受众与插件命名空间
   section('第 1 步：令牌受众（aud）与插件命名空间收敛')
   const audPrincipal = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'billing-svc', refType: 'external', scopes: ['audit.read'] } })
@@ -464,6 +493,12 @@ try {
   check('schema v1 校验（resource 格式拒绝）', !badResource.ok)
   const noPrice = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, idempotency_key: 'test-usage-003', resource: 'model:no-such-model' } })
   check('无计价规则拒绝登记（不免费放行）', !noPrice.ok && JSON.stringify(noPrice.error).includes('计价'))
+
+  // 计量键硬校验：事件必含价格簿 meter_key（缺失 400 且错误信息携带期望键；不再静默 0 计费）
+  const wrongMeterKey = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, idempotency_key: 'test-usage-wrong-key-1', meters: [{ key: 'calls', value: 1, unit: '次' }] } })
+  check('计量键与价格簿不符被拒（mcp:* 须 tokens，错误可自纠）', !wrongMeterKey.ok && JSON.stringify(wrongMeterKey.error).includes('计量键不匹配') && JSON.stringify(wrongMeterKey.error).includes('tokens'))
+  const rightKeyAgain = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, idempotency_key: 'test-usage-right-key-1', meters: [{ key: 'tokens', value: 1000, unit: 'token' }] } })
+  check('计量键匹配路径计价不变（1000 tokens = 30 分）', rightKeyAgain.ok && rightKeyAgain.data.pricing.charge_cents === 30)
 
   const reconcile1 = await api('POST', '/api/usage/reconcile', { token: admin })
   check('三方对账：usage 口径 = audit 投影（全量比对）', reconcile1.ok
@@ -1270,6 +1305,8 @@ try {
   // 计量管道（观测补齐）：skill 下载/安装进 usage 事件（skill:<ID>，默认零费率）
   const skillUsage = await api('GET', '/api/usage/events?resource=' + encodeURIComponent(`skill:${skillId}`), { token: admin })
   check('Skill 下载/安装进计量管道（skill:<ID> 资源，零费率）', skillUsage.ok && skillUsage.data.total >= 2 && (skillUsage.data.items[0].pricing?.charge_cents ?? -1) === 0)
+  const skillMeters = skillUsage.data.items.flatMap((event) => event.meters.map((meter) => meter.key))
+  check('skill 事件 meters 含价格簿计价键 calls（硬校验下内部管道存活）', skillMeters.includes('calls') && skillMeters.includes('downloads') && skillMeters.includes('installs'))
   const skillExternalMeter = await api('POST', '/api/usage/record', { token: admin, body: { org: tenantOrg.data.id, subject: `agent:${targetAgent.id}`, principal: `org:${tenantOrg.data.id}`, resource: `skill:${skillId}`, meters: [{ key: 'calls', value: 1, unit: '次' }], idempotency_key: 'test-usage-skill-external-1' } })
   check('外部 usage record 可上报 skill:<ID> 资源（默认价格簿放行）', skillExternalMeter.ok)
   const heat = await api('GET', '/api/skills/usage-heatmap?days=30', { token: admin })
@@ -1297,6 +1334,24 @@ try {
   const agentCreate = await api('POST', '/api/agents', { token: ops, body: { name: '自测机器人', attrs: { description: '自测用机器人', model: 'deepseek-chat', riskLevel: 'low', avatar: '🧪' } } })
   check('注册 Agent（并颁发机器凭证）', agentCreate.ok && agentCreate.data.credential.clientId)
   const selfAgent = agentCreate.data.agent
+
+  // 凭证默认 usage.write（Agent 自推计量能力）+ 机器身份读台账入审计（agent.verify）
+  const selfAgentCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: agentCreate.data.credential.clientId, clientSecret: agentCreate.data.credential.clientSecret } })
+  check('新注册 Agent 凭证默认含 usage.write', selfAgentCc.ok && selfAgentCc.data.principal.scopes.includes('usage.write'))
+
+  const agentVerifyLogs = () => api('GET', '/api/audit/logs?type=auth&resourceType=agent&limit=200', { token: admin })
+  const verifyBefore = (await agentVerifyLogs()).data.items.filter((log) => log.action === 'agent.verify').length
+  await api('GET', '/api/agents', { token: admin })
+  const verifyAfterHuman = (await agentVerifyLogs()).data.items.filter((log) => log.action === 'agent.verify').length
+  check('人类读台账不产生 agent.verify（噪音控制）', verifyAfterHuman === verifyBefore)
+
+  const machineAgentsList = await api('GET', '/api/agents', { token: selfAgentCc.data.token })
+  check('机器令牌读台账 200（接入验证「发一句话」）', machineAgentsList.ok)
+  const verifyLogs = (await agentVerifyLogs()).data.items
+  check('机器身份读台账入审计（agent.verify 留痕）', verifyLogs.some((log) => log.action === 'agent.verify' && log.actorId === selfAgentCc.data.principal.id))
+
+  const agentSelfMeter = await api('POST', '/api/usage/record', { token: selfAgentCc.data.token, body: { org: tenantOrg.data.id, subject: `agent:${selfAgent.id}`, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 100, unit: 'token' }], idempotency_key: 'test-usage-agent-self-1' } })
+  check('Agent 机器令牌自推计量 200（usage.write 生效）', agentSelfMeter.ok && agentSelfMeter.data.pricing.charge_cents === 3)
 
   const onlineTooEarly = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: ops, body: { action: 'online' } })
   check('缺治理属性不可上线（校验）', !onlineTooEarly.ok)

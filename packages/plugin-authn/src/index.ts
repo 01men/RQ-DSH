@@ -15,6 +15,7 @@ import {
   PlatformEvents, generateSecret, newId, sha256Hex,
   type Collection, type RecordBase,
 } from '../../platform-core/src/index.ts'
+import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import * as authnTools from './tools.ts'
 import { OidcService } from './oidc.ts'
 
@@ -545,13 +546,14 @@ export class AuthnService extends Service {
     })
   }
 
-  /** 创建机器身份凭证（Client Credentials）。secret 仅返回一次。 */
+  /** 创建机器身份凭证（Client Credentials）。secret 仅返回一次；scopes 须命中权限目录（防拼错）。 */
   createMachineCredential(input: {
     name: string
     refType?: 'agent' | 'app' | 'external'
     refId?: string
     scopes: string[]
   }): { principal: PrincipalRecord; clientId: string; clientSecret: string } {
+    this.assertMachineScopes(input.scopes)
     const clientId = `mc-${newId('id').slice(3)}`
     const clientSecret = generateSecret('cs')
     const principal = this.principals().insert({
@@ -573,6 +575,40 @@ export class AuthnService extends Service {
     if (!principal) throw new Error(`身份不存在：${id}`)
     this.revokePrincipalTokens(id, reason)
     return this.principals().update(id, { status: 'disabled' })
+  }
+
+  /** 校验机器身份权限范围：恰为 ['*'] 或全部命中权限目录（防拼错，如 usage.wrtie）。 */
+  private assertMachineScopes(scopes: string[]): void {
+    if (scopes.length === 0) throw new Error('scopes 不能为空')
+    if (scopes.includes('*')) {
+      if (scopes.length !== 1) throw new Error("'*' 不可与其他权限点混用")
+      return
+    }
+    const catalog = new Set(PermissionCatalog.map((item) => item.point))
+    const invalid = scopes.filter((scope) => !catalog.has(scope))
+    if (invalid.length > 0) throw new Error(`非法权限点：${invalid.join('、')}（须为权限目录中的点，或仅 '*'）`)
+  }
+
+  /** 调整机器身份权限范围；联动吊销全部存量令牌（收权即时生效，下次换牌按新范围签发）。 */
+  updateMachineScopes(id: string, scopes: string[]): PrincipalRecord {
+    const principal = this.principals().get(id)
+    if (!principal) throw new Error(`身份不存在：${id}`)
+    if (principal.type !== 'machine') throw new Error('仅机器身份支持调整权限范围')
+    this.assertMachineScopes(scopes)
+    const updated = this.principals().update(id, { scopes })
+    this.revokePrincipalTokens(id, '权限范围调整联动')
+    return updated
+  }
+
+  /** 轮换机器凭证密钥：clientId 不变，旧 secret 立即失效，存量令牌全部吊销；新 secret 仅此一次返回。 */
+  rotateMachineCredential(id: string): { principal: PrincipalRecord; clientSecret: string } {
+    const principal = this.principals().get(id)
+    if (!principal) throw new Error(`身份不存在：${id}`)
+    if (principal.type !== 'machine' || !principal.clientId) throw new Error('仅机器凭证（clientId/clientSecret）支持轮换')
+    const clientSecret = generateSecret('cs')
+    const updated = this.principals().update(id, { clientSecretHash: sha256Hex(clientSecret) })
+    this.revokePrincipalTokens(id, '凭证轮换联动')
+    return { principal: updated, clientSecret }
   }
 
   enablePrincipal(id: string): PrincipalRecord {

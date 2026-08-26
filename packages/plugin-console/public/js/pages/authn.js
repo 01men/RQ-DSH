@@ -15,6 +15,7 @@ export async function renderAuthn(content, params, ctx) {
   ])
   const canOidc = oidcClients !== null
   const canOidcWrite = session.can('authn.oidc.write')
+  const canPrincipalWrite = session.can('authn.principal.write')
 
   content.innerHTML = `
     <div class="page-head">
@@ -51,7 +52,7 @@ export async function renderAuthn(content, params, ctx) {
       const table = renderTable({
         columns: [
           {
-            title: '主体', width: '26%',
+            title: '主体', width: '24%',
             render: (p) => `
               <div class="flex" style="gap:10px">
                 <div class="avatar sm" style="${p.type === 'machine' ? 'background:linear-gradient(135deg,#8b5cf6,#6d28d9)' : ''}">${icon(p.type === 'machine' ? 'settings' : 'user', 13)}</div>
@@ -63,15 +64,39 @@ export async function renderAuthn(content, params, ctx) {
           },
           { title: '类型', width: 90, render: (p) => `<span class="badge ${p.type === 'human' ? 'badge-brand' : 'badge-purple'} no-dot">${p.type === 'human' ? '人员' : '机器'}</span>` },
           { title: '绑定资源', render: (p) => esc(refLabel(p)) },
+          {
+            title: '权限范围',
+            render: (p) => p.type !== 'machine' || !p.scopes.length
+              ? '<span class="text-4">—</span>'
+              : `<span class="mono fs-11" style="display:inline-block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(p.scopes.join(', '))}">${esc(p.scopes.join(', '))}</span>`,
+          },
           { title: 'ClientId', render: (p) => p.clientId ? `<span class="mono fs-12">${esc(p.clientId)}</span>` : '<span class="text-4">—</span>' },
           { title: '活跃令牌', width: 90, render: (p) => `<span class="col-num">${p.activeTokens}</span>` },
           { title: '状态', width: 90, render: (p) => statusBadge(p.status === 'active' ? 'active' : 'frozen', p.status === 'active' ? '正常' : '已禁用') },
+          {
+            title: '', width: 150,
+            render: (p) => p.type === 'machine' && canPrincipalWrite ? `
+              <button class="btn btn-default btn-sm" data-scopes="${esc(p.id)}">编辑权限</button>
+              ${p.clientId ? `<button class="btn btn-danger-ghost btn-sm" data-rotate="${esc(p.id)}">轮换密钥</button>` : ''}` : '',
+          },
         ],
         rows: principals.principals,
         onRowClick: (id, row) => openPrincipalDetail(row),
       })
       body.innerHTML = ''
       body.appendChild(table)
+      body.querySelectorAll('[data-scopes]').forEach((btn) => {
+        btn.onclick = (event) => {
+          event.stopPropagation()
+          openScopesEditor(principals.principals.find((p) => p.id === btn.dataset.scopes), ctx)
+        }
+      })
+      body.querySelectorAll('[data-rotate]').forEach((btn) => {
+        btn.onclick = (event) => {
+          event.stopPropagation()
+          rotateCredential(principals.principals.find((p) => p.id === btn.dataset.rotate), ctx)
+        }
+      })
     } else if (tab === 'tokens') {
       const table = renderTable({
         columns: [
@@ -244,10 +269,17 @@ client_secret: ${esc(result.clientSecret)}</div>
             <span class="fs-11 text-3">${timeAgo(t.issuedAt)}</span>
             ${t.revokedAt ? statusBadge('offline', '已吊销') : statusBadge('online', '生效中')}
           </div>`).join('') || '<span class="text-4 fs-12">暂无令牌</span>'}`,
-      foot: principal.status === 'active'
-        ? `<button class="btn btn-danger-ghost" id="pri-disable">${icon('alert', 14)}禁用身份（吊销全部令牌）</button>`
-        : '<button class="btn btn-primary" id="pri-enable">启用身份</button>',
+      foot: `
+        ${principal.type === 'machine' && canPrincipalWrite ? `<button class="btn btn-default" id="pri-scopes">${icon('shield', 14)}编辑权限</button>` : ''}
+        ${principal.type === 'machine' && principal.clientId && canPrincipalWrite ? `<button class="btn btn-danger-ghost" id="pri-rotate">${icon('refresh', 14)}轮换密钥</button>` : ''}
+        ${principal.status === 'active'
+          ? `<button class="btn btn-danger-ghost" id="pri-disable">${icon('alert', 14)}禁用身份（吊销全部令牌）</button>`
+          : '<button class="btn btn-primary" id="pri-enable">启用身份</button>'}`,
     })
+    const scopesBtn = drawer.el.querySelector('#pri-scopes')
+    if (scopesBtn) scopesBtn.onclick = () => { drawer.close(); openScopesEditor(principal, ctx) }
+    const priRotateBtn = drawer.el.querySelector('#pri-rotate')
+    if (priRotateBtn) priRotateBtn.onclick = () => { drawer.close(); rotateCredential(principal, ctx) }
     const disableBtn = drawer.el.querySelector('#pri-disable')
     if (disableBtn) disableBtn.onclick = async () => {
       const result = await confirmDialog({ title: '禁用身份', requireReason: true, danger: true, message: `禁用 <b>${esc(principal.name)}</b> 后其全部令牌立即失效。` })
@@ -256,10 +288,90 @@ client_secret: ${esc(result.clientSecret)}</div>
       toast('身份已禁用'); drawer.close(); ctx.rerender()
     }
     const enableBtn = drawer.el.querySelector('#pri-enable')
-    if (enableBtn) enableBtn.onclick = () => toast('启用身份请通过 API（演示入口收口）', 'info')
+    if (enableBtn) enableBtn.onclick = async () => {
+      try {
+        await api.post(`/api/authn/principals/${principal.id}/enable`)
+        toast('身份已启用'); drawer.close(); ctx.rerender()
+      } catch (error) { toast(error.message, 'error') }
+    }
   }
 
   if (params.get('action') === 'credential') $('#authn-credential').click()
+
+  /** 编辑机器凭证权限范围：按权限目录分组多选；调整后存量令牌联动吊销，机器侧需重新换牌。 */
+  async function openScopesEditor(principal, ctx2) {
+    let catalog
+    try {
+      catalog = (await api.get('/api/iam/permissions')).catalog
+    } catch (error) { toast(error.message, 'error'); return }
+    const groups = new Map()
+    for (const item of catalog) {
+      if (!groups.has(item.group)) groups.set(item.group, [])
+      groups.get(item.group).push(item)
+    }
+    const selected = new Set(principal.scopes ?? [])
+    const modal = openModal({
+      title: `编辑权限范围 · ${principal.name}`, wide: true,
+      body: `
+        <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>调整保存后该主体<b>全部存量令牌立即吊销</b>（收权即时生效），机器侧需用凭证重新换牌，新令牌按新范围签发。</span></div>
+        <label class="flex mb-14" style="gap:8px;cursor:pointer;font-weight:600">
+          <input type="checkbox" id="scope-star" ${selected.has('*') ? 'checked' : ''} style="accent-color:var(--danger)">
+          <span style="color:var(--danger)">'*' —— 全部权限（不可与其他权限点混用）</span>
+        </label>
+        <div class="form-grid">
+          ${[...groups.entries()].map(([group, items]) => `
+            <div class="form-item full">
+              <div class="card-title mb-8">${esc(group)}</div>
+              <div class="flex" style="flex-wrap:wrap;gap:6px 14px">
+                ${items.map((item) => `
+                  <label class="flex" style="gap:6px;font-size:12px;cursor:pointer" data-point-group>
+                    <input type="checkbox" data-point="${esc(item.point)}" ${selected.has(item.point) ? 'checked' : ''} style="accent-color:var(--brand-500)">
+                    <span>${esc(item.label)}<span class="mono text-4" style="margin-left:4px">${esc(item.point)}</span></span>
+                  </label>`).join('')}
+              </div>
+            </div>`).join('')}
+        </div>`,
+      foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存（联动吊销存量令牌）</button>',
+    })
+    const starBox = modal.body.querySelector('#scope-star')
+    const pointBoxes = () => [...modal.body.querySelectorAll('[data-point]')]
+    const syncStar = () => pointBoxes().forEach((box) => { box.disabled = starBox.checked; if (starBox.checked) box.checked = false })
+    starBox.onchange = syncStar
+    syncStar()
+    modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+    modal.el.querySelector('[data-ok]').onclick = async () => {
+      const scopes = starBox.checked ? ['*'] : pointBoxes().filter((box) => box.checked).map((box) => box.dataset.point)
+      if (!scopes.length) return toast('scopes 不能为空（或勾选 *）', 'error')
+      try {
+        await api.patch(`/api/authn/principals/${principal.id}`, { scopes })
+        modal.close()
+        toast('权限范围已更新；存量令牌已联动吊销，机器侧需重新换牌')
+        ctx2.rerender()
+      } catch (error) { toast(error.message, 'error') }
+    }
+  }
+
+  /** 轮换机器凭证密钥：clientId 不变、旧 secret 立即失效、存量令牌全部吊销；新 secret 仅此一次展示。 */
+  async function rotateCredential(principal, ctx2) {
+    const result = await confirmDialog({
+      title: '轮换 clientSecret', danger: true, confirmText: '确认轮换',
+      message: `<b>${esc(principal.name)}</b> 的旧 clientSecret <b>立即失效</b>，存量令牌<b>全部吊销</b>；clientId 保持不变，新 clientSecret 仅展示一次。`,
+    })
+    if (!result) return
+    try {
+      const rotated = await api.post(`/api/authn/principals/${principal.id}/rotate-secret`)
+      openModal({
+        title: '新 clientSecret（仅此一次展示）',
+        body: `
+          <div class="form-hint" style="margin-bottom:10px;color:var(--danger)">请立即复制保存，关闭后无法再次查看 clientSecret。</div>
+          <div class="code-block">client_id:     ${esc(rotated.clientId)}
+client_secret: ${esc(rotated.clientSecret)}</div>
+          <div class="form-hint mt-8">${esc(rotated.note ?? '')}</div>`,
+        foot: '<button class="btn btn-primary" data-ok>已保存</button>',
+      })
+      ctx2.rerender()
+    } catch (error) { toast(error.message, 'error') }
+  }
 }
 
 function refLabel(principal) {

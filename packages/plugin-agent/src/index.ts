@@ -3,8 +3,8 @@
  *
  * 基于 resource-core 底座：属性表 schema + 生命周期状态机 + 依赖图全部复用，
  * 本插件只声明 Agent 差异 schema 与运营监测逻辑。
- * 注册即纳管：创建 Agent 颁发唯一 ID 与机器身份凭证（authn），
- * 上线走 L4 审批，下线联动吊销凭证、通知绑定用户、保留审计数据。
+ * 注册即纳管：创建 Agent 颁发唯一 ID 与机器身份凭证（authn，含 usage.write，
+ * Agent 可自推直连消耗的计量），上线走 L4 审批，下线联动吊销凭证、通知绑定用户、保留审计数据。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
@@ -115,11 +115,12 @@ export class AgentRegistryService extends Service {
     const agent = this.ctx.resourceCore.create('agent', { ...input, attrs })
     let credential
     if (input.withCredential !== false) {
+      // usage.write：Agent 绕过平台网关直连外部资源时须自推计量（POST /api/usage/record）
       credential = this.ctx.authn.createMachineCredential({
         name: `agent:${(agent as any).slug}`,
         refType: 'agent',
         refId: agent.id,
-        scopes: ['mcp.invoke', 'skill.read', 'agent.read'],
+        scopes: ['mcp.invoke', 'skill.read', 'agent.read', 'usage.write'],
       })
     }
     this.ctx.platformBus.emit(PlatformEvents.AgentRegistered, {
@@ -339,4 +340,27 @@ export function apply(ctx: Context) {
   ctx.effect(() => ctx.audit.registerExecutor('agent.offline', async (payload) => {
     return registry.offline(String(payload.agentId), 'approval-center', String(payload.reason ?? '审批通过下线'))
   }))
+  migrateAgentCredentialScopes(ctx)
+}
+
+/** 一次性迁移：为存量 Agent 机器凭证补 usage.write（幂等标记，防止覆盖后续人工调整的 scopes）。 */
+function migrateAgentCredentialScopes(ctx: Context): void {
+  const markers = ctx.opsStorage.collection<{ id: string; doneAt: string }>('agent:migrations')
+  const MARK = 'agent-scopes-usage-write-v1'
+  if (markers.get(MARK)) return
+  let patched = 0
+  for (const principal of ctx.authn.principals().find(
+    (item) => item.type === 'machine' && item.refType === 'agent' && item.status === 'active' && !item.scopes.includes('usage.write'),
+  )) {
+    ctx.authn.principals().update(principal.id, { scopes: [...principal.scopes, 'usage.write'] })
+    ctx.audit.record({
+      type: 'change', actorType: 'system', actorId: 'agent-migration', actorName: '凭证范围迁移',
+      action: 'agent.credential.scopes-backfill', resourceType: 'agent',
+      resourceId: principal.refId ?? '', resourceName: principal.name, result: 'ok',
+      detail: '补入 usage.write（Agent 自推计量能力对齐）',
+    })
+    patched++
+  }
+  markers.insert({ id: MARK, doneAt: new Date().toISOString() })
+  if (patched > 0) ctx.logger('agent').info(`存量 Agent 凭证迁移完成：${patched} 条补入 usage.write`)
 }

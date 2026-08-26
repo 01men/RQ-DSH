@@ -1,13 +1,14 @@
 # Skill: dsh-ops-authn
 
 ## 何时使用
-机器凭证签发（Agent/应用/外部系统接入）、令牌签发与吊销、签名密钥轮换、on-behalf-of 链路验证、
-OIDC 客户端（应用 SSO 接入）管理与排障。
+机器凭证签发与管理（Agent/应用/外部系统接入；权限范围调整、密钥轮换）、令牌签发与吊销、
+签名密钥轮换、on-behalf-of 链路验证、OIDC 客户端（应用 SSO 接入）管理与排障。
 
 
 ## 调用方式（工具优先）
 平台已把运维能力注册为 dsh 工具，**回答现状问题（查询/盘点/排障）必须直接调用工具获取真实数据，禁止凭记忆回答**：
 - authn_token_issue / authn_token_revoke / authn_token_list / authn_credential_create
+  / authn_credential_scopes（调整权限范围）/ authn_credential_rotate（轮换 clientSecret）
 （工具参数见各工具 schema；下文手册中的 `dshctl ...` 为「平台独立部署 + HTTP API 运维」场景的 CLI 备选，需 DSHCTL_TOKEN/DSHCTL_USER，在 dsh 会话内一般用不到。）
 
 ## 前置条件
@@ -16,13 +17,22 @@ OIDC 客户端（应用 SSO 接入）管理与排障。
 ## 操作手册
 
 ### 场景 1：为外部系统签发机器凭证
-1. `dshctl credential create --name="external:ci-system" --scope=mcp.invoke`
+1. `dshctl credential create --name="external:ci-system" --scope=mcp.invoke`（--scope 支持逗号多值与 `*`）
 2. clientSecret 仅返回一次——立即转存密钥管理系统
 3. 对方用法：POST /api/auth/client-credentials 换取访问令牌（2h 有效）
 
+### 场景 1b：机器凭证治理（权限调整 / 密钥轮换）
+- 列出凭证：`dshctl credential list`（principalId/clientId/scopes/状态/活跃令牌）
+- 调整权限范围：`dshctl credential scopes <principalId> --scopes=agent.read,usage.write`
+  （或控制台「认证与令牌 → 身份主体 → 编辑权限」，按权限目录分组勾选；调整后**存量令牌全部联动吊销**，机器侧需重新换牌）
+- 密钥丢失/泄露：`dshctl credential rotate <principalId>` —— clientId 不变、旧 clientSecret 立即失效、
+  新值仅此一次返回、存量令牌全部吊销。**无需重新注册 Agent/重新签发凭证**
+- 启用/禁用主体：`POST /api/authn/principals/:id/enable|disable`（禁用联动吊销令牌）
+- scopes 合法性：必须全部命中权限目录（或恰为 `['*']`），拼错（如 usage.wrtie）会被 400 拒绝
+
 ### 场景 2：疑似泄露应急
-1. `dshctl token list --principalId=<id>` 找到全部令牌
-2. `dshctl token revoke <jti> --reason="疑似泄露"` 逐个吊销
+1. `dshctl credential rotate <principalId>` 一键轮换（旧 secret 失效 + 存量令牌全吊销）
+2. 需要定位令牌时：`dshctl token list --principalId=<id>`，`dshctl token revoke <jti> --reason="疑似泄露"` 逐个吊销
 3. 严重时禁用主体（控制台认证与令牌页）或轮换签名密钥（吊销全部令牌）
 
 ### 场景 3：验证 on-behalf-of 链

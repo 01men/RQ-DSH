@@ -82,10 +82,11 @@ const PLUGINS = [
     api: [
       'POST /api/auth/login · POST /api/auth/sso · POST /api/auth/client-credentials',
       'GET /api/auth/me · POST /api/auth/logout',
-      'GET/POST /api/authn/principals · POST /api/authn/principals/:id/disable',
+      'GET/POST /api/authn/principals · PATCH /api/authn/principals/:id（scopes 调整，联动吊销令牌）',
+      'POST /api/authn/principals/:id/disable|enable|rotate-secret（轮换：旧值即废，新值仅一次返回）',
       'GET/POST /api/authn/tokens · DELETE /api/authn/tokens/:jti · POST /api/authn/rotate-secret',
     ],
-    tools: ['authn_token_issue', 'authn_token_revoke', 'authn_token_list', 'authn_credential_create'],
+    tools: ['authn_token_issue', 'authn_token_revoke', 'authn_token_list', 'authn_credential_create', 'authn_credential_scopes', 'authn_credential_rotate'],
     ui: { routes: ['#/authn'], menus: [{ group: '治理与运营', items: ['认证与令牌'] }] },
   },
   {

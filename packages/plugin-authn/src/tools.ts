@@ -78,7 +78,7 @@ export function apply(ctx: Context) {
       name: { type: 'string', required: true, description: '主体名称' },
       refType: { type: 'string', enum: ['agent', 'app', 'external'], description: '绑定资源类型' },
       refId: { type: 'string', description: '绑定资源 ID' },
-      scopes: { type: 'array', items: { type: 'string' }, description: '权限点列表（可用 * 或 mcp.* 通配）' },
+      scopes: { type: 'array', items: { type: 'string' }, description: '权限点列表（须为权限目录中的点，或仅 ["*"]）' },
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args) {
@@ -93,6 +93,41 @@ export function apply(ctx: Context) {
         clientId: created.clientId,
         clientSecret: created.clientSecret,
         note: 'clientSecret 仅此一次返回，请妥善保管',
+      }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'authn_credential_scopes',
+    description: '调整机器身份权限范围（收权/扩权）。调整后存量令牌全部联动吊销，机器侧需重新换牌。',
+    permission: 'authn.principal.write',
+    parameters: {
+      principalId: { type: 'string', required: true, description: '主体 ID（pri_ 前缀）' },
+      scopes: { type: 'array', items: { type: 'string' }, required: true, description: '新权限点列表（须全部命中权限目录，或恰为 ["*"]）' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const principal = ctx.authn.updateMachineScopes(args.principalId, args.scopes)
+      const { clientSecretHash, ...safe } = principal
+      void clientSecretHash
+      return { ...safe, note: '存量令牌已全部吊销，机器侧需用凭证重新换牌' }
+    },
+  }))
+
+  t.register(defineTool({
+    name: 'authn_credential_rotate',
+    description: '轮换机器凭证密钥（clientSecret）。clientId 不变，旧值立即失效，存量令牌全部吊销；新 secret 仅此一次返回。凭证丢失/泄露的补救手段，无需重新注册 Agent。',
+    permission: 'authn.principal.write',
+    parameters: {
+      principalId: { type: 'string', required: true, description: '主体 ID（pri_ 前缀）' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const rotated = ctx.authn.rotateMachineCredential(args.principalId)
+      return {
+        clientId: rotated.principal.clientId,
+        clientSecret: rotated.clientSecret,
+        note: '新 clientSecret 仅此一次返回，旧值立即失效，存量令牌已全部吊销',
       }
     },
   }))

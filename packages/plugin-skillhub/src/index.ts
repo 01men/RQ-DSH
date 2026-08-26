@@ -428,7 +428,8 @@ export class SkillHubService extends Service {
   }
 
   /** 计量管道（观测补齐）：skill 下载/安装进 usage 事件（skill:<ID>，中文名 slug 含非 ASCII 故用 ID；
-   *  skill:* 默认零费率，失败只告警不阻断主流程）。 */
+   *  skill:* 默认零费率，失败只告警不阻断主流程。calls 为价格簿计价键（usage.record 硬校验要求
+   *  事件必含计价键），downloads/installs 为观测维度保留。 */
   private meterSkillUsage(skill: SkillRecord, meterKey: 'downloads' | 'installs', idempotencyKey: string, subject: string): void {
     try {
       this.ctx.usage.record({
@@ -436,7 +437,10 @@ export class SkillHubService extends Service {
         subject,
         principal: `org:${skill.orgId}`,
         resource: `skill:${skill.id}`,
-        meters: [{ key: meterKey, value: 1, unit: '次' }],
+        meters: [
+          { key: 'calls', value: 1, unit: '次' },
+          { key: meterKey, value: 1, unit: '次' },
+        ],
         idempotency_key: idempotencyKey,
       })
     } catch (error) {

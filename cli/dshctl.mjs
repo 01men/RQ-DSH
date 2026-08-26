@@ -123,7 +123,10 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
   conflict  list | resolve <id> --keep=third_party|platform
   token     list [--principalId=] | issue --principalId= --ttlHours=
             revoke <jti> --reason=<原因>
-  credential create --name= --scope=mcp.invoke   （clientSecret 仅返回一次）
+  credential list                                        列出机器凭证（principalId/clientId/scopes/状态）
+          create --name= --scope=a,b[,c|*] [--refType= --refId=]   （clientSecret 仅返回一次）
+          scopes <principalId> --scopes=a,b[,c|*]   调整权限范围（存量令牌联动吊销）
+          rotate <principalId>                       轮换 clientSecret（仅本次展示，旧值立即失效）
   mcp       list [--status=] | get <id> | metrics <id> | health <id>
             deploy <id> [--gray=20] [--version=] [--changelog=] [--dry-run]
             rollback <id> --targetVersion=
@@ -147,7 +150,9 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
   app       list | get <id> | metrics <id> | topology <id> | cost <id>
             report <id> [--dau= --sessions= --avg-depth= --retention7= --date=]   （应用指标主动上报）
   usage     record --org= --subject= --principal= --resource= --meter=key:value:unit[,...]
-                                            （计量事件主动推送，schema v1 + 幂等键）
+                                            （计量事件主动推送，schema v1 + 幂等键；
+                                             meter key 须与价格簿一致：mcp:* → tokens、model:<slug> → output_tokens，
+                                             不匹配会被硬拒绝，报错直接给出期望键）
             [--idempotency-key= --tenant-id=]
             events [--principal= --resource= --limit=] | totals [--principal= --from=]
   audit     logs [--type= --resourceId= --limit=] | alerts [--unread] | read-all
@@ -446,15 +451,49 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
   credential: {
     run: async () => {
       await ensureToken()
-      if (argv[0] === 'create') {
-        const data = await call('POST', '/api/authn/principals', {
-          name: argOf('--name'), refType: flag('refType', 'external'), scopes: [String(flag('scope', 'mcp.invoke'))],
-        })
+      const action = argv[0] ?? 'list'
+      const id = argv[1]
+      if (action === 'list') {
+        const data = await call('GET', '/api/authn/principals')
+        out(data.principals.filter((p) => p.type === 'machine').map((p) => ({
+          principalId: p.id,
+          clientId: p.clientId ?? '—',
+          name: p.name,
+          refType: p.refType ?? 'external',
+          scopes: (p.scopes ?? []).join(','),
+          status: p.status,
+          activeTokens: p.activeTokens,
+        })), ['principalId', 'clientId', 'name', 'refType', 'scopes', 'status', 'activeTokens'])
+        return
+      }
+      if (action === 'create') {
+        const scopes = String(flag('scope', 'mcp.invoke')).split(',').map((s) => s.trim()).filter(Boolean)
+        const payload = { name: argOf('--name'), refType: flag('refType', 'external'), scopes }
+        const refId = argOf('--refId')
+        if (refId) payload.refId = String(refId)
+        if (!payload.name) fail('用法：credential create --name=<名称> --scope=<权限点>[,<权限点>…] [--refType= --refId=]')
+        const data = await call('POST', '/api/authn/principals', payload)
         ok('凭证已签发（clientSecret 仅此一次展示）')
         out(data)
         return
       }
-      fail('用法：credential create --name=<名称> --scope=<权限点>')
+      if (action === 'scopes') {
+        const scopesRaw = argOf('--scopes')
+        if (!id || !scopesRaw) fail('用法：credential scopes <principalId> --scopes=<权限点>[,<权限点>…|*]')
+        const scopes = String(scopesRaw).split(',').map((s) => s.trim()).filter(Boolean)
+        const data = await call('PATCH', `/api/authn/principals/${id}`, { scopes })
+        ok(`权限范围已更新为 ${data.scopes.join(',')}（存量令牌已联动吊销，机器侧需重新换牌）`)
+        out({ principalId: data.id, name: data.name, scopes: data.scopes.join(','), status: data.status })
+        return
+      }
+      if (action === 'rotate') {
+        if (!id) fail('用法：credential rotate <principalId>')
+        const data = await call('POST', `/api/authn/principals/${id}/rotate-secret`)
+        ok('clientSecret 已轮换（新值仅此一次展示，旧值立即失效，存量令牌已全部吊销）')
+        out(data)
+        return
+      }
+      fail('用法：credential list | create --name= --scope=a,b[,c|*] [--refType= --refId=] | scopes <principalId> --scopes=a,b[,c|*] | rotate <principalId>')
     },
   },
 

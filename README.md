@@ -40,7 +40,7 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）405 项端到端断言
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）445 项端到端断言
 npm run lint:manifests  # 插件清单五面 YAML 校验（65 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
@@ -272,7 +272,8 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
   （`app.write`）/ `app_metrics_report` 工具 / CLI `app report` 三端同契约（**PV/UV/DAU/会话/会话深度/7 日留存**，
   同日 PV 累加、UV/DAU 取最大，可指定 `date` 补录历史）；计量事件推送走 `POST /api/usage/record`
   （`usage.write`，schema v1 + 幂等键，CLI `usage record`，resource 支持 `mcp:<slug>` / `skill:<id>` /
-  `nas:<id>` / `model:<slug>` / `plugin:<id>`），宿主侧据此外部应用全生命周期监测。
+  `nas:<id>` / `model:<slug>` / `plugin:<id>`；meter key 须与价格簿一致——mcp:* 用 tokens、model:* 用
+  output_tokens，不符硬拒绝且报错直接给出期望键），宿主侧据此外部应用全生命周期监测。
 - **一行 SDK 式接入验证**：selftest 内置 openid-client（v6）冒烟——discovery 驱动走通 authorize →
   token → userinfo → refresh → revoke → end_session 全链（标准客户端真实姿势回归）。
 
@@ -324,6 +325,32 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
 - 验收：`npm run selftest` **405/405**（新增 10 项：skill/nas 计量入账与外部上报放行、PV/UV 累加语义、
   毛利恒等、热力矩阵、弃用护栏与落库、下架原因聚合）。
 
+## 三F、接入链路四项加固：凭证补权/计量硬校验/凭证治理/机器留痕（本迭代，v1.6）
+
+对外接入提示词（Agent 注册接入 / AI 应用接入）评审发现的四个平台侧缺口逐一封堵：
+
+- **Agent 凭证默认授 `usage.write`**：注册签发的机器凭证 scopes 由
+  `['mcp.invoke','skill.read','agent.read']` 扩为含 `usage.write`——Agent 按提示词自推直连消耗的计量
+  不再必然 403。存量部署一次性迁移（幂等标记 `agent-scopes-usage-write-v1`，只跑一次防覆盖后续人工
+  收权；迁移动作逐条入 change 审计 `agent.credential.scopes-backfill`）。
+- **计量键与价格簿不符 → 硬拒绝**：`usage.record` 校验事件必含价格簿 `meter_key`，缺失 400 且错误信息
+  直接携带期望键（价格簿对调用方不可见，错误信息是唯一自纠线索）——消灭「静默按 0 计费入库」这一
+  比报错更危险的漏计费面。skillhub 内部管道同步对齐（meters 补价格簿计价键 `calls`，downloads/installs
+  观测维度保留，热力图口径不变）。
+- **机器凭证治理三端齐备**：`PATCH /api/authn/principals/:id`（scopes 调整，须全部命中权限目录或恰为
+  `['*']`）+ `POST /api/authn/principals/:id/rotate-secret`（clientId 不变、旧 secret 立即失效、新值仅此
+  一次返回）+ enable 端点补齐；**调整/轮换联动吊销全部存量令牌**（令牌 scopes 为签发时快照，不吊销
+  则收权不生效）。控制台「认证与令牌」principals 表新增 scopes 列与「编辑权限（按权限目录分组勾选）/
+  轮换密钥（一次性展示）」行操作；CLI `credential list | scopes | rotate` + `create --scope` 逗号多值；
+  工具 `authn_credential_scopes` / `authn_credential_rotate`。凭证丢失/泄露的补救从「重新注册 Agent」
+  变为「管理员一键轮换」。`GET /api/authn/principals` 与治理响应一律剔除 `clientSecretHash`。
+- **机器身份读台账入审计（`agent.verify`）**：机器令牌调 `GET /api/agents`（list 与 get）在审计留痕
+  （auth 类、含 act 链）——接入提示词「发一句话即接入验证且平台留痕」成为事实；人类控制台读操作
+  不记录（噪音控制）。
+- 验收：`npm run selftest` **445/445**（新增 19 项：凭证默认含 usage.write 与机器令牌自推计量、
+  计量键不符拒绝/匹配路径计价不变/skill 事件含计价键、scopes 调整联动吊销/拼错与 `*` 混用拒绝/
+  轮换旧值即废/列表 hash 脱敏、机器读台账留痕与人类噪音控制）。
+
 ## 三、目录结构（插件标准解剖）
 
 ```
@@ -343,7 +370,7 @@ packages/
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（405 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（445 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -357,7 +384,7 @@ cordis.patch.yml            dsh.bundle 安装补丁（dsh plugin add）
 |---|---|
 | 组织/账号/角色/用户组（§2） | 多级组织树、批量导入、账号状态机、动态/静态用户组、权限点矩阵 |
 | 三方同步与冲突（§2.1/2.3） | OrgConnector 接口 + 钉钉模拟连接器、全量同步、三种冲突策略、对比式冲突工单 |
-| 统一认证（§7） | 双轨身份、HMAC 短期令牌（默认 2h）、吊销/轮换、Client Credentials |
+| 统一认证（§7） | 双轨身份、HMAC 短期令牌（默认 2h）、吊销/轮换、Client Credentials、机器凭证 scopes 编辑与 secret 轮换（联动吊销令牌） |
 | on-behalf-of（§5.5/6.5） | 用户→Agent 令牌链（act 叠加），审计可还原完整链路 |
 | MCP 部署/灰度/回滚（§3.2） | 草稿→验证→灰度→全量，版本不可变，一键回滚 |
 | MCP 令牌网关（§3.3/3.4） | 统一鉴权（权限组 + Tool 粒度 + 只读约束）、限流、熔断、调用监控（P95/成功率/Token） |
@@ -396,7 +423,10 @@ node cli/dshctl.mjs skill submit --name=<名> --content-file=SKILL.md --package=
 node cli/dshctl.mjs skill storage set --mode=nas --nas-id=<id> --base-path=/skillhub
 node cli/dshctl.mjs app report <id> --pv=1200 --uv=320 --dau=280 --sessions=580 --retention7=0.45   # 应用指标主动上报（可 --date= 补录）
 node cli/dshctl.mjs usage record --org=<orgId> --subject=agent:<id> --principal=org:<orgId> \
-     --resource=skill:<skillId> --meter=calls:3:次,tokens:1200:token --idempotency-key=<业务单号>   # resource 亦支持 mcp:<slug> / nas:<id>
+     --resource=skill:<skillId> --meter=calls:3:次,tokens:1200:token --idempotency-key=<业务单号>   # resource 亦支持 mcp:<slug> / nas:<id>；meter key 须与价格簿一致（mcp:*→tokens、model:*→output_tokens），不符 400 且报错给出期望键
+node cli/dshctl.mjs credential list                       # 机器凭证盘点（principalId/scopes/活跃令牌）
+node cli/dshctl.mjs credential scopes <principalId> --scopes=agent.read,usage.write   # 调整权限范围（存量令牌联动吊销）
+node cli/dshctl.mjs credential rotate <principalId>       # 轮换 clientSecret（clientId 不变、旧值立即失效、新值仅此一次）
 ```
 
 ```bash
@@ -413,7 +443,7 @@ curl http://localhost:7300/docs/app-sso-integration.md
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **405 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **445 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批（发起人可自审）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
@@ -435,7 +465,11 @@ Skill 包上架自动上传（字节级校验 / 无包现场打包 / NAS 未上�
 接入客户端心跳：机器令牌上报与宿主可见、非客户端身份 404、无令牌 401）+ **观测与分析补齐**
 （Skill 下载/安装与 NAS 文件操作进计量管道（calls/bytes）、`skill:`/`nas:` 资源外部上报放行、
 PV 同日累加与 UV/DAU 取最大、效益分析毛利恒等、技能热力矩阵、skill 弃用原因必填与落库、
-下架原因三源聚合并去重）。
+下架原因三源聚合并去重）+ **接入链路加固**
+（Agent 凭证默认含 usage.write 且机器令牌自推计量 200、计量键与价格簿不符 400（错误携带期望键）
+与匹配路径计价恒等、skill 事件 meters 含计价键 calls、scopes 调整后旧令牌联动吊销/拼错权限点与
+`*` 混用拒绝、clientSecret 轮换旧值即废新值即用、身份列表与治理响应不外发 clientSecretHash、
+机器身份读台账入审计 agent.verify 而人类读不产生（噪音控制））。
 测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
 
 ## 八、说明与边界
