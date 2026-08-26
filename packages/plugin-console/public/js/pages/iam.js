@@ -189,6 +189,7 @@ export async function renderIam(content, params, ctx) {
         menu.innerHTML = `
           <button class="dropdown-item" data-act="add-child">${icon('plus')}新建子组织</button>
           <button class="dropdown-item" data-act="rename">${icon('edit')}重命名</button>
+          <button class="dropdown-item" data-act="move">${icon('gitBranch')}调整上级组织</button>
           <button class="dropdown-item danger" data-act="delete">${icon('trash')}删除组织</button>`
         menu.querySelector('[data-act="add-child"]').onclick = () => { anchor.remove(); openOrgCreate(treeData, node.id) }
         menu.querySelector('[data-act="rename"]').onclick = async () => {
@@ -204,6 +205,27 @@ export async function renderIam(content, params, ctx) {
             if (!data.name) return toast('名称不能为空', 'error')
             await api.patch(`/api/iam/orgs/${node.id}`, { name: data.name })
             toast('已重命名'); modal.close(); location.hash = '#/iam'; ctx.rerender()
+          }
+        }
+        menu.querySelector('[data-act="move"]').onclick = () => {
+          anchor.remove()
+          // 候选父级排除自身与全部子孙（体验层防环，服务端 moveOrg 环检测兜底）
+          const excluded = new Set()
+          const collectSubtree = (n) => { excluded.add(n.id); (n.children ?? []).forEach(collectSubtree) }
+          collectSubtree(node)
+          const candidates = flattenTree(treeData).filter((o) => !excluded.has(o.id))
+          const modal = openModal({
+            title: `调整上级组织（${esc(node.name)}）`,
+            body: field('上级组织', selectField('parentId', [{ value: '', label: '（作为顶级组织）' }, ...candidates.map((o) => ({ value: o.id, label: '　'.repeat(o.depth) + o.name }))], { value: node.parentId ?? '' })),
+            foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
+          })
+          modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+          modal.el.querySelector('[data-ok]').onclick = async () => {
+            const data = collectForm(modal.body)
+            try {
+              await api.patch(`/api/iam/orgs/${node.id}`, { parentId: data.parentId || null })
+              toast('已调整上级组织'); modal.close(); location.hash = '#/iam'; ctx.rerender()
+            } catch (error) { toast(error.message, 'error') }
           }
         }
         menu.querySelector('[data-act="delete"]').onclick = async () => {

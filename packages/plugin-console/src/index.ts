@@ -838,7 +838,7 @@ export function apply(ctx: Context) {
 
   guarded('PATCH', '/api/iam/orgs/:id', 'iam.org.write', (exchange) => {
     const input = body<{ name?: string; parentId?: string | null }>(exchange)
-    if (input.name) {
+    if (input.name !== undefined) {
       const org = ctx.iam.renameOrg(exchange.params['id']!, input.name)
       changeLog(exchange, 'iam.org.rename', 'org', org.id, org.name)
     }

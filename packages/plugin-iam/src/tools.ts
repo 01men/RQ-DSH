@@ -42,6 +42,25 @@ export function apply(ctx: Context) {
   }))
 
   t.register(defineTool({
+    name: 'iam_org_update',
+    description: '修改组织：重命名和/或调整上级组织（需 iam.org.write 权限）。name 与 parentId 至少提供一个；parentId 传空字符串表示提升为顶级组织。',
+    permission: 'iam.org.write',
+    parameters: {
+      orgId: { type: 'string', required: true, description: '组织 ID' },
+      name: { type: 'string', description: '新组织名称' },
+      parentId: { type: 'string', description: '新父组织 ID（传空字符串表示提升为顶级组织）' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      if (args.name === undefined && args.parentId === undefined) throw new Error('name 与 parentId 至少提供一个')
+      if (args.name !== undefined) ctx.iam.renameOrg(args.orgId, args.name)
+      if (args.parentId !== undefined) ctx.iam.moveOrg(args.orgId, args.parentId || null)
+      const org = ctx.iam.orgs().get(args.orgId)
+      return { id: org.id, name: org.name, parentId: org.parentId }
+    },
+  }))
+
+  t.register(defineTool({
     name: 'iam_user_list',
     description: '查询账号列表，可按组织/状态/关键字过滤。',
     parameters: {

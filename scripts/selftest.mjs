@@ -332,6 +332,22 @@ try {
   const tree = await api('GET', '/api/iam/orgs/tree', { token: admin })
   check('组织树包含新组织', tree.ok && JSON.stringify(tree.data).includes('自测事业部'))
 
+  // 组织改名 / 层级调整（PATCH /api/iam/orgs/:id）
+  const siblingOrg = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '自测兄弟部门' } })
+  check('创建同级组织（改名冲突靶子）', siblingOrg.ok)
+  const renameOrg = await api('PATCH', `/api/iam/orgs/${newOrg.data.id}`, { token: admin, body: { name: '自测事业部（更名）' } })
+  check('组织重命名', renameOrg.ok && renameOrg.data.name === '自测事业部（更名）')
+  const renameEmpty = await api('PATCH', `/api/iam/orgs/${newOrg.data.id}`, { token: admin, body: { name: '   ' } })
+  check('空白名称重命名被拒', !renameEmpty.ok)
+  const renameDup = await api('PATCH', `/api/iam/orgs/${newOrg.data.id}`, { token: admin, body: { name: '自测兄弟部门' } })
+  check('同级重名重命名被拒', !renameDup.ok)
+  const moveOrg = await api('PATCH', `/api/iam/orgs/${newOrg.data.id}`, { token: admin, body: { parentId: siblingOrg.data.id } })
+  check('调整上级组织', moveOrg.ok && moveOrg.data.parentId === siblingOrg.data.id)
+  const moveSelf = await api('PATCH', `/api/iam/orgs/${newOrg.data.id}`, { token: admin, body: { parentId: newOrg.data.id } })
+  check('移动到自身被拒（环检测）', !moveSelf.ok)
+  const moveChild = await api('PATCH', `/api/iam/orgs/${siblingOrg.data.id}`, { token: admin, body: { parentId: newOrg.data.id } })
+  check('移动到子孙被拒（环检测）', !moveChild.ok)
+
   const groupCreate = await api('POST', '/api/iam/groups', { token: admin, body: { name: '自测静态组', type: 'static', memberIds: [newUser.data.id] } })
   check('创建静态用户组', groupCreate.ok)
 

@@ -619,8 +619,14 @@ export class IamService extends Service {
   }
 
   renameOrg(id: string, name: string): OrgRecord {
-    this.requireOrg(id)
-    return this.orgs().update(id, { name })
+    const org = this.requireOrg(id)
+    if (!name?.trim()) throw new Error('组织名称不能为空')
+    const trimmed = name.trim()
+    const duplicate = this.orgs().findOne((item) => item.id !== id && item.name === trimmed && item.parentId === org.parentId)
+    if (duplicate) throw new Error(`同级下已存在同名组织「${trimmed}」`)
+    const updated = this.orgs().update(id, { name: trimmed })
+    this.ctx.platformBus.emit(PlatformEvents.OrgChanged, { kind: 'rename', orgId: id, name: trimmed })
+    return updated
   }
 
   /** 移动组织（拖拽调岗），含环检测。 */

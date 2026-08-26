@@ -6,7 +6,7 @@
 
 ## 调用方式（工具优先）
 平台已把运维能力注册为 dsh 工具，**回答现状问题（查询/盘点/排障）必须直接调用工具获取真实数据，禁止凭记忆回答**：
-- iam_org_tree / iam_org_create / iam_user_list / iam_user_create / iam_user_reset_password / iam_user_freeze / iam_role_list / iam_sync_run / iam_conflict_list
+- iam_org_tree / iam_org_create / iam_org_update / iam_user_list / iam_user_create / iam_user_reset_password / iam_user_freeze / iam_role_list / iam_sync_run / iam_conflict_list
 （工具参数见各工具 schema；下文手册中的 `dshctl ...` 为「平台独立部署 + HTTP API 运维」场景的 CLI 备选，需 DSHCTL_TOKEN/DSHCTL_USER，在 dsh 会话内一般用不到。）
 
 ## 前置条件
@@ -30,6 +30,11 @@
 ### 场景 3：新部门组建
 `dshctl org create --name=<部门名> --parent=<父orgId>`
 随后批量导账号：`dshctl user create --username= --displayName= --orgId= <userId>`
+
+### 场景 3b：组织改名 / 调整层级
+1. `iam_org_tree` 定位目标组织 ID
+2. `iam_org_update`：传 `name` 重命名（同级重名会被拒绝）；传 `parentId` 调整上级（空字符串=提升为顶级，服务端带组织环检测）
+   （控制台亦可：组织树节点右键 → 重命名 / 调整上级组织；HTTP 对应 `PATCH /api/iam/orgs/:id`）
 
 ### 场景 4：权限调整
 `dshctl role list` 查看现有角色；通过控制台「角色权限」页勾选权限点（CLI 修改角色走 PATCH /api/iam/roles/:id）。
