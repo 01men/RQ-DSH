@@ -44,6 +44,8 @@ export interface ThirdPartyBinding {
   unionId: string
   displayName: string
   boundAt: string
+  /** 主体企业 corpId（多主体隔离维度；缺省/空串视为同一旧主体）。 */
+  corpId?: string
 }
 
 export interface UserRecord extends RecordBase {
@@ -88,6 +90,8 @@ export interface UserGroupRecord extends RecordBase {
 export interface ConnectorConfigRecord extends RecordBase {
   id: string
   provider: 'dingtalk' | 'feishu' | 'wecom'
+  /** 主体名称（多主体展示维度；缺省 `${provider}-${corpId}`）。 */
+  name: string
   enabled: boolean
   corpId: string
   appKey: string
@@ -104,14 +108,16 @@ export interface ConnectorConfigRecord extends RecordBase {
   apiBase?: string
   /** 通讯录 topapi 基址覆盖（默认 https://oapi.dingtalk.com）。 */
   oapiBase?: string
+  /** 同步树挂载的目标组织 ID（空=平台根；多主体各自挂到自己的根组织）。 */
+  targetOrgId?: string
   lastSyncAt?: string
   lastSyncResult?: { ok: boolean; created: number; updated: number; conflicts: number; frozen: number; message: string }
 }
 
 /**
  * 三方身份链接（融合 auth-identity 的 user_identity_links 设计）。
- * 活跃链接在 (provider, providerUserId) 上引擎级唯一——「一人一号」由唯一约束兜底，
- * 禁止以「先查后插」替代约束（红线）。解绑即物理删除记录（等价 WHERE unlinked_at IS NULL 的部分唯一索引）。
+ * 活跃链接在 (provider, corpId, providerUserId) 上引擎级唯一——「一人一号」按主体隔离，
+ * 由唯一约束兜底，禁止以「先查后插」替代约束（红线）。解绑即物理删除记录（等价 WHERE unlinked_at IS NULL 的部分唯一索引）。
  */
 export interface IdentityLinkRecord extends RecordBase {
   provider: 'dingtalk' | 'feishu' | 'wecom'
@@ -425,6 +431,7 @@ export class IamService extends Service {
    */
   private static readonly BUILTIN_CONNECTOR_PROVIDERS: ReadonlySet<string> = new Set(['dingtalk'])
 
+  /** 运行时注册表：key 为配置实例 ID（DEMO_SEED 内置 mock 用 'demo:dingtalk'），provider 仅表示平台类型。 */
   private connectors = new Map<string, OrgConnector>()
   private authProviders = new Map<string, IdentityProviderAdapter>()
 
@@ -433,44 +440,71 @@ export class IamService extends Service {
     // 默认不注册任何三方身份源：生产基线三方登录入口自动隐藏（未配置连接器时 sso 不可用）。
     // mock 钉钉 IdP 仅在显式 DEMO_SEED=1 演示环境下注册，避免生产基线暴露演示身份/匿名注册入口。
     if (process.env.DEMO_SEED === '1') {
-      this.registerConnector(new DingTalkConnector())
-      this.registerAuthProvider(new DingTalkAuthAdapter())
+      this.registerConnector('demo:dingtalk', new DingTalkConnector())
+      this.registerAuthProvider('demo:dingtalk', new DingTalkAuthAdapter())
     }
     this.ensureDefaultTenant()
     // 连接器/身份源注册表仅存内存：重启后须按持久化配置重建，否则 real 模式的
-    // Real*Adapter 不会恢复（扫码登录/同步将报「未注册」）。
+    // Real*Adapter 不会恢复（扫码登录/同步将报「未注册」）。多主体：按配置实例 id 逐条恢复。
     for (const config of this.connectorConfigs().all()) {
-      this.applyConnectorMode(config.provider)
+      this.applyConnectorMode(config.id)
     }
   }
 
-  registerConnector(connector: OrgConnector): () => void {
-    this.connectors.set(connector.provider, connector)
-    return () => this.connectors.delete(connector.provider)
+  /** 注册连接器实例：key 为配置实例 id（多主体各自独立注册/注销）。 */
+  registerConnector(key: string, connector: OrgConnector): () => void {
+    this.connectors.set(key, connector)
+    return () => this.connectors.delete(key)
   }
 
-  /** 注册身份源 Adapter：登录主流程面向接口编程，新增平台零侵入。 */
-  registerAuthProvider(adapter: IdentityProviderAdapter): () => void {
-    this.authProviders.set(adapter.type, adapter)
-    return () => this.authProviders.delete(adapter.type)
+  /** 注册身份源 Adapter 实例：登录主流程面向接口编程，新增平台零侵入。 */
+  registerAuthProvider(key: string, adapter: IdentityProviderAdapter): () => void {
+    this.authProviders.set(key, adapter)
+    return () => this.authProviders.delete(key)
   }
 
+  /**
+   * 按平台类型取身份源（旧调用兼容；多主体请用 getAuthProviderByConfig）。
+   * 优先配置实例注册的身份源（按配置创建顺序取第一）；`demo:` 前缀的 DEMO_SEED 引导注册
+   * 仅作「尚无配置」窗口的兜底——否则演示实例长期占据首位，会遮蔽配置切换后的真实/新 mock 实例。
+   */
   getAuthProvider(type: string): IdentityProviderAdapter {
-    const adapter = this.authProviders.get(type)
-    if (!adapter) throw new Error(`未注册的身份源：${type}`)
+    let demoFallback: IdentityProviderAdapter | undefined
+    for (const [key, adapter] of this.authProviders) {
+      if (adapter.type !== type) continue
+      if (key.startsWith('demo:')) {
+        demoFallback ??= adapter
+        continue
+      }
+      return adapter
+    }
+    if (demoFallback) return demoFallback
+    throw new Error(`未注册的身份源：${type}`)
+  }
+
+  /** 按配置实例 id 取身份源（多主体登录/绑定按主体发起）。 */
+  getAuthProviderByConfig(configId: string): IdentityProviderAdapter {
+    const adapter = this.authProviders.get(configId)
+    if (!adapter) throw new Error(`未注册的身份源：${configId}`)
     return adapter
   }
 
-  /** 三方身份链接集合（活跃唯一约束：同一三方身份只能映射一个平台账号）。 */
+  /** 三方身份链接集合（活跃唯一约束：同一主体下的同一三方身份只能映射一个平台账号）。 */
   identityLinks(): Collection<IdentityLinkRecord> {
     const collection = this.ctx.opsStorage.collection<IdentityLinkRecord>('iam:identityLinks')
-    collection.uniqueOn('identity_link_active', (record) => `${record.provider}|${record.providerUserId}`)
+    collection.uniqueOn('identity_link_active', (record) => `${record.provider}|${record.corpId}|${record.providerUserId}`)
     return collection
   }
 
-  /** 命中查找：按归一化档案定位已绑定的平台账号。 */
-  findLinkByProfile(provider: string, providerUserId: string): IdentityLinkRecord | undefined {
-    return this.identityLinks().findOne((link) => link.provider === provider && link.providerUserId === providerUserId)
+  /**
+   * 命中查找：按归一化档案定位已绑定的平台账号。
+   * 传 corpId 时精确命中优先；无精确命中回落任意 corp 的同三方身份——钉钉 unionId 跨企业同人，
+   * 且兼容单主体部署在 mock/real 间切换（corpId 变化）后的身份连续性。多主体下同身份多链接时精确匹配生效。
+   */
+  findLinkByProfile(provider: string, providerUserId: string, corpId?: string): IdentityLinkRecord | undefined {
+    const links = this.identityLinks().find((link) => link.provider === provider && link.providerUserId === providerUserId)
+    if (corpId === undefined) return links[0]
+    return links.find((link) => link.corpId === corpId) ?? links[0]
   }
 
   /** 建立身份链接（唯一约束兜底；user.bindings 保持为投影，便于列表展示）。 */
@@ -487,10 +521,16 @@ export class IamService extends Service {
       linkedAt: new Date().toISOString(),
       linkedBy: actor,
     })
-    // 投影同步（bindings 仅作展示，事实源是 identityLinks）
-    if (!user.bindings.some((item) => item.provider === profile.provider)) {
+    // 投影同步（bindings 仅作展示，事实源是 identityLinks；多主体按 provider+corpId 判重）
+    if (!user.bindings.some((item) => item.provider === profile.provider && (item.corpId ?? '') === profile.corpId)) {
       this.users().update(userId, {
-        bindings: [...user.bindings, { provider: profile.provider, unionId: profile.providerUserId, displayName: profile.displayName, boundAt: link.linkedAt }],
+        bindings: [...user.bindings, {
+          provider: profile.provider,
+          unionId: profile.providerUserId,
+          displayName: profile.displayName,
+          boundAt: link.linkedAt,
+          ...(profile.corpId ? { corpId: profile.corpId } : {}),
+        }],
       })
     }
     return link
@@ -508,15 +548,21 @@ export class IamService extends Service {
     return true
   }
 
-  connectorProviders(): Array<{ provider: string; label: string }> {
-    return [...this.connectors.values()].map(({ provider, label }) => ({ provider, label }))
+  /** 已注册连接器实例清单（多主体：携带 configId/主体名，provider 仅表示平台类型）。 */
+  connectorProviders(): Array<{ configId: string; provider: string; label: string; name?: string }> {
+    return [...this.connectors.entries()].map(([configId, connector]) => {
+      const name = this.connectorConfigById(configId)?.name
+      return { configId, provider: connector.provider, label: connector.label, ...(name !== undefined ? { name } : {}) }
+    })
   }
 
   // -- 集合 ---------------------------------------------------------------
 
   orgs(): Collection<OrgRecord> {
     const collection = this.ctx.opsStorage.collection<OrgRecord>('iam:orgs')
-    collection.uniqueOn('org_same_level_name', (org) => `${org.parentId ?? '-'}|${org.name}`)
+    // 同级同名唯一按连接器分区：手工/历史组织（无 connectorId）维持旧口径，
+    // 不同主体同步下来的同名部门（两家企业很可能同名）各自落库不撞键。
+    collection.uniqueOn('org_same_level_name', (org) => `${String(org.customFields['connectorId'] ?? '')}|${org.parentId ?? '-'}|${org.name}`)
     return collection
   }
 
@@ -535,7 +581,10 @@ export class IamService extends Service {
   }
 
   connectorConfigs(): Collection<ConnectorConfigRecord> {
-    return this.ctx.opsStorage.collection<ConnectorConfigRecord>('iam:connectors')
+    const collection = this.ctx.opsStorage.collection<ConnectorConfigRecord>('iam:connectors')
+    // 多主体：同一 provider 可接入多家企业，但 provider|corpId 引擎级唯一（重复主体拒绝）
+    collection.uniqueOn('connector_provider_corp', (config) => `${config.provider}|${config.corpId}`)
+    return collection
   }
 
   conflicts(): Collection<SyncConflictRecord> {
@@ -603,7 +652,10 @@ export class IamService extends Service {
     if (!input.name?.trim()) throw new Error('组织名称不能为空')
     const parentId = input.parentId ?? null
     if (parentId && !this.orgs().get(parentId)) throw new Error(`父组织不存在：${parentId}`)
-    const duplicate = this.orgs().findOne((org) => org.name === input.name && org.parentId === parentId)
+    // 同级同名判重与引擎唯一键同口径：按连接器归属分区（无 connectorId 的手工组织一个分区）。
+    const ownerKey = input.customFields?.['connectorId'] ?? ''
+    const duplicate = this.orgs().findOne((org) => org.name === input.name && org.parentId === parentId
+      && (org.customFields['connectorId'] ?? '') === ownerKey)
     if (duplicate) throw new Error(`同级下已存在同名组织「${input.name}」`)
     const record = this.orgs().insert({
       id: newId('org'),
@@ -622,7 +674,9 @@ export class IamService extends Service {
     const org = this.requireOrg(id)
     if (!name?.trim()) throw new Error('组织名称不能为空')
     const trimmed = name.trim()
-    const duplicate = this.orgs().findOne((item) => item.id !== id && item.name === trimmed && item.parentId === org.parentId)
+    // 判重口径同 createOrg：只在同一连接器归属分区内拒绝同名。
+    const duplicate = this.orgs().findOne((item) => item.id !== id && item.name === trimmed && item.parentId === org.parentId
+      && (item.customFields['connectorId'] ?? '') === (org.customFields['connectorId'] ?? ''))
     if (duplicate) throw new Error(`同级下已存在同名组织「${trimmed}」`)
     const updated = this.orgs().update(id, { name: trimmed })
     this.ctx.platformBus.emit(PlatformEvents.OrgChanged, { kind: 'rename', orgId: id, name: trimmed })
@@ -783,14 +837,17 @@ export class IamService extends Service {
     if (binding.verifyCode !== '000000' && binding.verifyCode !== undefined && binding.verifyCode.length !== 6) {
       throw new Error('二次验证码格式不正确')
     }
-    if (user.bindings.some((item) => item.provider === binding.provider)) {
+    // corpId 缺省取该 provider 已配置主体的 corpId（控制台手工绑定即针对已接入主体），
+    // 保证「一人一号」唯一约束（provider|corpId|providerUserId）对存量链接生效。
+    const corpId = binding.corpId ?? this.connectorConfig(binding.provider)?.corpId ?? ''
+    if (user.bindings.some((item) => item.provider === binding.provider && (item.corpId ?? '') === corpId)) {
       throw new Error(`该账号已绑定${binding.provider}身份，请先解绑`)
     }
-    // 唯一约束冲突由存储引擎兜底（同一 provider|unionId 只能映射一个账号）
+    // 唯一约束冲突由存储引擎兜底（同一主体下同一三方身份只能映射一个账号）
     this.linkIdentity(id, {
       provider: binding.provider,
       providerUserId: binding.unionId,
-      corpId: binding.corpId ?? '',
+      corpId,
       displayName: binding.displayName,
     }, 'console')
     return this.users().get(id)!
@@ -958,12 +1015,31 @@ export class IamService extends Service {
 
   // -- 三方接入 -----------------------------------------------------------
 
+  /** 按平台类型取第一条配置（旧调用兼容；多主体请用 connectorConfigById/resolveConnectorConfig）。 */
   connectorConfig(provider: string): ConnectorConfigRecord | undefined {
     return this.connectorConfigs().findOne((config) => config.provider === provider)
   }
 
+  /** 按配置实例 id 寻址（多主体：配置实例以 ConnectorConfigRecord.id 寻址，provider 仅表示平台类型）。 */
+  connectorConfigById(id: string): ConnectorConfigRecord | undefined {
+    return this.connectorConfigs().get(id)
+  }
+
+  /** 解析配置实例：先按 id 找，找不到按 provider 取第一条（enabled 优先）——REST 旧参数兼容入口。 */
+  resolveConnectorConfig(idOrProvider: string): ConnectorConfigRecord | undefined {
+    const byId = this.connectorConfigById(idOrProvider)
+    if (byId) return byId
+    const candidates = this.connectorConfigs().find((config) => config.provider === idOrProvider)
+    return candidates.find((config) => config.enabled) ?? candidates[0]
+  }
+
+  /** 更新/创建接入配置：带 id 按 id 更新；不带 id 维持旧行为（按 provider 第一条更新，无则建）。 */
   upsertConnectorConfig(input: {
+    /** 配置实例 id（多主体按 id 更新；缺省=旧的按 provider 第一条语义）。 */
+    id?: string
     provider: 'dingtalk' | 'feishu' | 'wecom'
+    /** 主体名称（缺省 `${provider}-${corpId}`）。 */
+    name?: string
     corpId: string
     appKey: string
     appSecret?: string
@@ -979,14 +1055,23 @@ export class IamService extends Service {
     apiBase?: string
     /** 通讯录 topapi 基址覆盖（默认 https://oapi.dingtalk.com）。 */
     oapiBase?: string
+    /** 同步树挂载的目标组织 ID（空=平台根）。 */
+    targetOrgId?: string
   }): ConnectorConfigRecord {
     if (!IamService.BUILTIN_CONNECTOR_PROVIDERS.has(input.provider)) throw new Error(`未注册的连接器：${input.provider}`)
-    const existing = this.connectorConfig(input.provider)
+    let existing: ConnectorConfigRecord | undefined
+    if (input.id !== undefined) {
+      existing = this.connectorConfigById(input.id)
+      if (!existing) throw new Error(`接入配置不存在：${input.id}`)
+    } else {
+      existing = this.connectorConfig(input.provider)
+    }
     const secret = input.appSecret ?? existing?.secretActual ?? 'demo-secret'
     // 非演示密钥的全新配置默认 real（表单不采集 mode，靠密钥形态推导；demo- 前缀=演示降级）。
     const mode = input.mode ?? (secret.startsWith('demo-') ? 'mock' : existing?.mode ?? 'real')
     const payload = {
       provider: input.provider,
+      name: input.name ?? existing?.name ?? `${input.provider}-${input.corpId}`,
       enabled: input.enabled ?? existing?.enabled ?? true,
       corpId: input.corpId,
       appKey: input.appKey,
@@ -1000,19 +1085,78 @@ export class IamService extends Service {
       mode,
       ...(input.apiBase !== undefined ? { apiBase: input.apiBase } : existing?.apiBase !== undefined ? { apiBase: existing.apiBase } : {}),
       ...(input.oapiBase !== undefined ? { oapiBase: input.oapiBase } : existing?.oapiBase !== undefined ? { oapiBase: existing.oapiBase } : {}),
+      ...(input.targetOrgId !== undefined ? { targetOrgId: input.targetOrgId } : existing?.targetOrgId !== undefined ? { targetOrgId: existing.targetOrgId } : {}),
     }
     const saved = existing
       ? this.connectorConfigs().update(existing.id, payload)
       : this.connectorConfigs().insert({ id: newId('conn'), ...payload })
-    this.applyConnectorMode(input.provider)
+    this.applyConnectorMode(saved.id)
     return saved
   }
 
-  /** 按配置切换连接器/身份源 Adapter 的 real/mock 实现（第 0 步：连接器真实化）。 */
-  applyConnectorMode(provider: 'dingtalk' | 'feishu' | 'wecom'): void {
-    const config = this.connectorConfig(provider)
+  /** 新建接入配置实例（多主体：同一 provider 可接入多家企业，provider|corpId 由引擎级唯一约束拒绝重复主体）。 */
+  createConnectorConfig(input: {
+    provider: 'dingtalk' | 'feishu' | 'wecom'
+    /** 主体名称（缺省 `${provider}-${corpId}`）。 */
+    name?: string
+    corpId: string
+    appKey: string
+    appSecret?: string
+    enabled?: boolean
+    syncOrgRoot?: string
+    intervalMinutes?: number
+    callbackUrl?: string
+    loginEnabled?: boolean
+    conflictStrategy?: ConnectorConfigRecord['conflictStrategy']
+    /** real=真实 OpenAPI（需真实企业凭证）；mock=演示降级。 */
+    mode?: 'real' | 'mock'
+    /** OpenAPI 基址覆盖（测试/专有部署）。 */
+    apiBase?: string
+    /** 通讯录 topapi 基址覆盖（默认 https://oapi.dingtalk.com）。 */
+    oapiBase?: string
+    /** 同步树挂载的目标组织 ID（空=平台根）。 */
+    targetOrgId?: string
+  }): ConnectorConfigRecord {
+    if (!IamService.BUILTIN_CONNECTOR_PROVIDERS.has(input.provider)) throw new Error(`未注册的连接器：${input.provider}`)
+    const secret = input.appSecret ?? 'demo-secret'
+    // 与 upsert 同一推导：demo- 前缀密钥=演示降级（mock），其余全新配置默认 real。
+    const mode = input.mode ?? (secret.startsWith('demo-') ? 'mock' : 'real')
+    const saved = this.connectorConfigs().insert({
+      id: newId('conn'),
+      provider: input.provider,
+      name: input.name ?? `${input.provider}-${input.corpId}`,
+      enabled: input.enabled ?? true,
+      corpId: input.corpId,
+      appKey: input.appKey,
+      secretMasked: mask(secret, 4),
+      secretActual: secret,
+      syncOrgRoot: input.syncOrgRoot ?? '',
+      intervalMinutes: input.intervalMinutes ?? 60,
+      callbackUrl: input.callbackUrl ?? '',
+      loginEnabled: input.loginEnabled ?? false,
+      conflictStrategy: input.conflictStrategy ?? 'manual',
+      mode,
+      ...(input.apiBase !== undefined ? { apiBase: input.apiBase } : {}),
+      ...(input.oapiBase !== undefined ? { oapiBase: input.oapiBase } : {}),
+      ...(input.targetOrgId !== undefined ? { targetOrgId: input.targetOrgId } : {}),
+    })
+    this.applyConnectorMode(saved.id)
+    return saved
+  }
+
+  /** 删除接入配置实例：同时注销运行时连接器/身份源注册项（不存在则抛错）。 */
+  deleteConnectorConfig(id: string): void {
+    if (!this.connectorConfigById(id)) throw new Error(`接入配置不存在：${id}`)
+    this.connectorConfigs().remove(id)
+    this.connectors.delete(id)
+    this.authProviders.delete(id)
+  }
+
+  /** 按单条配置实例实例化连接器/身份源 Adapter 的 real/mock 实现（第 0 步：连接器真实化；多主体按 configId 注册）。 */
+  applyConnectorMode(configId: string): void {
+    const config = this.connectorConfigById(configId)
     if (!config) return
-    if (provider === 'dingtalk') {
+    if (config.provider === 'dingtalk') {
       if (config.mode === 'real' && config.secretActual) {
         const credentials: DingTalkCredentials = {
           corpId: config.corpId,
@@ -1021,35 +1165,36 @@ export class IamService extends Service {
           ...(config.apiBase !== undefined ? { apiBase: config.apiBase } : {}),
           ...(config.oapiBase !== undefined ? { oapiBase: config.oapiBase } : {}),
         }
-        this.registerConnector(new RealDingTalkConnector(credentials, { syncOrgRoot: config.syncOrgRoot }))
-        this.registerAuthProvider(new RealDingTalkAuthAdapter(credentials))
+        this.registerConnector(config.id, new RealDingTalkConnector(credentials, { syncOrgRoot: config.syncOrgRoot }))
+        this.registerAuthProvider(config.id, new RealDingTalkAuthAdapter(credentials))
       } else if (config.mode === 'mock') {
         // 显式声明 mock（演示/联调）：仅 DEMO_SEED 环境允许注册 mock 身份源，
         // 生产基线禁止将 mock 作为可登录身份源暴露。
         if (process.env.DEMO_SEED === '1') {
-          this.registerConnector(new DingTalkConnector())
-          this.registerAuthProvider(new DingTalkAuthAdapter())
+          this.registerConnector(config.id, new DingTalkConnector())
+          this.registerAuthProvider(config.id, new DingTalkAuthAdapter())
         } else {
-          this.registerConnector(new DingTalkConnector())
+          this.registerConnector(config.id, new DingTalkConnector())
         }
       }
     }
   }
 
-  async testConnector(provider: string): Promise<{ ok: boolean; latencyMs: number; message: string }> {
-    const connector = this.connectors.get(provider)
-    if (!connector) throw new Error(`未注册的连接器：${provider}`)
+  async testConnector(idOrProvider: string): Promise<{ ok: boolean; latencyMs: number; message: string }> {
+    const config = this.resolveConnectorConfig(idOrProvider)
+    const connector = config ? this.connectors.get(config.id) : undefined
+    if (!connector) throw new Error(`未注册的连接器：${idOrProvider}`)
     return connector.healthCheck()
   }
 
   /** 全量同步：目录映射 + 冲突入队 + 离职联动。失败同样落 lastSyncResult（ok:false），避免「点了没反应」。 */
-  async syncConnector(provider: string, actor: string): Promise<{ created: number; updated: number; conflicts: number; frozen: number; message: string }> {
-    const config = this.connectorConfig(provider)
-    if (!config || !config.enabled) throw new Error(`连接器未启用：${provider}`)
-    const connector = this.connectors.get(provider)
-    if (!connector) throw new Error(`未注册的连接器：${provider}`)
+  async syncConnector(idOrProvider: string, actor: string): Promise<{ created: number; updated: number; conflicts: number; frozen: number; message: string }> {
+    const config = this.resolveConnectorConfig(idOrProvider)
+    if (!config || !config.enabled) throw new Error(`连接器未启用：${idOrProvider}`)
+    const connector = this.connectors.get(config.id)
+    if (!connector) throw new Error(`未注册的连接器：${idOrProvider}`)
     try {
-      return await this.runSync(provider, actor, config, connector)
+      return await this.runSync(config.provider, actor, config, connector)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       const result = { ok: false, created: 0, updated: 0, conflicts: 0, frozen: 0, message: `同步失败：${message}` }
@@ -1058,21 +1203,30 @@ export class IamService extends Service {
     }
   }
 
-  private async runSync(provider: string, actor: string, config: ConnectorConfigRecord, connector: OrgConnector): Promise<{ created: number; updated: number; conflicts: number; frozen: number; message: string }> {
+  private async runSync(provider: ConnectorConfigRecord['provider'], actor: string, config: ConnectorConfigRecord, connector: OrgConnector): Promise<{ created: number; updated: number; conflicts: number; frozen: number; message: string }> {
     const directory = await connector.fetchDirectory()
 
     const remoteOrgToId = new Map<string, string>()
     let created = 0
     let updated = 0
     for (const remoteOrg of directory.orgs) {
-      const parent = remoteOrg.parentRemoteId ? remoteOrgToId.get(remoteOrg.parentRemoteId) : null
+      // 多主体：同步树根挂到 config.targetOrgId（空=平台根）
+      const parent = remoteOrg.parentRemoteId ? remoteOrgToId.get(remoteOrg.parentRemoteId) : (config.targetOrgId ?? null)
       if (parent === undefined && remoteOrg.parentRemoteId) continue
-      const local = this.orgs().findOne((org) => org.customFields['remoteId'] === remoteOrg.remoteId)
-        ?? this.orgs().findOne((org) => org.name === remoteOrg.name && org.parentId === parent)
+      // 部门归属双键 customFields { remoteId, connectorId }：旧数据只有 remoteId 的视为不属于任何连接器，不会被误匹配
+      const local = this.orgs().findOne((org) => org.customFields['remoteId'] === remoteOrg.remoteId && org.customFields['connectorId'] === config.id)
+        // 名称兜底只认领「无归属（手工/历史）或本连接器」的组织——其他主体名下的同名部门不能合并
+        ?? this.orgs().findOne((org) => org.name === remoteOrg.name && org.parentId === parent
+          && (org.customFields['connectorId'] === undefined || org.customFields['connectorId'] === config.id))
       if (local) {
+        // 认领即盖章：名称兜底命中的无归属组织补写 remoteId/connectorId，
+        // 之后其他主体的名称兜底不再能命中它（否则第二主体会合并进第一主体的树）。
+        if (local.customFields['connectorId'] !== config.id || local.customFields['remoteId'] !== remoteOrg.remoteId) {
+          this.orgs().update(local.id, { customFields: { ...local.customFields, remoteId: remoteOrg.remoteId, connectorId: config.id } })
+        }
         remoteOrgToId.set(remoteOrg.remoteId, local.id)
       } else {
-        const record = this.createOrg({ name: remoteOrg.name, parentId: parent, customFields: { remoteId: remoteOrg.remoteId } })
+        const record = this.createOrg({ name: remoteOrg.name, parentId: parent, customFields: { remoteId: remoteOrg.remoteId, connectorId: config.id } })
         remoteOrgToId.set(remoteOrg.remoteId, record.id)
         created++
       }
@@ -1083,7 +1237,8 @@ export class IamService extends Service {
     for (const remoteUser of directory.users) {
       const orgId = remoteOrgToId.get(remoteUser.orgRemoteId)
       if (!orgId) continue
-      const local = this.users().findOne((user) => user.bindings.some((binding) => binding.provider === provider && binding.unionId === remoteUser.remoteId))
+      // 多主体：bindings 按 provider+corpId 匹配（binding.corpId 为空串/undefined 时只匹配同空）
+      const local = this.users().findOne((user) => user.bindings.some((binding) => binding.provider === provider && binding.unionId === remoteUser.remoteId && (binding.corpId ?? '') === config.corpId))
         ?? this.users().findOne((user) => user.jobNumber === remoteUser.jobNumber)
       if (!local) {
         const { user: record } = this.createUser({
@@ -1099,7 +1254,7 @@ export class IamService extends Service {
         created++
         continue
       }
-      if (!local.bindings.some((binding) => binding.provider === provider)) {
+      if (!local.bindings.some((binding) => binding.provider === provider && (binding.corpId ?? '') === config.corpId)) {
         try {
           this.linkIdentity(local.id, { provider, providerUserId: remoteUser.remoteId, corpId: config.corpId, displayName: remoteUser.name }, 'connector-sync')
         } catch {

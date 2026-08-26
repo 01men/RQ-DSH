@@ -445,12 +445,13 @@ export async function renderIam(content, params, ctx) {
       }
       drawer.el.querySelector('#ud-bind').onclick = async () => {
         // 钉钉 real 模式下优先扫码授权绑定（自动识别身份，不手工输入 unionId）；
-        // 手工录入降级为备用（mock/演示/其他平台）。
-        let dingtalkReal = false
+        // 手工录入降级为备用（mock/演示/其他平台）。多主体接入时需先选定目标主体。
+        let dingtalkConfigs = []
         try {
           const data = await api.get('/api/iam/connectors')
-          dingtalkReal = Boolean((data?.configs ?? []).find((c) => c.provider === 'dingtalk' && c.enabled && c.mode === 'real'))
+          dingtalkConfigs = (data?.configs ?? []).filter((c) => c.provider === 'dingtalk' && c.enabled && c.mode === 'real')
         } catch { /* 查询失败时仅提供手工录入 */ }
+        const dingtalkReal = dingtalkConfigs.length > 0
         const modal = openModal({
           title: '绑定三方身份',
           body: `
@@ -459,6 +460,7 @@ export async function renderIam(content, params, ctx) {
               <div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--brand-200);background:var(--brand-50)">
                 ${icon('info', 15)}<span>无需填写任何 ID：点击按钮跳转钉钉授权，本机已登录钉钉将自动识别身份，未登录则扫码确认，授权后自动完成绑定。</span>
               </div>
+              ${dingtalkConfigs.length > 1 ? field('选择主体', `<select class="select" id="bind-config-id">${dingtalkConfigs.map((c) => `<option value="${esc(c.id)}">${esc(c.name || c.corpId)}</option>`).join('')}</select>`) : ''}
               <button class="btn btn-primary btn-block" id="bind-oauth-go">${icon('link', 14)}钉钉扫码授权绑定</button>
             </div>
             <details id="bind-manual-wrap" ${dingtalkReal ? '' : 'open'} style="margin-top:${dingtalkReal ? '14px' : '0'}">
@@ -477,7 +479,8 @@ export async function renderIam(content, params, ctx) {
           btn.classList.add('btn-loading')
           try {
             if (providerValue() !== 'dingtalk') throw new Error('扫码授权绑定当前仅支持钉钉')
-            const auth = await api.post('/api/auth/sso/bind/authorize', { provider: 'dingtalk', targetUserId: user.id })
+            const configId = modal.body.querySelector('#bind-config-id')?.value
+            const auth = await api.post('/api/auth/sso/bind/authorize', { provider: 'dingtalk', targetUserId: user.id, ...(configId ? { configId } : {}) })
             if (!auth.authorizeUrl) throw new Error('身份源未返回授权地址（可能为 mock 模式），请改用手动绑定')
             // 必须整页跳转：弹窗/iframe 会被第三方 Cookie 策略拦截导致授权失败
             window.location.href = auth.authorizeUrl
@@ -712,68 +715,105 @@ export async function renderIam(content, params, ctx) {
 
   // ------------------------------------------------------------------
   async function renderConnectors(params2, ctx2) {
-    $('#iam-actions').innerHTML = ''
-    const [data] = await Promise.all([api.get('/api/iam/connectors')])
-    const body = $('#iam-body')
-    const config = data.configs.find((c) => c.provider === 'dingtalk')
+    const [data, orgs] = await Promise.all([api.get('/api/iam/connectors'), api.get('/api/iam/orgs')])
+    const configs = data.configs ?? []
+    // 目标组织展示/下拉共用：平铺组织列表按 parentId 还原层级后拍平成缩进序列
+    const orgOptions = flattenOrgList(orgs)
+    const orgNameOf = (id) => orgOptions.find((o) => o.id === id)?.name
     // 回调地址按当前访问地址自动生成（与后端发起授权时按 Host 头拼接的 redirect_uri 一致），
-    // 直接复制到钉钉开发者后台的登录重定向地址即可，无需手填。
+    // 直接复制到钉钉开发者后台的登录重定向地址即可，无需手填。全部主体共用同一回调地址。
     const callbackUrl = `${location.origin.replace(/\/+$/, '')}/api/auth/sso`
-    body.innerHTML = `
-      <div class="card mb-20">
-        <div class="card-head">
-          <span class="card-title">${icon('link', 15)} 钉钉通讯录同步</span>
-          ${config?.enabled ? '<span class="badge badge-ok">已启用</span>' : '<span class="badge badge-muted">未启用</span>'}
-          <div class="card-head-actions">
-            <button class="btn btn-default btn-sm" id="conn-test">${icon('wifi', 13)}连通性自检</button>
-            <button class="btn btn-primary btn-sm" id="conn-sync">${icon('refresh', 13)}立即同步</button>
-          </div>
-        </div>
-        <div class="card-body">
-          <div class="grid-3 mb-14">
-            ${syncStatCard('最近同步', config?.lastSyncAt ? timeAgo(config.lastSyncAt) : '从未同步', config?.lastSyncResult?.ok ? 'var(--ok)' : 'var(--text-3)')}
-            ${syncStatCard('同步结果', config?.lastSyncResult ? config.lastSyncResult.message : '—', 'var(--text-1)')}
-            ${syncStatCard('同步频率', config ? `每 ${config.intervalMinutes} 分钟` : '—', 'var(--text-1)')}
-          </div>
-          <div class="desc-grid">
-            <div class="desc-item"><span class="k">CorpID</span><span class="v mono">${esc(config?.corpId ?? '未配置')}</span></div>
-            <div class="desc-item"><span class="k">AppKey</span><span class="v mono">${esc(config?.appKey ?? '未配置')}</span></div>
-            <div class="desc-item"><span class="k">AppSecret</span><span class="v mono">${esc(config?.secretMasked ?? '—')} <span class="text-4">（KMS 加密存储）</span></span></div>
-            <div class="desc-item"><span class="k">扫码登录</span><span class="v">${config?.loginEnabled ? '已开启' : '未开启'}</span></div>
-            <div class="desc-item"><span class="k">回调地址</span><span class="v mono">${esc(callbackUrl)}</span></div>
-            <div class="desc-item"><span class="k">冲突策略</span><span class="v">${strategyName(config?.conflictStrategy)}</span></div>
-          </div>
-          <div class="flex mt-14">
-            <button class="btn btn-default btn-sm" id="conn-edit">${icon('settings', 13)}接入配置</button>
-          </div>
-        </div>
-      </div>`
+    $('#iam-actions').innerHTML = `<button class="btn btn-primary" id="conn-add">${icon('plus', 14)}新增接入</button>`
+    $('#conn-add').onclick = () => openConnectorEditor(null)
 
-    $('#conn-test').onclick = async (e) => {
-      const btn = e.currentTarget
-      btn.classList.add('btn-loading')
-      try {
-        const result = await api.post('/api/iam/connectors/dingtalk/test')
-        toast(`${result.message}（${result.latencyMs}ms）`)
-      } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
+    const body = $('#iam-body')
+    if (!configs.length) {
+      body.innerHTML = ''
+      body.appendChild(emptyState({ title: '还没有三方接入', desc: '接入钉钉等企业主体后，可按主体独立同步通讯录、开启扫码登录', actionText: '新增接入', onAction: () => $('#conn-add').click() }))
+    } else {
+      body.innerHTML = ''
+      for (const config of configs) body.appendChild(connectorCard(config))
     }
-    $('#conn-sync').onclick = async (e) => {
-      const btn = e.currentTarget
-      btn.classList.add('btn-loading')
-      try {
-        const result = await api.post('/api/iam/connectors/dingtalk/sync')
-        toast(result.message)
-        setTimeout(() => ctx2.rerender(), 600)
-      } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
+
+    /** 单个接入主体卡片：配置概览 + 自检/同步/编辑/删除，操作均按配置实例 id 寻址。 */
+    function connectorCard(config) {
+      const card = h(`
+        <div class="card mb-20">
+          <div class="card-head">
+            <span class="card-title">${icon('link', 15)} ${esc(config.name || providerName(config.provider))}</span>
+            <span class="badge ${config.mode === 'real' ? 'badge-brand' : 'badge-muted'} no-dot">${config.mode === 'real' ? 'real' : 'mock'}</span>
+            ${config.enabled ? '<span class="badge badge-ok">已启用</span>' : '<span class="badge badge-muted">未启用</span>'}
+            <div class="card-head-actions">
+              <button class="btn btn-default btn-sm" data-test>${icon('wifi', 13)}连通性自检</button>
+              <button class="btn btn-primary btn-sm" data-sync>${icon('refresh', 13)}立即同步</button>
+            </div>
+          </div>
+          <div class="card-body">
+            <div class="grid-3 mb-14">
+              ${syncStatCard('最近同步', config.lastSyncAt ? timeAgo(config.lastSyncAt) : '从未同步', config.lastSyncResult?.ok ? 'var(--ok)' : 'var(--text-3)')}
+              ${syncStatCard('同步结果', config.lastSyncResult ? config.lastSyncResult.message : '—', 'var(--text-1)')}
+              ${syncStatCard('同步频率', `每 ${config.intervalMinutes ?? 60} 分钟`, 'var(--text-1)')}
+            </div>
+            <div class="desc-grid">
+              <div class="desc-item"><span class="k">平台</span><span class="v">${esc(providerName(config.provider))}</span></div>
+              <div class="desc-item"><span class="k">CorpID</span><span class="v mono">${esc(config.corpId ?? '未配置')}</span></div>
+              <div class="desc-item"><span class="k">AppKey</span><span class="v mono">${esc(config.appKey ?? '未配置')}</span></div>
+              <div class="desc-item"><span class="k">AppSecret</span><span class="v mono">${esc(config.secretMasked ?? '—')} <span class="text-4">（KMS 加密存储）</span></span></div>
+              <div class="desc-item"><span class="k">目标组织</span><span class="v">${esc(config.targetOrgId ? (orgNameOf(config.targetOrgId) ?? config.targetOrgId) : '平台根')}</span></div>
+              <div class="desc-item"><span class="k">扫码登录</span><span class="v">${config.loginEnabled ? '已开启' : '未开启'}</span></div>
+              <div class="desc-item"><span class="k">回调地址</span><span class="v mono">${esc(callbackUrl)}</span></div>
+              <div class="desc-item"><span class="k">冲突策略</span><span class="v">${esc(strategyName(config.conflictStrategy))}</span></div>
+            </div>
+            <div class="flex mt-14">
+              <button class="btn btn-default btn-sm" data-edit>${icon('settings', 13)}接入配置</button>
+              <button class="btn btn-ghost btn-sm" style="color:var(--danger)" data-del>${icon('trash', 13)}删除</button>
+            </div>
+          </div>
+        </div>`)
+      card.querySelector('[data-test]').onclick = async (e) => {
+        const btn = e.currentTarget
+        btn.classList.add('btn-loading')
+        try {
+          const result = await api.post(`/api/iam/connectors/${config.id}/test`)
+          toast(`${result.message}（${result.latencyMs}ms）`)
+        } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
+      }
+      card.querySelector('[data-sync]').onclick = async (e) => {
+        const btn = e.currentTarget
+        btn.classList.add('btn-loading')
+        try {
+          const result = await api.post(`/api/iam/connectors/${config.id}/sync`)
+          toast(result.message)
+          setTimeout(() => ctx2.rerender(), 600)
+        } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
+      }
+      card.querySelector('[data-edit]').onclick = () => openConnectorEditor(config)
+      card.querySelector('[data-del]').onclick = async () => {
+        const result = await confirmDialog({
+          title: '删除接入', danger: true,
+          message: `确定删除主体「${esc(config.name || config.corpId)}」的接入配置？将同时注销其运行时连接器与登录身份源（已同步的组织与账号保留）。`,
+        })
+        if (!result) return
+        try {
+          await api.delete(`/api/iam/connectors/${config.id}`)
+          toast('接入已删除'); ctx2.rerender()
+        } catch (error) { toast(error.message, 'error') }
+      }
+      return card
     }
-    $('#conn-edit').onclick = () => {
+
+    /** 接入配置弹窗：config 为空为新增接入（AppSecret 必填），传入 config 为编辑（AppSecret 留空保持不变）。 */
+    function openConnectorEditor(config) {
+      const isEdit = !!config
       const modal = openModal({
-        title: '钉钉接入配置', wide: true,
+        title: isEdit ? `接入配置（${esc(config.name || providerName(config.provider))}）` : '新增接入', wide: true,
         body: `
           <div class="form-grid">
+            ${field('三方平台', '<code class="mono" style="line-height:32px">钉钉（dingtalk）</code>', { hint: '当前仅支持钉钉，更多平台陆续接入' })}
+            ${field('主体名称', inputField('name', { value: config?.name, placeholder: '如：集团总部 / 华南子公司' }), { required: true })}
             ${field('CorpID', inputField('corpId', { value: config?.corpId }), { required: true })}
             ${field('AppKey', inputField('appKey', { value: config?.appKey }), { required: true })}
-            ${field('AppSecret', inputField('appSecret', { value: '', placeholder: '留空保持不变（加密存储）' }), { hint: '通过 KMS 托管加密，禁止明文落库' })}
+            ${field('AppSecret', inputField('appSecret', { value: '', placeholder: isEdit ? '留空保持不变（加密存储）' : '必填（加密存储）' }), { required: !isEdit, hint: '通过 KMS 托管加密，禁止明文落库' })}
             ${field('同步频率（分钟）', inputField('intervalMinutes', { value: config?.intervalMinutes ?? 60 }))}
             ${field('回调地址（自动生成）', `
               <div class="flex" style="gap:8px">
@@ -785,9 +825,10 @@ export async function renderIam(content, params, ctx) {
               { value: 'third_party_wins', label: '以三方为准' },
               { value: 'platform_wins', label: '以平台为准' },
             ], { value: config?.conflictStrategy ?? 'manual' }))}
+            ${field('目标组织', selectField('targetOrgId', [{ value: '', label: '（平台根）' }, ...orgOptions.map((o) => ({ value: o.id, label: '　'.repeat(o.depth) + o.name }))], { value: config?.targetOrgId ?? '' }), { hint: '同步下来的三方部门与人员挂到该组织下，空值为平台根' })}
             ${field(' ', `<label class="flex"><input type="checkbox" name="loginEnabled" ${config?.loginEnabled ? 'checked' : ''} style="accent-color:var(--brand-500)"> 允许钉钉扫码登录控制台</label>`)}
           </div>`,
-        foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
+        foot: `<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>${isEdit ? '保存' : '创建'}</button>`,
       })
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.el.querySelector('#conn-copy-callback').onclick = () => {
@@ -795,15 +836,38 @@ export async function renderIam(content, params, ctx) {
       }
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
+        if (!data2.name) return toast('主体名称不能为空', 'error')
+        if (!data2.corpId || !data2.appKey) return toast('CorpID 与 AppKey 不能为空', 'error')
+        if (!isEdit && !data2.appSecret) return toast('AppSecret 不能为空', 'error')
+        const payload = {
+          provider: 'dingtalk',
+          name: data2.name,
+          corpId: data2.corpId,
+          appKey: data2.appKey,
+          intervalMinutes: Number(data2.intervalMinutes) || 60,
+          callbackUrl: data2.callbackUrl,
+          conflictStrategy: data2.conflictStrategy,
+          targetOrgId: data2.targetOrgId || undefined,
+          loginEnabled: data2.loginEnabled,
+          ...(data2.appSecret ? { appSecret: data2.appSecret } : {}),
+        }
         try {
-          await api.put('/api/iam/connectors/dingtalk', { ...data2, intervalMinutes: Number(data2.intervalMinutes) || 60 })
-          toast('配置已更新（变更已审计）'); modal.close(); ctx2.rerender()
+          if (isEdit) {
+            await api.put(`/api/iam/connectors/${config.id}`, payload)
+            toast('配置已更新（变更已审计）')
+          } else {
+            await api.post('/api/iam/connectors', payload)
+            toast('接入已创建')
+          }
+          modal.close(); ctx2.rerender()
         } catch (error) { toast(error.message, 'error') }
       }
     }
 
     if (params2.get('action') === 'sync') {
-      void api.post('/api/iam/connectors/dingtalk/sync').then((r) => toast(r.message)).catch((e) => toast(e.message, 'error'))
+      // 兼容旧入口（未指定主体）：对第一条 dingtalk 配置触发同步
+      const target = configs.find((c) => c.provider === 'dingtalk')
+      if (target) void api.post(`/api/iam/connectors/${target.id}/sync`).then((r) => toast(r.message)).catch((e) => toast(e.message, 'error'))
       location.hash = '#/iam?tab=connectors'
     }
   }
@@ -884,6 +948,25 @@ function flattenTree(nodes, depth = 0, out = []) {
     out.push({ id: node.id, name: node.name, depth })
     flattenTree(node.children ?? [], depth + 1, out)
   }
+  return out
+}
+/** 平铺组织列表（GET /api/iam/orgs）按 parentId 还原层级，拍平成带缩进深度的序列（下拉选项用）。 */
+function flattenOrgList(orgs) {
+  const childrenOf = new Map()
+  for (const org of orgs ?? []) {
+    const key = org.parentId ?? ''
+    if (!childrenOf.has(key)) childrenOf.set(key, [])
+    childrenOf.get(key).push(org)
+  }
+  const out = []
+  const walk = (parentId, depth) => {
+    const list = (childrenOf.get(parentId) ?? []).slice().sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    for (const org of list) {
+      out.push({ id: org.id, name: org.name, depth })
+      walk(org.id, depth + 1)
+    }
+  }
+  walk('', 0)
   return out
 }
 function debounce(fn, ms) {

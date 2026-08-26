@@ -7,3 +7,4 @@ boot.log
 # 本地服务运行日志
 service.log
 .zcode/
+.workbuddy/

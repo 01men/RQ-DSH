@@ -67,7 +67,14 @@ Restart=always
   - **插件市场安装（bundle）**：在宿主 dsh 侧执行 `dsh plugin update github:01men/ybkk-AIOS`，重启 dsh 宿主。
   - Agent 亦可在会话中直接说「检查平台更新」/「升级平台」（`update_status` / `update_check` / `update_apply` 工具）。
 - **对外发布**：用 Nginx 等反代 7300 并做 TLS；平台自身按 Bearer 令牌鉴权。
-- **企业定制**（按需）：钉钉真实连接器（`mode: real` + `apiBase`，控制台「组织与账号 → 三方集成」配置）；
+- **企业定制**（按需）：钉钉真实连接器（`mode: real` + `apiBase`，控制台「组织与账号 → 三方集成」配置）。
+  三方接入支持**同 provider 多主体多实例**：同一钉钉平台可接入多家企业主体（各自一套
+  corpId/appKey/appSecret），配置以实例 id 寻址、按 `provider|corpId` 唯一（重复主体拒绝），
+  各自独立配置/测试/同步/删除，同步部门按连接器实例隔离归属，登录/绑定可按主体发起。REST 面：
+  `POST /api/iam/connectors` 创建实例、`DELETE /api/iam/connectors/:id` 删除实例（权限点
+  `iam.connector.write`）；既有 `PUT/POST /api/iam/connectors/:param[/test|/sync]` 中 `:param`
+  先按实例 id 解析、失败按 provider 取第一条（enabled 优先），旧调用零改动兼容。配置字段新增
+  `name`（主体显示名，登录入口/列表按此区分）与 `targetOrgId`（同步树根挂载部门，空=平台根）。
   OIDC 对外声明 `OIDC_ISSUER` 环境变量；OIDC 私钥生产建议迁 KMS。
 - **内网/限流环境**：更新检查走 GitHub API（未认证限额 60 次/时/IP，可设 `GITHUB_TOKEN` 提额）；
   私有镜像用 `DSH_UPDATE_API_BASE` / `DSH_UPDATE_RAW_BASE` 环境变量覆盖。

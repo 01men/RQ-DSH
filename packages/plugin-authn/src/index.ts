@@ -71,6 +71,8 @@ export interface TokenRecord extends RecordBase {
 /** OAuth state 记录（防 CSRF，一次性消费）。 */
 export interface OAuthStateRecord extends RecordBase {
   provider: string
+  /** 多主体：发起授权时指定的连接器配置实例 id（缺省=该 provider 第一个，旧行为）。 */
+  configId?: string
   scene: string
   /** 用途隔离：login=三方登录；bind=已登录账号绑定三方身份（防拿绑定 state 换登录）。 */
   purpose?: 'login' | 'bind'
@@ -269,21 +271,31 @@ export class AuthnService extends Service {
    * 缺省时回落相对路径（仅本地/mock 链路可用）。
    * options.purpose='bind' 时用于「已登录账号扫码绑定三方身份」：state 锁定目标 userId，
    * 回调由 GET /api/auth/sso/callback 承接（与登录用途隔离，见 completeSso）。
+   * options.configId 指定多主体连接器实例：按其适配器发起授权并记入 state，回调按实例解析。
    */
-  async beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app', origin?: string, options: { purpose?: 'login' | 'bind'; userId?: string } = {}): Promise<{ authorizeUrl: string | null; state: string }> {
-    const adapter = this.ctx.iam.getAuthProvider(provider)
+  async beginSso(provider: string, scene: 'web_qr' | 'h5' | 'in_app', origin?: string, options: { purpose?: 'login' | 'bind'; userId?: string; configId?: string } = {}): Promise<{ authorizeUrl: string | null; state: string }> {
+    // 多主体：指定 configId 时按配置实例取适配器并校验平台类型一致，否则取该 provider 第一个（旧行为）
+    const adapter = options.configId !== undefined
+      ? this.ctx.iam.getAuthProviderByConfig(options.configId)
+      : this.ctx.iam.getAuthProvider(provider)
+    if (options.configId !== undefined && adapter.type !== provider) {
+      throw new Error(`连接器实例（${options.configId}）平台类型 ${adapter.type} 与请求 provider ${provider} 不一致`)
+    }
     const state = randomUUID().replace(/-/g, '')
     this.oauthStates().insert({
       id: state,
       createdAt: new Date().toISOString(),
       provider,
+      ...(options.configId !== undefined ? { configId: options.configId } : {}),
       scene,
       purpose: options.purpose ?? 'login',
       ...(options.userId !== undefined ? { userId: options.userId } : {}),
     })
     // redirect_uri 优先用连接器配置里的 callbackUrl（须与钉钉后台「安全设置」白名单逐字一致）；
     // 未配置时回落 origin 推导的 /api/auth/sso/callback。
-    const configured = this.ctx.iam.connectorConfig(provider)?.callbackUrl?.trim()
+    const configured = (options.configId !== undefined
+      ? this.ctx.iam.connectorConfigById(options.configId)?.callbackUrl
+      : this.ctx.iam.connectorConfig(provider)?.callbackUrl)?.trim()
     const redirectUri = configured || (origin ? `${origin.replace(/\/+$/, '')}/api/auth/sso/callback` : '/api/auth/sso/callback')
     return { authorizeUrl: await adapter.buildAuthorizeUrl(scene, state, redirectUri), state }
   }
@@ -293,7 +305,6 @@ export class AuthnService extends Service {
    * → 命中身份链接直接登录；未命中签发待绑定票据（绑定已有账号 / 注册新账号两分支）。
    */
   async completeSso(provider: string, code: string, state: string): Promise<{ kind: 'hit'; session: { token: string; refreshToken: string; access: TokenRecord; sid: string }; userId: string } | { kind: 'pending'; pendingTicket: string; profileName: string }> {
-    const adapter = this.ctx.iam.getAuthProvider(provider)
     const stateRecord = this.oauthStates().get(state)
     if (!stateRecord) throw new Error('state 无效（未发起授权或已消费）')
     if (stateRecord.consumedAt) throw new Error('state 已被使用（防重放）')
@@ -301,17 +312,22 @@ export class AuthnService extends Service {
     if (Date.now() - new Date(stateRecord.createdAt).getTime() > 10 * 60_000) throw new Error('state 已过期')
     this.oauthStates().update(state, { consumedAt: new Date().toISOString() })
 
+    // 多主体：以 state 记录为准（provider 参数仅兼容旧调用）；configId 命中时按配置实例取适配器
+    const ssoProvider = stateRecord.provider
+    const adapter = stateRecord.configId
+      ? this.ctx.iam.getAuthProviderByConfig(stateRecord.configId)
+      : this.ctx.iam.getAuthProvider(ssoProvider)
     const tokenSet = await adapter.exchangeCode(code) // code 一次性，重放抛 ProviderAuthError
     const raw = await adapter.getUserInfo(tokenSet)
     const profile = adapter.normalizeProfile(raw)
 
-    const link = this.ctx.iam.findLinkByProfile(provider, profile.providerUserId)
+    const link = this.ctx.iam.findLinkByProfile(ssoProvider, profile.providerUserId, profile.corpId)
     if (link) {
       const user = this.ctx.iam.users().get(link.userId)
       if (!user) throw new Error('身份链接指向的账号不存在')
       if (user.status !== 'active') throw new Error('账号状态异常，无法登录')
       const principal = this.ensureHumanPrincipal(user.id, user.displayName)
-      const session = this.issueSessionPair(principal.id, { issuedBy: 'sso:' + provider })
+      const session = this.issueSessionPair(principal.id, { issuedBy: 'sso:' + ssoProvider })
       this.ctx.iam.markLogin(user.id)
       this.ctx.platformBus.emit(PlatformEvents.TokenIssued, { jti: session.access.jti, principalId: principal.id, kind: 'access' })
       return { kind: 'hit', session, userId: user.id }
@@ -319,7 +335,7 @@ export class AuthnService extends Service {
     const ticket = newId('tkt')
     this.ssoTickets().insert({
       id: ticket,
-      provider,
+      provider: ssoProvider,
       profile: {
         providerUserId: profile.providerUserId,
         corpId: profile.corpId,
@@ -333,13 +349,14 @@ export class AuthnService extends Service {
   }
 
   /** 读取 state 记录的用途（回调路由分发用；不消费）。 */
-  peekOAuthState(state: string): { provider: string; purpose: 'login' | 'bind'; userId?: string } {
+  peekOAuthState(state: string): { provider: string; purpose: 'login' | 'bind'; userId?: string; configId?: string } {
     const record = this.oauthStates().get(state)
     if (!record) throw new Error('state 无效（未发起授权或已消费）')
     return {
       provider: record.provider,
       purpose: record.purpose ?? 'login',
       ...(record.userId !== undefined ? { userId: record.userId } : {}),
+      ...(record.configId !== undefined ? { configId: record.configId } : {}),
     }
   }
 
@@ -357,7 +374,10 @@ export class AuthnService extends Service {
     if (Date.now() - new Date(stateRecord.createdAt).getTime() > 10 * 60_000) throw new Error('state 已过期')
     this.oauthStates().update(state, { consumedAt: new Date().toISOString() })
 
-    const adapter = this.ctx.iam.getAuthProvider(stateRecord.provider)
+    // 多主体：state 携带 configId 时按配置实例取适配器，否则取该 provider 第一个（旧行为）
+    const adapter = stateRecord.configId
+      ? this.ctx.iam.getAuthProviderByConfig(stateRecord.configId)
+      : this.ctx.iam.getAuthProvider(stateRecord.provider)
     const tokenSet = await adapter.exchangeCode(code) // code 一次性，重放抛 ProviderAuthError
     const raw = await adapter.getUserInfo(tokenSet)
     const profile = adapter.normalizeProfile(raw)
@@ -365,7 +385,7 @@ export class AuthnService extends Service {
     const user = this.ctx.iam.users().get(stateRecord.userId)
     if (!user) throw new Error('绑定目标账号不存在')
     if (user.status === 'deactivated') throw new Error('绑定目标账号已注销')
-    const existing = this.ctx.iam.findLinkByProfile(stateRecord.provider, profile.providerUserId)
+    const existing = this.ctx.iam.findLinkByProfile(stateRecord.provider, profile.providerUserId, profile.corpId)
     if (existing && existing.userId !== user.id) {
       throw new Error('该钉钉身份已绑定其他平台账号（一人一号）')
     }

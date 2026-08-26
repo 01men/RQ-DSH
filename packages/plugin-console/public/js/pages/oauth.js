@@ -110,7 +110,9 @@ function renderLoginPanel(app, reqId, info) {
           <label class="form-label">钉钉授权码</label>
           <input class="input input-lg" id="oauth-ding-code" placeholder="请输入钉钉扫码授权码">
         </div>
-        <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-submit">免密登录并继续</button>
+        <div id="oauth-ding-actions">
+          <button class="btn btn-primary btn-lg btn-block" id="oauth-ding-submit">免密登录并继续</button>
+        </div>
       </div>
       <div id="oauth-ding-step-pending" style="display:none">
         <div class="muted-box" style="display:flex;gap:8px;margin-bottom:14px">
@@ -135,8 +137,12 @@ function renderLoginPanel(app, reqId, info) {
     </div>`)
   // 三方登录入口按平台连接器配置显隐（与主登录页同一探测端点与规则）
   void rawJson('GET', '/api/auth/providers').then((result) => {
-    const hasDingtalk = (result.payload?.data?.providers ?? []).some((item) => item.provider === 'dingtalk')
-    if (!hasDingtalk) app.querySelector('#oauth-login-tabs').style.display = 'none'
+    const dingtalkProviders = (result.payload?.data?.providers ?? []).filter((item) => item.provider === 'dingtalk')
+    if (!dingtalkProviders.length) {
+      app.querySelector('#oauth-login-tabs').style.display = 'none'
+      return
+    }
+    renderDingtalkButtons(dingtalkProviders)
   }).catch(() => { /* 查询失败时保持默认展示 */ })
   const tabPassword = app.querySelector('#oauth-login-form')
   const tabDingtalk = app.querySelector('#oauth-login-dingtalk')
@@ -184,14 +190,14 @@ function renderLoginPanel(app, reqId, info) {
     if (result.status !== 200 || !result.payload?.ok) throw new Error(result.payload?.error?.message ?? fallback)
     return result.payload.data
   }
-  app.querySelector('#oauth-ding-submit').onclick = async () => {
-    const btn = app.querySelector('#oauth-ding-submit')
+  // 钉钉免密登录提交：多主体接入时按按钮携带的主体（configId）发起 authorize
+  const submitDingCode = async (btn, configId) => {
     btn.classList.add('btn-loading')
     try {
       const code = app.querySelector('#oauth-ding-code').value.trim()
       if (!code) throw new Error('请输入钉钉授权码（演示环境为工号，如 DD0002）')
       dingTip('')
-      const auth = unwrap(await rawJson('POST', '/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr' }), '钉钉登录暂不可用')
+      const auth = unwrap(await rawJson('POST', '/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr', ...(configId ? { configId } : {}) }), '钉钉登录暂不可用')
       const data = unwrap(await rawJson('POST', '/api/auth/sso', { provider: 'dingtalk', code, state: auth.state }), '钉钉登录失败')
       if (data.kind === 'pending') {
         dingTicket = data.pendingTicket
@@ -206,6 +212,17 @@ function renderLoginPanel(app, reqId, info) {
     } finally {
       btn.classList.remove('btn-loading')
     }
+  }
+  app.querySelector('#oauth-ding-submit').onclick = (e) => void submitDingCode(e.currentTarget)
+  // 多主体接入时每个主体一个登录按钮；仅一条或无主体名称时保持默认单按钮外观
+  const renderDingtalkButtons = (providers) => {
+    if (providers.length < 2) return
+    const holder = app.querySelector('#oauth-ding-actions')
+    holder.innerHTML = providers.map((item, index) => `
+      <button class="btn btn-primary btn-lg btn-block" style="${index ? 'margin-top:8px' : ''}" data-config-id="${esc(item.configId ?? '')}">钉钉登录（${esc(item.name || item.corpId || '未命名主体')}）</button>`).join('')
+    holder.querySelectorAll('[data-config-id]').forEach((btn) => {
+      btn.onclick = () => void submitDingCode(btn, btn.dataset.configId || undefined)
+    })
   }
   app.querySelectorAll('#oauth-login-dingtalk .tab[data-ptab]').forEach((el) => {
     el.onclick = () => {

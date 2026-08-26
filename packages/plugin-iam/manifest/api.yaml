@@ -8,7 +8,7 @@ endpoints:
   - POST/DELETE /api/iam/users/:id/bindings[/:provider]
   - GET /api/iam/roles · GET /api/iam/permissions · POST/PATCH /api/iam/roles/:id
   - GET/POST/PATCH/DELETE /api/iam/groups
-  - GET/PUT /api/iam/connectors/:provider · POST .../test · POST .../sync
+  - GET/POST /api/iam/connectors · PUT /api/iam/connectors/:idOrProvider · DELETE /api/iam/connectors/:id · POST .../test · POST .../sync（idOrProvider：先按配置 id 解析，回退 provider 第一条）
   - GET /api/iam/conflicts · POST /api/iam/conflicts/:id/resolve
   - # v1.1（融合 auth-identity）：IdentityProviderAdapter + 身份链接事实源
   - identityLinks 集合（provider+providerUserId 引擎级唯一）；bindThirdParty 走链接层

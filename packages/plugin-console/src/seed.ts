@@ -110,6 +110,7 @@ async function seedDemo(ctx: Context): Promise<void> {
   // -- 连接器 --------------------------------------------------------------
   ctx.iam.upsertConnectorConfig({
     provider: 'dingtalk',
+    name: '元冰可集团（演示）',
     corpId: 'ding-yuanbingke',
     appKey: 'demo-app-key',
     appSecret: 'demo-secret-do-not-use',

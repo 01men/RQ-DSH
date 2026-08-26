@@ -1189,6 +1189,33 @@ try {
   const { existsSync } = await import('node:fs')
   check('SQLite 事务存储已就位（txnstore.db）', existsSync(join(DATA_DIR, 'txnstore.db')))
 
+  // -- 多主体接入（同 provider 多实例连接器） --------------------------------
+  // 兼容语义：:param 先按实例 id 解析、失败按 provider 取第一条；旧路由 'dingtalk' 零改动可用。
+  section('多主体接入（同 provider 多实例连接器：创建/唯一约束/隔离同步/删除）')
+  const createSecond = await api('POST', '/api/iam/connectors', { token: admin, body: { provider: 'dingtalk', name: '第二主体', corpId: 'ding-second', appKey: 'demo-key-2', appSecret: 'demo-secret-2', mode: 'mock', enabled: true, conflictStrategy: 'manual' } })
+  check('创建第二主体连接器（POST /api/iam/connectors）', createSecond.ok && Boolean(createSecond.data?.id), JSON.stringify(createSecond).slice(0, 300))
+  const listAfterCreate = await api('GET', '/api/iam/connectors', { token: admin })
+  check('连接器列表出现 2 条配置', listAfterCreate.ok && listAfterCreate.data.configs.length === 2, JSON.stringify(listAfterCreate.data).slice(0, 200))
+  const dupCorp = await api('POST', '/api/iam/connectors', { token: admin, body: { provider: 'dingtalk', name: '重复主体', corpId: 'ding-second', appKey: 'demo-key-2', appSecret: 'demo-secret-2', mode: 'mock', enabled: true, conflictStrategy: 'manual' } })
+  check('同 provider+corpId 重复创建被拒（provider|corpId 唯一约束）', !dupCorp.ok, JSON.stringify(dupCorp).slice(0, 200))
+  const id2 = createSecond.data?.id
+  const syncSecond = await api('POST', `/api/iam/connectors/${id2}/sync`, { token: admin })
+  check('按实例 id 同步第二主体', syncSecond.ok && /同步完成/.test(syncSecond.data?.message ?? ''), JSON.stringify(syncSecond).slice(0, 300))
+  const syncFirstAgain = await api('POST', '/api/iam/connectors/dingtalk/sync', { token: admin })
+  check('第一主体旧路由（按 provider 解析）同步互不影响', syncFirstAgain.ok && /同步完成/.test(syncFirstAgain.data?.message ?? ''), JSON.stringify(syncFirstAgain).slice(0, 300))
+  const orgsAfterMulti = (await api('GET', '/api/iam/orgs', { token: admin })).data
+  const mockRootCount = orgsAfterMulti.filter((org) => org.name === '元冰可集团').length
+  check('两家主体部门并存（两家根部门均落库）', mockRootCount >= 2, `元冰可集团根数=${mockRootCount}`)
+  const delSecond = await api('DELETE', `/api/iam/connectors/${id2}`, { token: admin })
+  check('删除第二主体连接器（DELETE /api/iam/connectors/:id）', delSecond.ok && delSecond.data?.deleted === true, JSON.stringify(delSecond).slice(0, 200))
+  const listAfterDelete = await api('GET', '/api/iam/connectors', { token: admin })
+  check('删除后列表回到 1 条', listAfterDelete.ok && listAfterDelete.data.configs.length === 1, JSON.stringify(listAfterDelete.data).slice(0, 200))
+  const testDeleted = await api('POST', `/api/iam/connectors/${id2}/test`, { token: admin })
+  check('已删除实例不可再测试', !testDeleted.ok, JSON.stringify(testDeleted).slice(0, 200))
+  const authProviders = await api('GET', '/api/auth/providers')
+  check('三方登录入口带 configId/name（多主体可区分）', authProviders.ok && authProviders.data.providers.length >= 1
+    && authProviders.data.providers.every((p) => p.configId && p.name), JSON.stringify(authProviders.data).slice(0, 300))
+
   mcpStub.close()
   ddStub.close()
 

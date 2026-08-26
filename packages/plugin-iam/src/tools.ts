@@ -151,15 +151,18 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'iam_sync_run',
-    description: '触发三方通讯录全量同步（当前内置钉钉模拟连接器）。',
+    description: '触发三方通讯录全量同步（支持多主体：同一平台可接入多家企业，传 configId 指定主体实例，缺省按 provider 取第一条）。',
     permission: 'iam.connector.write',
     parameters: {
-      provider: { type: 'string', enum: ['dingtalk'], required: true, description: '连接器' },
+      provider: { type: 'string', enum: ['dingtalk'], description: '连接器（与 configId 至少提供一个；缺省按 provider 取第一条配置）' },
+      configId: { type: 'string', description: '接入配置实例 ID（多主体时指定，优先于 provider）' },
       actor: { type: 'string', description: '操作人（审计用）' },
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args) {
-      return await ctx.iam.syncConnector(args.provider, args.actor ?? 'agent')
+      const target = args.configId ?? args.provider
+      if (!target) throw new Error('provider 与 configId 至少提供一个')
+      return await ctx.iam.syncConnector(target, args.actor ?? 'agent')
     },
   }))
 

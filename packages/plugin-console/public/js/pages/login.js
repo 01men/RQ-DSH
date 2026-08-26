@@ -1,7 +1,7 @@
 /** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）。 */
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
-import { h, $, toast } from '../ui.js'
+import { h, $, esc, toast } from '../ui.js'
 
 export function renderLogin(app) {
   app.innerHTML = `
@@ -53,7 +53,9 @@ export function renderLogin(app) {
 
         <form class="login-form" id="login-form-dingtalk" style="display:none">
           <div id="ding-step-authorize">
-            <button class="btn btn-primary btn-lg btn-block" id="ding-oauth-go" type="button">前往钉钉扫码授权</button>
+            <div id="ding-oauth-list">
+              <button class="btn btn-primary btn-lg btn-block" id="ding-oauth-go" type="button">前往钉钉扫码授权</button>
+            </div>
             <div class="form-hint" style="margin:8px 0 4px">整页跳转钉钉授权：本机已登录钉钉自动识别身份，未登录则出二维码扫码。授权成功自动回跳登录。</div>
             <details style="margin-top:12px">
               <summary class="form-hint" style="cursor:pointer">手动输入授权码（演示/mock 备用）</summary>
@@ -99,13 +101,38 @@ export function renderLogin(app) {
 
   const tabPassword = $('#login-form-password')
   const tabDing = $('#login-form-dingtalk')
+  // 发起整页跳转授权：多主体接入时按所选主体（configId）发起
+  const startDingOauth = async (btn, configId) => {
+    btn.classList.add('btn-loading')
+    try {
+      const auth = await api.post('/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr', ...(configId ? { configId } : {}) })
+      if (!auth.authorizeUrl) throw new Error('身份源未返回授权地址（可能为 mock 模式），请改用手动输入授权码')
+      // 必须整页跳转：弹窗/iframe 会被第三方 Cookie 策略拦截导致授权失败
+      window.location.href = auth.authorizeUrl
+    } catch (error) {
+      toast(error.message, 'error')
+      btn.classList.remove('btn-loading')
+    }
+  }
+  // 多主体接入时每个主体一个授权按钮；仅一条或无主体名称时保持默认单按钮外观
+  const renderDingtalkButtons = (providers) => {
+    if (providers.length < 2) return
+    const holder = $('#ding-oauth-list')
+    holder.innerHTML = providers.map((item, index) => `
+      <button class="btn btn-primary btn-lg btn-block" style="${index ? 'margin-top:8px' : ''}" data-config-id="${esc(item.configId ?? '')}" type="button">钉钉登录（${esc(item.name || item.corpId || '未命名主体')}）</button>`).join('')
+    holder.querySelectorAll('[data-config-id]').forEach((btn) => {
+      btn.onclick = () => void startDingOauth(btn, btn.dataset.configId || undefined)
+    })
+  }
   // 三方登录入口按平台配置显隐：未启用任何登录连接器时仅展示账号密码
   void api.get('/api/auth/providers').then((data) => {
-    const hasDingtalk = (data?.providers ?? []).some((item) => item.provider === 'dingtalk')
-    if (!hasDingtalk) {
+    const dingtalkProviders = (data?.providers ?? []).filter((item) => item.provider === 'dingtalk')
+    if (!dingtalkProviders.length) {
       $('#login-tabs').style.display = 'none'
       $('#login-sub').textContent = '使用平台账号登录'
+      return
     }
+    renderDingtalkButtons(dingtalkProviders)
   }).catch(() => { /* 查询失败时保持默认展示 */ })
   app.querySelectorAll('#login-tabs .segmented-item').forEach((el) => {
     el.onclick = () => {
@@ -137,19 +164,7 @@ export function renderLogin(app) {
     e.preventDefault()
     void doLogin({ username: $('#login-username').value.trim(), password: $('#login-password').value }, '/api/auth/login')
   }
-  $('#ding-oauth-go').onclick = async () => {
-    const btn = $('#ding-oauth-go')
-    btn.classList.add('btn-loading')
-    try {
-      const auth = await api.post('/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr' })
-      if (!auth.authorizeUrl) throw new Error('身份源未返回授权地址（可能为 mock 模式），请改用手动输入授权码')
-      // 必须整页跳转：弹窗/iframe 会被第三方 Cookie 策略拦截导致授权失败
-      window.location.href = auth.authorizeUrl
-    } catch (error) {
-      toast(error.message, 'error')
-      btn.classList.remove('btn-loading')
-    }
-  }
+  $('#ding-oauth-go').onclick = (e) => void startDingOauth(e.currentTarget)
 
   let dingTicket = ''
   // 承接扫码回跳：callback 页把「首次使用三方身份」的待绑定票据暂存 localStorage

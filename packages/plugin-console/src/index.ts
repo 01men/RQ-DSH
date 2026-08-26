@@ -221,7 +221,7 @@ export function apply(ctx: Context) {
   http.register('GET', '/api/auth/providers', (exchange) => {
     const providers = ctx.iam.connectorConfigs().all()
       .filter((config) => config.enabled && config.loginEnabled)
-      .map((config) => ({ provider: config.provider, corpId: config.corpId }))
+      .map((config) => ({ provider: config.provider, corpId: config.corpId, configId: config.id, name: config.name }))
     exchange.ok({ providers })
   })
 
@@ -254,9 +254,9 @@ export function apply(ctx: Context) {
 
   // -- 三方登录（IdentityProviderAdapter 链路） ------------------------------
   http.register('POST', '/api/auth/sso/authorize', async (exchange) => {
-    const { provider, scene } = body<{ provider: string; scene?: 'web_qr' | 'h5' | 'in_app' }>(exchange)
+    const { provider, scene, configId } = body<{ provider: string; scene?: 'web_qr' | 'h5' | 'in_app'; configId?: string }>(exchange)
     try {
-      exchange.ok(await ctx.authn.beginSso(provider ?? 'dingtalk', scene ?? 'web_qr', requestOrigin(exchange)))
+      exchange.ok(await ctx.authn.beginSso(provider ?? 'dingtalk', scene ?? 'web_qr', requestOrigin(exchange), { ...(configId ? { configId } : {}) }))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(400, 'SSO_AUTHORIZE_FAILED', message)
@@ -323,7 +323,7 @@ export function apply(ctx: Context) {
    * 指定 targetUserId 为他人绑定（需 iam.user.write，扫码人即被绑定的钉钉身份）。
    */
   http.register('POST', '/api/auth/sso/bind/authorize', async (exchange) => {
-    const { provider, targetUserId } = body<{ provider?: string; targetUserId?: string }>(exchange)
+    const { provider, targetUserId, configId } = body<{ provider?: string; targetUserId?: string; configId?: string }>(exchange)
     const info = caller(exchange)
     const userId = targetUserId ?? info.userId
     if (!userId) {
@@ -339,7 +339,7 @@ export function apply(ctx: Context) {
       return
     }
     try {
-      exchange.ok(await ctx.authn.beginSso(provider ?? 'dingtalk', 'web_qr', requestOrigin(exchange), { purpose: 'bind', userId }))
+      exchange.ok(await ctx.authn.beginSso(provider ?? 'dingtalk', 'web_qr', requestOrigin(exchange), { purpose: 'bind', userId, ...(configId ? { configId } : {}) }))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(400, 'SSO_BIND_AUTHORIZE_FAILED', message)
@@ -994,23 +994,60 @@ export function apply(ctx: Context) {
     }),
   }))
 
-  guarded('PUT', '/api/iam/connectors/:provider', 'iam.connector.write', (exchange) => {
-    const input = body<{ corpId: string; appKey: string; appSecret?: string; enabled?: boolean; syncOrgRoot?: string; intervalMinutes?: number; callbackUrl?: string; loginEnabled?: boolean; conflictStrategy?: 'third_party_wins' | 'platform_wins' | 'manual'; mode?: 'real' | 'mock'; apiBase?: string; oapiBase?: string }>(exchange)
-    const config = ctx.iam.upsertConnectorConfig({ provider: exchange.params['provider']! as 'dingtalk', ...input })
-    changeLog(exchange, 'iam.connector.update', 'connector', config.id, config.provider)
+  // 新增接入主体：同一 provider 可接入多家企业（多套 corpId/appKey/appSecret），各自独立配置/同步/登录
+  guarded('POST', '/api/iam/connectors', 'iam.connector.write', (exchange) => {
+    const input = body<{ provider: 'dingtalk' | 'feishu' | 'wecom'; name: string; corpId: string; appKey: string; appSecret?: string; enabled?: boolean; syncOrgRoot?: string; intervalMinutes?: number; callbackUrl?: string; loginEnabled?: boolean; conflictStrategy?: 'third_party_wins' | 'platform_wins' | 'manual'; mode?: 'real' | 'mock'; apiBase?: string; oapiBase?: string; targetOrgId?: string }>(exchange)
+    if (!input.provider || !input.name || !input.corpId || !input.appKey) {
+      exchange.fail(400, 'BAD_REQUEST', 'provider、name、corpId、appKey 必填')
+      return
+    }
+    const config = ctx.iam.createConnectorConfig(input)
+    changeLog(exchange, 'iam.connector.create', 'connector', config.id, config.name ?? config.provider)
     const { secretActual, ...safe } = config
     void secretActual
     return safe
   })
 
-  guarded('POST', '/api/iam/connectors/:provider/test', 'iam.connector.write', async (exchange) => {
-    return await ctx.iam.testConnector(exchange.params['provider']!)
+  // 参数语义 idOrProvider：先按配置 id / provider 解析已有配置（命中按 id 更新）；
+  // 未命中且 param 为平台类型时维持旧行为（按 provider 第一条更新，无则新建）
+  guarded('PUT', '/api/iam/connectors/:param', 'iam.connector.write', (exchange) => {
+    const param = exchange.params['param']!
+    const input = body<{ name?: string; corpId: string; appKey: string; appSecret?: string; enabled?: boolean; syncOrgRoot?: string; intervalMinutes?: number; callbackUrl?: string; loginEnabled?: boolean; conflictStrategy?: 'third_party_wins' | 'platform_wins' | 'manual'; mode?: 'real' | 'mock'; apiBase?: string; oapiBase?: string; targetOrgId?: string }>(exchange)
+    const existing = ctx.iam.resolveConnectorConfig(param)
+    if (!existing && !['dingtalk', 'feishu', 'wecom'].includes(param)) {
+      exchange.fail(400, 'BAD_REQUEST', `连接器配置不存在：${param}`)
+      return
+    }
+    const config = existing
+      ? ctx.iam.upsertConnectorConfig({ id: existing.id, provider: existing.provider, ...input })
+      : ctx.iam.upsertConnectorConfig({ provider: param as 'dingtalk', ...input })
+    changeLog(exchange, 'iam.connector.update', 'connector', config.id, config.name ?? config.provider)
+    const { secretActual, ...safe } = config
+    void secretActual
+    return safe
   })
 
-  guarded('POST', '/api/iam/connectors/:provider/sync', 'iam.connector.write', async (exchange) => {
+  guarded('DELETE', '/api/iam/connectors/:id', 'iam.connector.write', (exchange) => {
+    const config = ctx.iam.connectorConfigById(exchange.params['id']!)
+    if (!config) {
+      exchange.fail(400, 'BAD_REQUEST', `连接器配置不存在：${exchange.params['id']}`)
+      return
+    }
+    ctx.iam.deleteConnectorConfig(config.id)
+    changeLog(exchange, 'iam.connector.delete', 'connector', config.id, config.name ?? config.provider)
+    return { deleted: true }
+  })
+
+  guarded('POST', '/api/iam/connectors/:param/test', 'iam.connector.write', async (exchange) => {
+    return await ctx.iam.testConnector(exchange.params['param']!)
+  })
+
+  guarded('POST', '/api/iam/connectors/:param/sync', 'iam.connector.write', async (exchange) => {
     const info = caller(exchange)
-    const result = await ctx.iam.syncConnector(exchange.params['provider']!, info.userId ?? info.principalId)
-    changeLog(exchange, 'iam.connector.sync', 'connector', exchange.params['provider']!, exchange.params['provider']!, result.message)
+    const param = exchange.params['param']!
+    const result = await ctx.iam.syncConnector(param, info.userId ?? info.principalId)
+    const config = ctx.iam.resolveConnectorConfig(param)
+    changeLog(exchange, 'iam.connector.sync', 'connector', config?.id ?? param, config?.name ?? config?.provider ?? param, result.message)
     return result
   })
 
