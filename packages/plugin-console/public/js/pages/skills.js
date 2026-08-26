@@ -26,6 +26,7 @@ export async function renderSkills(content, params, ctx) {
         <button class="btn btn-primary" id="skill-submit">${icon('plus', 14)}提交 Skill</button>
       </div>
     </div>
+    <div id="skill-heatmap" class="mb-20"></div>
     <div class="filter-bar">
       <div class="search-input">${icon('search')}<input class="input" id="skill-q" placeholder="搜索名称 / 标签 / 简介"></div>
       <div class="chips" id="skill-cats">
@@ -89,6 +90,11 @@ export async function renderSkills(content, params, ctx) {
   }
 
   $('#skill-q').oninput = debounce(() => { state.q = $('#skill-q').value.trim(); state.mode = 'market'; void refresh() }, 250)
+
+  // 技能热力图：skill × 日 使用矩阵（usage 计量为主、历史下载流水回填）；无数据不占位
+  api.get('/api/skills/usage-heatmap?days=30')
+    .then((hm) => { if (hm.skills?.length) $('#skill-heatmap').innerHTML = heatCard(hm) })
+    .catch(() => undefined)
   $$('#skill-cats .chip').forEach((chip) => {
     chip.onclick = () => {
       $$('#skill-cats .chip').forEach((c) => c.classList.remove('active'))
@@ -136,6 +142,10 @@ async function openSkillDetail(id, ctx, refresh) {
         ${skill.tags.map((tag) => `<span class="badge badge-muted no-dot">${esc(tag)}</span>`).join('')}
       </div>
       <div class="fs-13 mt-14" style="line-height:1.7;color:var(--text-2)">${esc(skill.description || skill.summary)}</div>
+      ${skill.deprecatedReason ? `
+        <div class="muted-box mt-8" style="display:flex;gap:8px;border-color:var(--warn-border);background:var(--warn-bg)">
+          ${icon('alert', 15)}<span><b>弃用原因</b>：${esc(skill.deprecatedReason)}${skill.deprecatedAt ? `（${timeAgo(skill.deprecatedAt)}）` : ''}</span>
+        </div>` : ''}
 
       <div class="stat-grid mt-14 mb-20" style="grid-template-columns:repeat(4,1fr)">
         ${miniStat('download', '下载量', fmtNum(skill.stats.downloads))}
@@ -459,4 +469,37 @@ function miniStat(ic, label, value) {
 function debounce(fn, ms) {
   let timer
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms) }
+}
+
+/** 技能热力图卡片：行=skill、列=日、色深=使用次数（下载/安装计量口径）。 */
+function heatCard({ days, skills, maxCell }) {
+  const rows = skills.slice(0, 12)
+  const cell = 15
+  const gap = 3
+  const labelW = 148
+  const width = labelW + days.length * (cell + gap)
+  const height = rows.length * (cell + gap) + 16
+  const cells = rows.map((skill, r) => skill.cells.map((value, c) => {
+    const opacity = value > 0 ? 0.1 + 0.9 * (value / maxCell) : 0.04
+    return `<rect x="${labelW + c * (cell + gap)}" y="${r * (cell + gap)}" width="${cell}" height="${cell}" rx="3" fill="#4f6ef7" fill-opacity="${opacity.toFixed(2)}"><title>${esc(skill.name)} · ${esc(days[c])} · ${value} 次</title></rect>`
+  }).join('')).join('')
+  const rowLabels = rows.map((skill, r) =>
+    `<text x="0" y="${r * (cell + gap) + 11}" font-size="11" fill="#6b7280">${esc(skill.name.length > 13 ? skill.name.slice(0, 12) + '…' : skill.name)}</text>`).join('')
+  const dayTicks = days.map((day, c) => c % 7 === 6
+    ? `<text x="${labelW + c * (cell + gap)}" y="${height - 3}" font-size="10" fill="#9ca3af">${esc(day.slice(5))}</text>` : '').join('')
+  return `
+    <div class="card">
+      <div class="card-head"><span class="card-title">${icon('chart', 15)} 技能使用热力图</span><span class="card-sub">近 30 天 · 下载/安装计量（含历史流水回填）</span></div>
+      <div class="card-body" style="padding-top:10px">
+        <div style="overflow-x:auto">
+          <svg width="${Math.max(width, 360)}" height="${height}" style="display:block">
+            ${rowLabels}${cells}${dayTicks}
+          </svg>
+        </div>
+        <div class="flex fs-11 text-4" style="justify-content:space-between;margin-top:4px">
+          <span>Top ${rows.length}（按窗口使用次数）</span>
+          <span>色深 = 当日使用次数（峰值 ${maxCell}）</span>
+        </div>
+      </div>
+    </div>`
 }

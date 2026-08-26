@@ -40,7 +40,7 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）395 项端到端断言
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）405 项端到端断言
 npm run lint:manifests  # 插件清单五面 YAML 校验（65 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
@@ -229,7 +229,8 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
   过期令牌 7 天后物理清理（启动 + 每日巡检）；refresh 哈希索引化查询。
 - **企业 AI 资产运营（新）**：`资产运营` 控制台页 + REST——统一台账（MCP/Agent/应用/Skill/模型路由
   五类资产一处盘点，含归属组织、负责人、健康、近 N 天调用与消耗）、一键健康巡检（批量探活留审计）、
-  成本报表（Top 资产 / 主体分摊 / 日趋势，计量口径）。
+  成本报表（Top 资产 / 主体分摊 / 日趋势，计量口径）、效益分析（毛利=列表价收入−采购成本、
+  单位 DAU 成本）与下架分析（弃用/下线原因聚合）。
 - **商业化放缓（决策）**：真实支付网关/对公收款/开票/开发者付款等资金通道**保持手工过渡态暂缓实施**，
   插件市场变现（订阅代收/分账结算自动化）同样暂缓——本迭代优先企业内资产治理与运营能力。
 
@@ -268,9 +269,10 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
 - **「平台接入」外部接入总览**：机器凭证（按绑定资源分组）+ OIDC 客户端（含关联应用）+ 远程 dsh
   客户端一处盘点，跳转对应管理页。
 - **应用指标主动上报（接入即监测）**：外部应用可向宿主推送产品指标——`POST /api/apps/:id/metrics-report`
-  （`app.write`）/ `app_metrics_report` 工具 / CLI `app report` 三端同契约（DAU/会话/会话深度/7 日留存，
-  同日 DAU 取最大、会话累加，可指定 `date` 补录历史）；计量事件推送走 `POST /api/usage/record`
-  （`usage.write`，schema v1 + 幂等键，CLI `usage record`），宿主侧据此外部应用全生命周期监测。
+  （`app.write`）/ `app_metrics_report` 工具 / CLI `app report` 三端同契约（**PV/UV/DAU/会话/会话深度/7 日留存**，
+  同日 PV 累加、UV/DAU 取最大，可指定 `date` 补录历史）；计量事件推送走 `POST /api/usage/record`
+  （`usage.write`，schema v1 + 幂等键，CLI `usage record`，resource 支持 `mcp:<slug>` / `skill:<id>` /
+  `nas:<id>` / `model:<slug>` / `plugin:<id>`），宿主侧据此外部应用全生命周期监测。
 - **一行 SDK 式接入验证**：selftest 内置 openid-client（v6）冒烟——discovery 驱动走通 authorize →
   token → userinfo → refresh → revoke → end_session 全链（标准客户端真实姿势回归）。
 
@@ -301,6 +303,27 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
   与 `skill storage get|set`；控制台新增「NAS 存储」页（列表/详情/文件浏览器/导入），
   资产台账与一键巡检覆盖 nas 类型。
 
+## 三E、观测与分析补齐：Skill/NAS 计量 + PV/UV + 效益分析 + 技能热力图 + 下架分析（本迭代）
+
+围绕「接入后自主提报 + 宿主自动监测」与「分析看板」两条主线补齐观测口径：
+
+- **Skill/NAS 进计量管道**：skill 下载/安装、nas 全部文件操作（读写在 `fsCall` 单点埋点）自动产生
+  usage 事件（`skill:<ID>` / `nas:<ID>`，calls/bytes 口径）；价格簿逐条幂等播种 `skill:*` / `nas:*`
+  零费率默认规则（观测先行，是否计费由运营调价决定，存量部署升级自动补齐）。
+  跨机部署与中文 slug 兼容：skill 资源键用资产 ID（中文名 slug 含非 ASCII，过不了 resource 校验）。
+- **应用指标 PV/UV 口径**：`metrics-report` / `app_metrics_report` / `app report` 三端新增 `--pv/--uv`
+  （同日 PV 累加、UV 取最大，与 DAU 同语义）；应用详情指标页展示 PV 柱图与 UV/DAU 双线。
+- **效益分析**：`GET /api/assets/benefit`——按资产聚合 列表价收入/采购成本/**毛利**，应用类资产关联
+  窗口 DAU 派生**单位 DAU 成本**（指标×成本首次打通）；「资产运营」页新增效益表 + 主体分摊
+  （谁在花钱，byPrincipal 前端首次渲染）。
+- **技能热力图**：`GET /api/skills/usage-heatmap`——skill × 日使用矩阵（usage 事件为主、计量接入前的
+  下载流水按日回填去重）；Skill 市场页顶部热力图卡片（色深=当日使用次数）。
+- **下架分析闭环**：skill 弃用/MCP 下线 REST 层原因必填（与服务层 Agent/App 护栏对齐）；Skill 弃用原因
+  落库持久化（详情抽屉可见）；`GET /api/assets/retire-reasons` 聚合 弃用/下线 原因（审计 change 日志 +
+  生命周期留痕 + Skill 落库原因三源合一、去重），「资产运营」页新增下架分析卡片。
+- 验收：`npm run selftest` **405/405**（新增 10 项：skill/nas 计量入账与外部上报放行、PV/UV 累加语义、
+  毛利恒等、热力矩阵、弃用护栏与落库、下架原因聚合）。
+
 ## 三、目录结构（插件标准解剖）
 
 ```
@@ -320,7 +343,7 @@ packages/
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（375 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（405 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -371,9 +394,9 @@ node cli/dshctl.mjs nas import --config='{"mcpServers":{"synology-filestation":{
 node cli/dshctl.mjs nas files <id> --path=/skillhub    # 文件浏览（shares/mkdir/upload/delete/search 同组）
 node cli/dshctl.mjs skill submit --name=<名> --content-file=SKILL.md --package=skill.zip
 node cli/dshctl.mjs skill storage set --mode=nas --nas-id=<id> --base-path=/skillhub
-node cli/dshctl.mjs app report <id> --dau=320 --sessions=580 --retention7=0.45   # 应用指标主动上报（可 --date= 补录）
+node cli/dshctl.mjs app report <id> --pv=1200 --uv=320 --dau=280 --sessions=580 --retention7=0.45   # 应用指标主动上报（可 --date= 补录）
 node cli/dshctl.mjs usage record --org=<orgId> --subject=agent:<id> --principal=org:<orgId> \
-     --resource=mcp:<slug> --meter=tokens:1200:token,calls:3:次 --idempotency-key=<业务单号>
+     --resource=skill:<skillId> --meter=calls:3:次,tokens:1200:token --idempotency-key=<业务单号>   # resource 亦支持 mcp:<slug> / nas:<id>
 ```
 
 ```bash
@@ -390,7 +413,7 @@ curl http://localhost:7300/docs/app-sso-integration.md
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **395 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **405 项端到端断言**：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批（发起人可自审）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
@@ -409,7 +432,10 @@ mcpServers JSON 导入→探活→上线→工具发现、文件全链与审计�
 Skill 包上架自动上传（字节级校验 / 无包现场打包 / NAS 未上线 fail-closed）、台账巡检覆盖、
 `/mcp` 端点 401/initialize/tools-list/tools-call/工具级越权/-32601）+ **接入方主动推送**
 （应用指标上报：当日写入/历史补录累加/日期格式与应用存在性校验/RBAC 403/`app_metrics_report` 工具；
-接入客户端心跳：机器令牌上报与宿主可见、非客户端身份 404、无令牌 401）。
+接入客户端心跳：机器令牌上报与宿主可见、非客户端身份 404、无令牌 401）+ **观测与分析补齐**
+（Skill 下载/安装与 NAS 文件操作进计量管道（calls/bytes）、`skill:`/`nas:` 资源外部上报放行、
+PV 同日累加与 UV/DAU 取最大、效益分析毛利恒等、技能热力矩阵、skill 弃用原因必填与落库、
+下架原因三源聚合并去重）。
 测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock。
 
 ## 八、说明与边界

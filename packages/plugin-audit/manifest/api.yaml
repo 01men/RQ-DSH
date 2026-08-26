@@ -3,12 +3,13 @@ plugin: dsh-plugin-audit
 base: /api
 endpoints:
   - GET /api/audit/logs · GET /api/audit/summary
-  - GET/POST/PATCH /api/audit/alert-rules · GET /api/audit/alerts · POST /api/audit/alerts/:id/read
+  - GET/POST/PATCH /api/audit/alert-rules · GET /api/audit/alerts · POST /api/audit/alerts/:id/read · POST /api/audit/alerts/read-all
   - GET /api/audit/cost?groupBy=app|agent|org|date
   - GET /api/approvals · POST /api/approvals/:id/decide
 tools:
   - audit_logs
   - audit_alerts_list
+  - audit_alerts_read_all
   - approval_decide
   - audit_cost_report
 services:

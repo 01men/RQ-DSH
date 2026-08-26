@@ -102,7 +102,18 @@ export async function renderAudit(content, params, ctx) {
   async function renderAlerts() {
     const data = await api.get('/api/audit/alerts')
     const alerts = data.alerts
+    const unread = alerts.filter((alert) => !alert.read)
     const body = $('#audit-body')
+    $('#audit-actions').innerHTML = unread.length
+      ? `<button class="btn btn-default" id="alert-read-all">${icon('check', 14)}全部已读（${unread.length}）</button>`
+      : ''
+    const readAllBtn = $('#alert-read-all')
+    if (readAllBtn) readAllBtn.onclick = async () => {
+      try {
+        const result = await api.post('/api/audit/alerts/read-all')
+        toast(`已将 ${result.read} 条告警标记为已读`); ctx.rerender()
+      } catch (error) { toast(error.message, 'error') }
+    }
     if (!alerts.length) {
       body.innerHTML = ''
       body.appendChild(emptyState({ title: '没有告警', desc: '平台运行平稳，告警将实时推送至此', icon: 'shieldCheck' }))

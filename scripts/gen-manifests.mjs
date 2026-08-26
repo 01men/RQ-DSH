@@ -99,11 +99,11 @@ const PLUGINS = [
     ],
     api: [
       'GET /api/audit/logs · GET /api/audit/summary',
-      'GET/POST/PATCH /api/audit/alert-rules · GET /api/audit/alerts · POST /api/audit/alerts/:id/read',
+      'GET/POST/PATCH /api/audit/alert-rules · GET /api/audit/alerts · POST /api/audit/alerts/:id/read · POST /api/audit/alerts/read-all',
       'GET /api/audit/cost?groupBy=app|agent|org|date',
       'GET /api/approvals · POST /api/approvals/:id/decide',
     ],
-    tools: ['audit_logs', 'audit_alerts_list', 'approval_decide', 'audit_cost_report'],
+    tools: ['audit_logs', 'audit_alerts_list', 'audit_alerts_read_all', 'approval_decide', 'audit_cost_report'],
     ui: { routes: ['#/audit?tab=logs|alerts|rules|cost', '#/approvals'], menus: [{ group: '治理与运营', items: ['审计与告警', '审批中心'] }] },
   },
   {
@@ -128,7 +128,7 @@ const PLUGINS = [
   {
     dir: 'skillhub', id: 'dsh-plugin-skillhub', label: 'Skill 市场',
     depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-audit'], permissions: ['skill.read', 'skill.submit', 'skill.approve', 'skill.publish', 'skill.install', 'skill.storage.write'],
-    services: [['skillHub', 'ctx.skillHub', '提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索 + skill.zip 包存储（local/NAS）']],
+    services: [['skillHub', 'ctx.skillHub', '提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索 + skill.zip 包存储（local/NAS）；下载/安装进 usage 计量（skill:* 资源），弃用原因落库持久化']],
     events: [
       ['skill.submitted / skill.published / skill.installed', 'emit', '流水线事件'],
       ['skill.deprecated', 'emit', '弃用（扫描引用 Agent 并告警负责人）'],
@@ -171,16 +171,17 @@ const PLUGINS = [
     api: [
       'GET/POST /api/apps · GET /api/apps/:id · PATCH /api/apps/:id',
       'POST /api/apps/:id/transition（发布/下架为 L4 审批）',
+      'POST /api/apps/:id/metrics-report（应用指标主动上报：PV/UV/DAU/会话/留存，可 --date 补录）',
       'GET /api/apps/:id（含 topology/cost/impact）',
     ],
-    tools: ['app_list', 'app_topology', 'app_metrics', 'app_cost_breakdown'],
+    tools: ['app_list', 'app_topology', 'app_metrics', 'app_metrics_report', 'app_cost_breakdown'],
     ui: { routes: ['#/apps'], menus: [{ group: 'AI 资源', items: ['AI 应用'] }] },
   },
   {
     dir: 'nas', id: 'dsh-plugin-nas', label: 'NAS 文件存储',
     depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-iam', 'dsh-plugin-audit'],
     permissions: ['nas.read', 'nas.write'],
-    services: [['nasRegistry', 'ctx.nasRegistry', 'NAS 资产注册/生命周期/探活 + MCP 文件网关客户端（synology-filestation 形态）+ Skill 包存储配置']],
+    services: [['nasRegistry', 'ctx.nasRegistry', 'NAS 资产注册/生命周期/探活 + MCP 文件网关客户端（synology-filestation 形态）+ Skill 包存储配置；全部文件操作进 usage 计量（nas:* 资源，calls/bytes 口径）']],
     events: [
       ['nas.registered / nas.onlined / nas.offlined', 'emit', 'NAS 资产生命周期'],
     ],
@@ -204,6 +205,8 @@ const PLUGINS = [
       'POST /mcp（平台即 MCP Server：Streamable HTTP，initialize/tools/list/tools/call，Bearer 鉴权 + 工具级权限点）',
       'GET /api/platform/info（插件树/工具目录/集合） · GET /api/overview（工作台聚合）',
       'GET /api/assets/inventory（资产台账） · POST /api/assets/healthcheck（健康巡检） · GET /api/assets/report（成本报表）',
+      'GET /api/assets/benefit（效益分析：毛利=列表价收入−采购成本，应用关联单位 DAU 成本） · GET /api/assets/retire-reasons（下架分析：弃用/下线原因聚合）',
+      'GET /api/skills/usage-heatmap（技能热力图：skill × 日 使用矩阵）',
       '静态托管 public/ SPA（飞书级控制台）',
     ],
     ui: {

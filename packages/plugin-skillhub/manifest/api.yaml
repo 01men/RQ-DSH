@@ -17,4 +17,4 @@ tools:
 services:
   - key: skillHub
     access: ctx.skillHub
-    description: 提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索 + skill.zip 包存储（local/NAS）
+    description: 提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索 + skill.zip 包存储（local/NAS）；下载/安装进 usage 计量（skill:* 资源），弃用原因落库持久化

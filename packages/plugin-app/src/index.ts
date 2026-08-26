@@ -22,6 +22,10 @@ export interface AppUsageRecord extends RecordBase {
   sessions: number
   avgDepth: number
   retention7: number
+  /** 页面浏览量（同日多次上报累加；接入方主动上报口径）。 */
+  pv?: number
+  /** 日独立访客（同日多次上报取最大，与 DAU 同语义的 UV 口径）。 */
+  uv?: number
 }
 
 export class AppRegistryService extends Service {
@@ -182,17 +186,32 @@ export class AppRegistryService extends Service {
     }
   }
 
-  /** 回跳地址护栏：https 或 http://localhost[:port]（本机调试）。 */
-  private static assertRedirectUris(uris: string[]): void {
+  /**
+   * 回跳地址护栏：https 任意主机；http 仅限内网（环回 / RFC1918 私网 / 链路本地 / IPv6 ULA）。
+   * 纯内网部署可用 APP_SSO_ALLOW_HTTP=1 放开全部 http 主机（公网明文回调仍建议 https）。
+   * 公共静态：plugin-console 的管理端 OIDC 客户端路由复用同一份口径。
+   */
+  static assertRedirectUris(uris: string[]): void {
     if (!Array.isArray(uris) || uris.length === 0) throw new Error('redirectUris 必填（至少一个回调地址）')
+    const allowAnyHttp = String(process.env.APP_SSO_ALLOW_HTTP ?? '') === '1'
     for (const uri of uris) {
       let parsed: URL
       try { parsed = new URL(uri) } catch { throw new Error(`回调地址非法：${uri}`) }
-      const localhostOk = parsed.protocol === 'http:' && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
-      if (parsed.protocol !== 'https:' && !localhostOk) {
-        throw new Error(`回调地址必须为 https:// 或 http://localhost[:port]（收到：${uri}）`)
-      }
+      if (parsed.protocol === 'https:') continue
+      if (parsed.protocol === 'http:' && (allowAnyHttp || AppRegistryService.isIntranetHost(parsed.hostname))) continue
+      throw new Error(`回调地址必须为 https://，或 http:// 的内网地址（localhost / 127.0.0.1 / 10.x / 172.16-31.x / 192.168.x）（收到：${uri}）`)
     }
+  }
+
+  /** 内网主机判定：环回、RFC1918 私网、链路本地、IPv6 ULA。 */
+  private static isIntranetHost(hostname: string): boolean {
+    const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    if (host === 'localhost' || host === '::1') return true
+    if (host.includes(':')) return host.startsWith('f') || host.startsWith('fd') // fc00::/7 ULA
+    const parts = host.split('.')
+    if (parts.length !== 4 || parts.some((part) => !/^\d+$/.test(part))) return false // 非点分 IPv4 一律按公网处理
+    const [a, b] = parts.map(Number) as [number, number]
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
   }
 
   activeSsoClient(appId: string) {
@@ -254,9 +273,9 @@ export class AppRegistryService extends Service {
   /**
    * 记录应用层指标（外部应用主动上报通道：REST /api/apps/:id/metrics-report、
    * 工具 app_metrics_report、CLI app report 均汇入此方法）。
-   * 语义：同日 DAU 取最大、会话数累加；可指定 date 补录历史（YYYY-MM-DD）。
+   * 语义：同日 DAU/UV 取最大、会话数/PV 累加；可指定 date 补录历史（YYYY-MM-DD）。
    */
-  recordUsage(appId: string, usage: { dau?: number; sessions?: number; avgDepth?: number; retention7?: number; date?: string }): void {
+  recordUsage(appId: string, usage: { dau?: number; sessions?: number; avgDepth?: number; retention7?: number; pv?: number; uv?: number; date?: string }): void {
     if (!this.ctx.resourceCore.get('app', appId)) throw new Error(`应用不存在：${appId}`)
     const date = usage.date ?? new Date().toISOString().slice(0, 10)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`date 格式非法：${date}（应为 YYYY-MM-DD）`)
@@ -267,6 +286,8 @@ export class AppRegistryService extends Service {
         sessions: existing.sessions + (usage.sessions ?? 0),
         avgDepth: usage.avgDepth ?? existing.avgDepth,
         retention7: usage.retention7 ?? existing.retention7,
+        pv: (existing.pv ?? 0) + (usage.pv ?? 0),
+        uv: Math.max(existing.uv ?? 0, usage.uv ?? 0),
       })
     } else {
       this.usage().insert({
@@ -277,6 +298,8 @@ export class AppRegistryService extends Service {
         sessions: usage.sessions ?? 0,
         avgDepth: usage.avgDepth ?? 0,
         retention7: usage.retention7 ?? 0,
+        pv: usage.pv ?? 0,
+        uv: usage.uv ?? 0,
       })
     }
   }
@@ -284,23 +307,25 @@ export class AppRegistryService extends Service {
   metrics(appId: string): {
     dau: number
     mau: number
+    pv: number
+    uv: number
     sessions: number
     avgDepth: number
     retention7: number
-    series: Array<{ date: string; dau: number; sessions: number }>
+    series: Array<{ date: string; dau: number; pv: number; uv: number; sessions: number }>
   } {
     const rows = this.usage().find((item) => item.appId === appId).sort((a, b) => a.date.localeCompare(b.date))
     const today = rows.at(-1)
     const last30 = rows.slice(-30)
-    const mauSet = new Set<string>()
-    void mauSet
     return {
       dau: today?.dau ?? 0,
       mau: last30.reduce((sum, row) => sum + row.dau, 0),
+      pv: today?.pv ?? 0,
+      uv: today?.uv ?? 0,
       sessions: rows.reduce((sum, row) => sum + row.sessions, 0),
       avgDepth: Math.round((rows.reduce((sum, row) => sum + row.avgDepth, 0) / Math.max(1, rows.length)) * 10) / 10,
       retention7: today?.retention7 ?? 0,
-      series: rows.slice(-14).map((row) => ({ date: row.date, dau: row.dau, sessions: row.sessions })),
+      series: rows.slice(-14).map((row) => ({ date: row.date, dau: row.dau, pv: row.pv ?? 0, uv: row.uv ?? 0, sessions: row.sessions })),
     }
   }
 

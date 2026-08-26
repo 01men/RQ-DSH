@@ -75,10 +75,12 @@ export function apply(ctx: Context) {
       path: { type: 'string', description: '绝对路径 /<共享名>/子路径；省略列出共享' },
     },
     output: { type: 'object', additionalProperties: true },
-    async execute(args) {
+    async execute(args, exec) {
       const nasId = String(args.nasId)
       const path = args.path === undefined || args.path === '' ? undefined : String(args.path)
-      return path === undefined ? await ctx.nasRegistry.listShares(nasId) : await ctx.nasRegistry.listFiles(nasId, path)
+      return path === undefined
+        ? await ctx.nasRegistry.listShares(nasId, actorOf(args, exec))
+        : await ctx.nasRegistry.listFiles(nasId, path, actorOf(args, exec))
     },
   }))
 
@@ -92,8 +94,8 @@ export function apply(ctx: Context) {
       path: { type: 'string', description: '起始路径（默认根 /）' },
     },
     output: { type: 'object', additionalProperties: true },
-    async execute(args) {
-      return await ctx.nasRegistry.search(String(args.nasId), String(args.pattern), args.path ? String(args.path) : '/')
+    async execute(args, exec) {
+      return await ctx.nasRegistry.search(String(args.nasId), String(args.pattern), args.path ? String(args.path) : '/', actorOf(args, exec))
     },
   }))
 
@@ -146,7 +148,7 @@ export function apply(ctx: Context) {
   }))
 }
 
-/** 写类工具的操作人：工具桥注入 caller 身份后可信，直连执行时缺省标注来源。 */
+/** 文件类工具的操作人（计量 subject 与审计 actor 共用）：工具桥注入 caller 身份后可信，直连执行时缺省标注来源。 */
 function actorOf(args: Record<string, unknown>, exec: { callId: string }): { id: string; name: string } {
   if (typeof args.actorId === 'string' && typeof args.actorName === 'string') return { id: args.actorId, name: args.actorName }
   return { id: `tool:${exec.callId.slice(0, 8)}`, name: '运维工具调用' }

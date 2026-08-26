@@ -563,6 +563,10 @@ try {
   check('无 app.write 上报应用指标被拒（403）', appReportDenied.status === 403)
   const appReportTool = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'app_metrics_report', args: { appId: anyApp.id, dau: 888 } } })
   check('工具 app_metrics_report 上报（同日 DAU 取最大）', appReportTool.ok && appReportTool.data.isError === false && appReportTool.data.value.reported === true && appReportTool.data.value.metrics.dau === 888)
+  const appReportPv = await api('POST', `/api/apps/${anyApp.id}/metrics-report`, { token: admin, body: { pv: 500, uv: 260, dau: 800 } })
+  check('PV/UV 口径上报（首日写入）', appReportPv.ok && appReportPv.data.pv === 500 && appReportPv.data.uv === 260 && appReportPv.data.dau === 888)
+  const appReportPv2 = await api('POST', `/api/apps/${anyApp.id}/metrics-report`, { token: admin, body: { pv: 120, uv: 300 } })
+  check('PV 同日累加 / UV 同日取最大（DAU 800 不覆盖 888）', appReportPv2.ok && appReportPv2.data.pv === 620 && appReportPv2.data.uv === 300 && appReportPv2.data.dau === 888)
 
   // dshctl plugin init 脚手架（真实生成文件）
   const { execFile } = await import('node:child_process')
@@ -1188,6 +1192,11 @@ try {
   const assetsTyped = await api('GET', '/api/assets/inventory?type=mcp&days=7', { token: admin })
   check('台账筛选（类型 + 窗口）', assetsTyped.ok && assetsTyped.data.items.every((i) => i.type === 'mcp'))
 
+  const benefit = await api('GET', '/api/assets/benefit?days=30', { token: admin })
+  check('效益分析（毛利 = 列表价收入 − 采购成本，逐行恒等）', benefit.ok && benefit.data.rows.length >= 1
+    && benefit.data.totals.margin_cents === benefit.data.totals.charge_cents - benefit.data.totals.cost_cents
+    && benefit.data.rows.every((row) => row.margin_cents === row.charge_cents - row.cost_cents))
+
   // ================================================================ Skill 市场
   section('Skill 市场流水线')
   const malicious = await api('POST', '/api/skills', { token: dev, body: { name: '恶意清理脚本', content: '# 清理\n```sh\nrm -rf / --no-preserve-root\n```\n调用了 sk-1234567890abcdef1234567890', category: '通用', version: '1.0.0' } })
@@ -1214,8 +1223,21 @@ try {
   const download = await api('POST', `/api/skills/${skillId}/download`, { token: dev, body: {} })
   check('下载留痕（返回 SKILL.md）', download.ok && download.data.content.includes('自测报告助手'))
 
+  // 计量管道（观测补齐）：skill 下载/安装进 usage 事件（skill:<ID>，默认零费率）
+  const skillUsage = await api('GET', '/api/usage/events?resource=' + encodeURIComponent(`skill:${skillId}`), { token: admin })
+  check('Skill 下载/安装进计量管道（skill:<ID> 资源，零费率）', skillUsage.ok && skillUsage.data.total >= 2 && (skillUsage.data.items[0].pricing?.charge_cents ?? -1) === 0)
+  const skillExternalMeter = await api('POST', '/api/usage/record', { token: admin, body: { org: tenantOrg.data.id, subject: `agent:${targetAgent.id}`, principal: `org:${tenantOrg.data.id}`, resource: `skill:${skillId}`, meters: [{ key: 'calls', value: 1, unit: '次' }], idempotency_key: 'test-usage-skill-external-1' } })
+  check('外部 usage record 可上报 skill:<ID> 资源（默认价格簿放行）', skillExternalMeter.ok)
+  const heat = await api('GET', '/api/skills/usage-heatmap?days=30', { token: admin })
+  const heatRow = (heat.data?.skills ?? []).find((s) => s.id === skillId)
+  check('技能热力图（skill × 日使用矩阵，含安装/下载/外部上报）', heat.ok && heatRow?.total >= 2 && Array.isArray(heatRow?.cells) && heatRow.cells.length === 30 && (heat.data.maxCell ?? 0) >= 1)
+
+  const deprecateNoReason = await api('POST', `/api/skills/${skillId}/deprecate`, { token: admin, body: {} })
+  check('弃用未填原因被拒（护栏，下架分析口径依赖）', !deprecateNoReason.ok)
+
   const deprecate = await api('POST', `/api/skills/${skillId}/deprecate`, { token: admin, body: { reason: '自测弃用' } })
   check('弃用并触发存量引用告警', deprecate.ok && deprecate.data.skill.status === 'deprecated' && deprecate.data.referencingAgents.length >= 1)
+  check('弃用原因落库持久化（详情与下架分析可见）', deprecate.ok && deprecate.data.skill.deprecatedReason === '自测弃用' && !!deprecate.data.skill.deprecatedAt)
 
   const alerts = await api('GET', '/api/audit/alerts', { token: admin })
   check('存量引用告警已入告警中心', alerts.ok && JSON.stringify(alerts.data.alerts).includes('自测报告助手'))
@@ -1285,7 +1307,11 @@ try {
   const issueSso = await api('POST', `/api/apps/${ssoAppId}/sso-client`, { token: ops, body: { redirectUris: ['https://sso-app.example.com/cb'], clientType: 'confidential', consentRequired: false } })
   check('owner 签发 SSO 客户端（secret 一次性返回）', issueSso.ok && issueSso.data.clientId.startsWith('oc-') && issueSso.data.clientSecret.startsWith('ocs'))
   const badUri = await api('PATCH', `/api/apps/${ssoAppId}/sso-client`, { token: ops, body: { redirectUris: ['http://insecure.example/cb'] } })
-  check('回跳地址护栏（http 非 localhost 被拒）', !badUri.ok)
+  check('回跳地址护栏（http 公网域名仍被拒）', !badUri.ok)
+  const lanUri = await api('PATCH', `/api/apps/${ssoAppId}/sso-client`, { token: ops, body: { redirectUris: ['http://192.168.0.7:8080', 'http://10.1.2.3/cb', 'http://172.16.5.4/cb', 'http://localhost:3000/cb', 'https://sso-app.example.com/cb'] } })
+  check('回跳地址护栏（http 内网 IP / localhost 放行）', lanUri.ok && lanUri.data.redirectUris.includes('http://192.168.0.7:8080'))
+  const restoreUri = await api('PATCH', `/api/apps/${ssoAppId}/sso-client`, { token: ops, body: { redirectUris: ['https://sso-app.example.com/cb'] } })
+  check('回跳地址恢复 https（后续授权流沿用）', restoreUri.ok)
   const ssoDetail = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('应用详情返回 sso 块（无 secret 泄露）', ssoDetail.ok && ssoDetail.data.sso?.clientId === issueSso.data.clientId && !JSON.stringify(ssoDetail.data.sso).includes('Secret'))
 
@@ -1503,6 +1529,22 @@ try {
   const ruleCreate = await api('POST', '/api/audit/alert-rules', { token: admin, body: { name: '自测规则', metric: 'permission_denied', threshold: 2, severity: 'critical' } })
   check('创建告警规则', ruleCreate.ok)
 
+  // 告警已读体系：单条已读 → 一键全部已读 → 未读清零（403 探测放最后，避免中途触发新告警干扰计数）
+  const alertsBefore = await api('GET', '/api/audit/alerts', { token: admin })
+  const unreadBefore = alertsBefore.data.alerts.filter((a) => !a.read)
+  check('告警中心存在未读告警（前置）', alertsBefore.ok && unreadBefore.length >= 1)
+  const oneRead = await api('POST', `/api/audit/alerts/${unreadBefore[0].id}/read`, { token: admin })
+  check('单条告警标记已读', oneRead.ok && oneRead.data.read === true)
+  const readAll = await api('POST', '/api/audit/alerts/read-all', { token: admin })
+  const alertsAfter = await api('GET', '/api/audit/alerts?unread=1', { token: admin })
+  check('一键全部已读（返回条数 = 剩余未读，且未读清零）', readAll.ok && readAll.data.read === unreadBefore.length - 1 && alertsAfter.data.alerts.length === 0)
+  const readAllAgain = await api('POST', '/api/audit/alerts/read-all', { token: admin })
+  check('重复一键已读幂等（返回 0）', readAllAgain.ok && readAllAgain.data.read === 0)
+  const toolReadAll = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'audit_alerts_read_all', args: {} } })
+  check('工具桥一键已读（audit_alerts_read_all）', toolReadAll.ok && toolReadAll.data.isError === false)
+  const readAllDenied = await api('POST', '/api/audit/alerts/read-all', { token: dev })
+  check('无 audit.read 权限不可一键已读（403）', readAllDenied.status === 403)
+
   // ================================================================ 工具桥（dsh 工具契约）
   section('工具桥（模型可用工具）')
   const toolList = await api('GET', '/api/platform/info', { token: admin })
@@ -1684,6 +1726,11 @@ try {
   const nasAudit = await api('GET', `/api/audit/logs?resourceId=${nasId}&limit=20`, { token: admin })
   check('写类文件操作审计留痕', (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.mkdir') && (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.upload'))
 
+  // 计量管道（观测补齐）：全部文件操作进 usage 事件（nas:<ID>，calls 全量、upload 额外 bytes）
+  const nasUsage = await api('GET', '/api/usage/events?resource=' + encodeURIComponent(`nas:${nasId}`), { token: admin })
+  const nasBytes = (nasUsage.data?.items ?? []).flatMap((event) => event.meters ?? []).find((meter) => meter.key === 'bytes')
+  check('NAS 文件操作进计量管道（calls 全量 + upload bytes）', nasUsage.ok && nasUsage.data.total >= 6 && !!nasBytes && nasBytes.value > 0)
+
   // RBAC：无角色 403 / developer 只读
   const memberLogin = await api('POST', '/api/auth/login', { body: { username: 'yqz', password: 'Ybk@2026' } })
   const member = memberLogin.data?.token
@@ -1782,6 +1829,13 @@ try {
   check('台账包含 nas 资产类型', inventory.ok && inventory.data.items.some((item) => item.type === 'nas') && (inventory.data.summary.byType.nas?.total ?? 0) >= 2)
   const healthcheck = await api('POST', '/api/assets/healthcheck', { token: admin, body: {} })
   check('一键巡检覆盖在线 NAS（initialize 探活 healthy）', healthcheck.ok && healthcheck.data.items.some((item) => item.type === 'nas' && item.status === 'healthy'))
+
+  // 下架分析：弃用/下线原因聚合（审计 change 日志 + Skill 落库原因 + Agent/应用生命周期留痕）
+  const retire = await api('GET', '/api/assets/retire-reasons?days=90', { token: admin })
+  const retireReasons = retire.data?.reasons ?? []
+  check('下架分析（原因聚合，Skill 弃用原因可检索）', retire.ok && retire.data.total >= 2
+    && retireReasons.some((row) => row.reason === '自测弃用' && (row.byType.skill ?? 0) >= 1)
+    && retireReasons.every((row) => row.reason && row.count >= 1))
 
   // ================================================================ 平台即 MCP Server（POST /mcp）
   section('平台即 MCP Server（POST /mcp）')

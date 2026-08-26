@@ -56,10 +56,12 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'app_metrics_report',
-    description: '上报应用层产品指标（DAU/会话数/会话深度/7 日留存，可指定 date 补录历史）。外部 AI 应用接入后据此向宿主推送运行指标，宿主侧做全生命周期监测。',
+    description: '上报应用层产品指标（PV/UV/DAU/会话数/会话深度/7 日留存，可指定 date 补录历史）。外部 AI 应用接入后据此向宿主推送运行指标，宿主侧做全生命周期监测。',
     permission: 'app.write',
     parameters: {
       appId: { type: 'string', required: true, description: '应用 ID' },
+      pv: { type: 'integer', description: '页面浏览量 PV（同日多次上报累加）' },
+      uv: { type: 'integer', description: '日独立访客 UV（同日多次上报取最大值）' },
       dau: { type: 'integer', description: '日活跃用户数（同日多次上报取最大值）' },
       sessions: { type: 'integer', description: '会话数（同日多次上报累加）' },
       avgDepth: { type: 'number', description: '平均会话深度' },
@@ -70,6 +72,8 @@ export function apply(ctx: Context) {
     async execute(args) {
       const appId = String(args.appId)
       ctx.appRegistry.recordUsage(appId, {
+        ...(args.pv !== undefined ? { pv: Number(args.pv) } : {}),
+        ...(args.uv !== undefined ? { uv: Number(args.uv) } : {}),
         ...(args.dau !== undefined ? { dau: Number(args.dau) } : {}),
         ...(args.sessions !== undefined ? { sessions: Number(args.sessions) } : {}),
         ...(args.avgDepth !== undefined ? { avgDepth: Number(args.avgDepth) } : {}),

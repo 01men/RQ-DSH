@@ -150,7 +150,7 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
                                             （计量事件主动推送，schema v1 + 幂等键）
             [--idempotency-key= --tenant-id=]
             events [--principal= --resource= --limit=] | totals [--principal= --from=]
-  audit     logs [--type= --resourceId= --limit=] | alerts [--unread]
+  audit     logs [--type= --resourceId= --limit=] | alerts [--unread] | read-all
   approval  list [--pending] | decide <id> --decision=approve|reject --opinion=
   cost      report --groupBy=app|agent|org|date
   platform  info                              插件树 / 工具目录 / 集合
@@ -754,15 +754,15 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       if (action === 'get') { out(await call('GET', `/api/apps/${id}`)); return }
       if (action === 'metrics') { out((await call('GET', `/api/apps/${id}`)).metrics); return }
       if (action === 'report') {
-        if (!id) fail('用法：app report <id> [--dau=] [--sessions=] [--avg-depth=] [--retention7=] [--date=YYYY-MM-DD]')
+        if (!id) fail('用法：app report <id> [--pv=] [--uv=] [--dau=] [--sessions=] [--avg-depth=] [--retention7=] [--date=YYYY-MM-DD]')
         const input = {}
-        for (const [flagName, key] of [['dau', 'dau'], ['sessions', 'sessions'], ['avg-depth', 'avgDepth'], ['retention7', 'retention7']]) {
+        for (const [flagName, key] of [['pv', 'pv'], ['uv', 'uv'], ['dau', 'dau'], ['sessions', 'sessions'], ['avg-depth', 'avgDepth'], ['retention7', 'retention7']]) {
           const value = flag(flagName)
           if (value !== undefined && value !== true) input[key] = Number(value)
         }
         const date = flag('date')
         if (date && date !== true) input.date = String(date)
-        if (Object.keys(input).length === 0) fail('至少上报一项指标：--dau= / --sessions= / --avg-depth= / --retention7=（可选 --date= 补录历史）')
+        if (Object.keys(input).length === 0) fail('至少上报一项指标：--pv= / --uv= / --dau= / --sessions= / --avg-depth= / --retention7=（可选 --date= 补录历史）')
         const data = await call('POST', `/api/apps/${id}/metrics-report`, input)
         ok('应用指标已上报（宿主侧已记录）')
         out(data)
@@ -791,6 +791,11 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       if (action === 'alerts') {
         const data = await call('GET', '/api/audit/alerts' + (flag('unread') ? '?unread=1' : ''))
         out(data.alerts.map((a) => ({ time: a.createdAt.slice(0, 16).replace('T', ' '), severity: a.severity, title: a.title })), ['time', 'severity', 'title'])
+        return
+      }
+      if (action === 'read-all') {
+        const result = await call('POST', '/api/audit/alerts/read-all')
+        out([{ read: result.read }], ['read'])
         return
       }
       fail(`未知动作：audit ${action}`)

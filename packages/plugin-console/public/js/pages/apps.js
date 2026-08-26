@@ -51,6 +51,8 @@ export async function renderApps(content, params, ctx) {
           ${(app.attrs['channels'] ?? []).map((ch) => `<span class="badge badge-muted no-dot">${esc(ch)}</span>`).join('')}
         </div>
         <div class="res-foot">
+          <span class="metric">${icon('eye', 13)}PV ${fmtNum(app.metrics.pv ?? 0)}</span>
+          <span class="metric">${icon('users', 13)}UV ${fmtNum(app.metrics.uv ?? 0)}</span>
           <span class="metric">${icon('users', 13)}DAU ${fmtNum(app.metrics.dau)}</span>
           <span class="metric">${icon('activity', 13)}会话 ${fmtNum(app.metrics.sessions)}</span>
           <span style="margin-left:auto" class="text-4">${esc(app.attrs['ownerName'] ?? '')}</span>
@@ -79,7 +81,9 @@ async function openAppDetail(id, ctx) {
         ${(app.attrs['channels'] ?? []).map((ch) => `<span class="badge badge-muted no-dot">${esc(ch)}</span>`).join('')}
       </div>
 
-      <div class="stat-grid mb-20" style="grid-template-columns:repeat(4,1fr)">
+      <div class="stat-grid mb-20" style="grid-template-columns:repeat(6,1fr)">
+        ${miniStat('eye', '今日 PV', fmtNum(app.metrics.pv ?? 0))}
+        ${miniStat('users', '今日 UV', fmtNum(app.metrics.uv ?? 0))}
         ${miniStat('users', '今日 DAU', fmtNum(app.metrics.dau))}
         ${miniStat('activity', '累计会话', fmtNum(app.metrics.sessions))}
         ${miniStat('zap', '会话深度', app.metrics.avgDepth + ' 轮')}
@@ -122,8 +126,12 @@ async function openAppDetail(id, ctx) {
     if (tab === 'metrics') {
       tabBody.innerHTML = `
         <div class="card card-pad mb-14">
-          <div class="card-title mb-8">近 14 天 DAU</div>
-          ${lineChart([app.metrics.series.map((s) => s.dau)], { width: 640, height: 150, colors: ['#4f6ef7'] })}
+          <div class="card-title mb-8">近 14 天 UV / DAU（日去重口径）</div>
+          ${lineChart([app.metrics.series.map((s) => s.uv ?? 0), app.metrics.series.map((s) => s.dau)], { width: 640, height: 150, colors: ['#10b981', '#4f6ef7'], labels: ['UV', 'DAU'] })}
+        </div>
+        <div class="card card-pad mb-14">
+          <div class="card-title mb-8">近 14 天 PV（页面浏览量）</div>
+          ${barChartSafe(app.metrics.series.map((s) => ({ label: s.date, value: s.pv ?? 0 })), 640, 150)}
         </div>
         <div class="card card-pad">
           <div class="card-title mb-8">近 14 天会话数</div>
@@ -241,7 +249,7 @@ function renderSsoTab(holder, app, ctx) {
         <div class="desc-item"><span class="k">签发时间</span><span class="v">${fmtTime(sso.createdAt)}</span></div>
       </div>
       <div class="form-item">
-        <label class="form-label">回调地址（redirect_uris，每行一个；https:// 或 http://localhost）</label>
+        <label class="form-label">回调地址（redirect_uris，每行一个；https://，或 http:// 内网/本机地址）</label>
         <textarea class="form-control mono" id="sso-redirects" rows="2">${esc(sso.redirectUris.join('\n'))}</textarea>
       </div>
       <div class="form-item">
@@ -326,7 +334,7 @@ function openIssueSsoModal(app, ctx) {
       <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>client_secret 仅签发后展示一次；应用按 OIDC 授权码模式接入（强制 PKCE S256）。</span></div>
       <div class="form-grid">
         ${field('回调地址 redirect_uris（每行一个）', `
-          <textarea class="form-control mono" name="redirectUris" rows="2" placeholder="https://app.example.com/auth/cb&#10;http://localhost:3000/cb（本机调试）"></textarea>`, { required: true, full: true, hint: '仅允许 https:// 或 http://localhost[:port]' })}
+          <textarea class="form-control mono" name="redirectUris" rows="2" placeholder="https://app.example.com/auth/cb&#10;http://192.168.0.7:8080/auth/cb（内网）&#10;http://localhost:3000/cb（本机调试）"></textarea>`, { required: true, full: true, hint: 'https:// 任意主机；http:// 仅限内网（localhost / 127.0.0.1 / 10.x / 172.16-31.x / 192.168.x）' })}
         ${field('客户端类型', selectField('clientType', [
           { value: 'confidential', label: 'confidential —— 有后端，持有 secret（推荐）' },
           { value: 'public', label: 'public —— 纯前端 SPA，免 secret（强制 PKCE、不发 refresh）' },

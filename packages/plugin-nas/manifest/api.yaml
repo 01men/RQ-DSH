@@ -2,7 +2,7 @@
 plugin: dsh-plugin-nas
 base: /api
 endpoints:
-  - GET/POST /api/nas · GET/PATCH/DELETE /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）
+  - GET/POST /api/nas · GET/PATCH /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）
   - POST /api/nas/:id/transition|health|sync-tools
   - GET /api/nas/:id/fs[?path=] · GET /api/nas/:id/fs/info
   - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download（经网关 fs_* 工具）
@@ -19,4 +19,4 @@ tools:
 services:
   - key: nasRegistry
     access: ctx.nasRegistry
-    description: NAS 资产注册/生命周期/探活 + MCP 文件网关客户端（synology-filestation 形态）+ Skill 包存储配置
+    description: NAS 资产注册/生命周期/探活 + MCP 文件网关客户端（synology-filestation 形态）+ Skill 包存储配置；全部文件操作进 usage 计量（nas:* 资源，calls/bytes 口径）

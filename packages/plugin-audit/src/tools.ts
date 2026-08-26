@@ -40,6 +40,17 @@ export function apply(ctx: Context) {
   }))
 
   t.register(defineTool({
+    name: 'audit_alerts_read_all',
+    description: '告警中心一键全部已读（处理完毕后批量清理未读状态），返回本次标记条数。',
+    permission: 'audit.read',
+    parameters: {},
+    output: { type: 'object', additionalProperties: true },
+    async execute() {
+      return { read: ctx.audit.markAllAlertsRead() }
+    },
+  }))
+
+  t.register(defineTool({
     name: 'approval_decide',
     description: '审批中心决策（approve/reject）。发起人与审批人不得为同一人。',
     permission: 'approval.decide',

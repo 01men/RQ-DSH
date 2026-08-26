@@ -7,7 +7,8 @@
  *
  * 基于 resource-core 底座（Pattern A）：属性表 + 生命周期状态机 + 依赖图复用，
  * 本插件补充：网关客户端、健康探活、工具发现、文件操作面与 Skill 包存储配置。
- * 全部写类文件操作审计留痕；读类操作仅在线资产可调。
+ * 全部写类文件操作审计留痕；读类操作仅在线资产可调；全部文件操作进 usage 计量
+ * （nas:* 资源、calls/bytes 口径，默认零费率——观测先行，计费由价格簿调价决定）。
  */
 import { mkdir, writeFile, readFile } from 'node:fs/promises'
 import { join, normalize, sep } from 'node:path'
@@ -191,48 +192,48 @@ export class NasRegistryService extends Service {
 
   // -- 文件操作面（全部经网关 tools/call） -----------------------------------
 
-  async listShares(id: string): Promise<unknown> {
-    return await this.fsCall(id, 'fs_list_shares', {})
+  async listShares(id: string, actor?: { id: string; name: string }): Promise<unknown> {
+    return await this.fsCall(id, 'fs_list_shares', {}, { actor })
   }
 
-  async listFiles(id: string, path = '/'): Promise<unknown> {
+  async listFiles(id: string, path = '/', actor?: { id: string; name: string }): Promise<unknown> {
     const { share, subPath } = this.splitPath(id, path)
-    return await this.fsCall(id, 'fs_list', { share, path: subPath })
+    return await this.fsCall(id, 'fs_list', { share, path: subPath }, { actor })
   }
 
-  async getInfo(id: string, path: string): Promise<unknown> {
+  async getInfo(id: string, path: string, actor?: { id: string; name: string }): Promise<unknown> {
     const { share, subPath } = this.splitPath(id, path)
-    return await this.fsCall(id, 'fs_get_info', { share, path: subPath })
+    return await this.fsCall(id, 'fs_get_info', { share, path: subPath }, { actor })
   }
 
-  async search(id: string, pattern: string, path = '/'): Promise<unknown> {
+  async search(id: string, pattern: string, path = '/', actor?: { id: string; name: string }): Promise<unknown> {
     const { share, subPath } = this.splitPath(id, path)
-    return await this.fsCall(id, 'fs_search', { share, path: subPath, pattern })
+    return await this.fsCall(id, 'fs_search', { share, path: subPath, pattern }, { actor })
   }
 
   async mkdir(id: string, path: string, actor: { id: string; name: string }): Promise<unknown> {
     const { share, subPath } = this.splitPath(id, path)
-    const result = await this.fsCall(id, 'fs_create_folder', { share, path: subPath })
+    const result = await this.fsCall(id, 'fs_create_folder', { share, path: subPath }, { actor })
     this.fsAudit(actor, 'nas.fs.mkdir', id, path)
     return result
   }
 
   async rename(id: string, path: string, newName: string, actor: { id: string; name: string }): Promise<unknown> {
     const { share, subPath } = this.splitPath(id, path)
-    const result = await this.fsCall(id, 'fs_rename', { share, path: subPath, new_name: newName })
+    const result = await this.fsCall(id, 'fs_rename', { share, path: subPath, new_name: newName }, { actor })
     this.fsAudit(actor, 'nas.fs.rename', id, `${path} → ${newName}`)
     return result
   }
 
   async copyMove(id: string, paths: string[], destination: string, mode: 'copy' | 'move', actor: { id: string; name: string }): Promise<unknown> {
     const { share, subPath } = this.splitPath(id, destination)
-    const result = await this.fsCall(id, 'fs_copy_move', { share, paths: paths.map((p) => this.splitPath(id, p).subPath), dest: subPath, mode })
+    const result = await this.fsCall(id, 'fs_copy_move', { share, paths: paths.map((p) => this.splitPath(id, p).subPath), dest: subPath, mode }, { actor })
     this.fsAudit(actor, `nas.fs.${mode}`, id, `${paths.join(',')} → ${destination}`)
     return result
   }
 
   async delete(id: string, paths: string[], actor: { id: string; name: string }): Promise<unknown> {
-    const result = await this.fsCall(id, 'fs_delete', { share: this.splitPath(id, paths[0] ?? '/').share, paths: paths.map((p) => this.splitPath(id, p).subPath) })
+    const result = await this.fsCall(id, 'fs_delete', { share: this.splitPath(id, paths[0] ?? '/').share, paths: paths.map((p) => this.splitPath(id, p).subPath) }, { actor })
     this.fsAudit(actor, 'nas.fs.delete', id, paths.join(','))
     return result
   }
@@ -257,7 +258,7 @@ export class NasRegistryService extends Service {
       throw new Error('uploadFile 需要 buffer 或 localFile 之一')
     }
     const { share, subPath } = this.splitPath(id, input.destPath)
-    await this.fsCall(id, 'fs_upload', { share, path: subPath, local_file: stagingFile, overwrite: true })
+    await this.fsCall(id, 'fs_upload', { share, path: subPath, local_file: stagingFile, overwrite: true }, { actor: input.actor, bytes: sizeBytes })
     this.fsAudit(input.actor, 'nas.fs.upload', id, `${input.destPath}（${sizeBytes}B，staging=${stagingFile}）`)
     return { path: input.destPath, sizeBytes }
   }
@@ -268,14 +269,14 @@ export class NasRegistryService extends Service {
     const dir = join(this.stagingDir(nas), 'downloads')
     await mkdir(dir, { recursive: true })
     const { share, subPath } = this.splitPath(id, path)
-    const result = await this.fsCall(id, 'fs_download', { share, path: subPath, dest_dir: dir })
+    const result = await this.fsCall(id, 'fs_download', { share, path: subPath, dest_dir: dir }, { actor })
     this.fsAudit(actor, 'nas.fs.download', id, path)
     return { localFile: join(dir, path.split('/').filter(Boolean).pop() ?? 'file'), result }
   }
 
-  async taskStatus(id: string, taskId: string): Promise<unknown> {
+  async taskStatus(id: string, taskId: string, actor?: { id: string; name: string }): Promise<unknown> {
     const { share } = this.splitPath(id, '/')
-    return await this.fsCall(id, 'fs_task_status', { share, taskid: taskId })
+    return await this.fsCall(id, 'fs_task_status', { share, taskid: taskId }, { actor })
   }
 
   // -- Skill 包存储配置 -----------------------------------------------------
@@ -335,10 +336,30 @@ export class NasRegistryService extends Service {
     return client
   }
 
-  private async fsCall(id: string, tool: string, args: Record<string, unknown>): Promise<unknown> {
+  private async fsCall(id: string, tool: string, args: Record<string, unknown>, meter?: { actor?: { id: string; name: string }; bytes?: number }): Promise<unknown> {
     const nas = this.requireOnline(id)
     const raw = await this.clientFor(nas).call(tool, args)
+    this.meterFsUsage(nas, meter)
     return typeof raw === 'string' ? parseMaybeJson(raw) : raw
+  }
+
+  /** 计量管道（观测补齐）：全部文件操作进 usage 事件（nas:* 默认零费率，失败只告警不阻断）。 */
+  private meterFsUsage(nas: ResourceEntity, meter?: { actor?: { id: string; name: string }; bytes?: number }): void {
+    try {
+      this.ctx.usage.record({
+        org: nas.orgId,
+        subject: meter?.actor ? (meter.actor.id.includes(':') ? meter.actor.id : `user:${meter.actor.id}`) : 'user:platform',
+        principal: `org:${nas.orgId}`,
+        resource: `nas:${nas.id}`,
+        meters: [
+          { key: 'calls', value: 1, unit: '次' },
+          ...(meter?.bytes && meter.bytes > 0 ? [{ key: 'bytes', value: meter.bytes, unit: '字节' }] : []),
+        ],
+        idempotency_key: `nas:fs:${newId('nfs')}`,
+      })
+    } catch (error) {
+      this.ctx.logger('nas').warn('usage 计量登记失败', error)
+    }
   }
 
   /** 平台路径 → 网关契约的 { share, path }（"/share/a/b" → share="share" path="/a/b"），并收敛到授权根路径内。 */
@@ -408,7 +429,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'nas'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit', 'usage']
 
 export function apply(ctx: Context) {
   ctx.plugin(NasRegistryService)

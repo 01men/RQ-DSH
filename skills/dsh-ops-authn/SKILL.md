@@ -31,7 +31,7 @@ POST /api/agents/<id>/obo-token（用户令牌发起）→ 返回 act 链：
 
 ### 场景 4：应用接入 SSO（OIDC 客户端）
 1. 应用 owner 在控制台「AI 应用 → 详情 → SSO 配置」签发客户端（或管理员在「认证与令牌 → OIDC 客户端」全局登记）
-2. client_secret 仅展示一次；回调地址仅允许 https:// 或 http://localhost；纯前端 SPA 选 public 类型（免 secret、强制 PKCE、无 refresh）
+2. client_secret 仅展示一次；回调地址允许 https:// 任意主机，或 http:// 内网地址（localhost / 127.0.0.1 / 10.x / 172.16-31.x / 192.168.x，纯内网部署可 APP_SSO_ALLOW_HTTP=1 放开）；纯前端 SPA 选 public 类型（免 secret、强制 PKCE、无 refresh）
 3. 应用侧按 docs/app-sso-integration.md 接入（openid-client / oidc-client-ts，discovery 驱动一行式）
 4. web/h5 形态应用上线门禁：未签发有效客户端时 requestOnline 直接拒绝（APP_SSO_ENFORCE 可调）
 

@@ -14,6 +14,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
 import { createPluginContext, platformVersionInfo } from '../../platform-core/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
+import { AppRegistryService } from '../../plugin-app/src/index.ts'
 import { seedAll } from './seed.ts'
 
 export const name = 'console'
@@ -659,20 +660,25 @@ export function apply(ctx: Context) {
     }
   })
 
+  // 资源/主体的展示名解析（成本报表与效益分析共用）
+  const labelOfResource = (resource: string) => {
+    const [kind, key] = [resource.slice(0, resource.indexOf(':')), resource.slice(resource.indexOf(':') + 1)]
+    if (kind === 'mcp') return ctx.mcpRegistry.services().findOne((item) => item.slug === key)?.name ?? resource
+    if (kind === 'model') return ctx.modelGateway.models().findOne((item) => item.slug === key)?.displayName ?? resource
+    if (kind === 'skill') return ctx.skillHub.skills().get(key)?.name ?? resource
+    if (kind === 'nas') return ctx.nasRegistry.get(key)?.name ?? resource
+    if (kind === 'app') return ctx.resourceCore.list('app').find((item) => item.slug === key)?.name ?? resource
+    return resource
+  }
+  const labelOfPrincipal = (principal: string) => {
+    if (principal.startsWith('org:')) return ctx.iam.orgs().get(principal.slice(4))?.name ?? principal
+    return principal
+  }
+
   guarded('GET', '/api/assets/report', 'usage.read', (exchange) => {
     const days = Math.min(Math.max(Number(exchange.query.get('days') ?? 30) || 30, 1), 90)
     const fromIso = new Date(Date.now() - days * 86_400_000).toISOString()
     const { byResource, byPrincipal, byDay } = ctx.usage.breakdown(fromIso)
-    const labelOfResource = (resource: string) => {
-      const [kind, key] = [resource.slice(0, resource.indexOf(':')), resource.slice(resource.indexOf(':') + 1)]
-      if (kind === 'mcp') return ctx.mcpRegistry.services().findOne((item) => item.slug === key)?.name ?? resource
-      if (kind === 'model') return ctx.modelGateway.models().findOne((item) => item.slug === key)?.displayName ?? resource
-      return resource
-    }
-    const labelOfPrincipal = (principal: string) => {
-      if (principal.startsWith('org:')) return ctx.iam.orgs().get(principal.slice(4))?.name ?? principal
-      return principal
-    }
     return {
       days,
       totals: ctx.usage.totals({ from: fromIso }),
@@ -680,6 +686,142 @@ export function apply(ctx: Context) {
       byPrincipal: byPrincipal.map((row) => ({ ...row, label: labelOfPrincipal(row.principal) })),
       byDay,
     }
+  })
+
+  // -- 效益分析（毛利口径）：列表价收入 - 采购成本；应用类资产关联单位 DAU 成本 --------------
+  guarded('GET', '/api/assets/benefit', 'usage.read', (exchange) => {
+    const days = Math.min(Math.max(Number(exchange.query.get('days') ?? 30) || 30, 1), 90)
+    const fromIso = new Date(Date.now() - days * 86_400_000).toISOString()
+    const fromDay = fromIso.slice(0, 10)
+    const appsBySlug = new Map(ctx.resourceCore.list('app').map((app) => [app.slug, app]))
+    const rows = ctx.usage.breakdown(fromIso).byResource.map((row) => {
+      const kind = row.resource.slice(0, row.resource.indexOf(':'))
+      const key = row.resource.slice(row.resource.indexOf(':') + 1)
+      const windowDau = kind === 'app' && appsBySlug.has(key)
+        ? ctx.appRegistry.usage().find((item) => item.appId === appsBySlug.get(key)!.id && item.date >= fromDay)
+          .reduce((sum, item) => sum + item.dau, 0)
+        : null
+      return {
+        resource: row.resource,
+        label: labelOfResource(row.resource),
+        kind,
+        count: row.count,
+        charge_cents: row.charge_cents,
+        cost_cents: row.cost_cents,
+        margin_cents: row.charge_cents - row.cost_cents,
+        window_dau: windowDau,
+        cost_per_dau_cents: windowDau && windowDau > 0 ? Math.round(row.cost_cents / windowDau) : null,
+      }
+    }).sort((a, b) => b.margin_cents - a.margin_cents || b.count - a.count)
+    return {
+      days,
+      totals: {
+        count: rows.reduce((sum, row) => sum + row.count, 0),
+        charge_cents: rows.reduce((sum, row) => sum + row.charge_cents, 0),
+        cost_cents: rows.reduce((sum, row) => sum + row.cost_cents, 0),
+        margin_cents: rows.reduce((sum, row) => sum + row.margin_cents, 0),
+      },
+      rows,
+    }
+  })
+
+  // -- 技能热力图：skill × 日 使用矩阵（usage 事件为主，计量管道接入前的下载流水回填） ------
+  guarded('GET', '/api/skills/usage-heatmap', 'skill.read', (exchange) => {
+    const days = Math.min(Math.max(Number(exchange.query.get('days') ?? 30) || 30, 7), 90)
+    const fromIso = new Date(Date.now() - days * 86_400_000).toISOString()
+    const fromDay = fromIso.slice(0, 10)
+    const counts = new Map<string, number>()
+    const daysMetered = new Map<string, Set<string>>()
+    for (const row of ctx.usage.matrix(fromIso, 'skill:')) {
+      const skillId = row.resource.slice('skill:'.length)
+      counts.set(`${skillId}|${row.day}`, (counts.get(`${skillId}|${row.day}`) ?? 0) + row.count)
+      if (!daysMetered.has(skillId)) daysMetered.set(skillId, new Set())
+      daysMetered.get(skillId)!.add(row.day)
+    }
+    // 回填：计量管道接入前的下载流水（同 skill 同日已有计量事件则不重复累计）
+    for (const record of ctx.skillHub.downloads().all()) {
+      const day = (record.createdAt ?? '').slice(0, 10)
+      if (!day || day < fromDay) continue
+      const skill = ctx.skillHub.skills().get(record.skillId)
+      if (!skill || daysMetered.get(skill.id)?.has(day)) continue
+      counts.set(`${skill.id}|${day}`, (counts.get(`${skill.id}|${day}`) ?? 0) + 1)
+    }
+    const axis: string[] = []
+    for (let i = days - 1; i >= 0; i--) axis.push(new Date(Date.now() - i * 86_400_000).toISOString().slice(0, 10))
+    const bySkill = new Map<string, { slug: string; name: string; cells: Map<string, number>; total: number }>()
+    for (const [key, count] of counts) {
+      const separator = key.lastIndexOf('|')
+      const skillId = key.slice(0, separator)
+      const day = key.slice(separator + 1)
+      let entry = bySkill.get(skillId)
+      if (!entry) {
+        const skill = ctx.skillHub.skills().get(skillId)
+        entry = { slug: skill?.slug ?? skillId, name: skill?.name ?? skillId, cells: new Map(), total: 0 }
+        bySkill.set(skillId, entry)
+      }
+      entry.cells.set(day, count)
+      entry.total += count
+    }
+    const skills = [...bySkill.entries()].map(([skillId, entry]) => ({
+      id: skillId,
+      slug: entry.slug,
+      name: entry.name,
+      total: entry.total,
+      cells: axis.map((day) => entry.cells.get(day) ?? 0),
+    })).sort((a, b) => b.total - a.total).slice(0, 20)
+    return { days: axis, skills, maxCell: Math.max(1, ...skills.flatMap((item) => item.cells)) }
+  })
+
+  // -- 下架分析：弃用/下线原因聚合（审计 change 日志 + 生命周期留痕 + Skill 落库原因） ------
+  guarded('GET', '/api/assets/retire-reasons', 'usage.read', (exchange) => {
+    const days = Math.min(Math.max(Number(exchange.query.get('days') ?? 90) || 90, 1), 365)
+    const fromIso = new Date(Date.now() - days * 86_400_000).toISOString()
+    const buckets = new Map<string, { reason: string; count: number; byType: Record<string, number>; latestAt: string; samples: Array<{ type: string; name: string; at: string }> }>()
+    const bucketOf = (reason: string) => {
+      const key = reason.trim() || '（未填写原因）'
+      let bucket = buckets.get(key)
+      if (!bucket) {
+        bucket = { reason: key, count: 0, byType: {}, latestAt: '', samples: [] }
+        buckets.set(key, bucket)
+      }
+      return bucket
+    }
+    const add = (reason: string, type: string, name: string, at: string) => {
+      const bucket = bucketOf(reason)
+      bucket.count++
+      bucket.byType[type] = (bucket.byType[type] ?? 0) + 1
+      if (at > bucket.latestAt) bucket.latestAt = at
+      if (bucket.samples.length < 5) bucket.samples.push({ type, name, at })
+    }
+    // Skill 弃用原因以落库记录为准（P5 起持久化），无落库原因的历史弃用回退审计日志
+    const skillReasonPersisted = new Set(
+      ctx.skillHub.skills().all()
+        .filter((skill) => skill.deprecatedAt && (skill.deprecatedAt ?? '') >= fromIso)
+        .map((skill) => skill.id),
+    )
+    const RETIRE_ACTIONS = new Set(['skill.deprecate', 'mcp.service.offline', 'nas.offline', 'nas.archive'])
+    for (const log of ctx.audit.logs().all()) {
+      if (log.type !== 'change' || !RETIRE_ACTIONS.has(log.action)) continue
+      if ((log.createdAt ?? '') < fromIso) continue
+      if (log.action === 'skill.deprecate' && skillReasonPersisted.has(log.resourceId)) continue
+      add(log.detail, log.resourceType, log.resourceName, log.createdAt)
+    }
+    for (const skill of ctx.skillHub.skills().all()) {
+      if (!['deprecated', 'offline'].includes(skill.status)) continue
+      if (!skill.deprecatedAt || skill.deprecatedAt < fromIso) continue
+      add(skill.deprecatedReason ?? '', 'skill', skill.name, skill.deprecatedAt)
+    }
+    // Agent/应用下线经审批执行器落生命周期留痕（note 即下架原因），不经 change 日志
+    for (const type of ['agent', 'app']) {
+      for (const entity of ctx.resourceCore.list(type)) {
+        for (const entry of entity.lifecycleHistory ?? []) {
+          if (entry.action !== 'offline' || (entry.at ?? '') < fromIso) continue
+          add(entry.note ?? '', type, entity.name, entry.at)
+        }
+      }
+    }
+    const reasons = [...buckets.values()].sort((a, b) => b.count - a.count)
+    return { days, total: reasons.reduce((sum, bucket) => sum + bucket.count, 0), reasons }
   })
 
   // -- IAM ----------------------------------------------------------------
@@ -998,12 +1140,7 @@ export function apply(ctx: Context) {
     if (!input.name || !Array.isArray(input.redirectUris) || input.redirectUris.length === 0) {
       throw new Error('name 与 redirectUris（至少一个回调地址）必填')
     }
-    for (const uri of input.redirectUris) {
-      let parsed: URL
-      try { parsed = new URL(uri) } catch { throw new Error(`回调地址非法：${uri}`) }
-      const localhostOk = parsed.protocol === 'http:' && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1')
-      if (parsed.protocol !== 'https:' && !localhostOk) throw new Error(`回调地址必须为 https:// 或 http://localhost[:port]（收到：${uri}）`)
-    }
+    AppRegistryService.assertRedirectUris(input.redirectUris)
     const created = ctx.oidc.createClient({
       name: input.name,
       redirectUris: input.redirectUris,
@@ -1129,6 +1266,7 @@ export function apply(ctx: Context) {
 
   guarded('POST', '/api/mcp/services/:id/offline', 'mcp.service.offline', (exchange) => {
     const { reason, viaApproval } = body<{ reason?: string; viaApproval?: boolean }>(exchange)
+    if (!reason?.trim()) throw new Error('下线必须填写原因（护栏要求，下架分析依赖该口径）')
     const id = exchange.params['id']!
     if (viaApproval !== false) {
       const impact = ctx.resourceCore.impact('mcp_service', id)
@@ -1255,8 +1393,9 @@ export function apply(ctx: Context) {
 
   guarded('POST', '/api/skills/:id/deprecate', 'skill.publish', (exchange) => {
     const { reason, force } = body<{ reason?: string; force?: boolean }>(exchange)
-    const result = ctx.skillHub.deprecate(exchange.params['id']!, caller(exchange).name, reason ?? '', force)
-    changeLog(exchange, 'skill.deprecate', 'skill', result.skill.id, result.skill.name, reason ?? '')
+    if (!reason?.trim()) throw new Error('弃用必须填写原因（护栏要求，下架分析依赖该口径）')
+    const result = ctx.skillHub.deprecate(exchange.params['id']!, caller(exchange).name, reason, force)
+    changeLog(exchange, 'skill.deprecate', 'skill', result.skill.id, result.skill.name, reason)
     return result
   })
 
@@ -1467,19 +1606,23 @@ export function apply(ctx: Context) {
   guarded('GET', '/api/nas/:id/fs', 'nas.read', async (exchange) => {
     const id = exchange.params['id']!
     const path = exchange.query.get('path')
-    return path === null || path === '' ? await ctx.nasRegistry.listShares(id) : await ctx.nasRegistry.listFiles(id, path)
+    const info = caller(exchange)
+    const actor = { id: info.userId ?? info.principalId, name: info.name }
+    return path === null || path === '' ? await ctx.nasRegistry.listShares(id, actor) : await ctx.nasRegistry.listFiles(id, path, actor)
   })
 
   guarded('GET', '/api/nas/:id/fs/info', 'nas.read', async (exchange) => {
     const path = exchange.query.get('path')
     if (!path) throw new Error('缺少 path 查询参数')
-    return await ctx.nasRegistry.getInfo(exchange.params['id']!, path)
+    const info = caller(exchange)
+    return await ctx.nasRegistry.getInfo(exchange.params['id']!, path, { id: info.userId ?? info.principalId, name: info.name })
   })
 
   guarded('POST', '/api/nas/:id/fs/search', 'nas.read', async (exchange) => {
     const { pattern, path } = body<{ pattern: string; path?: string }>(exchange)
     if (!pattern) throw new Error('缺少 pattern')
-    return await ctx.nasRegistry.search(exchange.params['id']!, pattern, path ?? '/')
+    const info = caller(exchange)
+    return await ctx.nasRegistry.search(exchange.params['id']!, pattern, path ?? '/', { id: info.userId ?? info.principalId, name: info.name })
   })
 
   guarded('POST', '/api/nas/:id/fs/mkdir', 'nas.write', async (exchange) => {
@@ -1675,13 +1818,13 @@ export function apply(ctx: Context) {
     return app
   })
 
-  // 应用指标主动上报（接入方 → 宿主推送通道；同日 DAU 取最大、会话累加，可指定 date 补录）
+  // 应用指标主动上报（接入方 → 宿主推送通道；同日 DAU/UV 取最大、会话/PV 累加，可指定 date 补录）
   guarded('POST', '/api/apps/:id/metrics-report', 'app.write', (exchange) => {
     const id = exchange.params['id']!
-    const input = body<{ dau?: number; sessions?: number; avgDepth?: number; retention7?: number; date?: string }>(exchange)
+    const input = body<{ dau?: number; sessions?: number; avgDepth?: number; retention7?: number; pv?: number; uv?: number; date?: string }>(exchange)
     ctx.appRegistry.recordUsage(id, input)
     const app = ctx.resourceCore.get('app', id)!
-    changeLog(exchange, 'app.metrics.report', 'app', id, app.name, `dau=${input.dau ?? '-'} sessions=${input.sessions ?? '-'} date=${input.date ?? '当日'}`)
+    changeLog(exchange, 'app.metrics.report', 'app', id, app.name, `pv=${input.pv ?? '-'} uv=${input.uv ?? '-'} dau=${input.dau ?? '-'} sessions=${input.sessions ?? '-'} date=${input.date ?? '当日'}`)
     return ctx.appRegistry.metrics(id)
   })
 
@@ -1825,6 +1968,12 @@ export function apply(ctx: Context) {
   guarded('POST', '/api/audit/alerts/:id/read', 'audit.read', (exchange) => {
     ctx.audit.markAlertRead(exchange.params['id']!)
     return { read: true }
+  })
+
+  guarded('POST', '/api/audit/alerts/read-all', 'audit.read', (exchange) => {
+    const read = ctx.audit.markAllAlertsRead()
+    changeLog(exchange, 'audit.alert.readAll', 'alert', 'all', '', `一键全部已读（${read} 条）`)
+    return { read, unread: 0 }
   })
 
   guarded('GET', '/api/audit/cost', 'audit.read', (exchange) => {

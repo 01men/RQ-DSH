@@ -118,7 +118,7 @@ OIDC_ISSUER=https://sso.yourcompany.com   # discovery/JWKS/端点全部按此拼
 - **state**：平台强制必填并原样回传（CSRF 防护）；SDK 自动处理，直连时自行生成并校验。
 - **PKCE S256**：平台对所有客户端强制；`code_challenge` 43–128 位 base64url。
 - **client_secret 保管**：仅存应用后端（环境变量 / KMS）；轮换入口在应用详情「SSO 配置」，旧值立即失效。
-- **HTTPS**：redirect_uri 仅允许 `https://` 或 `http://localhost[:port]`（本机调试）。
+- **HTTPS**：redirect_uri 允许 `https://` 任意主机；`http://` 仅放行内网地址（`localhost` / `127.0.0.1` / `10.x.x.x` / `172.16-31.x.x` / `192.168.x.x`，含内网 IPv6 ULA）。纯内网部署可设 `APP_SSO_ALLOW_HTTP=1` 放开全部 http 主机。
 - **登出联动**：应用登出时应调 `end_session`，平台会吊销该用户在本应用下的 refresh 链（否则登出后应用仍可静默续期）。
 - **冻结即时失效**：平台账号冻结 / 离职 → `userinfo` 与 `refresh` 立即拒绝（实时校验用户状态）。
 - **门禁**：`web`/`h5` 应用上线前必须持有 active SSO 客户端；审批挂单期间客户端被禁用会在执行期复核失败。

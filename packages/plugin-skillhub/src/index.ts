@@ -77,6 +77,9 @@ export interface SkillRecord extends RecordBase {
   status: SkillStatus
   currentVersion: string
   versions: SkillVersion[]
+  /** 弃用/强制下架原因（下架分析口径：随记录持久化，详情与看板可见）。 */
+  deprecatedReason?: string
+  deprecatedAt?: string
   stats: { downloads: number; installs: number; rating: number; ratingCount: number }
   ratings: Array<{ userId: string; stars: number; at: string }>
   cover: string
@@ -344,9 +347,15 @@ export class SkillHubService extends Service {
 
   deprecate(skillId: string, actor: string, note: string, force?: boolean): { skill: SkillRecord; referencingAgents: Array<{ id: string; name: string; owner: string }> } {
     const skill = this.requireSkill(skillId)
+    if (!note?.trim()) throw new Error('弃用必须填写原因（护栏要求）')
     if (skill.status !== 'published') throw new Error('仅已上架 Skill 可弃用')
     const versions = skill.versions.map((item) => item.status === 'published' ? { ...item, status: 'deprecated' as const } : item)
-    const updated = this.skills().update(skillId, { versions: versions as SkillVersion[], status: force ? 'offline' : 'deprecated' })
+    const updated = this.skills().update(skillId, {
+      versions: versions as SkillVersion[],
+      status: force ? 'offline' : 'deprecated',
+      deprecatedReason: note,
+      deprecatedAt: new Date().toISOString(),
+    })
     // 扫描引用该 Skill 的 Agent，产出存量引用告警
     const referencingAgents = this.referencingAgents(skillId)
     this.ctx.platformBus.emit(PlatformEvents.SkillDeprecated, {
@@ -383,8 +392,9 @@ export class SkillHubService extends Service {
     const skill = this.requireSkill(skillId)
     const target = skill.versions.find((item) => item.version === version && item.status === 'published')
     if (!target) throw new Error(`已发布版本不存在：${version}`)
-    this.downloads().insert({ id: newId('dwl'), skillId, version, userId: user.id, userName: user.name })
+    const record = this.downloads().insert({ id: newId('dwl'), skillId, version, userId: user.id, userName: user.name })
     this.skills().update(skillId, { stats: { ...skill.stats, downloads: skill.stats.downloads + 1 } })
+    this.meterSkillUsage(skill, 'downloads', `skill:dl:${record.id}`, `user:${user.id}`)
     return { content: target.content }
   }
 
@@ -403,8 +413,26 @@ export class SkillHubService extends Service {
       this.ctx.resourceCore.collection('agent').update(agentId, { attrs: { ...agent.attrs, skills: skillsAttr } })
     }
     const updated = this.skills().update(skillId, { stats: { ...skill.stats, installs: skill.stats.installs + 1 } })
+    this.meterSkillUsage(skill, 'installs', `skill:inst:${newId('uis')}`, `agent:${agentId}`)
     this.ctx.platformBus.emit(PlatformEvents.SkillInstalled, { skillId, version, agentId, agentName: agent.name, actor })
     return updated
+  }
+
+  /** 计量管道（观测补齐）：skill 下载/安装进 usage 事件（skill:<ID>，中文名 slug 含非 ASCII 故用 ID；
+   *  skill:* 默认零费率，失败只告警不阻断主流程）。 */
+  private meterSkillUsage(skill: SkillRecord, meterKey: 'downloads' | 'installs', idempotencyKey: string, subject: string): void {
+    try {
+      this.ctx.usage.record({
+        org: skill.orgId,
+        subject,
+        principal: `org:${skill.orgId}`,
+        resource: `skill:${skill.id}`,
+        meters: [{ key: meterKey, value: 1, unit: '次' }],
+        idempotency_key: idempotencyKey,
+      })
+    } catch (error) {
+      this.ctx.logger('skillhub').warn('usage 计量登记失败', error)
+    }
   }
 
   uninstall(skillId: string, agentId: string): void {
@@ -490,7 +518,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'skillhub'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit', 'nasRegistry']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit', 'nasRegistry', 'usage']
 
 export function apply(ctx: Context) {
   ctx.plugin(SkillHubService)

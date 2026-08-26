@@ -4,7 +4,7 @@ base: /api
 endpoints:
   - GET/POST /api/apps · GET /api/apps/:id · PATCH /api/apps/:id
   - POST /api/apps/:id/transition（发布/下架为 L4 审批）
-  - POST /api/apps/:id/metrics-report（应用指标主动上报，app.write；同日 DAU 取最大/会话累加，可指定 date 补录）
+  - POST /api/apps/:id/metrics-report（应用指标主动上报：PV/UV/DAU/会话/留存，可 --date 补录）
   - GET /api/apps/:id（含 topology/cost/impact）
 tools:
   - app_list

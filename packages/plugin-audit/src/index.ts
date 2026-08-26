@@ -335,6 +335,13 @@ export class AuditService extends Service {
     this.alerts().update(id, { read: true })
   }
 
+  /** 一键全部已读：把全部未读告警置为已读，返回本次处理的条数。 */
+  markAllAlertsRead(): number {
+    const unread = this.alerts().find((alert) => !alert.read)
+    for (const alert of unread) this.alerts().update(alert.id, { read: true })
+    return unread.length
+  }
+
   // -- 成本 ---------------------------------------------------------------
 
   addCost(input: Omit<CostRecord, 'id' | 'createdAt' | 'updatedAt'>): void {

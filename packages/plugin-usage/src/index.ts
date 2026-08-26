@@ -57,7 +57,7 @@ export interface UsageEvent {
   subject: string
   /** 计费责任主体：org:<id> | plugin:<id> | app:<id> | platform */
   principal: string
-  /** 资源：model:<slug> | plugin:<id> | mcp:<slug> */
+  /** 资源：model:<slug> | plugin:<id> | mcp:<slug> | skill:<id> | nas:<id> */
   resource: string
   meters: UsageMeter[]
   pricing: UsagePricingSnapshot
@@ -343,6 +343,17 @@ export class UsageService extends Service {
     return { byResource, byPrincipal, byDay }
   }
 
+  /**
+   * 观测矩阵：窗口内指定前缀资源的 资源×日 使用次数（技能热力图等观测视图数据源）。
+   * prefix 由调用方以代码字面量传入（如 'skill:'），不进 LIKE 通配符。
+   */
+  matrix(fromIso: string, prefix: string): Array<{ resource: string; day: string; count: number }> {
+    return this.ctx.txnStore.sql<{ resource: string; day: string; count: number }>(
+      "SELECT resource, substr(occurred_at, 1, 10) AS day, COUNT(*) AS count FROM usage_events WHERE occurred_at >= ? AND resource LIKE ? GROUP BY resource, day ORDER BY day",
+      [fromIso, `${prefix}%`],
+    ).map((row) => ({ resource: row.resource, day: String(row.day), count: Number(row.count) }))
+  }
+
   // -- 价格簿 ---------------------------------------------------------------
 
   priceBook(): Collection<PriceBookEntry> {
@@ -366,9 +377,17 @@ export class UsageService extends Service {
   }
 
   private ensureDefaultPriceBook(): void {
-    if (this.priceBook().count() > 0) return
-    this.upsertPrice({ pattern: 'mcp:*', meter_key: 'tokens', list_cents_per_unit: 30, cost_cents_per_unit: 15, units_per_step: 1000, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' })
-    this.upsertPrice({ pattern: 'platform:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' })
+    // 逐条幂等播种：存量部署升级时只补缺失的默认规则，不覆盖运营已改过的费率
+    const defaults: Array<Omit<PriceBookEntry, 'id' | 'createdAt' | 'updatedAt'>> = [
+      { pattern: 'mcp:*', meter_key: 'tokens', list_cents_per_unit: 30, cost_cents_per_unit: 15, units_per_step: 1000, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' },
+      { pattern: 'platform:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' },
+      // 观测补齐：skill/nas 先零费率采集（价格簿有规则即可入管道），是否计费由运营调价决定
+      { pattern: 'skill:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' },
+      { pattern: 'nas:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' },
+    ]
+    for (const entry of defaults) {
+      if (!this.priceBook().findOne((item) => item.pattern === entry.pattern)) this.upsertPrice(entry)
+    }
   }
 
   // -- 对账（三方口径比对） -----------------------------------------------
@@ -469,7 +488,7 @@ export class UsageService extends Service {
     if (!input.subject?.trim()) throw new Error('usage 事件 subject 必填（user:<id> / agent:<id>）')
     if (!input.principal?.trim()) throw new Error('usage 事件 principal 必填（org:<id> / plugin:<id> / platform）')
     if (!input.resource?.trim() || !/^[a-z]+:[A-Za-z0-9._-]+$/.test(input.resource)) {
-      throw new Error(`usage 事件 resource 格式非法：${input.resource}（应为 model:<slug> / mcp:<slug> / plugin:<id>）`)
+      throw new Error(`usage 事件 resource 格式非法：${input.resource}（应为 model:<slug> / mcp:<slug> / plugin:<id> / skill:<id> / nas:<id>）`)
     }
     if (!Array.isArray(input.meters) || input.meters.length === 0) throw new Error('usage 事件 meters 至少一项')
     for (const meter of input.meters) {

@@ -59,9 +59,11 @@ function trendSvg(byDay) {
 export async function renderAssets(content, params, { rerender }) {
   const days = params.get('days') ?? 30
   const typeFilter = params.get('type') ?? ''
-  const [inv, report] = await Promise.all([
+  const [inv, report, benefit, retire] = await Promise.all([
     api.get(`/api/assets/inventory?days=${days}${typeFilter ? `&type=${typeFilter}` : ''}`),
     api.get(`/api/assets/report?days=${days}`),
+    api.get(`/api/assets/benefit?days=${days}`),
+    api.get('/api/assets/retire-reasons?days=90'),
   ])
 
   content.innerHTML = `
@@ -122,6 +124,69 @@ export async function renderAssets(content, params, { rerender }) {
       <div class="card">
         <div class="card-head"><span class="card-title">${icon('trending', 15)} 日消耗趋势</span><span class="card-sub">全资产合计</span></div>
         <div class="card-body">${trendSvg(report.byDay)}</div>
+      </div>
+    </div>
+
+    <div class="grid-2 mb-20" style="grid-template-columns:1.35fr 1fr;align-items:start">
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">${icon('coins', 15)} 效益分析</span>
+          <span class="card-sub">毛利 = 列表价收入 − 采购成本 · 近 ${esc(days)} 天</span>
+        </div>
+        <div class="card-body" style="padding:10px 8px 14px">
+          <div class="flex mb-10" style="gap:18px;padding:0 6px">
+            <span class="fs-12 text-4">收入 <b class="fs-14" style="color:var(--text-1)">${fmtCents(benefit.totals.charge_cents)}</b></span>
+            <span class="fs-12 text-4">成本 <b class="fs-14" style="color:var(--text-1)">${fmtCents(benefit.totals.cost_cents)}</b></span>
+            <span class="fs-12 text-4">毛利 <b class="fs-14" style="color:${benefit.totals.margin_cents >= 0 ? 'var(--ok, #047857)' : 'var(--danger)'}">${fmtCents(benefit.totals.margin_cents)}</b></span>
+          </div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th>资产</th><th style="text-align:right">调用</th><th style="text-align:right">收入</th><th style="text-align:right">成本</th><th style="text-align:right">毛利</th><th style="text-align:right">单位 DAU 成本</th></tr></thead>
+              <tbody>
+                ${benefit.rows.length ? benefit.rows.slice(0, 10).map((row) => `
+                  <tr>
+                    <td><div class="col-strong">${esc(row.label)}</div><div class="col-sub mono">${esc(row.resource)}</div></td>
+                    <td class="col-num fs-12" style="text-align:right">${row.count}</td>
+                    <td class="col-num fs-12" style="text-align:right">${fmtCents(row.charge_cents)}</td>
+                    <td class="col-num fs-12" style="text-align:right">${fmtCents(row.cost_cents)}</td>
+                    <td class="col-num fs-12" style="text-align:right;font-weight:600;color:${row.margin_cents >= 0 ? 'inherit' : 'var(--danger)'}">${fmtCents(row.margin_cents)}</td>
+                    <td class="col-num fs-12" style="text-align:right">${row.cost_per_dau_cents !== null && row.cost_per_dau_cents !== undefined ? fmtCents(row.cost_per_dau_cents) : '—'}</td>
+                  </tr>`).join('') : `
+                  <tr><td colspan="6"><div class="tbl-empty">${icon('coins', 28)}<span>窗口内暂无计量事件（毛利随调用累积）</span></div></td></tr>`}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div class="card">
+          <div class="card-head"><span class="card-title">${icon('users', 15)} 主体分摊（谁在用）</span><span class="card-sub">近 ${esc(days)} 天</span></div>
+          <div class="card-body" style="padding-top:8px">
+            ${report.byPrincipal.slice(0, 6).map((row) => {
+              const max = Math.max(...report.byPrincipal.map((r) => r.charge_cents), 1)
+              return `
+                <div style="padding:7px 0">
+                  <div class="flex fs-12" style="margin-bottom:3px"><span class="ellipsis" style="max-width:60%">${esc(row.label)}</span><span style="margin-left:auto;font-weight:600">${fmtCents(row.charge_cents)}</span></div>
+                  <div style="height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden">
+                    <div style="height:100%;width:${Math.max((row.charge_cents / max) * 100, 2)}%;border-radius:3px;background:linear-gradient(90deg,#4f6ef7,#7c5cf5)"></div>
+                  </div>
+                </div>`
+            }).join('') || '<span class="text-4 fs-12">暂无计量数据</span>'}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><span class="card-title">${icon('alert', 15)} 下架分析</span><span class="card-sub">近 90 天 · 原因聚合</span></div>
+          <div class="card-body" style="padding-top:8px">
+            ${retire.reasons?.length ? retire.reasons.slice(0, 5).map((row) => `
+              <div class="flex" style="padding:7px 0;border-bottom:1px solid var(--border);gap:8px;align-items:flex-start">
+                <span class="badge badge-muted no-dot" style="flex-shrink:0">${row.count} 次</span>
+                <span class="grow">
+                  <span class="fs-12" style="display:block">${esc(row.reason)}</span>
+                  <span class="fs-11 text-4">${Object.entries(row.byType).map(([t, n]) => `${TYPE_META[t]?.[0] ?? t} ${n}`).join(' · ')}${row.samples?.[0] ? ` · 最近 ${esc(row.samples[0].name)}` : ''}</span>
+                </span>
+              </div>`).join('') : '<span class="text-4 fs-12">窗口内无下架/弃用记录</span>'}
+          </div>
+        </div>
       </div>
     </div>
 
