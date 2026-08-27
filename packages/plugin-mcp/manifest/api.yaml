@@ -3,9 +3,12 @@ plugin: dsh-plugin-mcp
 base: /api
 endpoints:
   - GET/POST /api/mcp/services · PATCH /api/mcp/services/:id
+  - POST /api/mcp/import（mcpServers JSON 一键导入：解析→注册 external 服务→自动发现工具）
+  - POST /api/mcp/services/:id/sync-tools（外部服务以远端 tools/list 为准刷新清单）
+  - DELETE /api/mcp/services/:id（仅下线可删；被权限组引用时拒绝）
   - POST /api/mcp/services/:id/verify|deploy|rollback|offline|health
   - GET /api/mcp/services/:id/metrics · GET /api/mcp/calls
-  - GET/POST/PATCH/DELETE /api/mcp/perm-groups
+  - GET/POST/PATCH /api/mcp/perm-groups · DELETE /api/mcp/perm-groups/:id
   - POST /api/mcp/invoke（网关统一鉴权/限流/审计）
 tools:
   - mcp_service_list

@@ -351,6 +351,23 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
   计量键不符拒绝/匹配路径计价不变/skill 事件含计价键、scopes 调整联动吊销/拼错与 `*` 混用拒绝/
   轮换旧值即废/列表 hash 脱敏、机器读台账留痕与人类噪音控制）。
 
+## 三G、连接器纳管：open-connector 融合（本迭代）
+
+SaaS 数据面网关（roadmap 第 9 步之二「连接器市场」执行缺口）：榕器=治理控制面，open-connector v1.4.0 sidecar=数据面 + 凭证保险库（AES-256-GCM）。能力零重叠强互补——不自研 provider 目录（1,000+ Provider / 10,000+ Action）、不自研 OAuth、不自研密钥库。
+
+- **新插件 `packages/plugin-connector`**：OcClient 版本锁定适配层（契约面单文件）+ ConnectorHubService。六个集合 `connector:gateway|connections|catalog|permGroups|tokens|runs`；强制 env fail-closed（`OOMOL_CONNECT_ENCRYPTION_KEY`/`OOMOL_CONNECT_ADMIN_TOKEN` 缺失即拒绝一切 invoke 并告警）；30s 探活熔断。
+- **三层调用同契约**：REST `/api/connector/*` guarded 路由段 + 5 个工具 `connector_catalog_search/connector_connection_list/connector_execute/connector_perm_group_list/connector_run_list`（REST 工具桥与 POST /mcp 自动暴露）+ CLI `dshctl connector …` 全树。
+- **双层授权镜像**：连接器权限组（pattern/riskCap/readOnly/**denyParams 强制拦截**）↔ 每组一枚 oct_ 运行时令牌（策略快照 PUT 四数组全发；org 巡检保证「令牌绑定连接 ⊆ 组内 org 连接」）；401/connection_not_allowed 自动恢复重试一次。
+- **连接三形态**：OAuth 代理全流程（自备 App 护栏 `oauth_client_config_required` 带向导指引）/ API Key 表单**过手不落盘**（回显脱敏 slice(0,6)+'…'）/ no_auth 虚拟登记；别名强制 `org:<orgId>:` 前缀；删除做权限组引用级联检查。
+- **审批双场景**：admin 级 action 出 `connector.action.admin` 单（批准后 executor 自动完成调用，同图 pending 复用）；受控连接两段式 `connector.connect`（审批负载零凭证字段，approve 后携 approvalId 提交实际凭证）。
+- **计量对账**：`usage.record(resource='connector:<service>', meter=calls, trace_id=meta.executionId, 幂等键=connector:<runId>)`，价格簿 `connector:*` 零费率起步；runs 按 runtimeTokenId 与 usage trace_id 交叉校验，「有 run 无 meter」即绕行 critical 告警；`Idempotency-Key` 写类自动生成（24h 重放窗口）。
+- **M0 桥接过渡**：sidecar `/mcp` 经既有 `POST /api/mcp/import` 一键纳管（header `x-bridged-from: open-connector` 打「桥接过渡」徽章）；治理降级语义显式声明（无 action 级授权/连接绑定/令牌镜像），仅用于连通性验证。
+- **权限点**：`connector.gateway.write/catalog.read/connection.read/write/invoke/permgroup.write/runs.read/market.publish(M3)`；内置角色迁移幂等补齐（resource_admin `connector.*`、developer catalog+invoke、auditor runs+connection 读）；Agent 机器凭证默认 scopes 补 `connector.invoke`（存量一次性迁移）。
+- **控制台 `#/connectors`**：网关设置（env 门禁预演探针可视化）/ 目录浏览（provider 卡片 + action schema & agent.md 预览 & riskLevel 徽章）/ 连接卡片墙 + 三形态向导（OAuth 授权页跳转+状态轮询）/ 权限组管理（JSON 策略编辑器 + 影响面预览「N 令牌/M 连接」+ 只读模板二次确认）/ 运行日志抽屉 + oct_ 台账（永不显示令牌值）/ 对账按钮。
+- **红线**：凭证零进平台（selftest 以数据目录全文扫描兜底 T-24）；授权双出验证（绕开平台直连 sidecar 同样被令牌策略拒绝 T-29）；actChain 审计 + 计量对账。
+- 文档：部署两拓扑 runbook/OAuth 自备 App/故障排查见 **docs/connector-integration.md**；设计全文与评审修正自查表见 **docs/dev-plan-connector.md**。
+- 验收：`npm run selftest` 新增 section 全绿（stub 覆盖 open-connector v1.4.0 全契约面，断言组 T-01~T-25/T-28/T-29 共 26 组）。
+
 ## 三、目录结构（插件标准解剖）
 
 ```

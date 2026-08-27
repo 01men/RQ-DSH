@@ -22,6 +22,7 @@ export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'oidc', 'audit', 'usage', 'billing', 'market', 'modelGateway',
   'mcpRegistry', 'nasRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
+  'connectorHub',
 ]
 
 interface CallerInfo {
@@ -1413,6 +1414,305 @@ export function apply(ctx: Context) {
     }, input.serviceId, input.tool, input.args ?? {})
   })
 
+  // -- 连接器纳管（open-connector 融合） ------------------------------------
+  // 路由集中在 console（仓内铁律），业务逻辑全在 plugin-connector；OcError 的错误码/状态
+  // 原样透传（oauth_client_config_required→向导指引、connection_not_allowed→403 等）。
+  const runWithOcErrors = async (exchange: HttpExchange, handler: () => Promise<unknown> | unknown): Promise<unknown> => {
+    try {
+      return await handler()
+    } catch (error) {
+      const status = (error as { status?: unknown }).status
+      const code = (error as { code?: unknown }).code
+      const message = error instanceof Error ? error.message : String(error)
+      const guidance = (error as { guidance?: unknown }).guidance
+      if (typeof status === 'number' && typeof code === 'string' && typeof guidance !== 'undefined'
+        || (typeof status === 'number' && typeof code === 'string' && (error as { name?: string }).name === 'OcError')) {
+        exchange.fail(status, code.toUpperCase(), guidance ? `${message} ${String(guidance)}` : message)
+        return undefined
+      }
+      throw error
+    }
+  }
+
+  /**
+   * 连接器域组织可见范围：超管可带 ?orgId= 查任意组织；普通用户锁定在自身归属组织
+   * （跨 org 不可见，T-20 的 UI 半段；数据面仍由权限组 authorize 双保险）。
+   */
+  const restrictOrgScope = (exchange: HttpExchange): string | undefined => {
+    const info = caller(exchange)
+    const requested = exchange.query.get('orgId') ?? undefined
+    if (info.permissions.includes('*')) return requested
+    if (info.kind === 'human' && info.userId) {
+      const user = ctx.iam.users().get(info.userId)
+      if (!user) throw new Error(`账号不存在：${info.userId}`)
+      return user.orgId
+    }
+    return requested
+  }
+
+  /** 连接引用对外回显：无凭证字段（结构保证），maskedProfile 已在服务侧脱敏。 */
+  const maskReference = <T extends { maskedProfile?: Record<string, string> }>(ref: T): T => ref
+
+  const requireBodyOrg = (orgId: string | undefined): string => {
+    if (!orgId) throw new Error('orgId 必填（连接归属组织，org:<orgId>: 别名前缀由此而来）')
+    return orgId
+  }
+
+  const resolveConnectorCaller = (info: CallerInfo): { type: 'user' | 'agent' | 'app'; id: string; name: string } => {
+    if (info.kind === 'human') return { type: 'user', id: info.userId ?? info.principalId, name: info.name }
+    const principal = ctx.authn.principals().get(info.principalId)
+    if (principal?.refType === 'agent' && principal.refId) return { type: 'agent', id: principal.refId, name: info.name }
+    if (principal?.refType === 'app' && principal.refId) return { type: 'app', id: principal.refId, name: info.name }
+    return { type: 'app', id: info.principalId, name: info.name }
+  }
+
+  // -- 网关配置 -------------------------------------------------------------
+  guarded('GET', '/api/connector/gateway', 'connector.gateway.write', (exchange) => {
+    // ?assumeEnv=JSON：只读「预演探针」——评估强制 env 门禁各分支的 fail-closed 文案
+    // （不改动进程真实环境；selftest T-02 依赖此确定性断言路径）。
+    const assumeRaw = exchange.query.get('assumeEnv')
+    if (assumeRaw) {
+      try {
+        const parsed = JSON.parse(assumeRaw) as Record<string, boolean>
+        return ctx.connectorHub.gatewayStatus(parsed)
+      } catch {
+        throw new Error('assumeEnv 必须是 {"ENV_NAME": boolean} 形态的 JSON')
+      }
+    }
+    return ctx.connectorHub.gatewayStatus()
+  })
+
+  /** org 巡检手动触发（T-21 确定性断言；定时器周期外的一致性复核入口）。 */
+  guarded('POST', '/api/connector/patrol', 'connector.gateway.write', async (exchange) => {
+    return await runWithOcErrors(exchange, () => ctx.connectorHub.runPatrols(exchange.query.get('catalog') === '1' ? true : undefined))
+  })
+
+  guarded('PUT', '/api/connector/gateway', 'connector.gateway.write', async (exchange) => {
+    const input = body<{ baseUrl: string; adminToken?: string; autoCatalogSyncMinutes?: number }>(exchange)
+    const record = await ctx.connectorHub.configureGateway(input, caller(exchange).name)
+    changeLog(exchange, 'connector.gateway.configure', 'connector_gateway', record.id, record.baseUrl)
+    return { ok: true, baseUrl: record.baseUrl, versionPin: record.versionPin, autoCatalogSyncMinutes: record.autoCatalogSyncMinutes }
+  })
+
+  guarded('POST', '/api/connector/gateway/health', 'connector.gateway.write', async (exchange) => {
+    const result = await ctx.connectorHub.probeGateway()
+    changeLog(exchange, 'connector.gateway.probe', 'connector_gateway', 'gateway', '', result.ok ? `healthy ${result.latencyMs}ms` : `${result.reason ?? ''}`)
+    return result
+  })
+
+  // -- 目录 -----------------------------------------------------------------
+  guarded('GET', '/api/connector/catalog', 'connector.catalog.read', (exchange) => {
+    const q = (exchange.query.get('q') ?? '').toLowerCase()
+    const service = exchange.query.get('service')
+    const kind = exchange.query.get('kind')
+    const limit = Math.min(Number(exchange.query.get('limit') ?? 100), 500)
+    const catalog = ctx.connectorHub.catalogs().all()[0]
+    if (!catalog) return { providers: [], actions: [], skippedServices: [] as Array<{ service: string; reason: string }> }
+    const filterProvider = (provider: Record<string, unknown>): boolean =>
+      (!service || String(provider['service']) === service)
+      && (!q || JSON.stringify(provider).toLowerCase().includes(q))
+    const filterAction = (action: { id: string; service: string; description?: string }): boolean =>
+      (!service || action.service === service)
+      && (!q || `${action.id} ${action.service} ${action.description ?? ''}`.toLowerCase().includes(q))
+    return {
+      ...(catalog.syncedAt ? { syncedAt: catalog.syncedAt } : {}),
+      providers: kind === 'actions' ? [] : catalog.providers.filter(filterProvider).slice(0, limit),
+      actions: kind === 'providers' ? [] : catalog.actions.filter(filterAction).slice(0, limit),
+      skippedServices: catalog.skippedServices,
+    }
+  })
+
+  guarded('GET', '/api/connector/catalog/actions/:id/guide', 'connector.catalog.read', async (exchange) => {
+    const { client } = ctx.connectorHub['requireClient']()
+    const text = await client.getActionGuide(exchange.params['id']!)
+    return { actionId: exchange.params['id'], guide: text }
+  })
+
+  guarded('GET', '/api/connector/catalog/actions/:id', 'connector.catalog.read', (exchange) => {
+    const action = ctx.connectorHub.requireAction(exchange.params['id']!)
+    return { action }
+  })
+
+  guarded('POST', '/api/connector/catalog/sync', 'connector.gateway.write', async (exchange) => {
+    const result = await runWithOcErrors(exchange, () => ctx.connectorHub.syncCatalog(caller(exchange).name))
+    if (!result) return // 错误响应已由处理器写出（如网关 fail-closed 503）
+    changeLog(exchange, 'connector.catalog.sync', 'connector_catalog', 'catalog', '', `providers/actions=${(result as { providers?: number }).providers ?? 0}/${(result as { actions?: number }).actions ?? 0}`)
+    return result
+  })
+
+  // -- 连接 -----------------------------------------------------------------
+  guarded('GET', '/api/connector/connections', 'connector.connection.read', (exchange) => {
+    const restrictedOrg = restrictOrgScope(exchange)
+    const refs = ctx.connectorHub.connections().find((item) =>
+      (!restrictedOrg || item.ownerOrgId === restrictedOrg))
+    return { total: refs.length, connections: refs.map(maskReference) }
+  })
+
+  guarded('POST', '/api/connector/connections/oauth', 'connector.connection.write', async (exchange) => {
+    const input = body<{ provider: string; aliasSuffix: string; requestedScopes?: string[]; requireApproval?: boolean; approvalId?: string; actorName?: string }>(exchange)
+    const info = caller(exchange)
+    const result = await runWithOcErrors(exchange, () => ctx.connectorHub.createConnection({
+      orgId: requireBodyOrg(input.orgId),
+      actor: { id: info.userId ?? info.principalId, name: input.actorName ?? info.name },
+      provider: input.provider,
+      aliasSuffix: input.aliasSuffix,
+      authType: 'oauth',
+      ...(input.requestedScopes?.length ? { requestedScopes: input.requestedScopes } : {}),
+      ...(input.requireApproval !== undefined ? { requireApproval: input.requireApproval } : {}),
+      ...(input.approvalId ? { approvalId: input.approvalId } : {}),
+    }))
+    if ((result as { reference?: { id: string } }).reference) {
+      changeLog(exchange, 'connector.connection.oauth.start', 'connector_connection', (result as { reference: { id: string } }).reference.id, input.provider, input.orgId)
+    } else if ((result as { approvalRequired?: boolean }).approvalRequired) {
+      changeLog(exchange, 'connector.connection.approval', 'approval_center', (result as { approvalId?: string }).approvalId ?? '', input.provider, '连接创建进入审批门禁')
+    }
+    return result
+  })
+
+  guarded('POST', '/api/connector/connections/api-key', 'connector.connection.write', async (exchange) => {
+    // 表单值过手直达 sidecar，不落任何集合、不打日志（红线一）
+    const input = body<{ provider: string; aliasSuffix: string; values: Record<string, unknown>; authType?: 'api_key' | 'custom_credential'; requireApproval?: boolean; approvalId?: string; actorName?: string }>(exchange)
+    const info = caller(exchange)
+    const result = await runWithOcErrors(exchange, () => ctx.connectorHub.createConnection({
+      orgId: requireBodyOrg(input.orgId),
+      actor: { id: info.userId ?? info.principalId, name: input.actorName ?? info.name },
+      provider: input.provider,
+      aliasSuffix: input.aliasSuffix,
+      authType: input.authType ?? 'api_key',
+      values: input.values,
+      ...(input.requireApproval !== undefined ? { requireApproval: input.requireApproval } : {}),
+      ...(input.approvalId ? { approvalId: input.approvalId } : {}),
+    }))
+    const ref = (result as { reference?: { id: string } }).reference
+    if (ref) changeLog(exchange, 'connector.connection.create', 'connector_connection', ref.id, input.provider, `${input.authType ?? 'api_key'} 直达 sidecar`)
+    else if ((result as { approvalRequired?: boolean }).approvalRequired) {
+      changeLog(exchange, 'connector.connection.approval', 'approval_center', (result as { approvalId?: string }).approvalId ?? '', input.provider, '连接创建进入审批门禁')
+    }
+    return result
+  })
+
+  guarded('POST', '/api/connector/connections/no-auth', 'connector.connection.write', async (exchange) => {
+    const input = body<{ provider: string; aliasSuffix: string; actorName?: string }>(exchange)
+    const info = caller(exchange)
+    const result = await runWithOcErrors(exchange, () => ctx.connectorHub.createConnection({
+      orgId: requireBodyOrg(input.orgId),
+      actor: { id: info.userId ?? info.principalId, name: input.actorName ?? info.name },
+      provider: input.provider,
+      aliasSuffix: input.aliasSuffix,
+      authType: 'no_auth',
+    }))
+    const ref = (result as { reference?: { id: string } }).reference
+    if (ref) changeLog(exchange, 'connector.connection.create', 'connector_connection', ref.id, input.provider, 'no_auth 虚拟连接登记')
+    return result
+  })
+
+  guarded('GET', '/api/connector/connections/oauth/:requestId/status', 'connector.connection.write', async (exchange) => {
+    return await runWithOcErrors(exchange, () => ctx.connectorHub.confirmConnectionStatus({ requestId: exchange.params['requestId'] }))
+  })
+
+  guarded('POST', '/api/connector/connections/refresh', 'connector.connection.read', async (exchange) => {
+    const orgFilter = exchange.query.get('orgId') ?? undefined
+    return await runWithOcErrors(exchange, () => ctx.connectorHub.refreshConnections(orgFilter))
+  })
+
+  guarded('DELETE', '/api/connector/connections/:id', 'connector.connection.write', async (exchange) => {
+    const input = body<{ force?: boolean }>(exchange)
+    const deleteOutcome = await runWithOcErrors(exchange, () => ctx.connectorHub.deleteConnection(exchange.params['id']!, {
+      actor: caller(exchange).name, ...(input.force ? { force: true } : {}),
+    }))
+    if (!deleteOutcome) return // 错误响应已由处理器写出（如 connection_in_use 409）
+    const result = deleteOutcome as Awaited<ReturnType<typeof ctx.connectorHub.deleteConnection>>
+    changeLog(exchange, 'connector.connection.delete', 'connector_connection', exchange.params['id']!, '', `released=${result.releasedGroups.join(',') || 'none'}`)
+    return result
+  })
+
+  // -- 执行网关 --------------------------------------------------------------
+  guarded('POST', '/api/connector/execute', 'connector.invoke', async (exchange) => {
+    const input = body<{ actionId: string; input?: Record<string, unknown>; connection?: string; dryRun?: boolean }>(exchange)
+    const info = caller(exchange)
+    const resolved = resolveConnectorCaller(info)
+    return await runWithOcErrors(exchange, () => ctx.connectorHub.invokeAction({
+      ...resolved,
+      ...(info.actChain.length > 0 ? { actChain: info.actChain } : {}),
+    }, {
+      actionId: input.actionId,
+      input: input.input ?? {},
+      ...(input.connection ? { alias: input.connection } : {}),
+      ...(input.dryRun ? { dryRun: true } : {}),
+    }))
+  })
+
+  // -- 权限组 -----------------------------------------------------------------
+  guarded('GET', '/api/connector/perm-groups', 'connector.connection.read', (exchange) => {
+    const orgFilter = restrictOrgScope(exchange)
+    const groups = ctx.connectorHub.permGroups().find((group) => (!orgFilter || group.orgId === orgFilter))
+    return { total: groups.length, groups }
+  })
+
+  guarded('POST', '/api/connector/perm-groups', 'connector.permgroup.write', async (exchange) => {
+    const input = body<{ name: string; description?: string; orgId: string; policies: Record<string, { allowedActions: '*' | string[]; riskCap?: 'read' | 'write' | 'admin'; connections?: string[]; constraints?: { readOnly?: boolean; denyParams?: string[] } }>; subjects: Array<{ type: 'user_group' | 'agent' | 'app'; id: string; name?: string }>; rateLimitPerMin?: number; precheckCents?: number }>(exchange)
+    const createdGroup = await runWithOcErrors(exchange, () => ctx.connectorHub.createPermGroup({
+      name: input.name,
+      description: input.description,
+      orgId: input.orgId,
+      policies: input.policies,
+      subjects: input.subjects,
+      rateLimitPerMin: input.rateLimitPerMin,
+      precheckCents: input.precheckCents,
+    }))
+    if (!createdGroup) return // 错误响应已由处理器写出（如 invalid_alias_prefix 400）
+    const group = createdGroup as Awaited<ReturnType<typeof ctx.connectorHub.createPermGroup>>
+    changeLog(exchange, 'connector.permgroup.create', 'connector_perm_group', group.id, group.name)
+    return group
+  })
+
+  guarded('PATCH', '/api/connector/perm-groups/:id', 'connector.permgroup.write', async (exchange) => {
+    const updated = await runWithOcErrors(exchange, () => ctx.connectorHub.updatePermGroup(exchange.params['id']!, body(exchange)))
+    if (!updated) return // 错误响应已由处理器写出
+    const group = updated as Awaited<ReturnType<typeof ctx.connectorHub.updatePermGroup>>
+    changeLog(exchange, 'connector.permgroup.update', 'connector_perm_group', group.id, group.name)
+    return group
+  })
+
+  guarded('DELETE', '/api/connector/perm-groups/:id', 'connector.permgroup.write', (exchange) => {
+    const removed = ctx.connectorHub.deletePermGroup(exchange.params['id']!)
+    changeLog(exchange, 'connector.permgroup.delete', 'connector_perm_group', exchange.params['id']!, '')
+    return { deleted: removed }
+  })
+
+  guarded('POST', '/api/connector/perm-groups/:id/impact', 'connector.connection.read', (exchange) => {
+    return ctx.connectorHub.permGroupImpact(exchange.params['id']!)
+  })
+
+  // -- 运行日志 / 对账 / 台账 ---------------------------------------------------
+  guarded('GET', '/api/connector/runs', 'connector.runs.read', async (exchange) => {
+    return await runWithOcErrors(exchange, () => ctx.connectorHub.listRunsView({
+      ...(exchange.query.get('service') ? { service: exchange.query.get('service')! } : {}),
+      ...(exchange.query.get('ok') !== null ? { ok: exchange.query.get('ok') === 'true' } : {}),
+      limit: Number(exchange.query.get('limit') ?? 100),
+    }))
+  })
+
+  guarded('POST', '/api/connector/reconcile', 'connector.runs.read', async (exchange) => {
+    const outcome = await runWithOcErrors(exchange, () => ctx.connectorHub.reconcileRuns())
+    if (!outcome) return // 错误响应已由处理器写出
+    const result = outcome as Awaited<ReturnType<typeof ctx.connectorHub.reconcileRuns>>
+    changeLog(exchange, 'connector.reconcile.runs', 'connector_reconcile', 'runs', '', `checked=${result.checkedRuns} bypass=${result.bypassRuns.length}`)
+    return result
+  })
+
+  guarded('GET', '/api/connector/tokens', 'connector.permgroup.write', (exchange) => {
+    // 台账只读：永不返回 token 值（值仅创建时返回一次且平台不落盘）
+    const ledgers = ctx.connectorHub.tokens().all().map((item) => ({
+      permGroupId: item.permGroupId,
+      ocTokenId: item.ocTokenId,
+      policySnapshotHash: item.policySnapshotHash.slice(0, 12),
+      createdAt: item.createdAt,
+      lastSyncedAt: item.lastSyncedAt,
+    }))
+    return { total: ledgers.length, tokens: ledgers }
+  })
+
   // -- Skill 市场 ---------------------------------------------------------
   guarded('GET', '/api/skills', 'skill.read', (exchange) => {
     if (exchange.query.get('mine') === '1') {
@@ -2527,6 +2827,11 @@ export function apply(ctx: Context) {
       args.callerType = mcpCaller.type
       args.callerId = mcpCaller.id
       args.callerName = mcpCaller.name
+    } else if (name === 'connector_execute') {
+      const connectorCaller = resolveConnectorCaller(info)
+      args.callerType = connectorCaller.type
+      args.callerId = connectorCaller.id
+      args.callerName = connectorCaller.name
     } else if (name === 'approval_decide' || name === 'skill_approve') {
       args.approverId = principalId
       args.approverName = info.name

@@ -41,6 +41,9 @@ export interface McpServiceRecord extends RecordBase {
   headers?: Record<string, string>
   orgId: string
   owner: string
+  /** 桥接来源标记（如 open-connector）：M0 数据面桥接的治理降级标识——仅服务级粒度，
+   *  无 action 级授权/连接级绑定/令牌镜像（dev-plan-connector §2.11）。控制台打徽章。 */
+  bridgeFrom?: string
   status: 'draft' | 'verifying' | 'online' | 'gray' | 'unhealthy' | 'offline'
   grayPercent: number
   currentVersion: string
@@ -264,6 +267,8 @@ export class McpService extends Service {
     stability?: number
     /** 显式声明 demo 才使用模拟执行层；缺省一律 real（生态设计 v1.2 第 0 步）。 */
     exec?: 'real' | 'demo'
+    /** M0 数据面桥接来源标记（open-connector 等），控制台打「桥接过渡」徽章。 */
+    bridgeFrom?: string
   }): McpServiceRecord {
     if (!input.name?.trim()) throw new Error('服务名称不能为空')
     const slug = input.slug ?? input.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
@@ -291,6 +296,7 @@ export class McpService extends Service {
       stability: input.stability ?? 0.97,
       rateLimitPerMin: 60,
       exec: input.exec ?? 'real',
+      ...(input.bridgeFrom ? { bridgeFrom: input.bridgeFrom } : {}),
     })
   }
 
@@ -358,6 +364,9 @@ export class McpService extends Service {
         continue
       }
       try {
+        const entryHeaders = entry.headers ?? {}
+        const bridgedFrom = Object.entries(entryHeaders)
+          .find(([key]) => key.toLowerCase() === 'x-bridged-from')?.[1]
         const service = this.createService({
           name: entry.name,
           endpoint: entry.url,
@@ -367,6 +376,8 @@ export class McpService extends Service {
           orgId: input.orgId,
           owner: input.owner,
           ...(entry.headers ? { headers: entry.headers } : {}),
+          // M0 数据面桥接打标：连接器网关导入的 MCP 服务带治理降级徽章（§2.11）
+          ...(bridgedFrom ? { bridgeFrom: String(bridgedFrom) } : {}),
           ...(entry.description ? { description: entry.description } : {}),
           tools: [],
         })

@@ -143,6 +143,17 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
             health <id> | online <id> | offline <id> --reason=
             shares <id> | files <id> [--path=] | mkdir <id> --path= | delete <id> --path=
             upload <id> --file=<本地路径> --dest=<NAS路径> | search <id> --pattern= [--path=]
+  connector gateway get | gateway set --base-url= --admin-token-env=VAR | gateway health
+            catalog providers [--search=] | catalog actions [--service=] [--search=]
+            catalog action <actionId> [--guide]
+            connections list [--org=] | connections create --provider= --auth-type=no_auth|api_key|oauth
+                     --org=<orgId> [--alias-suffix=main] [--values=@file.json] [--scopes=a,b]
+                     connections delete <id> --yes [--force]
+            execute --action=<actionId> [--connection=<alias>] [--input=@file.json] [--dry-run]
+            perm-groups list | get | create --file=@group.json | impact <id> | delete <id> --yes
+            runs [--service=] [--ok=true|false] [--limit=50]
+            reconcile                              runs 对账（有 run 无 meter 即绕行告警，人工复核口径）
+            tokens                                 oct_ 台账（永不返回令牌值）
   agent     list [--status=] | get <id> | metrics <id> | topology <id>
             create --name= --model= --riskLevel=
             offline <id> --reason=<原因> --requesterId= --requesterName=   （L4 审批）
@@ -729,6 +740,186 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
   },
 
   // ---------------------------------------------------------------- agent / app
+  connector: {
+    desc: 'SaaS 连接器纳管（open-connector 数据面网关适配）',
+    run: async () => {
+      const group = argv[0] ?? 'gateway'
+      const sub = argv[1]
+      await ensureToken()
+      const jsonBodyFromFile = async (raw) => {
+        if (!raw) return {}
+        return JSON.parse(String(raw).startsWith('@')
+          ? await import('node:fs/promises').then((fs) => fs.readFile(String(raw).slice(1), 'utf8'))
+          : String(raw))
+      }
+      // ---- 网关 ----
+      if (group === 'gateway') {
+        if (sub === 'set') {
+          const baseUrl = argOf('--base-url')
+          if (!baseUrl) fail('用法：connector gateway set --base-url= [--admin-token-env=VAR]')
+          const adminTokenEnv = argOf('--admin-token-env')
+          await call('PUT', '/api/connector/gateway', {
+            baseUrl,
+            ...(adminTokenEnv ? { adminToken: `env:${adminTokenEnv}` } : {}),
+          })
+          ok(`网关已保存：${baseUrl}（探活已触发，可用 connector gateway health 复核）`)
+          return
+        }
+        if (sub === 'health') {
+          const data = await call('POST', '/api/connector/gateway/health')
+          out([data], ['ok', 'latencyMs', 'reason'])
+          return
+        }
+        out(await call('GET', '/api/connector/gateway'))
+        return
+      }
+      // ---- 目录 ----
+      if (group === 'catalog') {
+        if (sub === 'providers') {
+          const data = await call('GET', '/api/connector/catalog' + (flag('search') ? `?q=${encodeURIComponent(flag('search'))}&kind=providers` : '?kind=providers'))
+          out(data.providers.map((p) => ({ service: p.service, name: p.name, description: p.description })), ['service', 'name', 'description'])
+          return
+        }
+        if (sub === 'actions') {
+          const params = new URLSearchParams({ kind: 'actions' })
+          if (flag('service')) params.set('service', flag('service'))
+          if (flag('search')) params.set('q', flag('search'))
+          const data = await call('GET', `/api/connector/catalog?${params}`)
+          out(data.actions.map((a) => ({ id: a.id, service: a.service, riskLevel: a.riskLevel, description: a.description })), ['id', 'service', 'riskLevel', 'description'])
+          return
+        }
+        if (sub === 'action') {
+          const actionId = argv[2]
+          if (!actionId) fail('用法：connector catalog action <actionId> [--guide]')
+          if (flag('guide')) {
+            const raw = await fetch(`${BASE}/api/connector/catalog/actions/${encodeURIComponent(actionId)}/guide`, { headers: { authorization: `Bearer ${token}` } })
+            console.log(await raw.text())
+            return
+          }
+          out(await call('GET', `/api/connector/catalog/actions/${encodeURIComponent(actionId)}`))
+          return
+        }
+      }
+      // ---- 连接 ----
+      if (group === 'connections') {
+        if (sub === 'list') {
+          const search = new URLSearchParams()
+          if (flag('org')) search.set('orgId', flag('org'))
+          const data = await call('GET', '/api/connector/connections' + (search.size ? `?${search}` : ''))
+          out(data.connections.map((c) => ({
+            id: c.id, provider: c.provider, alias: c.alias, authType: c.authType,
+            status: c.status, org: c.ownerOrgId,
+            maskedProfile: c.maskedProfile ? Object.entries(c.maskedProfile).map(([k, v]) => `${k}=${v}`).join(' ') : '',
+          })), ['id', 'provider', 'alias', 'authType', 'status', 'org', 'maskedProfile'])
+          return
+        }
+        if (sub === 'create') {
+          const provider = argOf('--provider')
+          const authType = argOf('--auth-type')
+          const org = argOf('--org')
+          const aliasSuffix = argOf('--alias-suffix', 'main')
+          if (!provider || !authType || !org) fail('用法：connector connections create --provider= --auth-type=no_auth|api_key|oauth --org=<orgId> [--alias-suffix=main] [--values=@file.json]')
+          const endpoint = authType === 'oauth' ? '/api/connector/connections/oauth'
+            : authType === 'no_auth' ? '/api/connector/connections/no-auth'
+              : '/api/connector/connections/api-key'
+          const payload = { provider, aliasSuffix, orgId: org }
+          if (authType !== 'no_auth' && authType !== 'oauth') payload.values = await jsonBodyFromFile(argOf('--values'))
+          if (authType === 'oauth' && flag('scopes')) payload.requestedScopes = String(flag('scopes')).split(',')
+          const data = await call('POST', endpoint, payload)
+          if (data.approvalRequired) { ok(`已进入审批门禁：审批单 ${data.approvalId}；批准后重发并带相同参数即可完成创建（服务端校验 approvalId）`); return }
+          if (data.authorizationUrl) {
+            console.log(`\n✔ 授权页：${data.authorizationUrl}\n  state=${data.state}\n  完成授权后执行 dshctl connector connections list 观察状态`)
+            return
+          }
+          out(data.reference, ['id', 'alias', 'provider', 'authType', 'status', 'ocConnectionId'])
+          return
+        }
+        if (sub === 'delete') {
+          const id = argv[2]
+          if (!id) fail('用法：connector connections delete <id> --yes （仍被权限组引用时可加 --force 解除引用并镜像令牌）')
+          if (!ASSUME_YES && !DRY_RUN) fail('删除连接需要确认：请携带 --yes')
+          const data = await call('DELETE', `/api/connector/connections/${id}`, flag('force') ? { force: true } : {})
+          console.log(`\n✔ 连接已删除${Array.isArray(data.releasedGroups) && data.releasedGroups.length > 0 ? `（解除引用组：${data.releasedGroups.join(',')}）` : ''}`)
+          return
+        }
+      }
+      // ---- 执行 ----
+      if (group === 'execute') {
+        const actionId = argOf('--action')
+        if (!actionId) fail('用法：connector execute --action=<actionId> [--connection=<alias>] [--input=@file.json] [--dry-run]')
+        const input = await jsonBodyFromFile(argOf('--input'))
+        const body = { actionId, input }
+        if (argOf('--connection')) body.connection = argOf('--connection')
+        if (DRY_RUN) body.dryRun = true
+        const data = await call('POST', '/api/connector/execute', body)
+        if (data.status === 'approval_required') {
+          console.log(`\n⏸ admin 级 action 已生成审批单 ${data.approvalId}\n  批准：dshctl approval decide ${data.approvalId} --decision=approve\n  批准后 executor 自动完成调用与计量`)
+          return
+        }
+        out(data)
+        return
+      }
+      // ---- 权限组 ----
+      if (group === 'perm-groups') {
+        if (sub === 'create') {
+          const file = argOf('--file')
+          if (!file) fail('用法：connector perm-groups create --file=@group.json（含 name/orgId/policies/subjects/rateLimitPerMin/precheckCents）')
+          const payload = await jsonBodyFromFile(file)
+          const data = await call('POST', '/api/connector/perm-groups', payload)
+          ok(`权限组已创建：${data.id}（独立 oct_ 令牌按四数组全发语义镜像 policies）`)
+          return
+        }
+        if (sub === 'impact') {
+          const id = argv[2]
+          if (!id) fail('用法：connector perm-groups impact <id>   变更影响面预览（N 令牌 / M 连接 / 主体数）')
+          out(await call('POST', `/api/connector/perm-groups/${id}/impact`))
+          return
+        }
+        if (sub === 'delete') {
+          const id = argv[2]
+          if (!id) fail('用法：connector perm-groups delete <id> --yes   联动 DELETE 对应运行时令牌')
+          if (!ASSUME_YES) fail('删除权限组会吊销其运行时令牌：请携带 --yes')
+          await call('DELETE', `/api/connector/perm-groups/${id}`)
+          ok('已删除并联动吊销运行时令牌')
+          return
+        }
+        if (sub === 'get') {
+          out(await call('GET', '/api/connector/perm-groups'))
+          return
+        }
+        const data = await call('GET', '/api/connector/perm-groups')
+        out(data.groups.map((g) => ({ id: g.id, name: g.name, org: g.orgId, policies: Object.keys(g.policies).join('|'), subjects: g.subjects.length })), ['id', 'name', 'org', 'policies', 'subjects'])
+        return
+      }
+      // ---- 运行日志 / 对账 / 台账 ----
+      if (group === 'runs') {
+        const search = new URLSearchParams()
+        if (flag('service')) search.set('service', flag('service'))
+        if (flag('ok')) search.set('ok', String(flag('ok')))
+        search.set('limit', String(argOf('--limit', 50)))
+        const data = await call('GET', `/api/connector/runs?${search}`)
+        out(data.items.map((r) => ({ id: r.id, service: r.service, actionId: r.actionId, ok: r.ok, runtimeTokenId: r.runtimeTokenId, startedAt: r.startedAt })), ['id', 'service', 'actionId', 'ok', 'runtimeTokenId', 'startedAt'])
+        return
+      }
+      if (group === 'reconcile') {
+        const data = await call('POST', '/api/connector/reconcile')
+        out([{
+          checkedRuns: data.checkedRuns,
+          matchedMeters: data.matchedMeters,
+          bypass: (data.bypassRuns ?? []).join(',') || '-',
+          cursor: data.cursor ?? '-',
+        }], ['checkedRuns', 'matchedMeters', 'bypass', 'cursor'])
+        return
+      }
+      if (group === 'tokens') {
+        const data = await call('GET', '/api/connector/tokens')
+        out(data.tokens.map((t) => ({ permGroupId: t.permGroupId, ocTokenId: t.ocTokenId, hash: t.policySnapshotHash, lastSyncedAt: t.lastSyncedAt })), ['permGroupId', 'ocTokenId', 'hash', 'lastSyncedAt'])
+        return
+      }
+      fail(`未知 connector 子命令：${group}（见 dshctl help）`)
+    },
+  },
+
   agent: {
     run: async () => {
       const action = argv[0] ?? 'list'

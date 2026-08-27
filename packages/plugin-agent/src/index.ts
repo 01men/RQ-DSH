@@ -120,7 +120,8 @@ export class AgentRegistryService extends Service {
         name: `agent:${(agent as any).slug}`,
         refType: 'agent',
         refId: agent.id,
-        scopes: ['mcp.invoke', 'skill.read', 'agent.read', 'usage.write'],
+        // connector.invoke：连接器纳管（open-connector 融合）与 mcp.invoke 同级的独立调用权限点
+        scopes: ['mcp.invoke', 'skill.read', 'agent.read', 'usage.write', 'connector.invoke'],
       })
     }
     this.ctx.platformBus.emit(PlatformEvents.AgentRegistered, {
@@ -341,6 +342,29 @@ export function apply(ctx: Context) {
     return registry.offline(String(payload.agentId), 'approval-center', String(payload.reason ?? '审批通过下线'))
   }))
   migrateAgentCredentialScopes(ctx)
+  migrateAgentCredentialConnectorInvoke(ctx)
+}
+
+/** 一次性迁移：为存量 Agent 机器凭证补 connector.invoke（幂等标记，先例 agent-scopes-usage-write-v1）。 */
+function migrateAgentCredentialConnectorInvoke(ctx: Context): void {
+  const markers = ctx.opsStorage.collection<{ id: string; doneAt: string }>('agent:migrations')
+  const MARK = 'agent-scopes-connector-invoke-v1'
+  if (markers.get(MARK)) return
+  let patched = 0
+  for (const principal of ctx.authn.principals().find(
+    (item) => item.type === 'machine' && item.refType === 'agent' && item.status === 'active' && !item.scopes.includes('connector.invoke'),
+  )) {
+    ctx.authn.principals().update(principal.id, { scopes: [...principal.scopes, 'connector.invoke'] })
+    ctx.audit.record({
+      type: 'change', actorType: 'system', actorId: 'agent-migration', actorName: '凭证范围迁移',
+      action: 'agent.credential.connector-invoke-backfill', resourceType: 'agent',
+      resourceId: principal.refId ?? '', resourceName: principal.name, result: 'ok',
+      detail: '补入 connector.invoke（连接器纳管数据面对齐）',
+    })
+    patched++
+  }
+  markers.insert({ id: MARK, doneAt: new Date().toISOString() })
+  if (patched > 0) ctx.logger('agent').info(`存量 Agent 凭证迁移完成：${patched} 条补入 connector.invoke`)
 }
 
 /** 一次性迁移：为存量 Agent 机器凭证补 usage.write（幂等标记，防止覆盖后续人工调整的 scopes）。 */

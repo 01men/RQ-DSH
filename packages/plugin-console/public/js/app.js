@@ -10,6 +10,7 @@ import { renderIam } from './pages/iam.js'
 import { renderAuthn } from './pages/authn.js'
 import { renderMcp } from './pages/mcp.js'
 import { renderNas } from './pages/nas.js'
+import { renderConnectors } from './pages/connectors.js'
 import { renderSkills } from './pages/skills.js'
 import { renderAgents } from './pages/agents.js'
 import { renderApps } from './pages/apps.js'
@@ -31,6 +32,7 @@ const NAV = [
     { path: '#/apps', label: 'AI 应用', icon: 'app', perm: 'app.read' },
     { path: '#/mcp', label: 'MCP 服务', icon: 'plug', perm: 'mcp.service.read' },
     { path: '#/nas', label: 'NAS 存储', icon: 'server', perm: 'nas.read' },
+    { path: '#/connectors', label: '连接器', icon: 'plug', perm: 'connector.catalog.read' },
   ] },
   { section: '治理与运营', items: [
     { path: '#/assets', label: '资产运营', icon: 'layers', perm: 'usage.read' },
@@ -81,6 +83,7 @@ function navigate() {
     authn: renderAuthn,
     mcp: renderMcp,
     nas: renderNas,
+    connectors: renderConnectors,
     skills: renderSkills,
     agents: renderAgents,
     apps: renderApps,

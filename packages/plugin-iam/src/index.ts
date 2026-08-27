@@ -165,6 +165,15 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'mcp.service.offline', label: '下线 MCP', group: 'MCP' },
   { point: 'mcp.permgroup.write', label: '管理 MCP 权限组', group: 'MCP' },
   { point: 'mcp.invoke', label: '调用 MCP 网关', group: 'MCP' },
+  // 连接器纳管（SaaS 数据面网关；invoke 独立权限点对齐 mcp.invoke 先例）
+  { point: 'connector.gateway.write', label: '配置连接器网关与健康操作', group: '连接器' },
+  { point: 'connector.catalog.read', label: '浏览连接器目录', group: '连接器' },
+  { point: 'connector.connection.read', label: '查看连接器连接（org 内）', group: '连接器' },
+  { point: 'connector.connection.write', label: '创建/删除连接器连接（含 OAuth 发起）', group: '连接器' },
+  { point: 'connector.invoke', label: '调用连接器 action', group: '连接器' },
+  { point: 'connector.permgroup.write', label: '管理连接器权限组', group: '连接器' },
+  { point: 'connector.runs.read', label: '查看连接器运行日志/对账视图', group: '连接器' },
+  { point: 'connector.market.publish', label: '上架连接器型插件（M3，业务触发启动）', group: '连接器' },
   { point: 'skill.read', label: '浏览 Skill 市场', group: 'Skill 市场' },
   { point: 'skill.submit', label: '提交 Skill', group: 'Skill 市场' },
   { point: 'skill.approve', label: '审批 Skill', group: 'Skill 市场' },
@@ -206,11 +215,21 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [
   { code: 'super_admin', name: '平台超级管理员', builtin: true, description: '拥有全部权限点', permissions: ['*'] },
   { code: 'org_admin', name: '组织管理员', builtin: true, description: '管理本组织账号与用户组', permissions: ['console.login', 'iam.*', 'approval.read'] },
-  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS 资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'approval.read'] },
-  { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'app.read', 'app.write', 'nas.read'] },
+  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS/连接器资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'connector.*', 'approval.read'] },
+  { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'app.read', 'app.write', 'nas.read', 'connector.catalog.read', 'connector.connection.read', 'connector.invoke'] },
   { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read'] },
-  { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'authn.oidc.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'nas.read', 'audit.read', 'approval.read'] },
+  { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'authn.oidc.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'nas.read', 'audit.read', 'approval.read', 'connector.runs.read', 'connector.connection.read'] },
 ]
+
+/**
+ * 内置角色的一次性幂等权限迁移：ensureBuiltinRoles 只插不更新——生产已落库角色不会自动
+ * 获得 v1.1 新增的 connector.* 权限点。迁移只做「缺则补」，不触碰用户自定义角色。
+ */
+export const CONNECTOR_ROLE_MIGRATION: Record<string, string[]> = {
+  resource_admin: ['connector.gateway.write', 'connector.catalog.read', 'connector.connection.read', 'connector.connection.write', 'connector.invoke', 'connector.permgroup.write', 'connector.runs.read'],
+  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke'],
+  auditor: ['connector.runs.read', 'connector.connection.read'],
+}
 
 // ---------------------------------------------------------------------------
 // 三方连接器接口
@@ -888,6 +907,41 @@ export class IamService extends Service {
         this.roles().insert({ id: newId('rol'), ...role })
       }
     }
+  }
+
+  /**
+   * 内置角色权限迁移（幂等）：给已落库的 resource_admin/developer/auditor 补齐连接器纳管
+   * 权限点。只补缺不覆盖；迁移标记入 iam:migrations 集合供观测（P2 修正⑯）。
+   */
+  ensureConnectorPermissionsMigration(): { applied: boolean; touched: string[] } {
+    const collection = this.ctx.opsStorage.collection<RecordBase & { key: string; note?: string }>('iam:migrations')
+    const marker = collection.findOne((item) => item.key === 'connector-permissions-v1')
+    const touched: string[] = []
+    for (const [code, additions] of Object.entries(CONNECTOR_ROLE_MIGRATION)) {
+      const role = this.roles().findOne((item) => item.code === code)
+      if (!role) continue
+      const missing = additions.filter((point) => !role.permissions.includes(point))
+      if (missing.length > 0) {
+        this.roles().update(role.id, { permissions: [...role.permissions, ...missing] })
+        this.ctx.platformBus.emit(PlatformEvents.PermissionChanged, { kind: 'builtin_role_migration', roleId: role.id })
+        touched.push(`${code}+${missing.join(',')}`)
+      }
+    }
+    // 通配语义复查：resource_admin 持有 mcp.* 形态的通配时 userPermissions 已可展开 connector.*
+    // （旧库存量不含 connector.*），故此处显式并入该通配保证无需逐点追加。
+    const resourceAdmin = this.roles().findOne((item) => item.code === 'resource_admin')
+    if (resourceAdmin && !resourceAdmin.permissions.includes('connector.*')) {
+      this.roles().update(resourceAdmin.id, { permissions: [...resourceAdmin.permissions, 'connector.*'] })
+      this.ctx.platformBus.emit(PlatformEvents.PermissionChanged, { kind: 'builtin_role_migration', roleId: resourceAdmin.id })
+      touched.push('resource_admin+connector.*')
+    }
+    if (!marker) {
+      collection.insert({
+        id: newId('mig'), key: 'connector-permissions-v1',
+        ...(touched.length > 0 ? { note: touched.join('; ') } : {}),
+      })
+    }
+    return { applied: marker === undefined || touched.length > 0, touched }
   }
 
   createRole(input: { code: string; name: string; description?: string; permissions: string[] }): RoleRecord {

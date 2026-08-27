@@ -1,0 +1,20 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-connector
+base: /api
+endpoints:
+  - GET/PUT /api/connector/gateway · POST /api/connector/gateway/health
+  - GET /api/connector/catalog · GET /api/connector/catalog/actions/:actionId[/guide] · POST /api/connector/catalog/sync
+  - GET /api/connector/connections · POST /api/connector/connections/oauth|api-key|no-auth|finalize · DELETE /api/connector/connections/:id
+  - POST /api/connector/execute（七步链：RBAC→权限组→审批→限流→precheck→oct_ 令牌→数据面）
+  - GET/POST/PATCH/DELETE /api/connector/perm-groups · POST /api/connector/perm-groups/:id/impact
+  - GET /api/connector/runs · POST /api/connector/reconcile · GET /api/connector/tokens
+tools:
+  - connector_catalog_search
+  - connector_connection_list
+  - connector_execute
+  - connector_perm_group_list
+  - connector_run_list
+services:
+  - key: connectorHub
+    access: ctx.connectorHub
+    description: open-connector v1.4.0 数据面网关适配：目录同步/连接管理（OAuth·APIKey·no_auth）/invoke 七步链/oct_ 令牌策略镜像/runs 对账

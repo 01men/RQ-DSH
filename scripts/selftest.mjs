@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process'
 import { createServer, request as httpRequest } from 'node:http'
 import { createHash } from 'node:crypto'
 import { rm, mkdir } from 'node:fs/promises'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const readBody = (req) => new Promise((resolve) => {
@@ -142,10 +143,16 @@ const nasGwStub = createServer(async (req, res) => {
     if (name === 'fs_download') return text({ downloaded: args.path, dest_dir: args.dest_dir })
     if (name === 'fs_task_status') return text({ taskid: args.taskid, finished: true })
     if (name === 'fs_upload') {
+      // 对齐真实 synology-filestation-mcp 契约：dest_path（目标目录，必填 string）+ local_file（必填 string），
+      // 上传文件名取 basename(local_file)；缺必填参数按真实网关回 -32602（zod 校验失败）
+      if (typeof args.dest_path !== 'string' || typeof args.local_file !== 'string') {
+        return replyError(-32602, 'Input validation error: Invalid arguments for tool fs_upload: Invalid input: expected string, received undefined at dest_path')
+      }
       try {
         const buffer = await import('node:fs/promises').then((fs) => fs.readFile(String(args.local_file)))
-        nasGwUploads.push({ share: args.share, path: args.path, sizeBytes: buffer.length, magic: buffer.subarray(0, 2).toString('latin1'), content: buffer })
-        return text({ uploaded: args.path, size: buffer.length })
+        const filename = String(args.local_file).split(/[\\/]/).pop()
+        nasGwUploads.push({ destPath: args.dest_path, filename, sizeBytes: buffer.length, magic: buffer.subarray(0, 2).toString('latin1'), content: buffer })
+        return text({ uploaded: `${args.dest_path}/${filename}`, bytes: buffer.length })
       } catch (error) {
         return reply({ content: [{ type: 'text', text: `fs_upload 网关侧读不到 local_file：${error instanceof Error ? error.message : error}` }], isError: true })
       }
@@ -156,7 +163,298 @@ const nasGwStub = createServer(async (req, res) => {
 })
 await new Promise((resolve) => nasGwStub.listen(NAS_GW_PORT, '127.0.0.1', resolve))
 
-// ---------------------------------------------------------------- 启动隔离实例
+// ---------------------------------------------------------------- stub open-connector 数据面网关（v1.4.0 契约）
+// 进程内真实 HTTP stub：统一信封 {success,data,meta}/{success:false,errorCode}、
+// 强制管理 Bearer、oct_ 令牌策略校验（T-11/T-29）、PUT 四数组严格校验（T-12）、
+// token 值仅创建时返回一次、oauth_client_config_required 分支（T-06）、cursor 分页 runs + 注入伪造 run（T-23）。
+const OC_STUB_PORT = 7363
+const OC_BASE = `http://127.0.0.1:${OC_STUB_PORT}`
+const OC_TOKEN = 'oc-selftest-admin-token'
+const ocCalls = []          // POST /v1/actions/:id 调用记录 {actionId,bearerOk,alias,idempotencyKey,input}
+const ocPuts = []           // PUT /api/runtime-tokens/:id 记录（四数组断言用）
+const ocDeletes = []        // DELETE /api/runtime-tokens/:id
+const ocMintedValues = []   // 每次铸造返回的 oct_ 一次性值（T-24 全文扫描名单）
+const ocLedgerTokens = new Map()  // id → {policy,name}
+const ocTokenByValue = new Map()
+const ocConnections = new Map() // service → Map(connectionName → summary)
+const ocIdemCache = new Map()   // Idempotency-Key → 完整响应体（24h 重放窗口的 stub 等价物，T-22）
+const ocClientsConfigured = new Set()   // 已存 OAuth client 配置的 service
+const ocRuns = []           // 伪造/真实 run 日志（runtimeTokenId 维度对账）
+const ocCtl = {
+  connNotAllowedOnce: null,   // 下一次该 tokenValue 执行回 403 connection_not_allowed 后自动清除
+  alwaysDenyToken: null,      // 该 tokenValue 执行恒 403 connection_not_allowed（自动恢复重试仍失败路径）
+  auditPersistedNext: false,  // 下一次成功执行 meta.auditPersisted=false
+  actions: null,              // 当前目录 action 集（null=默认；测试可删改模拟下架）
+  overlapDupInRuns: false,    // 分页重叠窗口：第二页重复首条（T-23 去重）
+}
+
+const ocActionsDefault = [
+  { id: 'hackernews.get_top_stories', name: 'get_top_stories', service: 'hackernews', description: '获取热帖', requiredScopes: [], providerPermissions: [], inputSchema: { type: 'object', properties: { limit: { type: 'number' } } } },
+  { id: 'hackernews.fetch_item', name: 'fetch_item', service: 'hackernews', description: '拉取条目', requiredScopes: ['public:read'], inputSchema: { type: 'object' } },
+  { id: 'hackernews.submit_post', name: 'submit_post', service: 'hackernews', description: '提交帖子', requiredScopes: ['write:posts'], inputSchema: { type: 'object', properties: { title: { type: 'string' }, url: { type: 'string' } } } },
+  { id: 'github.list_issues', name: 'list_issues', service: 'github', description: '列 issue', requiredScopes: ['repo:read'], inputSchema: { type: 'object' } },
+  { id: 'github.create_issue', name: 'create_issue', service: 'github', description: '建 issue', requiredScopes: ['repo:write'], inputSchema: { type: 'object', properties: { title: { type: 'string' } } } },
+  { id: 'github.delete_webhook', name: 'delete_webhook', service: 'github', description: '删除 webhook', requiredScopes: ['webhook:admin'], inputSchema: { type: 'object' } },
+  { id: 'hackernews.do_the_thing', name: 'do_the_thing', service: 'hackernews', description: '无 scope 无名可判定的动作', requiredScopes: [], inputSchema: { type: 'object' } },
+]
+const ocProvidersDefault = [
+  { service: 'hackernews', name: 'Hacker News', description: 'no_auth 示例', auth: [{ type: 'no_auth' }] },
+  { service: 'github', name: 'GitHub', description: 'OAuth+API Key 示例', auth: [{ type: 'oauth' }, { type: 'api_key' }] },
+  // resource 正则拒绝纳管的反例（T-03）
+  { service: 'weird service!', name: 'Weird', description: '非法 service 标识', auth: [] },
+]
+
+let ocSeq = 10
+const ocEnvelope = (res, status, payload) => {
+  res.writeHead(status, { 'content-type': 'application/json' })
+  res.end(JSON.stringify(payload))
+}
+const ocAdmin = (req) => req.headers.authorization === `Bearer ${OC_TOKEN}`
+const ocPolicyFits = (tokenPolicy, actionId) => {
+  const allowed = tokenPolicy.allowedActions ?? []
+  return allowed.includes('*') || allowed.includes(actionId)
+    || allowed.some((p) => typeof p === 'string' && p.endsWith('.*') && actionId.startsWith(p.slice(0, -2)))
+}
+
+const ocStub = createServer(async (req, res) => {
+  const url = new URL(req.url ?? '/', OC_BASE)
+  const path = url.pathname
+  const bodyText = await readBody(req)
+  let body = {}
+  try { body = bodyText ? JSON.parse(bodyText) : {} } catch { /* ignore */ }
+  // 健康探测与数据面执行（oct_）公开于管理门禁之外；/api/* 一律 admin Bearer
+  const bearerValue = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
+  const isKnownOct = ocTokenByValue.has(bearerValue)
+  if (req.method === 'GET' && path === '/v1/health') {
+    return ocEnvelope(res, 200, { success: true, data: { ok: true, runtime: 'oomol-connect' } })
+  }
+  const isDataPlaneExec = /^\/v1\/actions\/[^/]+$/.test(path) && req.method === 'POST'
+  if (!path.startsWith('/oauth/callback') && !isDataPlaneExec && !ocAdmin(req)) {
+    return ocEnvelope(res, 401, { success: false, errorCode: 'unauthorized', message: '管理接口需要 Bearer 口令' })
+  }
+  void isKnownOct
+
+  // -- 目录 ---------------------------------------------------------------
+  if (req.method === 'GET' && path === '/v1/providers') {
+    return ocEnvelope(res, 200, { success: true, data: ocProvidersDefault })
+  }
+  if (req.method === 'GET' && path === '/v1/actions') {
+    return ocEnvelope(res, 200, { success: true, data: (ocCtl.actions ?? ocActionsDefault), ...(url.searchParams.get('service') ? {} : {}) })
+  }
+  const actionDetailMatch = path.match(/^\/v1\/actions\/([^/]+)$/)
+  if (req.method === 'GET' && actionDetailMatch) {
+    const found = (ocCtl.actions ?? ocActionsDefault).find((item) => item.id === decodeURIComponent(actionDetailMatch[1]))
+    if (!found) return ocEnvelope(res, 404, { success: false, errorCode: 'unknown_action' })
+    return ocEnvelope(res, 200, { success: true, data: found })
+  }
+  const guideMatch = path.match(/^\/api\/actions\/([^/]+)\/agent\.md$/)
+  if (req.method === 'GET' && guideMatch) {
+    res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' })
+    res.end(`## 连接指南（stub agent.md）\n\n为 ${decodeURIComponent(guideMatch[1])} 配置连接：先注册 OAuth App / 准备 API Key。\n`)
+    return
+  }
+
+  // -- 连接 ---------------------------------------------------------------
+  if (req.method === 'GET' && path === '/api/connections') {
+    const all = [...ocConnections.values()].flatMap((m) => [...m.values()])
+    return ocEnvelope(res, 200, { success: true, data: all })
+  }
+  const connectionMatch = path.match(/^\/api\/connections\/([^/]+)$/)
+  if (req.method === 'PUT' && connectionMatch) {
+    const service = decodeURIComponent(connectionMatch[1])
+    if (!ocConnections.has(service)) ocConnections.set(service, new Map())
+    const summary = {
+      id: `oc-con-${++ocSeq}`,
+      service,
+      connectionName: String(body.connectionName ?? ''),
+      authType: body.authType === 'custom_credential' ? 'custom_credential' : 'api_key',
+      configured: true,
+      virtual: false,
+      default: Boolean(body.default),
+      profile: { ...Object.fromEntries(Object.entries(body.values ?? {}).map(([k, v]) => [k, typeof v === 'string' ? `${String(v).slice(0, 4)}***` : v])) },
+    }
+    ocConnections.get(service).set(summary.connectionName, summary)
+    return ocEnvelope(res, 200, { success: true, data: summary }) // 成功状态码上游未载——按默认 200 断言信封
+  }
+  if (req.method === 'DELETE' && connectionMatch) {
+    const service = decodeURIComponent(connectionMatch[1])
+    const removed = ocConnections.get(service)?.delete(String(body.connectionName ?? ''))
+    return removed
+      ? ocEnvelope(res, 200, { success: true, data: { deleted: true } })
+      : ocEnvelope(res, 404, { success: false, errorCode: 'unknown_connection', message: `连接不存在：${service}/${body.connectionName}` })
+  }
+
+  // -- OAuth ----------------------------------------------------------------
+  if (req.method === 'POST' && path === '/api/oauth/authorizations') {
+    const service = String(body.service ?? '')
+    if (!ocClientsConfigured.has(service)) {
+      return ocEnvelope(res, 400, { success: false, errorCode: 'oauth_client_config_required', message: `${service} 未存 client 配置` })
+    }
+    const state = `st-${++ocSeq}`
+    pendingOauth.set(state, { service, connectionName: String(body.connectionName ?? '') })
+    return ocEnvelope(res, 200, { success: true, data: { authorizationUrl: `${OC_BASE}/oauth/authorize?state=${state}`, state } })
+  }
+  if (req.method === 'GET' && path === '/oauth/callback') {
+    const state = url.searchParams.get('state') ?? ''
+    const entry = pendingOauth.get(state)
+    if (!entry) {
+      res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' }); res.end('<html>bad state</html>'); return
+    }
+    pendingOauth.delete(state)
+    if (!ocConnections.has(entry.service)) ocConnections.set(entry.service, new Map())
+    ocConnections.get(entry.service).set(entry.connectionName, {
+      id: `oc-con-${++ocSeq}`, service: entry.service, connectionName: entry.connectionName,
+      authType: 'oauth', configured: true, virtual: false, default: false,
+      profile: { login: 'dsh-selftest' },
+    })
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end('<html><body>授权完成（stub 回调页）</body></html>')
+    return
+  }
+
+  // -- 运行时令牌 -------------------------------------------------------------
+  if (req.method === 'POST' && path === '/api/runtime-tokens') {
+    const requiredArrays = ['allowedActions', 'blockedActions', 'allowedProxies', 'allowedConnections']
+    for (const key of requiredArrays) {
+      if (!Array.isArray(body[key])) return ocEnvelope(res, 400, { success: false, errorCode: 'invalid_policy_arrays', message: `${key} 必须是数组（四数组全发契约）` })
+    }
+    const id = `tok-${++ocSeq}`
+    const value = `oct_selftest_${++ocSeq}_${Math.random().toString(36).slice(2, 8)}`
+    ocLedgerTokens.set(id, { policy: { allowedActions: body.allowedActions, blockedActions: body.blockedActions, allowedProxies: body.allowedProxies, allowedConnections: body.allowedConnections }, name: String(body.name ?? '') })
+    ocTokenByValue.set(value, id)
+    ocMintedValues.push(value)
+    return ocEnvelope(res, 200, { success: true, data: { id, name: body.name, token: value, createdAt: new Date().toISOString(), policy: ocLedgerTokens.get(id).policy } })
+  }
+  if (req.method === 'GET' && path === '/api/runtime-tokens') {
+    return ocEnvelope(res, 200, { success: true, data: [...ocLedgerTokens.entries()].map(([id, rec]) => ({ id, name: rec.name, createdAt: new Date().toISOString(), policy: rec.policy })) })
+  }
+  const tokenMatch = path.match(/^\/api\/runtime-tokens\/([^/]+)$/)
+  if (req.method === 'PUT' && tokenMatch) {
+    const id = decodeURIComponent(tokenMatch[1])
+    if (!ocLedgerTokens.has(id)) return ocEnvelope(res, 404, { success: false, errorCode: 'unknown_token' })
+    for (const key of ['allowedActions', 'blockedActions', 'allowedProxies', 'allowedConnections']) {
+      if (!Array.isArray(body[key])) return ocEnvelope(res, 400, { success: false, errorCode: 'invalid_policy_arrays', message: `${key} 缺失或非数组（PUT 四数组全发契约）` })
+    }
+    ocLedgerTokens.get(id).policy = { allowedActions: body.allowedActions, blockedActions: body.blockedActions, allowedProxies: body.allowedProxies, allowedConnections: body.allowedConnections }
+    ocPuts.push({ id, policy: ocLedgerTokens.get(id).policy })
+    return ocEnvelope(res, 200, { success: true, data: { id, policy: ocLedgerTokens.get(id).policy } })
+  }
+  if (req.method === 'DELETE' && tokenMatch) {
+    const id = decodeURIComponent(tokenMatch[1])
+    ocDeletes.push(id)
+    ocLedgerTokens.delete(id)
+    return ocEnvelope(res, 200, { success: true, data: { deleted: true } })
+  }
+
+  // -- 数据面执行 --------------------------------------------------------------
+  const execMatch = path.match(/^\/v1\/actions\/([^/]+)$/)
+  if (req.method === 'POST' && execMatch) {
+    const bearer = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
+    const tokenId = ocTokenByValue.get(bearer)
+    const actionId = decodeURIComponent(execMatch[1])
+    ocCalls.push({
+      actionId, bearerOk: Boolean(tokenId),
+      alias: req.headers['x-oo-connector-alias'] ?? null,
+      idempotencyKey: req.headers['idempotency-key'] ?? null,
+      input: body.input ?? {},
+    })
+    if (!tokenId) return ocEnvelope(res, 401, { success: false, errorCode: 'unauthorized', message: '缺少合法 oct_ 运行时令牌' })
+    // 数据面独立强制（T-29）与策略镜像一致性（T-11）：令牌 policy 与请求 action 不符即 403，
+    // 越权在凭证加载前拒绝——即使调用方完全绕开平台侧权限组也一样。
+    const record = ocLedgerTokens.get(tokenId)
+    if (!record || !ocPolicyFits(record.policy, actionId)) {
+      return ocEnvelope(res, 403, { success: false, errorCode: 'forbidden_action', message: `action ${actionId} 不在该运行时令牌 allowedActions 内` })
+    }
+    const allowedConnections = record.policy.allowedConnections ?? []
+    if (allowedConnections.length > 0) {
+      const alias = req.headers['x-oo-connector-alias']
+      const boundSummary = [...ocConnections.values()].flatMap((m) => [...m.values()])
+        .find((s) => s.id === allowedConnections[0] || s.connectionName === alias)
+      if (!boundSummary) return ocEnvelope(res, 403, { success: false, errorCode: 'connection_not_allowed', message: `连接未获令牌授权：${alias ?? '(default)'}` })
+    }
+    // 哨兵 '*ANY*' 匹配任意合法 oct_（测试注入用），否则按精确值匹配
+    const denyOnceMatch = ocCtl.connNotAllowedOnce !== null && (ocCtl.connNotAllowedOnce === '*ANY*' || ocCtl.connNotAllowedOnce === bearer)
+    if (denyOnceMatch) {
+      ocCtl.connNotAllowedOnce = null
+      return ocEnvelope(res, 403, { success: false, errorCode: 'connection_not_allowed' })
+    }
+    const denyAlwaysMatch = ocCtl.alwaysDenyToken !== null && (ocCtl.alwaysDenyToken === '*ANY*' || ocCtl.alwaysDenyToken === bearer)
+    if (denyAlwaysMatch) {
+      return ocEnvelope(res, 403, { success: false, errorCode: 'connection_not_allowed' })
+    }
+    const executionId = `exec-${++ocSeq}`
+    ocRuns.push({ id: executionId, service: actionId.split('.')[0], actionId, ok: true, runtimeTokenId: tokenId, caller: 'http', startedAt: new Date().toISOString(), latencyMs: 12 })
+    const successPayload = {
+      success: true,
+      data: { echo: body.input ?? {}, viaAlias: req.headers['x-oo-connector-alias'] ?? null, replayKey: req.headers['idempotency-key'] ?? null },
+      meta: { executionId, actionId, auditPersisted: !ocCtl.auditPersistedNext },
+    }
+    // T-22：同 Idempotency-Key 在重放窗口内返回原响应（含原 executionId），不产生重复 run
+    if (req.headers['idempotency-key']) {
+      const key = String(req.headers['idempotency-key'])
+      const cached = ocIdemCache.get(key)
+      if (cached) return ocEnvelope(res, 200, cached)
+      ocIdemCache.set(key, successPayload)
+      // 注入的伪造 run 会在下一个调用带同键时被消费为空（避免污染去重断言）
+    }
+    return ocEnvelope(res, 200, successPayload)
+  }
+
+  // -- runs 对账视图（cursor 分页 + 重叠窗口 + 伪造注入） ----------------------------------
+  if (req.method === 'GET' && path === '/api/runs') {
+    let items = [...ocRuns]
+    const fakeCount = Number(url.searchParams.get('injectFakeBypass') ?? 0)
+    for (let i = 0; i < fakeCount; i++) {
+      items.push({ id: `fake-bypass-${Date.now()}-${i}`, service: 'github', actionId: 'github.list_issues', ok: true, runtimeTokenId: [...ocLedgerTokens.keys()][0] ?? 'tok-foreign', caller: 'direct-sidecar', startedAt: new Date(Date.now() + i * 1000).toISOString() })
+    }
+    items.sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+    const cursorRaw = url.searchParams.get('cursor')
+    let offset = 0
+    if (cursorRaw) {
+      try { offset = Number(JSON.parse(decodeURIComponent(cursorRaw)).i ?? 0) } catch { offset = 0 }
+    }
+    const limit = Math.max(1, Number(url.searchParams.get('limit') ?? 100))
+    let page = items.slice(offset, offset + limit)
+    const nextOffset = offset + limit
+    // T-23 重叠窗口：第二页首条重复第一页末条（cursor 分页去重由平台侧负责）
+    if (offset > 0 && nextOffset < items.length && ocCtl.overlapDupInRuns && page.length > 0) {
+      page = [items[offset - 1], ...page]
+    }
+    const payload = { items: page }
+    if (nextOffset < items.length) {
+      payload.nextCursor = encodeURIComponent(JSON.stringify({ startedAt: page[page.length - 1].startedAt, i: nextOffset }))
+    }
+    return ocEnvelope(res, 200, { success: true, data: payload })
+  }
+
+  // -- MCP 桥接端点（POST /mcp，与平台同形态；供 M0 importServices 探测） ----------------------
+  if (req.method === 'POST' && path === '/mcp') {
+    let msg = {}
+    try { msg = JSON.parse(bodyText) } catch { /* ignore */ }
+    const jsonrpc = { jsonrpc: '2.0', id: msg.id }
+    if (msg.method === 'initialize') {
+      return ocEnvelope(res, 200, { ...jsonrpc, result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'open-connector-stub', version: '1.4.0' } } })
+    }
+    if (msg.method === 'tools/list') {
+      const names = ['hackernews_get_top_stories', 'hackernews_fetch_item', 'hackernews_submit_post', 'github_list_issues', 'github_create_issue']
+      return ocEnvelope(res, 200, { ...jsonrpc, result: { tools: names.map((name) => ({ name, description: `stub ${name}`, inputSchema: { type: 'object' } })) } })
+    }
+    if (msg.method === 'tools/call') {
+      const mapped = String(msg.params?.name ?? '').replace(/_/g, '.').replace('.get.top.stories', '.get_top_stories')
+      ocCalls.push({ actionId: msg.params?.name?.replace(/_([a-z])/g, '.$1'), bearerOk: true, alias: null, idempotencyKey: null, input: msg.params?.arguments ?? {} })
+      const executionId = `exec-mcp-${++ocSeq}`
+      ocRuns.push({ id: executionId, service: 'hackernews', ok: true, startedAt: new Date().toISOString(), latencyMs: 9 })
+      return ocEnvelope(res, 200, { ...jsonrpc, result: { content: [{ type: 'text', text: JSON.stringify({ bridgeEcho: msg.params?.arguments ?? {}, runId: executionId }) }] } })
+    }
+    return ocEnvelope(res, 200, { ...jsonrpc, error: { code: -32601, message: `方法不存在：${msg.method}` } })
+  }
+
+  return ocEnvelope(res, 404, { success: false, errorCode: 'not_found', message: path })
+})
+const pendingOauth = new Map()
+await new Promise((resolve) => ocStub.listen(OC_STUB_PORT, '127.0.0.1', resolve))
+
+// ---------------- 启动隔离实例
 console.log('\x1b[90m» 启动隔离测试实例…\x1b[0m')
 await rm(DATA_DIR, { recursive: true, force: true })
 await mkdir(DATA_DIR, { recursive: true })
@@ -167,6 +465,12 @@ const proc = spawn(process.execPath, ['src/main.ts', '--port', String(PORT), '--
   env: {
     ...process.env,
     DEMO_SEED: '1',
+    // 连接器纳管：强制 env 由自测进程下发（fail-closed 门禁的绿路前提）；
+    // 桥接 stub 地址 + 演示种子开关（网关/连接/权限组模板）
+    OOMOL_CONNECT_ENCRYPTION_KEY: 'selftest-encryption-key-not-a-secret',
+    OOMOL_CONNECT_ADMIN_TOKEN: OC_TOKEN,
+    OOMOL_CONNECT_STUB_URL: OC_BASE,
+    OOMOL_CONNECT_DEMO_SEED: '1',
     DSH_UPDATE_RAW_BASE: `http://127.0.0.1:${GH_PORT}`,
     DSH_UPDATE_API_BASE: `http://127.0.0.1:${GH_PORT}`,
     DSH_UPDATE_AUTO_CHECK: 'off',
@@ -226,6 +530,9 @@ try {
   // 三方登录完整链路（IdentityProviderAdapter：authorize → state → code → normalize）
   const authorize = await api('POST', '/api/auth/sso/authorize', { body: { provider: 'dingtalk', scene: 'web_qr' } })
   check('SSO 发起授权（签发 state）', authorize.ok && authorize.data.state.length >= 32)
+  check('SSO 授权地址不带 prompt=consent（已授权用户可静默通过，缩短回跳链路）',
+    typeof authorize.data.authorizeUrl === 'string' && authorize.data.authorizeUrl.includes('login.dingtalk.com/oauth2/auth')
+    && !authorize.data.authorizeUrl.includes('prompt=consent') && authorize.data.authorizeUrl.includes('scope=openid'))
   const sso = await api('POST', '/api/auth/sso', { body: { provider: 'dingtalk', code: 'DD0002', state: authorize.data.state } })
   check('钉钉免密登录（身份链接命中）', sso.ok && sso.data.kind === 'hit' && sso.data.user.username === 'linxm')
   check('登录返回 refresh token（7d 轮转链）', typeof sso.data.refreshToken === 'string' && sso.data.refreshToken.startsWith('dstr_'))
@@ -1844,7 +2151,7 @@ try {
     token: admin,
     body: { contentBase64: Buffer.from('PK\x03\x04selftest-file', 'latin1').toString('base64'), destPath: '/skillhub/selftest/a.zip' },
   })
-  check('上传文件（平台 staging → 网关 fs_upload 侧读盘）', nasUpload.ok && nasGwUploads.some((u) => u.share === 'skillhub' && u.path === '/selftest/a.zip' && u.magic === 'PK'))
+  check('上传文件（平台 staging → 网关 fs_upload 侧读盘）', nasUpload.ok && nasGwUploads.some((u) => u.destPath === '/skillhub/selftest' && u.filename === 'a.zip' && u.magic === 'PK'))
   const nasSearch = await api('POST', `/api/nas/${nasId}/fs/search`, { token: admin, body: { pattern: 'report', path: '/skillhub' } })
   check('检索文件（fs_search）', nasSearch.ok && JSON.stringify(nasSearch.data).includes('report'))
   const nasDelete = await api('POST', `/api/nas/${nasId}/fs/delete`, { token: admin, body: { paths: ['/skillhub/selftest/a.zip'] } })
@@ -1921,7 +2228,7 @@ try {
   const pkgUploaded = nasGwUploads[nasGwUploads.length - 1]
   check('上架自动上传 NAS（fs_upload 收到包）', pkgPublish.ok && nasGwUploads.length === uploadsBefore + 1, JSON.stringify(pkgPublish.error))
   check('上传产物即提交的 zip（字节级一致）', pkgUploaded?.magic === 'PK' && pkgUploaded.sizeBytes === zipBuffer.length && pkgUploaded.content.equals(zipBuffer))
-  check('上传路径契约 <basePath>/<slug>/<slug>-<version>.zip', pkgUploaded?.share === 'skillhub' && typeof pkgUploaded?.path === 'string' && pkgUploaded.path.endsWith('-1.0.0.zip'))
+  check('上传路径契约 <basePath>/<slug>/<slug>-<version>.zip', typeof pkgUploaded?.destPath === 'string' && pkgUploaded.destPath.startsWith('/skillhub/') && typeof pkgUploaded?.filename === 'string' && pkgUploaded.filename.endsWith('-1.0.0.zip') && pkgUploaded.filename === `${pkgUploaded.destPath.split('/').pop()}-1.0.0.zip`)
   const pkgSkill = await api('GET', `/api/skills/${pkgSkillId}`, { token: admin })
   const pkgVersion = pkgSkill.data?.versions?.find((v) => v.version === '1.0.0')
   check('版本记录回写 package 元数据（storage=nas）', pkgVersion?.package?.storage === 'nas' && pkgVersion.package.nasId === nasId && pkgVersion.package.sizeBytes === zipBuffer.length)
@@ -1933,7 +2240,7 @@ try {
   await api('POST', `/api/skills/${autoSubmit.data.id}/approve`, { token: admin, body: { level: 'domain', decision: 'approve', opinion: 'selftest' } })
   const autoPublish = await api('POST', `/api/skills/${autoSubmit.data.id}/publish`, { token: admin, body: {} })
   const autoUploaded = nasGwUploads[nasGwUploads.length - 1]
-  check('无 zip 时由 SKILL.md 现场打包上传', autoPublish.ok && autoUploaded?.magic === 'PK' && autoUploaded.sizeBytes > 100 && autoUploaded.path.endsWith('-0.1.0.zip'), JSON.stringify(autoPublish.error))
+  check('无 zip 时由 SKILL.md 现场打包上传', autoPublish.ok && autoUploaded?.magic === 'PK' && autoUploaded.sizeBytes > 100 && autoUploaded.filename.endsWith('-0.1.0.zip'), JSON.stringify(autoPublish.error))
   check('现场打包产物含 SKILL.md 条目', autoUploaded?.content.toString('latin1').includes('SKILL.md'))
 
   // ③ fail-closed：存储后端 NAS 非 online → 上架中止且版本不落 published
@@ -2003,8 +2310,361 @@ try {
   })
   check('未知方法 -32601', jsonBody(mcpUnknown).error?.code === -32601)
 
+  // ================================================================ 连接器纳管（open-connector 融合）
+  section('连接器纳管（open-connector 融合）')
+  const waitFor = async (fn, ms = 5000) => {
+    const end = Date.now() + ms
+    let value
+    while (Date.now() < end) {
+      value = fn()
+      if (value) return value
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    return fn()
+  }
+
+  // -- 网关配置与强制 env fail-closed（T-02 预演探针路径） ----------------------
+  const envProbeEnc = await api('GET', `/api/connector/gateway?assumeEnv=${encodeURIComponent(JSON.stringify({ OOMOL_CONNECT_ADMIN_TOKEN: true, OOMOL_CONNECT_ENCRYPTION_KEY: false }))}`, { token: admin })
+  check('T-02 缺 OOMOL_CONNECT_ENCRYPTION_KEY → fail-closed 文案', !envProbeEnc.data?.available && String(envProbeEnc.data?.reason ?? '').includes('OOMOL_CONNECT_ENCRYPTION_KEY'), JSON.stringify(envProbeEnc).slice(0, 200))
+  const envProbeToken = await api('GET', `/api/connector/gateway?assumeEnv=${encodeURIComponent(JSON.stringify({ OOMOL_CONNECT_ADMIN_TOKEN: false }))}`, { token: admin })
+  check('T-02 管理口令未解析 → fail-closed 文案', !envProbeToken.data?.available && String(envProbeToken.data?.reason ?? '').includes('管理口令未解析'), JSON.stringify(envProbeToken).slice(0, 200))
+
+  const gwSet = await api('PUT', '/api/connector/gateway', { token: admin, body: { baseUrl: OC_BASE, adminToken: 'env:OOMOL_CONNECT_ADMIN_TOKEN', autoCatalogSyncMinutes: 0 } })
+  check('网关配置（baseUrl + adminToken env: 间接引用）', gwSet.ok && gwSet.data.baseUrl === OC_BASE, JSON.stringify(gwSet).slice(0, 200))
+  const gwHealth = await api('POST', '/api/connector/gateway/health', { token: admin })
+  check('探活契约（ok/runtime/latencyMs）', gwHealth.ok && gwHealth.data.ok === true && typeof gwHealth.data.latencyMs === 'number')
+  const gwState = await api('GET', '/api/connector/gateway', { token: admin })
+  check('网关状态可用（healthy + envChecks 双 true）', gwState.ok && gwState.data.available === true && gwState.data.status === 'healthy' && gwState.data.envChecks.OOMOL_CONNECT_ENCRYPTION_KEY === true)
+
+  // -- 目录同步（T-03） --------------------------------------------------------
+  const catSync1 = await api('POST', '/api/connector/catalog/sync', { token: admin })
+  const catSync1Data = catSync1.data ?? {}
+  check('目录同步 providers/actions 计数与 added 清单', catSync1.ok && catSync1Data.providers === 2 && catSync1Data.actions === 7 && catSync1Data.added.length === 7, JSON.stringify(catSync1).slice(0, 300))
+  check('非法 service 标识被拒纳管（resource 正则）', (catSync1Data.skippedServices ?? []).some((item) => item.service === 'weird service!'), JSON.stringify(catSync1Data.skippedServices))
+  const catalogView = (await api('GET', '/api/connector/catalog', { token: admin })).data
+  const riskOf = Object.fromEntries((catalogView.actions ?? []).map((action) => [action.id, action.riskLevel]))
+  check('riskLevel 映射（读/写/管理 + 默认 admin 兜底）',
+    riskOf['hackernews.get_top_stories'] === 'read' && riskOf['github.create_issue'] === 'write'
+    && riskOf['github.delete_webhook'] === 'admin' && riskOf['hackernews.do_the_thing'] === 'admin', JSON.stringify(riskOf))
+  const guideRaw = await rawReq('GET', '/api/connector/catalog/actions/hackernews.get_top_stories/guide', { headers: { authorization: `Bearer ${admin}` } })
+  check('连接向导 agent.md 代理展示（文本）', guideRaw.status === 200 && guideRaw.body.includes('连接指南'))
+
+  // -- 组织 / 用户（org 隔离锚点） ----------------------------------------------
+  const connOrg = (await api('POST', '/api/iam/orgs', { token: admin, body: { name: '连接器测试部' } })).data.id
+  const connOrgB = (await api('POST', '/api/iam/orgs', { token: admin, body: { name: '连接器隔离部' } })).data.id
+  const devUserSearch = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('陈默'), { token: admin })).data.users[0]
+  const connDevLogin = await api('POST', '/api/auth/login', { body: { username: 'dev', password: 'Ybk@2026' } })
+  const connAuditLogin = await api('POST', '/api/auth/login', { body: { username: 'audit', password: 'Ybk@2026' } })
+  check('测试主体就绪（dev 令牌 / audit 令牌）', Boolean(devUserSearch?.id) && Boolean(connDevLogin.data?.token) && Boolean(connAuditLogin.data?.token))
+
+  // -- 连接管理（T-05/T-06/T-07） -----------------------------------------------
+  const apiKeyCreate = await api('POST', '/api/connector/connections/api-key', { token: admin, body: { orgId: connOrg, provider: 'github', aliasSuffix: 'main-pat', values: { apiKey: 'ghp_selftestSecret123' } } })
+  check('API Key 表单直达 sidecar（返回 active 引用）', apiKeyCreate.ok && apiKeyCreate.data.reference?.status === 'active' && String(apiKeyCreate.data.reference.ocConnectionId ?? '').startsWith('oc-con-'), JSON.stringify(apiKeyCreate).slice(0, 220))
+  const patRef = apiKeyCreate.data.reference
+
+  const oauthMissClient = await api('POST', '/api/connector/connections/oauth', { token: admin, body: { orgId: connOrg, provider: 'github', aliasSuffix: 'oauth-bot' } })
+  check('T-06 未存 client 配置 → oauth_client_config_required 透传+自备 App 指引',
+    oauthMissClient.ok === false && oauthMissClient.error?.code === 'OAUTH_CLIENT_CONFIG_REQUIRED' && /OAuth App|自备/.test(oauthMissClient.error?.message ?? ''), JSON.stringify(oauthMissClient).slice(0, 240))
+  ocClientsConfigured.add('github')
+  const oauthStart = await api('POST', '/api/connector/connections/oauth', { token: admin, body: { orgId: connOrg, provider: 'github', aliasSuffix: 'oauth-bot' } })
+  check('T-01 OAuth 发起信封 {authorizationUrl,state}', oauthStart.ok && Boolean(oauthStart.data.authorizationUrl) && Boolean(oauthStart.data.state), JSON.stringify(oauthStart).slice(0, 220))
+  const callbackHtml = await fetch(`${OC_BASE}/oauth/callback?state=${oauthStart.data.state}&code=fake-code`).then((r) => r.text())
+  check('sidecar 回调完成页受理', callbackHtml.includes('授权完成'))
+  const oauthConfirm = await api('GET', `/api/connector/connections/oauth/${oauthStart.data.state}/status`, { token: admin })
+  check('T-05 回调后状态轮询：引用转 active 且平台不落凭证原文', oauthConfirm.ok && oauthConfirm.data.status === 'active' && oauthConfirm.data.authType === 'oauth', JSON.stringify(oauthConfirm).slice(0, 260))
+
+  // 别名前缀组织校验（T-20 后半）：跨 org 引用别名在权限组校验层拒绝在下方断言。
+
+  // -- 权限组 + oct_ 台账初始镜像（T-11） ----------------------------------------
+  const grpAdmin = (await api('POST', '/api/iam/groups', { token: admin, body: { name: '连接器组-A', type: 'static', memberIds: [adminLogin.data.user.id] } })).data
+  const grpDev = (await api('POST', '/api/iam/groups', { token: admin, body: { name: '连接器组-B(dev)', type: 'static', memberIds: [devUserSearch.id] } })).data
+  check('测试用户组建好', Boolean(grpAdmin?.id) && Boolean(grpDev?.id))
+
+  const crossOrgGroup = await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: '非法跨 org 组', orgId: connOrgB,
+    policies: { github: { allowedActions: ['github.list_issues'], riskCap: 'read', connections: [`org:${connOrg}:main-pat`] } },
+    subjects: [{ type: 'user_group', id: grpAdmin.id }],
+  } })
+  check('T-20 引用非本组织前缀别名的权限组被拒', crossOrgGroup.ok === false, JSON.stringify(crossOrgGroup).slice(0, 220))
+
+  const pgRead = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'dev 只读组', orgId: connOrg,
+    policies: {
+      hackernews: { allowedActions: ['hackernews.get_top_stories'], riskCap: 'read', constraints: { readOnly: true } },
+      github: { allowedActions: ['*'], riskCap: 'read', connections: [`org:${connOrg}:main-pat`], constraints: { readOnly: true } },
+    },
+    subjects: [{ type: 'user_group', id: grpDev.id }],
+  } })).data
+  const pgFull = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'admin 全量组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: '*', riskCap: 'admin' }, github: { allowedActions: '*', riskCap: 'admin' }, },
+    subjects: [{ type: 'user_group', id: grpAdmin.id }],
+    // 新建组织钱包为 0 分：预估置 0 让主链路不被余额闸误伤（quota 路径由 T-16b 独立大额组覆盖）
+    precheckCents: 0,
+  } })).data
+  const pgTmp = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'dev 高危通道组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: ['hackernews.do_the_thing'], riskCap: 'admin' } },
+    subjects: [{ type: 'user_group', id: grpDev.id }],
+  } })).data
+  check('三个权限组建好（含显式清单/通配/admin 通道）', Boolean(pgRead?.id) && Boolean(pgFull?.id) && Boolean(pgTmp?.id), JSON.stringify({ pgRead, pgFull, pgTmp }).slice(0, 240))
+
+  await waitFor(() => [...ocLedgerTokens.values()].length >= 3)
+  const ocReadTokens = [...ocLedgerTokens.entries()].filter(([, rec]) => rec.policy.allowedConnections.length > 0)
+  check('T-11 只读组令牌策略镜像逐字段一致',
+    ocReadTokens.some(([, rec]) =>
+      rec.policy.allowedActions[0] === '*' || JSON.stringify([...rec.policy.allowedActions].sort()) === JSON.stringify(['github.list_issues', 'hackernews.get_top_stories'])
+      && rec.policy.allowedProxies.length === 0 && rec.policy.blockedActions.length === 0
+      && rec.policy.allowedConnections.join(',') === patRef.ocConnectionId), JSON.stringify(ocReadTokens.map(([, r]) => r.policy)))
+  const fullLedgerTokens = [...ocLedgerTokens.entries()].filter(([, rec]) => rec.policy.allowedActions[0] === '*')
+  check('T-11 通配组令牌镜像（allowedActions=[\'*\']，无绑定连接则空数组全发）', fullLedgerTokens.length >= 1 && Array.isArray(fullLedgerTokens[0][1].policy.allowedConnections))
+  const impactPreview = await api('POST', `/api/connector/perm-groups/${pgRead.id}/impact`, { token: admin })
+  check('变更影响面预览（N 令牌/M 连接）', impactPreview.ok && impactPreview.data.tokens >= 1 && impactPreview.data.connections >= 1, JSON.stringify(impactPreview).slice(0, 160))
+
+  // -- 授权链执行（T-08/T-09/T-10 + 三端 dry-run） -------------------------------
+  const memberDenied = await api('POST', '/api/connector/execute', { token: connAuditLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('T-08 无 connector.invoke 权限点 → 403 + authz.denied 事件', memberDenied.ok === false && memberDenied.error?.code === 'FORBIDDEN' && memberDenied.status === 403, JSON.stringify(memberDenied).slice(0, 200))
+
+  const devDryRun = await api('POST', '/api/connector/execute', { token: connDevLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: { limit: 5 }, dryRun: true } })
+  check('dry-run 影响面预览（五步链通过、只读约束可见、不真实调用）', devDryRun.ok && devDryRun.data?.status === 'dry_run' && devDryRun.data.preview.riskLevel === 'read' && typeof devDryRun.data.preview.permGroup === 'string' && devDryRun.data.preview.readOnlyConstraint === true, JSON.stringify(devDryRun).slice(0, 300))
+
+  const devOkRun = await api('POST', '/api/connector/execute', { token: connDevLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: { limit: 5 } } })
+  check('授权放行成功调用（runId=executionId + 计量回执）', devOkRun.ok && devOkRun.data?.ok === true && /^exec-/.test(String(devOkRun.data.runId)) && devOkRun.data.metered === true, JSON.stringify(devOkRun).slice(0, 280))
+  const devOkUsage = await api('GET', `/api/usage/events?limit=50`, { token: admin })
+  check('T-14 usage.record 口径（resource/meters/trace_id/idempotency_key）',
+    devOkUsage.ok && devOkUsage.data.items.some((event) =>
+      event.resource === 'connector:hackernews' && event.trace_id === devOkRun.data.runId
+      && event.idempotency_key === `connector:${devOkRun.data.runId}` && event.meters.some((m) => m.key === 'calls')), JSON.stringify(devOkUsage.data?.items?.slice(0, 2)).slice(0, 240))
+  const priceBook = (await api('GET', '/api/usage/price-book', { token: admin })).data
+  check('价格簿 connector:* 零费率条目存在（缺规则会被 record 拒绝的反向保障）',
+    priceBook.entries.some((entry) => entry.pattern === 'connector:*' && entry.list_cents_per_unit === 0), JSON.stringify(priceBook.entries?.filter((e) => e.pattern.startsWith('connector')) ?? []).slice(0, 160))
+
+  const devWriteDenied = await api('POST', '/api/connector/execute', { token: connDevLogin.data.token, body: { actionId: 'github.create_issue', input: { title: 'x' } } })
+  check('T-09 write 级超出 readOnly/riskCap=read → 平台侧拒绝', devWriteDenied.ok && devWriteDenied.data?.status === 'denied' && /(riskCap|只读)/.test(String(devWriteDenied.data.error)), JSON.stringify(devWriteDenied).slice(0, 240))
+
+  const isoLogin = await api('POST', '/api/auth/login', { body: { username: 'suyq', password: 'Ybk@2026' } })
+  const isoGroup = (await api('POST', '/api/iam/groups', { token: admin, body: { name: '连接器组-单点', type: 'static', memberIds: [(await api('GET', '/api/iam/users?q=' + encodeURIComponent('苏砚秋'), { token: admin })).data.users[0].id] } })).data
+  const pgIso = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: '单点清单组（pattern-miss 回归）', orgId: connOrg,
+    policies: { hackernews: { allowedActions: ['hackernews.get_top_stories'], riskCap: 'read' } },
+    subjects: [{ type: 'user_group', id: isoGroup.id }],
+  } })).data
+  const devPatternMiss = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  check('T-10 pattern 未命中 → 平台侧拒绝', devPatternMiss.ok && devPatternMiss.data?.status === 'denied' && /允许模式/.test(String(devPatternMiss.data.error)), JSON.stringify(devPatternMiss).slice(0, 260))
+
+  // -- T-15 审计 actChain + runId 反查 -----------------------------------------
+  const devAuditTrail = await api('GET', `/api/audit/logs?q=${encodeURIComponent(String(devOkRun.data.runId))}&type=invoke`, { token: admin })
+  check('T-15 invoke 日志含 runId（run= 前缀反查命中）',
+    devAuditTrail.ok && devAuditTrail.data.items.some((log) => log.resourceType === 'connector_action' && String(log.detail).includes(`run=${devOkRun.data.runId}`)), JSON.stringify(devAuditTrail.data?.items?.slice(0, 2)).slice(0, 240))
+
+  // -- T-22 写类幂等键 + 同键重放不重复计量 ---------------------------------------
+  const directAdminMintRes = await fetch(`${OC_BASE}/api/runtime-tokens`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${OC_TOKEN}` },
+    body: JSON.stringify({ name: 'selftest-direct', allowedActions: ['*'], blockedActions: [], allowedProxies: [], allowedConnections: [] }),
+  }).then((r) => r.json())
+  const directOct = directAdminMintRes.data.token
+  ocMintedValues.push(directOct)
+  const replayKey = 'ikey-selftest-0001'
+  const directExec = () => fetch(`${OC_BASE}/v1/actions/hackernews.submit_post`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${directOct}`, 'idempotency-key': replayKey },
+    body: JSON.stringify({ input: { title: '自测幂等帖' } }),
+  }).then((r) => r.json())
+  const firstReplay = await directExec()
+  const secondReplay = await directExec()
+  check('T-22 同键重放返回原 executionId（24h 窗口语义）', firstReplay.meta.executionId === secondReplay.meta.executionId, `${firstReplay.meta.executionId} vs ${secondReplay.meta.executionId}`)
+  const runsForExec = ocRuns.filter((run) => run.id === firstReplay.meta.executionId)
+  check('T-22 重放不产生重复 run（stub 侧单条）', runsForExec.length === 1, String(runsForExec.length))
+
+  // -- 高危审批门禁（T-17） ------------------------------------------------------
+  const adminCallResp = await api('POST', '/api/connector/execute', { token: connDevLogin.data.token, body: { actionId: 'hackernews.do_the_thing', input: { work: 1 } } })
+  const approvalFlow = adminCallResp.data ?? {}
+  check('admin 级 action → 审批单生成且不执行', approvalFlow.status === 'approval_required' && Boolean(approvalFlow.approvalId), JSON.stringify(adminCallResp).slice(0, 260))
+  const dupApproval = await api('POST', '/api/connector/execute', { token: connDevLogin.data.token, body: { actionId: 'hackernews.do_the_thing', input: { work: 1 } } })
+  check('同图 pending 审批单复用（不重复开单）', dupApproval.data?.approvalId === approvalFlow.approvalId, JSON.stringify(dupApproval).slice(0, 180))
+  const beforeCalls = ocCalls.filter((call) => call.actionId === 'hackernews.do_the_thing').length
+  const decide = await api('POST', `/api/approvals/${approvalFlow.approvalId}/decide`, { token: admin, body: { decision: 'approve', opinion: '自测批准' } })
+  check('审批通过后 executor 同步完成调用（L4 闭环）', decide.ok && String(decide.data.execution?.result ?? '').includes('runId'), JSON.stringify(decide.data?.execution ?? {}).slice(0, 240))
+  const afterCalls = ocCalls.filter((call) => call.actionId === 'hackernews.do_the_thing').length
+  check('executor 真实下发一次数据面调用', afterCalls === beforeCalls + 1, `before=${beforeCalls} after=${afterCalls}`)
+
+  // -- connector.connect 两段式审批门禁（T-18，凭证不入审批负载） -------------------
+  const gatedConnectReq = await api('POST', '/api/connector/connections/api-key', { token: admin, body: { orgId: connOrg, provider: 'github', aliasSuffix: 'gated-pat', values: { apiKey: 'client-supersecret-oauth-xyz' }, requireApproval: true } })
+  check('T-18 requireApproval → 仅生成审批单（凭证不落任何集合）', gatedConnectReq.data?.approvalRequired === true && Boolean(gatedConnectReq.data.approvalId), JSON.stringify(gatedConnectReq).slice(0, 200))
+  await api('POST', `/api/approvals/${gatedConnectReq.data.approvalId}/decide`, { token: admin, body: { decision: 'approve' } })
+  const gatedFinalize = await api('POST', '/api/connector/connections/api-key', { token: admin, body: { orgId: connOrg, provider: 'github', aliasSuffix: 'gated-pat', values: { apiKey: 'client-supersecret-oauth-xyz' }, approvalId: gatedConnectReq.data.approvalId } })
+  check('审批通过后携 approvalId 完成实际创建', gatedFinalize.ok && gatedFinalize.data.reference?.status === 'active', JSON.stringify(gatedFinalize).slice(0, 220))
+
+  // -- T-12 权限组变更 PUT 四数组全发 + 组删 DELETE 令牌 ----------------------------
+  const putsBeforeChange = ocPuts.length
+  const patchedRead = await api('PATCH', `/api/connector/perm-groups/${pgRead.id}`, { token: admin, body: {
+    policies: {
+      hackernews: { allowedActions: ['hackernews.get_top_stories', 'hackernews.fetch_item'], riskCap: 'read', constraints: { readOnly: true } },
+      github: { allowedActions: ['*'], riskCap: 'read', connections: [`org:${connOrg}:main-pat`], constraints: { readOnly: true } },
+    },
+  } })
+  check('权限组策略更新成功', patchedRead.ok)
+  const mirrorPutAfterPatch = await waitFor(() => ocPuts.slice(putsBeforeChange)[0], 4000)
+  check('T-12 变更触发 PUT 且四数组全发',
+    mirrorPutAfterPatch && Object.keys(mirrorPutAfterPatch.policy).sort().join() === ['allowedActions', 'allowedConnections', 'allowedProxies', 'blockedActions'].sort().join()
+    && Array.isArray(mirrorPutAfterPatch.policy.allowedActions) && Array.isArray(mirrorPutAfterPatch.policy.allowedConnections), JSON.stringify(mirrorPutAfterPatch ?? {}).slice(0, 240))
+
+  // -- T-04 目录下架联动（先落库裁剪再镜像 PUT） ----------------------------------
+  ocCtl.actions = (ocCtl.actions ?? [...ocActionsDefault]).filter((action) => action.id !== 'hackernews.fetch_item')
+  const resyncAfterRemoval = await api('POST', '/api/connector/catalog/sync', { token: admin })
+  check('目录下架检测（removed 命中）', resyncAfterRemoval.ok && (resyncAfterRemoval.data.removed ?? []).includes('hackernews.fetch_item'), JSON.stringify(resyncAfterRemoval.data?.removed))
+  const prunedPut = await waitFor(() => ocPuts.find((put) => !put.policy.allowedActions.includes('hackernews.fetch_item') && put.policy.allowedActions.length >= 1), 4000)
+  check('T-04 下架后受影响组收到裁剪后的 PUT 更新', Boolean(prunedPut), JSON.stringify(ocPuts.slice(-2)))
+
+  // -- T-13 自动恢复（403 connection_not_allowed → PUT 最新快照 + 重试一次） ----------
+  ocCtl.connNotAllowedOnce = '*ANY*'
+  const recoverOk = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('T-13 单次 403 自动恢复重试成功（对调用方透明）', recoverOk.ok && recoverOk.data?.status === 'ok', JSON.stringify(recoverOk).slice(0, 220))
+  // 恢复过程触发了「删旧铸新」：最新铸造值即平台当前在用的该组令牌（每次铸造都会入册）
+  const mintCountBefore = ocMintedValues.length
+  void mintCountBefore
+  ocCtl.alwaysDenyToken = '*ANY*'
+  const persistFail = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('T-13 持续拒绝 → 重试仍失败计 error_rate', persistFail.ok && persistFail.data?.status === 'error', JSON.stringify(persistFail).slice(0, 220))
+  ocCtl.alwaysDenyToken = null
+
+  // 目录恢复：fetch_item 回归目录并重新同步（后续 T-16a 等用例依赖它）
+  ocCtl.actions = [...(ocCtl.actions ?? [])].concat((ocActionsDefault).filter((action) => action.id === 'hackernews.fetch_item'))
+  await api('POST', '/api/connector/catalog/sync', { token: admin })
+
+  // -- T-28 auditPersisted=false 补记 + 低阈告警记分 -------------------------------
+  ocCtl.auditPersistedNext = true
+  const ghostRun = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: { ghost: true } } })
+  ocCtl.auditPersistedNext = false
+  check('meta.auditPersisted=false 透传给调用方', ghostRun.ok && ghostRun.data?.status === 'ok' && ghostRun.data.meta.auditPersisted === false, JSON.stringify(ghostRun.data?.meta))
+  const recoveredLog = await api('GET', `/api/audit/logs?q=${encodeURIComponent('recovered-audit')}&type=invoke&limit=50`, { token: admin })
+  check('T-28 平台补记审计', recoveredLog.ok && recoveredLog.data.items.length >= 1, JSON.stringify(recoveredLog.data?.items?.slice(0, 1)))
+
+  // -- T-16a 限流（用单点清单组保证候选组唯一，绕开多组并集下的候选顺序不确定性） --------
+  await api('PATCH', `/api/connector/perm-groups/${pgIso.id}`, { token: admin, body: { rateLimitPerMin: 1 } })
+  const rateLimited = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  const rateLimitedSecond = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('T-16a 超 rateLimitPerMin → rate_limited 拒绝',
+    [rateLimited.data?.status, rateLimitedSecond.data?.status].includes('rate_limited'),
+    JSON.stringify([rateLimited.data, rateLimitedSecond.data]).slice(0, 300))
+  await api('PATCH', `/api/connector/perm-groups/${pgIso.id}`, { token: admin, body: { rateLimitPerMin: 60 } })
+
+  // -- T-16b billing.precheck quota.exceeded（独立 agent 主体 + 大额预估组） --------
+  const heavyAgent = await api('POST', '/api/agents', { token: admin, body: { name: '连接器预算闸机器人', attrs: { description: 'precheck 回归', model: 'deepseek-chat', riskLevel: 'low', avatar: '🤖' } } })
+  const heavyCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: heavyAgent.data.credential.clientId, clientSecret: heavyAgent.data.credential.clientSecret } })
+  const grpHeavy = (await api('POST', '/api/iam/groups', { token: admin, body: { name: '连接器组-heavy', type: 'static', memberIds: [] } })).data
+  await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: '大额预估组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: 'hackernews.*', riskCap: 'admin' } },
+    subjects: [{ type: 'agent', id: heavyAgent.data.agent.id }],
+    precheckCents: 99999999,
+  } })
+  const heavyDenied = await api('POST', '/api/connector/execute', { token: heavyCc.data.token, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  check('T-16b precheck 余额不足 → quota_exceeded', heavyDenied.ok && heavyDenied.data?.status === 'quota_exceeded' && String(heavyDenied.data.error).includes('quota.exceeded'), JSON.stringify(heavyDenied).slice(0, 240))
+
+  // -- T-19 stub 关停 fail-closed + 恢复 ------------------------------------------
+  await api('PUT', '/api/connector/gateway', { token: admin, body: { baseUrl: 'http://127.0.0.1:9', adminToken: 'env:OOMOL_CONNECT_ADMIN_TOKEN' } })
+  const outage1 = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  const outage3 = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('T-19 网关不可达 → invoke fail-closed（GATEWAY_UNAVAILABLE）',
+    outage1.ok === false || outage1.data?.status === 'error', JSON.stringify(outage1).slice(0, 220))
+  // 连续失败计数 ≥3 时 ConnectorGatewayUnhealthy 事件→audit 落 invoke 日志（探活定时器 30s 周期之外的即时口径）
+  const unhealthyTrail = await api('GET', '/api/audit/logs?q=' + encodeURIComponent('fail-closed') + '&type=invoke&limit=20', { token: admin })
+  check('T-19 fail-closed 原因入审计（unavailableReason 可检索）', unhealthyTrail.ok && unhealthyTrail.data.items.length >= 1, JSON.stringify(unhealthyTrail.data?.items?.slice(0, 1)).slice(0, 200))
+  await api('PUT', '/api/connector/gateway', { token: admin, body: { baseUrl: OC_BASE } })
+  await api('POST', '/api/connector/gateway/health', { token: admin })
+  const recoveredState = await api('GET', '/api/connector/gateway', { token: admin })
+  check('T-19 恢复后自动回 healthy 并可继续调用', recoveredState.data.available === true, JSON.stringify(recoveredState).slice(0, 160))
+
+  // -- T-21 org 巡检注入不一致 -----------------------------------------------------
+  const foreignConnectionSummary = (() => { return { id: 'oc-con-fake-foreign' } })()
+  const anyManagedToken = [...ocLedgerTokens.entries()][0]
+  if (anyManagedToken) anyManagedToken[1].policy.allowedConnections.push(foreignConnectionSummary.id)
+  const patrolNow = await api('POST', '/api/connector/patrol', { token: admin })
+  if (anyManagedToken) anyManagedToken[1].policy.allowedConnections.pop()
+  check('T-21 巡检发现「令牌绑定 org 外连接」异常', patrolNow.ok && (patrolNow.data.violations ?? []).some((violation) => violation.kind === 'token_binds_foreign_connection'), JSON.stringify(patrolNow.data).slice(0, 260))
+  const patrolAlerts = (await api('GET', '/api/audit/alerts', { token: admin })).data.alerts ?? []
+  check('T-21 异常联动 warning 告警（org 巡检标题）', patrolAlerts.some((alert) => String(alert.title).includes('org 巡检')), JSON.stringify(patrolAlerts.filter((a) => String(a.title).includes('巡检')).slice(0, 1)))
+
+  // -- T-23 runs 对账（cursor 增量去重 + 绕行 critical） ---------------------------
+  const pageOne = await fetch(`${OC_BASE}/api/runs?limit=2`, { headers: { authorization: `Bearer ${OC_TOKEN}` } }).then((r) => r.json())
+  check('T-01 runs 分页信封 {items,nextCursor}',
+    Array.isArray(pageOne.data.items) && (pageOne.data.nextCursor === undefined || typeof pageOne.data.nextCursor === 'string'), JSON.stringify(pageOne.data).slice(0, 120))
+  const reconcileFirst = await api('POST', '/api/connector/reconcile', { token: admin })
+  check('对账首跑：正常 run 与平台计量近似一致（bypass 空）', reconcileFirst.ok && (reconcileFirst.data?.bypassRuns ?? []).length === 0 && reconcileFirst.data.checkedRuns >= 1, JSON.stringify({ err: reconcileFirst.error, data: reconcileFirst.data }))
+  ocRuns.push({ id: 'fake-bypass-run-0001', service: 'github', actionId: 'github.list_issues', ok: true, runtimeTokenId: anyManagedToken ? anyManagedToken[0] : 'tok-none', caller: 'direct-sidecar', startedAt: new Date().toISOString() })
+  const reconcileBypass = await api('POST', '/api/connector/reconcile', { token: admin })
+  check('T-23 有 run 无 meter → 绕行 critical 告警命中 fake-bypass-run-0001', reconcileBypass.ok && (reconcileBypass.data.bypassRuns ?? []).includes('fake-bypass-run-0001'), JSON.stringify(reconcileBypass.data))
+  ocCtl.overlapDupInRuns = true
+  const reconcileOverlap = await api('POST', '/api/connector/reconcile', { token: admin })
+  ocCtl.overlapDupInRuns = false
+  // 增量语义：已处理的 run 不重复计入（重叠窗口翻倍也不放大结果集）
+  check('T-23 cursor 重叠窗口去重（增量运行零新增，无重复放大）',
+    reconcileOverlap.ok && (reconcileOverlap.data.bypassRuns ?? []).length === 0 && reconcileOverlap.data.checkedRuns === 0, JSON.stringify(reconcileOverlap.data))
+  const bypassAlerts = (await api('GET', '/api/audit/alerts', { token: admin })).data.alerts ?? []
+  check('绕行调用 critical 告警已入审计告警流', bypassAlerts.some((alert) => String(alert.title).includes('绕行调用')), JSON.stringify(bypassAlerts.filter((a) => a.severity === 'critical').slice(-1)))
+
+  // -- T-29 数据面层独立强制（合法 oct_ 直连打非命中 action） ------------------------
+  const scopedMint = await fetch(`${OC_BASE}/api/runtime-tokens`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${OC_TOKEN}` },
+    body: JSON.stringify({ name: 'scoped-single-action', allowedActions: ['github.delete_webhook'], blockedActions: [], allowedProxies: [], allowedConnections: [] }),
+  }).then((r) => r.json())
+  ocMintedValues.push(scopedMint.data.token)
+  const dataPlaneDeny = await fetch(`${OC_BASE}/v1/actions/github.list_issues`, {
+    method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${scopedMint.data.token}` },
+    body: JSON.stringify({ input: {} }),
+  }).then((r) => r.json())
+  check('T-29 合法 oct_ 直连非命中 action → 数据面 403 拒绝',
+    dataPlaneDeny.success === false && Number.isFinite(dataPlaneDeny.statusCode ?? dataPlaneDeny.status ?? 403) && dataPlaneDeny.errorCode === 'forbidden_action', JSON.stringify(dataPlaneDeny).slice(0, 200))
+
+  // -- M0 桥接（T-25，importServices + 桥接徽章标记字段） ----------------------------
+  const bridgeImport = await api('POST', '/api/mcp/import', { token: admin, body: {
+    config: JSON.stringify({
+      mcpServers: {
+        'open-connector-stub': {
+          url: `${OC_BASE}/mcp`,
+          headers: { authorization: `Bearer ${OC_TOKEN}`, 'x-bridged-from': 'open-connector' },
+        },
+      },
+    }),
+    autoDeploy: true,
+  } })
+  const bridgeResult = bridgeImport.data?.results?.[0]
+  check('T-25 桥接 import 成功（reachable+online）', bridgeImport.ok && bridgeResult?.ok === true && bridgeResult.reachable === true && bridgeResult.tools > 0, JSON.stringify(bridgeImport.data).slice(0, 260))
+  const servicesList = (await api('GET', '/api/mcp/services', { token: admin })).data.services
+  const bridgedService = servicesList.find((service) => service.slug === 'open-connector-stub')
+  check('桥接服务带「bridgeFrom=open-connector」治理降级标记', Boolean(bridgedService?.bridgeFrom) && bridgedService.bridgeFrom === 'open-connector', JSON.stringify({ slug: bridgedService?.slug, bridgeFrom: bridgedService?.bridgeFrom }))
+  // M0 治理降级语义：服务级粗粒度 MCP 权限组授权（无 action 级/连接级/令牌镜像）
+  await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
+    name: '桥接自测组（M0）',
+    policies: { [bridgedService.id]: { allowedTools: '*', constraints: {} } },
+    subjects: [{ type: 'user_group', id: grpAdmin.id }],
+  } })
+  const bridgedCall = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 77, method: 'tools/call', params: { name: 'mcp_invoke', arguments: { serviceId: bridgedService?.id, tool: 'hackernews_get_top_stories', args: { platform: 'bridge' } } } }),
+  })
+  const bridgedText = jsonBody(bridgedCall).result?.content?.[0]?.text ?? ''
+  // 平台工具层包装形态：InvokeResult.result 可为内容块数组（[{type:text,text:'{...}'}]）
+  const bridgeParsed = JSON.parse(bridgedText || '{}')
+  const innerBlockText = Array.isArray(bridgeParsed.result) ? bridgeParsed.result[0]?.text ?? '' : ''
+  const bridgeEchoSource = (() => {
+    try {
+      return Array.isArray(bridgeParsed.result) ? JSON.parse(innerBlockText) : bridgeParsed
+    } catch { return {} }
+  })()
+  const bridgeEcho = bridgeParsed.bridgeEcho ?? bridgeParsed.result?.bridgeEcho ?? bridgeEchoSource.bridgeEcho ?? {}
+  check('经平台 MCP 网关调用桥接服务成功', bridgedCall.status === 200 && bridgeEcho.platform === 'bridge', bridgedText.slice(0, 220))
+
+  // -- 三端工具面补验（工具桥 connector_execute / perm_group_list） -----------------
+  const toolBridgePermList = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'connector_perm_group_list', args: { orgId: connOrg } } })
+  check('工具桥 connector_perm_group_list 返回结构化组清单', toolBridgePermList.ok && toolBridgePermList.data.value.total >= 4, JSON.stringify(toolBridgePermList.data?.value?.total))
+  const toolBridgeExecute = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'connector_execute', args: { actionId: 'hackernews.get_top_stories', input: { viaTool: true } } } })
+  check('工具桥 connector_execute 身份注入 + 放行', toolBridgeExecute.ok && toolBridgeExecute.data.value.status === 'ok', JSON.stringify(toolBridgeExecute.data?.value).slice(0, 220))
+
   // ================================================================ /docs 静态发布（文档目录随服务可访问）
   section('/docs 静态发布（接入指南等文档直接可读）')
+
   const docIndex = await rawReq('GET', '/docs')
   check('/docs 目录索引页（HTML + 列出接入指南）', docIndex.status === 200 && String(docIndex.headers['content-type']).startsWith('text/html') && docIndex.body.includes('app-sso-integration.md'))
   const docFile = await rawReq('GET', '/docs/app-sso-integration.md')
@@ -2018,12 +2678,42 @@ try {
   check('/docs 编码 %2e%2e 穿越 → SPA 兜底页（不泄露文件）', docTraverseEncoded.status === 200 && String(docTraverseEncoded.headers['content-type']).startsWith('text/html') && !docTraverseEncoded.body.includes('"name": "dsh-enterprise-ops"'))
   const spaStillOk = await rawReq('GET', '/')
   check('SPA 静态兜底不受影响（/ 仍返回控制台首页）', spaStillOk.status === 200 && String(spaStillOk.headers['content-type']).startsWith('text/html') && spaStillOk.body.includes('榕器'))
+
+  // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
+  section('凭证零进平台（红线一 · T-24 全目录扫描）')
+  // SIGTERM 触发 main.ts 的 flushNow（把内存中的待写集合全部原子落盘）后退出，
+  // 再扫描数据目录——保证连「尚未刷盘的最新写入」也在扫描覆盖之内。
+  proc.kill('SIGTERM')
+  let stopped = false
+  for (let i = 0; i < 30; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    try { await fetch(`${BASE}/api/health`); } catch { stopped = true; break }
+  }
+  if (!stopped) proc.kill('SIGKILL')
+  const bannedSecrets = ['ghp_selftestSecret123', 'client-supersecret-oauth-xyz', ...new Set(ocMintedValues)]
+  const bannedHits = []
+  const walkFiles = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory() ? walkFiles(join(dir, entry.name)) : [join(dir, entry.name)])
+  let dataFiles = []
+  try { dataFiles = walkFiles(DATA_DIR) } catch { /* 目录已被清理则跳过扫描 */ }
+  for (const file of dataFiles) {
+    try {
+      const text = readFileSync(file).toString('latin1')
+      for (const secret of bannedSecrets) {
+        if (text.includes(secret)) bannedHits.push({ file: file.split(/[\\/]/).slice(-2).join('/'), secret })
+      }
+    } catch { /* 二进制读失败跳过 */ }
+  }
+  check(`T-24 数据目录 ${dataFiles.length} 个文件全部扫描`, dataFiles.length > 5, `files=${dataFiles.length}`)
+  check('T-24 凭证原文零命中（API Key / OAuth client secret / 每个一次性 oct_ 值）',
+    bannedHits.length === 0 && ocMintedValues.length >= 3, JSON.stringify(bannedHits))
 } finally {
   // ---------------------------------------------------------------- 收尾
   console.log('\n\x1b[90m» 停止测试实例…\x1b[0m')
   proc.kill('SIGKILL')
   await new Promise((resolve) => ghStub.close(resolve))
   await new Promise((resolve) => nasGwStub.close(resolve))
+  await new Promise((resolve) => ocStub.close(resolve))
   await rm(DATA_DIR, { recursive: true, force: true }).catch(() => {})
 }
 

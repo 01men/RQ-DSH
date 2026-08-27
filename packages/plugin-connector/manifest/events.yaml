@@ -1,0 +1,21 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-connector
+events:
+  - name: connector.gateway.changed
+    mode: emit
+    description: 网关配置变更或恢复健康
+  - name: connector.gateway.synced
+    mode: emit
+    description: 目录同步/org 巡检结果
+  - name: connector.gateway.unhealthy
+    mode: emit
+    description: 网关不可用 fail-closed 告警（audit 订阅）
+  - name: connector.connected / connector.disconnected
+    mode: emit
+    description: 连接生命周期
+  - name: connector.invoked
+    mode: emit
+    description: 连接器调用（审计透传 actChain+runId；成本归集 connector:*）
+  - name: connector.permgroup.changed
+    mode: emit
+    description: 权限组变更（oct_ 令牌镜像联动）

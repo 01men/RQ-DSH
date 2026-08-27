@@ -39,6 +39,9 @@
       name: '<PROJECT_ROOT>/packages/plugin-audit/src/index.ts'
     - id: ops-market
       name: '<PROJECT_ROOT>/packages/plugin-market/src/index.ts'
+    # 连接器纳管（open-connector 数据面网关适配）：依赖 iam/usage/billing/audit，先于 mcp/modelgw
+    - id: ops-connector
+      name: '<PROJECT_ROOT>/packages/plugin-connector/src/index.ts'
     - id: ops-mcp
       name: '<PROJECT_ROOT>/packages/plugin-mcp/src/index.ts'
     # NAS（FS 文件存储）资产：先于 skillhub 加载（skillhub 上架时经 nasRegistry 上传 skill.zip）

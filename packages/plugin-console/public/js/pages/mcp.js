@@ -47,7 +47,7 @@ export async function renderMcp(content, params, ctx) {
         <div class="res-card-top">
           <div class="res-icon" style="background:${bg};color:${color}">${svcIcon(svc.icon)}</div>
           <div class="grow">
-            <div class="res-name">${esc(svc.name)} ${statusBadge(svc.status)}</div>
+            <div class="res-name">${esc(svc.name)} ${statusBadge(svc.status)}${svc.bridgeFrom ? `<span class="badge badge-warning" title="M0 数据面桥接（open-connector）：仅服务级粗粒度权限组，无 action 级授权 / 连接级绑定 / oct_ 令牌镜像——生产纳管请走 #/connectors 原生链路">桥接过渡</span>` : ''}</div>
             <div class="res-slug">${esc(svc.endpoint || svc.slug)}</div>
           </div>
           <span class="traffic ${trafficClass(health)}" title="健康状态：${health}"></span>

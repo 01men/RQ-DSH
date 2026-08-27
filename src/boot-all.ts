@@ -11,6 +11,7 @@ import * as usage from '@dsh-ops/plugin-usage'
 import * as billing from '@dsh-ops/plugin-billing'
 import * as audit from '@dsh-ops/plugin-audit'
 import * as market from '@dsh-ops/plugin-market'
+import * as connector from '@dsh-ops/plugin-connector'
 import * as modelgw from '@dsh-ops/plugin-modelgw'
 import * as mcp from '@dsh-ops/plugin-mcp'
 import * as nas from '@dsh-ops/plugin-nas'
@@ -39,6 +40,8 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   await ctx.plugin(billing)
   await ctx.plugin(audit)
   await ctx.plugin(market)
+  // 连接器纳管（open-connector 数据面网关适配）：依赖 iam/usage/billing/audit，先于 mcp/modelgw
+  await ctx.plugin(connector)
   await ctx.plugin(mcp)
   // NAS（FS 文件存储）资产：先于 skillhub 加载（skillhub 上架时经 nasRegistry 上传 skill.zip）
   await ctx.plugin(nas)

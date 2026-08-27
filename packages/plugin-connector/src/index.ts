@@ -1,0 +1,1391 @@
+/**
+ * @dsh-ops/plugin-connector —— SaaS 连接器纳管（open-connector v1.4.0 融合，roadmap 第 9 步之二数据面）。
+ *
+ * 控制面/数据面分工：榕器=治理控制面（RBAC + 连接器权限组 + 高危审批 + 计量计费 + 审计）；
+ * open-connector sidecar=数据面网关 + 凭证保险库（AES-256-GCM，凭证永不回平台）。
+ * 本插件只做映射与接线：不自研 provider 目录、不自研 OAuth、不自研密钥库。
+ *
+ * 三条红线：
+ *   一、凭证零进平台——连接引用无凭证字段；API Key 表单代理直达 sidecar 过手不落盘；
+ *       oct_ 运行时令牌值仅存进程内存（台账只记 ocTokenId/policySnapshotHash）；
+ *   二、授权双出验证——平台权限组授权链与 oct_ 令牌策略镜像两层各自独立拒绝；
+ *   三、actChain 全链路审计 + 计量对账——usage.record 为计费事实源，runs 按 runtimeTokenId 交叉校验。
+ */
+import type { Context } from '@deepseek-ai/cordis'
+import { Service } from '@deepseek-ai/cordis'
+import { PlatformEvents, newId, sha256Hex, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
+import { OcClient, OC_VERSION_PIN, type OcConnectionSummary, type OcRunLog, type OcTokenPolicy } from './client.ts'
+import { OcError } from './errors.ts'
+import { heuristicRiskLevel, rankOf, type RiskLevel } from './risk.ts'
+import * as connectorTools from './tools.ts'
+
+// ---------------------------------------------------------------------------
+// 数据模型
+// ---------------------------------------------------------------------------
+
+export interface GatewayRecord extends RecordBase {
+  baseUrl: string
+  /** 管理面 Bearer：`env:VAR` 间接引用（生产强制）；测试可直填 stub 口令。 */
+  adminToken: string
+  status: 'unconfigured' | 'healthy' | 'unavailable'
+  health: { lastProbeAt?: string; latencyMs?: number; consecutiveFails: number }
+  /** 状态不可用原因（fail-closed 时写给运维看）。 */
+  unavailableReason?: string
+  versionPin: string
+  /** 目录自动同步周期分钟数；0=手动触发。 */
+  autoCatalogSyncMinutes: number
+}
+
+export interface CatalogActionRecord {
+  id: string
+  service: string
+  name?: string
+  description?: string
+  riskLevel: RiskLevel
+  requiredScopes: string[]
+  providerPermissions: string[]
+  inputSchema: Record<string, unknown>
+}
+
+export interface CatalogRecord extends RecordBase {
+  providers: Array<Record<string, unknown>>
+  actions: CatalogActionRecord[]
+  skippedServices: Array<{ service: string; reason: string }>
+  syncedAt?: string
+}
+
+/** 强制 `org:<orgId>:` 别名前缀的连接引用——无任何凭证字段（红线一）。 */
+export interface ConnectionReferenceRecord extends RecordBase {
+  provider: string
+  alias: string
+  authType: 'oauth' | 'api_key' | 'custom_credential' | 'no_auth'
+  ocConnectionId?: string
+  status: 'pending' | 'active' | 'error'
+  ownerOrgId: string
+  createdBy: string
+  maskedProfile?: Record<string, string>
+  bridge: boolean
+  lastSyncedAt?: string
+  requestId?: string
+  approvalId?: string
+  errorReason?: string
+}
+
+export interface ProviderPolicy {
+  allowedActions: '*' | string[]
+  riskCap: RiskLevel
+  connections?: string[]
+  constraints?: { readOnly?: boolean; denyParams?: string[] }
+}
+
+export interface ConnectorPermGroupRecord extends RecordBase {
+  name: string
+  description: string
+  orgId: string
+  policies: Record<string, ProviderPolicy>
+  subjects: Array<{ type: 'user_group' | 'agent' | 'app'; id: string; name?: string }>
+  rateLimitPerMin: number
+  /** billing.precheck 预估分额；0=仅做余额非负检查（零费率连接器默认直通）。 */
+  precheckCents: number
+}
+
+export interface TokenLedgerRecord extends RecordBase {
+  permGroupId: string
+  ocTokenId: string
+  policySnapshotHash: string
+  createdAt: string
+  lastSyncedAt: string
+}
+
+export interface InvokeCaller {
+  type: 'user' | 'agent' | 'app'
+  id: string
+  name: string
+  actChain?: Array<{ name: string; type: string }>
+}
+
+export type ConnectorInvokeStatus =
+  | 'ok' | 'denied' | 'rate_limited' | 'quota_exceeded' | 'approval_required' | 'error' | 'dry_run'
+
+export type InvokeOutcome =
+  | { ok: true; status: 'ok'; runId: string; latencyMs: number; data: unknown; meta: Record<string, unknown>; metered: boolean }
+  | { ok: true; status: 'dry_run'; preview: Record<string, unknown> }
+  | { ok: false; status: 'denied' | 'rate_limited' | 'quota_exceeded' | 'error'; error: string; latencyMs: number; code?: string }
+  | { ok: false; status: 'approval_required'; approvalId: string; actionId: string; message: string }
+
+export interface ApprovalLike {
+  id: string
+  kind: string
+  status: string
+  payload: Record<string, unknown>
+}
+
+const RESOURCE_PATTERN = /^[a-z]+:[A-Za-z0-9._-]+$/
+const HEALTH_INTERVAL_MS = 30_000
+const PATROL_INTERVAL_MS = 10 * 60_000
+const RECONCILE_INTERVAL_MS = 5 * 60_000
+/** 绕行对账游标去重环形上限（配合 RUN_LIMIT 5000 轮转窗口）。 */
+const PROCESSED_RUN_CAP = 4000
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+// ---------------------------------------------------------------------------
+// 服务
+// ---------------------------------------------------------------------------
+
+export class ConnectorHubService extends Service {
+  static readonly provide = 'connectorHub'
+
+  private rateBuckets = new Map<string, number[]>()
+  /** oct_ 令牌值内存缓存：permGroupId → token 值。永不落盘（红线一，journal 设计决策①）。 */
+  private tokenValueCache = new Map<string, string>()
+  private healthTimer: ReturnType<typeof setInterval> | undefined
+  private patrolTimer: ReturnType<typeof setInterval> | undefined
+  private reconcileTimer: ReturnType<typeof setInterval> | undefined
+
+  constructor(ctx: Context) {
+    super(ctx, 'connectorHub')
+    ctx.effect(() => () => {
+      for (const timer of [this.healthTimer, this.patrolTimer, this.reconcileTimer]) {
+        if (timer) clearInterval(timer)
+      }
+    })
+    this.healthTimer = setInterval(() => void this.probeGateway(), HEALTH_INTERVAL_MS)
+    this.patrolTimer = setInterval(() => void this.runPatrols(), PATROL_INTERVAL_MS)
+    this.reconcileTimer = setInterval(() => void this.reconcileRuns().catch(() => undefined), RECONCILE_INTERVAL_MS)
+  }
+
+  // -- 集合 -----------------------------------------------------------------
+
+  gateways(): Collection<GatewayRecord> {
+    const collection = this.ctx.opsStorage.collection<GatewayRecord>('connector:gateway')
+    collection.uniqueOn('gateway_singleton', () => 'singleton')
+    return collection
+  }
+
+  connections(): Collection<ConnectionReferenceRecord> {
+    const collection = this.ctx.opsStorage.collection<ConnectionReferenceRecord>('connector:connections')
+    collection.uniqueOn('alias_unique', (item) => item.alias)
+    return collection
+  }
+
+  catalogs(): Collection<CatalogRecord> {
+    const collection = this.ctx.opsStorage.collection<CatalogRecord>('connector:catalog')
+    collection.uniqueOn('catalog_singleton', () => 'singleton')
+    return collection
+  }
+
+  permGroups(): Collection<ConnectorPermGroupRecord> {
+    return this.ctx.opsStorage.collection<ConnectorPermGroupRecord>('connector:permGroups')
+  }
+
+  tokens(): Collection<TokenLedgerRecord> {
+    const collection = this.ctx.opsStorage.collection<TokenLedgerRecord>('connector:tokens')
+    collection.uniqueOn('ledger_group_unique', (item) => item.permGroupId)
+    return collection
+  }
+
+  runsState(): Collection<RecordBase & { key: string; cursor?: string; processedIds?: string[]; lastRunAt?: string }> {
+    const collection = this.ctx.opsStorage.collection<RecordBase & { key: string; cursor?: string; processedIds?: string[]; lastRunAt?: string }>('connector:runs')
+    collection.uniqueOn('runs_state_unique', (item) => item.key)
+    return collection
+  }
+
+  // -- 网关配置与 fail-closed（#2） ------------------------------------------
+
+  /** adminToken 解析：`env:VAR` 间接引用；envProbe 供只读预演探针覆盖（生产路径恒 undefined）。 */
+  resolveAdminToken(record: GatewayRecord | undefined, envProbe?: Record<string, boolean | undefined>): string | undefined {
+    const value = record?.adminToken ?? ''
+    if (!value) return undefined
+    if (!value.startsWith('env:')) return value
+    const name = value.slice(4)
+    if (envProbe && name in envProbe) return envProbe[name] ? process.env[name] : undefined
+    return process.env[name]
+  }
+
+  gatewayStatus(envProbe?: Record<string, boolean | undefined>): { available: boolean; reason?: string; baseUrl?: string; envChecks?: Record<string, boolean>; status?: GatewayRecord['status']; latencyMs?: number; lastProbeAt?: string } {
+    // envProbe：只读「预演探针」——控制台/自测在**不改动进程真实环境**的前提下评估
+    // 强制 env 门禁各分支的 fail-closed 语义（P0 修正①），生产路径恒传 undefined。
+    const envOf = (name: string): boolean =>
+      envProbe && name in envProbe ? Boolean(envProbe[name]) : Boolean(process.env[name])
+    const record = this.gateways().all()[0]
+    const envChecks = {
+      OOMOL_CONNECT_ENCRYPTION_KEY: envOf('OOMOL_CONNECT_ENCRYPTION_KEY'),
+      OOMOL_CONNECT_ADMIN_TOKEN: envOf('OOMOL_CONNECT_ADMIN_TOKEN'),
+    }
+    if (!record || !record.baseUrl.trim()) {
+      return { available: false, reason: 'connector:gateway 未配置（baseUrl/adminToken）', envChecks, status: 'unconfigured' }
+    }
+    const hasLiteralToken = this.resolveAdminToken(record, envProbe) !== undefined
+    if (!hasLiteralToken && (!envChecks.OOMOL_CONNECT_ADMIN_TOKEN)) {
+      return { available: false, reason: '管理口令未解析（adminToken 需为 env: 引用且 OOMOL_CONNECT_ADMIN_TOKEN 已设置）', envChecks, ...(record ? { status: record.status, lastProbeAt: record.health.lastProbeAt } : {}) }
+    }
+    if (!envChecks.OOMOL_CONNECT_ENCRYPTION_KEY) {
+      return { available: false, reason: 'OOMOL_CONNECT_ENCRYPTION_KEY 未设置：sidecar 将凭证明文落盘，平台 fail-closed 拒绝一切 invoke', envChecks, ...(record ? { status: record.status, lastProbeAt: record.health.lastProbeAt } : {}) }
+    }
+    if (record.status === 'unconfigured') {
+      return { available: false, reason: '网关尚未探活', envChecks, status: record.status }
+    }
+    if (record.status !== 'healthy') {
+      return { available: false, reason: record.unavailableReason ?? '网关探活失败（fail-closed）', envChecks, status: record.status, lastProbeAt: record.health.lastProbeAt }
+    }
+    return {
+      available: true,
+      baseUrl: record.baseUrl,
+      envChecks,
+      status: record.status,
+      ...(record.health.latencyMs !== undefined ? { latencyMs: record.health.latencyMs } : {}),
+      ...(record.health.lastProbeAt !== undefined ? { lastProbeAt: record.health.lastProbeAt } : {}),
+    }
+  }
+
+  /** 断言可用并返回客户端（对所有数据面动作的前置闸，不满足直接抛错拒绝）。 */
+  requireClient(): { client: OcClient; record: GatewayRecord } {
+    const status = this.gatewayStatus()
+    if (!status.available || !status.baseUrl) {
+      this.noteFailureSignal(status.reason ?? '网关不可用')
+      throw new OcError('gateway_unavailable', status.reason ?? '连接器网关不可用（fail-closed）', undefined, 503)
+    }
+    const record = this.gateways().all()[0]!
+    const client = new OcClient(status.baseUrl, this.resolveAdminToken(record)!, OC_DEFAULT_TIMEOUT)
+    return { client, record }
+  }
+
+  async configureGateway(input: { baseUrl: string; adminToken?: string; autoCatalogSyncMinutes?: number }, actor: string): Promise<GatewayRecord> {
+    const baseUrl = input.baseUrl.replace(/\/$/, '')
+    if (!baseUrl) throw new Error('baseUrl 必填')
+    const existing = this.gateways().all()[0]
+    const next: Partial<GatewayRecord> = {
+      baseUrl,
+      ...(input.adminToken !== undefined ? { adminToken: input.adminToken } : {}),
+      ...(input.autoCatalogSyncMinutes !== undefined ? { autoCatalogSyncMinutes: input.autoCatalogSyncMinutes } : {}),
+      versionPin: OC_VERSION_PIN,
+    }
+    let record: GatewayRecord
+    if (existing) {
+      record = this.gateways().update(existing.id, next)
+    } else {
+      record = this.gateways().insert({
+        id: newId('cgw'), baseUrl,
+        adminToken: input.adminToken ?? 'env:OOMOL_CONNECT_ADMIN_TOKEN',
+        status: 'unconfigured',
+        health: { consecutiveFails: 0 },
+        versionPin: OC_VERSION_PIN,
+        autoCatalogSyncMinutes: input.autoCatalogSyncMinutes ?? 0,
+        createdAt: nowIso(), updatedAt: nowIso(),
+      })
+    }
+    void actor
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayChanged, { baseUrl: record.baseUrl, versionPin: record.versionPin })
+    await this.probeGateway()
+    return this.gateways().get(record.id)!
+  }
+
+  /** 探活：连续失败即整体 unavailable（invoke 拒绝）；恢复自动半闭合。 */
+  async probeGateway(): Promise<{ ok: boolean; latencyMs: number; reason?: string }> {
+    const record = this.gateways().all()[0]
+    if (!record) return { ok: false, latencyMs: 0, reason: '未配置' }
+    // 强制 env 门禁先于网络探测（P0 修正①）：加密钥缺失或管理口令不可解析即 unavailable +
+    // 告警计数——这两个是部署期硬问题；而「尚未探活」属于正常过渡态，必须继续真实探测。
+    const encryptionMissing = process.env.OOMOL_CONNECT_ENCRYPTION_KEY === undefined
+    const adminUnresolvable = this.resolveAdminToken(record) === undefined
+    if (encryptionMissing || adminUnresolvable) {
+      const fails = record.health.consecutiveFails + 1
+      const rawReason = this.gatewayStatus().reason
+      const reason = rawReason && /(OOMOL|管理口令)/.test(rawReason) ? rawReason : '强制配置缺失：无法安全访问连接器网关（fail-closed）'
+      this.gateways().update(record.id, {
+        status: 'unavailable', unavailableReason: reason,
+        health: { lastProbeAt: nowIso(), consecutiveFails: fails },
+      })
+      if (fails >= 3) {
+        this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayUnhealthy, {
+          baseUrl: record.baseUrl, consecutiveFails: fails, reason, resourceType: 'connector_gateway', resourceId: record.id,
+        })
+      }
+      return { ok: false, latencyMs: 0, reason }
+    }
+    const started = Date.now()
+    try {
+      const client = new OcClient(record.baseUrl, this.resolveAdminToken(record) ?? 'probe-probe', 5_000)
+      await client.health()
+      const latencyMs = Date.now() - started
+      const previous = record.status
+      this.gateways().update(record.id, {
+        status: 'healthy', unavailableReason: undefined,
+        health: { lastProbeAt: nowIso(), latencyMs, consecutiveFails: 0 },
+      })
+      if (previous !== 'healthy') {
+        this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayChanged, { baseUrl: record.baseUrl, status: 'healthy', recoveredFrom: previous })
+      }
+      return { ok: true, latencyMs }
+    } catch (error) {
+      const fails = record.health.consecutiveFails + 1
+      const reason = error instanceof Error ? error.message : String(error)
+      this.gateways().update(record.id, {
+        status: 'unavailable', unavailableReason: reason,
+        health: { lastProbeAt: nowIso(), consecutiveFails: fails },
+      })
+      if (fails >= 3) {
+        this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayUnhealthy, {
+          baseUrl: record.baseUrl, consecutiveFails: fails, reason, resourceType: 'connector_gateway', resourceId: record.id,
+        })
+      }
+      return { ok: false, latencyMs: Date.now() - started, reason }
+    }
+  }
+
+  /** 业务失败信号：不足三次不开告警（与 mcp 连续熔断同思路），但即时刷新探活口径。 */
+  private noteFailureSignal(reason: string): void {
+    const record = this.gateways().all()[0]
+    if (!record) return
+    const fails = record.health.consecutiveFails + 1
+    this.gateways().update(record.id, {
+      status: 'unavailable', unavailableReason: reason,
+      health: { ...record.health, lastProbeAt: nowIso(), consecutiveFails: fails },
+    })
+    if (fails >= 3) {
+      this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayUnhealthy, {
+        baseUrl: record.baseUrl, consecutiveFails: fails, reason, resourceType: 'connector_gateway', resourceId: record.id,
+      })
+    }
+  }
+
+  private noteSuccessSignal(): void {
+    const record = this.gateways().all()[0]
+    if (!record || (record.health.consecutiveFails === 0 && record.status === 'healthy')) return
+    this.gateways().update(record.id, { status: 'healthy', unavailableReason: undefined, health: { ...record.health, consecutiveFails: 0 } })
+  }
+
+  // -- 目录同步（#3） ---------------------------------------------------------
+
+  async catalog(): Promise<CatalogRecord | undefined> {
+    return this.catalogs().all()[0]
+  }
+
+  requireAction(actionId: string): CatalogActionRecord {
+    const entry = this.catalogs().all()[0]?.actions.find((item) => item.id === actionId)
+    if (!entry) {
+      throw new OcError('unknown_action', `action 不在纳管目录中：${actionId}（先执行目录同步）`, undefined, 404)
+    }
+    return entry
+  }
+
+  async syncCatalog(actor: string): Promise<{ providers: number; actions: number; added: string[]; removed: string[]; skippedServices: Array<{ service: string; reason: string }> }> {
+    const { client } = this.requireClient()
+    const [providers, actions] = await Promise.all([client.listProviders(), client.listActions()])
+    const skipped: Array<{ service: string; reason: string }> = []
+    const validServices = new Set<string>()
+    const normalized: Array<Record<string, unknown>> = []
+    for (const provider of providers) {
+      const service = String((provider.service ?? provider.name ?? '') ).trim()
+      if (!service) continue
+      // usage resource 正则约束（P2 修正⑮）：provider 段必须满足 /^[a-z]+:[A-Za-z0-9._-]+$/
+      if (!RESOURCE_PATTERN.test(`connector:${service}`)) {
+        skipped.push({ service, reason: `service 标识不满足计量资源正则 ${RESOURCE_PATTERN.source}` })
+        continue
+      }
+      validServices.add(service)
+      normalized.push(provider)
+    }
+    const mapped: CatalogActionRecord[] = []
+    for (const action of actions) {
+      const service = String(action.service ?? '').trim()
+      if (!service || !validServices.has(service)) continue
+      const scopes = (Array.isArray(action.requiredScopes) ? action.requiredScopes : []).map(String)
+      const perms = (Array.isArray(action.providerPermissions) ? action.providerPermissions : []).map(String)
+      mapped.push({
+        id: action.id,
+        service,
+        ...(action.name !== undefined ? { name: String(action.name) } : {}),
+        ...(action.description !== undefined ? { description: String(action.description) } : {}),
+        riskLevel: heuristicRiskLevel(action),
+        requiredScopes: scopes,
+        providerPermissions: perms,
+        inputSchema: action.inputSchema && typeof action.inputSchema === 'object' ? action.inputSchema : { type: 'object', properties: {} },
+      })
+    }
+    const previous = this.catalogs().all()[0]
+    const previousIds = new Set(previous?.actions.map((item) => item.id) ?? [])
+    const added = mapped.filter((item) => !previousIds.has(item.id)).map((item) => item.id)
+    const newIds = new Set(mapped.map((item) => item.id))
+    const removed = (previous?.actions ?? []).filter((item) => !newIds.has(item.id)).map((item) => item.id)
+    // 目录变更联动（T-04）：显式清单命中下架 action 的权限组先落库裁剪，
+    // 再统一镜像——快照哈希因此变化，PUT 四数组全发自然发生。
+    let prunedGroups = 0
+    if (removed.length > 0) {
+      for (const group of this.permGroups().all()) {
+        let touched = false
+        const nextPolicies = Object.fromEntries(Object.entries(group.policies).map(([service, policy]) => {
+          if (policy.allowedActions === '*') return [service, policy]
+          const kept = policy.allowedActions.filter((entry) => !removed.includes(entry))
+          if (kept.length === policy.allowedActions.length) return [service, policy]
+          touched = true
+          return [service, { ...policy, allowedActions: kept }]
+        }))
+        if (touched) {
+          this.permGroups().update(group.id, { policies: nextPolicies as typeof group.policies })
+          prunedGroups++
+        }
+      }
+    }
+    const createdRecord = previous
+      ? this.catalogs().update(previous.id, { providers: normalized, actions: mapped, skippedServices: skipped, syncedAt: nowIso() })
+      : this.catalogs().insert({ id: newId('cat'), providers: normalized, actions: mapped, skippedServices: skipped, syncedAt: nowIso(), createdAt: nowIso(), updatedAt: nowIso() })
+    void createdRecord
+    if (added.length > 0 || removed.length > 0) {
+      this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewaySynced, {
+        kind: 'catalog', providers: normalized.length, actions: mapped.length, added, removed, actor, prunedGroups,
+      })
+      for (const group of this.permGroups().all()) {
+        await this.mirrorTokenPolicy(group).catch(() => undefined)
+      }
+    }
+    return { providers: normalized.length, actions: mapped.length, added, removed, skippedServices: skipped }
+  }
+
+  // -- 连接管理（#4） ---------------------------------------------------------
+
+  assertAliasPrefix(alias: string, orgId: string): string {
+    const prefix = `org:${orgId}:`
+    if (!alias.startsWith(prefix) || alias.length <= prefix.length) {
+      throw new OcError('invalid_alias_prefix', `连接别名必须以 ${prefix} 开头（org 隔离三件套①）`, undefined, 400)
+    }
+    return alias
+  }
+
+  buildAlias(orgId: string, suffix: string): string {
+    const clean = suffix.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-|-$/g, '')
+    if (!clean) throw new Error('连接别名后缀不能为空')
+    return this.assertAliasPrefix(`org:${orgId}:${clean}`, orgId)
+  }
+
+  maskValue(value: unknown): string {
+    const text = String(value ?? '')
+    if (text.length > 8) return `${text.slice(0, 6)}…`
+    return '****'
+  }
+
+  private summarize(sidecarSummary: OcConnectionSummary | undefined, ref: Partial<ConnectionReferenceRecord>): Partial<ConnectionReferenceRecord> {
+    const masked: Record<string, string> = {}
+    const profile = sidecarSummary?.profile
+    if (profile && typeof profile === 'object') {
+      for (const [key, value] of Object.entries(profile)) {
+        masked[key] = typeof value === 'string' && /(secret|token|key|password)/i.test(key) ? this.maskValue(value) : String(value)
+      }
+    }
+    return {
+      ...(sidecarSummary?.id ? { ocConnectionId: sidecarSummary.id } : {}),
+      ...(sidecarSummary?.authType ? { authType: normalizeAuthType(sidecarSummary.authType) } : {}),
+      status: sidecarSummary?.configured ? 'active' : (ref.status ?? 'pending'),
+      ...(Object.keys(masked).length > 0 ? { maskedProfile: masked } : {}),
+      lastSyncedAt: nowIso(),
+    }
+  }
+
+  /**
+   * 连接创建统一入口：no_auth 直接登记；api_key/custom_credential 表单值过手直达 sidecar 不落盘；
+   * OAuth 先审批后发起。requireApproval=true 或存在 provider 审批要求时进入两段式（journal 设计决策②）。
+   */
+  async createConnection(input: {
+    orgId: string
+    actor: { id: string; name: string }
+    provider: string
+    aliasSuffix: string
+    authType: 'oauth' | 'api_key' | 'custom_credential' | 'no_auth'
+    values?: Record<string, unknown>
+    requestedScopes?: string[]
+    requireApproval?: boolean
+    approvalId?: string
+  }): Promise<{ reference?: ConnectionReferenceRecord; approvalRequired?: boolean; approvalId?: string; authorizationUrl?: string; state?: string; guidance?: string }> {
+    const alias = this.buildAlias(input.orgId, input.aliasSuffix)
+    const approvalDecided = input.approvalId ? this.verifyConnectApproval(input.approvalId, input.provider, input.orgId, input.actor.id) : false
+    if (input.authType === 'no_auth') {
+      // no_auth 无凭证、不触碰 sidecar：纯本地虚拟登记（演示种子/网关未配置时也可建）
+      const existingNoAuth = this.connections().findOne((item) => item.alias === alias)
+      const reference = existingNoAuth
+        ? this.connections().update(existingNoAuth.id, { status: 'active', provider: input.provider, ownerOrgId: input.orgId, errorReason: undefined, updatedAt: nowIso() })
+        : this.connections().insert({
+            id: newId('ocn'), provider: input.provider, alias, authType: 'no_auth',
+            status: 'active', ownerOrgId: input.orgId, createdBy: input.actor.name,
+            bridge: false, createdAt: nowIso(), updatedAt: nowIso(),
+          })
+      this.ctx.platformBus.emit(PlatformEvents.ConnectorConnected, { connectionId: reference.id, alias, provider: input.provider, orgId: input.orgId, authType: 'no_auth' })
+      return { reference }
+    }
+    const { client } = this.requireClient()
+    if (!RESOURCE_PATTERN.test(`connector:${input.provider}`)) {
+      throw new OcError('invalid_service', `provider 标识不满足计量资源正则：${input.provider}`, undefined, 400)
+    }
+    const needsApproval = input.requireApproval === true
+    if (needsApproval && !approvalDecided) {
+      const approval = this.ctx.audit.createApproval({
+        kind: 'connector.connect',
+        title: `新建 SaaS 连接：${input.provider}`,
+        payload: {
+          // 审批负载禁止携带凭证字段（红线一）：只有 provider/org/alias 与发起人
+          provider: input.provider, orgId: input.orgId, alias, authType: input.authType,
+          requesterId: input.actor.id, requesterName: input.actor.name, stage: 'pre_submit',
+        },
+        requesterId: input.actor.id,
+        requesterName: input.actor.name,
+      })
+      return { approvalRequired: true, approvalId: approval.id }
+    }
+    if (input.approvalId && !approvalDecided) {
+      throw new OcError('approval_required', '该 provider 配置了连接审批：请先提交审批并通过后再携带 approvalId 创建连接', undefined, 403)
+    }
+    const existingRef = this.connections().findOne((item) => item.alias === alias)
+    if (input.authType === 'oauth') {
+      let authorization: Awaited<ReturnType<OcClient['createOAuthAuthorization']>>
+      try {
+        authorization = await client.createOAuthAuthorization({
+          service: input.provider,
+          connectionName: alias,
+          ...(input.requestedScopes?.length ? { requestedScopes: input.requestedScopes } : {}),
+        })
+      } catch (error) {
+        if (error instanceof OcError && error.code === 'oauth_client_config_required') {
+          // P1 修正⑩：自备 App 成本透传给向导（企业需先在 provider 侧注册 client 并写入 sidecar）
+          throw new OcError(
+            'oauth_client_config_required',
+            `${input.provider} 的 OAuth 需要「自备 App」：请先在企业侧注册 OAuth App，并把 client 配置写入连接器网关（PUT /api/oauth/configs/:service），再重试`,
+            `向导提示：在 ${input.provider} 开发者后台创建 OAuth App；回调地址使用 OOMOL_CONNECT_ORIGIN 对应的 /oauth/callback；随后由管理员保存 client 配置。指南详见 docs/connector-integration.md`,
+          )
+        }
+        throw error
+      }
+      const reference = existingRef
+        ? this.connections().update(existingRef.id, {
+            status: 'pending', provider: input.provider,
+            ownerOrgId: input.orgId, requestId: authorization.state,
+            errorReason: undefined, updatedAt: nowIso(),
+            createdBy: input.actor.name,
+          })
+        : this.connections().insert({
+            id: newId('ocn'), provider: input.provider, alias,
+            authType: 'oauth', status: 'pending', ownerOrgId: input.orgId,
+            createdBy: input.actor.name, bridge: false,
+            requestId: authorization.state, createdAt: nowIso(), updatedAt: nowIso(),
+          })
+      return { reference, authorizationUrl: authorization.authorizationUrl, state: authorization.state }
+    }
+    // api_key / custom_credential：表单过手直达 sidecar（请求体即刻送出，不写任何集合、不打日志）
+    const summary = await client.upsertConnection(input.provider, {
+      authType: input.authType === 'custom_credential' ? 'custom_credential' : 'api_key',
+      connectionName: alias,
+      values: input.values ?? {},
+    })
+    const base = existingRef ?? {}
+    const merged: Partial<ConnectionReferenceRecord> = {
+      provider: input.provider, alias, ownerOrgId: input.orgId,
+      authType: normalizeAuthType(summary.authType ?? input.authType),
+      createdBy: input.actor.name, bridge: false, errorReason: undefined,
+      ...this.summarize(summary, base),
+      updatedAt: nowIso(),
+    }
+    const reference = existingRef
+      ? this.connections().update(existingRef.id, merged)
+      : this.connections().insert({
+          id: newId('ocn'), createdAt: nowIso(), ...merged,
+        } as ConnectionReferenceRecord)
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorConnected, {
+      connectionId: reference.id, alias, provider: input.provider, orgId: input.orgId, authType: reference.authType,
+    })
+    return { reference }
+  }
+
+  /** 两段式审批的第二段：验证审批单已通过且主体/provider/org 匹配后才放行实际凭证提交。 */
+  verifyConnectApproval(approvalId: string, provider: string, orgId: string, requesterId: string): boolean {
+    const approval = this.ctx.audit.approvals().get(approvalId) as ApprovalLike | undefined
+    if (!approval) throw new OcError('approval_invalid', `审批单不存在：${approvalId}`, undefined, 400)
+    if (approval.kind !== 'connector.connect') throw new OcError('approval_invalid', `审批单类型不符：${approval.kind}`, undefined, 400)
+    const payload = approval.payload as Record<string, unknown>
+    if (String(payload.requesterId ?? '') !== String(requesterId)) {
+      throw new OcError('approval_actor_mismatch', '审批单发起人与当前操作人不一致，拒绝以此单放行', undefined, 403)
+    }
+    if (String(payload.provider ?? '') !== provider || String(payload.orgId ?? '') !== orgId) {
+      throw new OcError('approval_target_mismatch', '审批单的 provider/org 与本次创建不一致', undefined, 403)
+    }
+    if (!['approved', 'executed'].includes(approval.status)) {
+      throw new OcError('approval_pending', `审批单未通过（${approval.status}）`, undefined, 403)
+    }
+    return true
+  }
+
+  /** OAuth 回调后状态确认：比对 sidecar 连接清单回填引用（供前端轮询与巡检复用）。 */
+  async confirmConnectionStatus(filter: { requestId?: string; connectionId?: string }): Promise<ConnectionReferenceRecord | undefined> {
+    const { client } = this.requireClient()
+    const ref = filter.connectionId
+      ? this.connections().get(filter.connectionId)
+      : this.connections().findOne((item) => item.requestId === filter.requestId)
+    if (!ref) return undefined
+    const summaries = await client.listConnections()
+    const match = summaries.find((item) => item.connectionName === ref.alias && item.service === ref.provider)
+    if (!match) {
+      return this.connections().update(ref.id, { status: ref.status === 'active' ? 'active' : 'pending', lastSyncedAt: nowIso() })
+    }
+    const updated = this.connections().update(ref.id, {
+      ...this.summarize(match, ref),
+      updatedAt: nowIso(),
+    } as Partial<ConnectionReferenceRecord>)
+    if (updated.status === 'active' && ref.status !== 'active') {
+      this.ctx.platformBus.emit(PlatformEvents.ConnectorConnected, {
+        connectionId: updated.id, alias: updated.alias, provider: updated.provider, orgId: updated.ownerOrgId, authType: updated.authType,
+      })
+    }
+    return updated
+  }
+
+  /** 删除连接：级联检查权限组引用；force 时解除引用并镜像更新受影响令牌（四数组全发）。 */
+  async deleteConnection(id: string, options: { actor: string; force?: boolean }): Promise<{ deleted: boolean; releasedGroups: string[] }> {
+    const { client } = this.requireClient()
+    const ref = this.connections().get(id)
+    if (!ref) throw new Error(`连接引用不存在：${id}`)
+    const referencingGroups = this.permGroups().find((group) =>
+      group.orgId === ref.ownerOrgId && Object.values(group.policies).some((policy) => (policy.connections ?? []).includes(ref.alias)))
+    if (referencingGroups.length > 0 && !options.force) {
+      throw new OcError('connection_in_use', `连接仍被 ${referencingGroups.map((group) => group.name).join('、')} 权限组引用，请先解绑或携带 force 解除`, undefined, 409)
+    }
+    if (ref.authType !== 'no_auth') {
+      try {
+        await client.deleteConnection(ref.provider, ref.alias)
+      } catch (error) {
+        if (!(error instanceof OcError && error.code === 'unknown_connection')) throw error
+      }
+    }
+    this.connections().remove(id)
+    for (const group of referencingGroups) {
+      const nextPolicies = Object.fromEntries(Object.entries(group.policies).map(([service, policy]) => [
+        service,
+        { ...policy, connections: (policy.connections ?? []).filter((alias) => alias !== ref.alias) },
+      ]))
+      const updatedGroup = this.permGroups().update(group.id, { policies: nextPolicies })
+      await this.mirrorTokenPolicy(updatedGroup).catch(() => undefined)
+    }
+    if (referencingGroups.length === 0) {
+      const affected = this.tokens().find((item) => item.permGroupId && this.permGroups().get(item.permGroupId)?.orgId === ref.ownerOrgId)
+      for (const ledger of affected) {
+        const group = this.permGroups().get(ledger.permGroupId)
+        if (group) await this.mirrorTokenPolicy(group).catch(() => undefined)
+      }
+    }
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorDisconnected, { connectionId: id, alias: ref.alias, provider: ref.provider, orgId: ref.ownerOrgId, actor: options.actor })
+    return { deleted: true, releasedGroups: referencingGroups.map((group) => group.id) }
+  }
+
+  /** 全量同步连接引用侧状态（控制台列表页轮询入口）。 */
+  async refreshConnections(orgId?: string): Promise<{ refreshed: number; sidecarTotal: number }> {
+    const { client } = this.requireClient()
+    const summaries = await client.listConnections()
+    const scope = orgId ? this.connections().find((item) => item.ownerOrgId === orgId) : this.connections().all()
+    for (const ref of scope) {
+      const match = summaries.find((item) => item.connectionName === ref.alias)
+      if (!match) continue
+      this.connections().update(ref.id, { ...this.summarize(match, ref), updatedAt: nowIso() } as Partial<ConnectionReferenceRecord>)
+    }
+    return { refreshed: scope.length, sidecarTotal: summaries.length }
+  }
+
+  // -- 权限组（#2.4 第一层） ---------------------------------------------------
+
+  createPermGroup(input: {
+    name: string
+    description?: string
+    orgId: string
+    policies: Record<string, ProviderPolicy>
+    subjects: ConnectorPermGroupRecord['subjects']
+    rateLimitPerMin?: number
+    precheckCents?: number
+  }): ConnectorPermGroupRecord {
+    if (!input.name?.trim()) throw new Error('权限组名称不能为空')
+    if (this.permGroups().findOne((group) => group.name === input.name)) throw new Error(`权限组已存在：${input.name}`)
+    if (!this.ctx.iam.orgs().get(input.orgId)) throw new Error(`组织不存在：${input.orgId}`)
+    this.validatePolicies(input.orgId, input.policies)
+    const group = this.permGroups().insert({
+      id: newId('cpg'), name: input.name,
+      description: input.description ?? '', orgId: input.orgId,
+      policies: this.normalizePolicies(input.policies),
+      subjects: input.subjects,
+      rateLimitPerMin: Math.max(1, input.rateLimitPerMin ?? 60),
+      precheckCents: Math.max(0, input.precheckCents ?? 0),
+      createdAt: nowIso(), updatedAt: nowIso(),
+    })
+    this.afterPermGroupChange(group)
+    return group
+  }
+
+  updatePermGroup(id: string, patch: Partial<Pick<ConnectorPermGroupRecord, 'name' | 'description' | 'policies' | 'subjects' | 'rateLimitPerMin' | 'precheckCents'>>): ConnectorPermGroupRecord {
+    const group = this.requirePermGroup(id)
+    if (patch.policies) this.validatePolicies(group.orgId, patch.policies)
+    const normalizedPatch: Partial<ConnectorPermGroupRecord> = {
+      ...patch,
+      ...(patch.policies ? { policies: this.normalizePolicies(patch.policies) } : {}),
+    }
+    const updated = this.permGroups().update(id, normalizedPatch)
+    this.afterPermGroupChange(updated)
+    return updated
+  }
+
+  deletePermGroup(id: string): boolean {
+    this.requirePermGroup(id)
+    const removed = this.permGroups().remove(id)
+    if (removed) this.deleteTokenForGroup(id).catch(() => undefined)
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorPermGroupChanged, { groupId: id, change: 'deleted' })
+    return removed
+  }
+
+  /** 变更影响面预览（评审 2.2-3：N 个令牌 / M 个连接，对齐平台 dry-run 惯例）。 */
+  permGroupImpact(id: string): { tokens: number; connections: number; subjects: number } {
+    const group = this.requirePermGroup(id)
+    const referencedAliases = new Set(Object.values(group.policies).flatMap((policy) => policy.connections ?? []))
+    return {
+      tokens: this.tokens().find((item) => item.permGroupId === id).length,
+      connections: this.connections().find((item) => item.ownerOrgId === group.orgId && referencedAliases.has(item.alias)).length,
+      subjects: group.subjects.length,
+    }
+  }
+
+  private requirePermGroup(id: string): ConnectorPermGroupRecord {
+    const group = this.permGroups().get(id)
+    if (!group) throw new Error(`连接器权限组不存在：${id}`)
+    return group
+  }
+
+  private validatePolicies(orgId: string, policies: Record<string, ProviderPolicy>): void {
+    for (const [service, policy] of Object.entries(policies)) {
+      if (!RESOURCE_PATTERN.test(`connector:${service}`)) {
+        throw new Error(`provider 段不满足计量资源正则：${service}`)
+      }
+      if (policy.riskCap && !(policy.riskCap in { read: 1, write: 1, admin: 1 })) {
+        throw new Error(`riskCap 非法：${String(policy.riskCap)}（read|write|admin）`)
+      }
+      for (const alias of policy.connections ?? []) {
+        this.assertAliasPrefix(alias, orgId)
+        if (!this.connections().findOne((item) => item.alias === alias && item.ownerOrgId === orgId)) {
+          throw new Error(`引用的连接不存在或不在本组织：${alias}`)
+        }
+      }
+    }
+  }
+
+  private normalizePolicies(policies: Record<string, ProviderPolicy>): Record<string, ProviderPolicy> {
+    return Object.fromEntries(Object.entries(policies).map(([service, policy]) => [
+      service,
+      {
+        // '*' 字符串通配 / 'service.*' 单串 pattern / 数组三形态归一（pattern 语义见计划书 §2.4）
+        allowedActions: policy.allowedActions === '*'
+          ? '*'
+          : Array.isArray(policy.allowedActions)
+            ? policy.allowedActions
+            : (typeof policy.allowedActions === 'string' && policy.allowedActions.endsWith('.*') ? [policy.allowedActions] : ['*']),
+        riskCap: policy.riskCap ?? 'read',
+        ...(policy.connections?.length ? { connections: [...new Set(policy.connections)] } : {}),
+        constraints: {
+          ...(policy.constraints?.readOnly !== undefined ? { readOnly: policy.constraints.readOnly } : {}),
+          ...(policy.constraints?.denyParams?.length ? { denyParams: policy.constraints.denyParams } : {}),
+        },
+      },
+    ]))
+  }
+
+  private afterPermGroupChange(group: ConnectorPermGroupRecord): void {
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorPermGroupChanged, { groupId: group.id, name: group.name, change: 'upserted' })
+    void this.mirrorTokenPolicy(group).catch(() => undefined)
+  }
+
+  // -- 第二层：oct_ 令牌策略镜像（#7） -----------------------------------------
+
+  private clientForMirror(): OcClient {
+    return this.requireClient().client
+  }
+
+  /** 权限组快照（pattern 直传 + 该组可见连接稳定 ID 列表；org 边界天然绑定，三件套②）。 */
+  policySnapshot(group: ConnectorPermGroupRecord): OcTokenPolicy & { snapshotHash: string } {
+    const allowed: string[] = []
+    let wildcard = false
+    for (const policy of Object.values(group.policies)) {
+      if (policy.allowedActions === '*') {
+        wildcard = true
+        continue
+      }
+      allowed.push(...policy.allowedActions)
+    }
+    const referencedAliases = [...new Set(Object.values(group.policies).flatMap((policy) => policy.connections ?? []))]
+    const allowedConnections = referencedAliases.length === 0
+      ? []
+      : this.connections()
+          .find((item) => item.ownerOrgId === group.orgId && referencedAliases.includes(item.alias))
+          .map((item) => item.ocConnectionId)
+          .filter((id): id is string => Boolean(id))
+    // 通配短路：组内任一策略声明 '*' 即整体 ['*']（union 语义下不再混入显式条目）
+    const sortedAllowed = wildcard ? ['*'] : [...new Set(allowed)].sort()
+    const snapshot = {
+      allowedActions: sortedAllowed,
+      blockedActions: [] as string[],
+      allowedProxies: [] as string[],
+      allowedConnections: [...allowedConnections].sort(),
+    }
+    return { ...snapshot, snapshotHash: sha256Hex(JSON.stringify(snapshot)) }
+  }
+
+  /** 台账收敛：新建铸令 / 快照哈希变化才 PUT（四个数组全发）/ 删除场景走 DELETE。 */
+  async mirrorTokenPolicy(group: ConnectorPermGroupRecord): Promise<{ tokenId: string; hash: string; changed: boolean }> {
+    const client = this.clientForMirror()
+    const snapshot = this.policySnapshot(group)
+    const ledger = this.tokens().findOne((item) => item.permGroupId === group.id)
+    if (!ledger) {
+      const minted = await client.createRuntimeToken({
+        name: `dsh-${group.id}`,
+        allowedActions: snapshot.allowedActions,
+        blockedActions: snapshot.blockedActions,
+        allowedProxies: snapshot.allowedProxies,
+        allowedConnections: snapshot.allowedConnections,
+      })
+      if (!minted.id) throw new OcError('runtime_token_invalid', 'open-connector 未返回运行时令牌 id', undefined, 502)
+      this.tokens().insert({
+        id: newId('ctk'), permGroupId: group.id, ocTokenId: minted.id,
+        policySnapshotHash: snapshot.snapshotHash, createdAt: nowIso(), lastSyncedAt: nowIso(),
+      })
+      if (minted.token) this.tokenValueCache.set(group.id, minted.token)
+      return { tokenId: minted.id, hash: snapshot.snapshotHash, changed: true }
+    }
+    if (ledger.policySnapshotHash !== snapshot.snapshotHash) {
+      // PUT 四数组全发——上游不会因此丢既有 allowedConnections（P1 修正⑤确认项）
+      await client.updateRuntimeToken(ledger.ocTokenId, {
+        allowedActions: snapshot.allowedActions,
+        blockedActions: snapshot.blockedActions,
+        allowedProxies: snapshot.allowedProxies,
+        allowedConnections: snapshot.allowedConnections,
+      })
+      this.tokens().update(ledger.id, { policySnapshotHash: snapshot.snapshotHash, lastSyncedAt: nowIso() })
+      return { tokenId: ledger.ocTokenId, hash: snapshot.snapshotHash, changed: true }
+    }
+    this.tokens().update(ledger.id, { lastSyncedAt: nowIso() })
+    return { tokenId: ledger.ocTokenId, hash: snapshot.snapshotHash, changed: false }
+  }
+
+  async deleteTokenForGroup(groupId: string): Promise<void> {
+    const ledger = this.tokens().findOne((item) => item.permGroupId === groupId)
+    if (!ledger) return
+    try {
+      await this.clientForMirror().deleteRuntimeToken(ledger.ocTokenId)
+    } catch { /* 上游已删即目标达成 */ }
+    this.tokens().remove(ledger.id)
+    this.tokenValueCache.delete(groupId)
+  }
+
+  /** 取令牌值：内存命中 → 否则重启后惰性重铸（重铸语义而非找回，journal 决策①）。 */
+  private async obtainOctToken(group: ConnectorPermGroupRecord): Promise<string> {
+    const cached = this.tokenValueCache.get(group.id)
+    if (cached) return cached
+    const client = this.clientForMirror()
+    const ledger = this.tokens().findOne((item) => item.permGroupId === group.id)
+    const snapshot = this.policySnapshot(group)
+    const minted = await client.createRuntimeToken({
+      name: `dsh-${group.id}`,
+      allowedActions: snapshot.allowedActions,
+      blockedActions: snapshot.blockedActions,
+      allowedProxies: snapshot.allowedProxies,
+      allowedConnections: snapshot.allowedConnections,
+    })
+    if (ledger) {
+      // 进程内丢失（重启）：旧 token 立即销毁防滞留
+      await client.deleteRuntimeToken(ledger.ocTokenId).catch(() => undefined)
+      this.tokens().update(ledger.id, { ocTokenId: minted.id, policySnapshotHash: snapshot.snapshotHash, lastSyncedAt: nowIso() })
+    } else {
+      this.tokens().insert({
+        id: newId('ctk'), permGroupId: group.id, ocTokenId: minted.id,
+        policySnapshotHash: snapshot.snapshotHash, createdAt: nowIso(), lastSyncedAt: nowIso(),
+      })
+    }
+    if (!minted.token) throw new OcError('runtime_token_invalid', '运行时令牌未返回一次性 token 值', undefined, 502)
+    this.tokenValueCache.set(group.id, minted.token)
+    return minted.token
+  }
+
+  // -- 授权判定（第一层核心） ---------------------------------------------------
+
+  /** 找出命中主体的候选组（user_group 经 iam.resolveGroupMembers 展开；agent/app 直接比 id）。 */
+  candidateGroups(caller: InvokeCaller): ConnectorPermGroupRecord[] {
+    return this.permGroups().all().filter((group) =>
+      group.subjects.some((subject) => {
+        if (subject.type === 'user_group' && caller.type === 'user') {
+          return this.ctx.iam.resolveGroupMembers(subject.id).some((user) => user.id === caller.id)
+        }
+        return subject.type === caller.type && subject.id === caller.id
+      }))
+  }
+
+  /** 计划书 §2.4：pattern 命中 + riskCap ≥ action.riskLevel + readOnly/denyParams 强制（补齐 mcp 侧缺口）。 */
+  authorizeAgainst(group: ConnectorPermGroupRecord, action: CatalogActionRecord, input: Record<string, unknown>): { ok: true; policy: ProviderPolicy } | { ok: false; reason: string } {
+    const policy = group.policies[action.service]
+    if (!policy) return { ok: false, reason: `权限组 ${group.name} 未配置 provider ${action.service} 的策略` }
+    // '*' 可为字符串通配或数组元素（schema 允许两形态），归一后统一 pattern 匹配
+    const rawAllowed: unknown = policy.allowedActions
+    const patterns = rawAllowed === '*' ? ['*'] : Array.isArray(rawAllowed) ? rawAllowed : undefined
+    if (!patterns) {
+      return { ok: false, reason: `权限组 ${group.name} 的 allowedActions 形态非法：${JSON.stringify(rawAllowed)?.slice(0, 80)}（应为 '*' 或字符串数组）` }
+    }
+    const patternHit = patterns.some((pattern) => pattern === '*' || pattern === action.id
+      || (pattern.endsWith('.*') && action.service === pattern.slice(0, -2)))
+    if (!patternHit) return { ok: false, reason: `action ${action.id} 不在权限组 ${group.name} 的允许模式内` }
+    if (rankOf(policy.riskCap) < rankOf(action.riskLevel)) {
+      return { ok: false, reason: `action 风险级 ${action.riskLevel} 超出权限组 ${group.name} 的 riskCap ${policy.riskCap}` }
+    }
+    if (policy.constraints?.readOnly && action.riskLevel !== 'read') {
+      return { ok: false, reason: `权限组 ${group.name} 为只读模式，action ${action.id}（${action.riskLevel}）被拒绝` }
+    }
+    for (const deniedKey of policy.constraints?.denyParams ?? []) {
+      if (hasInputKey(input, deniedKey)) {
+        return { ok: false, reason: `参数 ${deniedKey} 在权限组 ${group.name} 的 denyParams 内，已拦截` }
+      }
+    }
+    return { ok: true, policy }
+  }
+
+  /** 七步链第③⑤步合一：主流程外的独立校验入口（tools/REST 共用）。 */
+  authorize(caller: InvokeCaller, actionId: string, input: Record<string, unknown>, groups?: ConnectorPermGroupRecord[]): { ok: true; group: ConnectorPermGroupRecord; policy: ProviderPolicy; action: CatalogActionRecord } | { ok: false; reason: string } {
+    const action = (() => {
+      try {
+        return this.requireAction(actionId)
+      } catch {
+        return undefined
+      }
+    })()
+    if (!action) return { ok: false, reason: `action 不在纳管目录中：${actionId}` }
+    const candidates = groups ?? this.candidateGroups(caller)
+    if (candidates.length === 0) return { ok: false, reason: `主体 ${caller.name} 未被任何连接器权限组授权` }
+    for (const group of candidates) {
+      const verdict = this.authorizeAgainst(group, action, input)
+      if (verdict.ok) return { ok: true, group, policy: verdict.policy, action }
+    }
+    return { ok: false, reason: candidates
+      .map((group) => this.authorizeAgainst(group, action, input))
+      .filter((verdict): verdict is Exclude<typeof verdict, { ok: true }> => !verdict.ok)
+      .map((verdict) => verdict.reason)[0] ?? `action ${actionId} 不在任何命中组的授权范围` }
+  }
+
+  // -- invoke 网关（#5，七步链） ------------------------------------------------
+
+  async invokeAction(caller: InvokeCaller, params: {
+    actionId: string
+    input?: Record<string, unknown>
+    alias?: string
+    dryRun?: boolean
+    /** 仅内部审批执行器可置位（REST/工具面不暴露）：审批通过后的续调通道。 */
+    viaApprovalExecutor?: boolean
+  }): Promise<InvokeOutcome> {
+    const started = Date.now()
+    const input = params.input ?? {}
+
+    // ③ 第一层授权（subject 匹配 + policy 校验；orgId 由命中组决定——journal 决策③）
+    const verdict = this.authorize(caller, params.actionId, input)
+    if (!verdict.ok) {
+      this.emitDeniedEvent(caller, params.actionId, verdict.reason, started)
+      return { ok: false, status: 'denied', error: verdict.reason, latencyMs: Date.now() - started }
+    }
+    const { group, policy, action } = verdict
+
+    // dry-run：通过授权即可给出影响面预览（CLI 冒烟与 UI 预演共用）
+    if (params.dryRun) {
+      return {
+        ok: true, status: 'dry_run',
+        preview: {
+          actionId: action.id, service: action.service, riskLevel: action.riskLevel,
+          permGroup: group.name, orgId: group.orgId,
+          connections: policy.connections ?? [],
+          readOnlyConstraint: Boolean(policy.constraints?.readOnly),
+          note: '授权链前五步全部通过，dry-run 不执行真实调用',
+        },
+      }
+    }
+
+    // ④ 高危审批门禁：admin 级必须走 connector.action.admin 审批，approve 后 executor 同步执行。
+    // 相同（action+组+主体+输入哈希）的 pending 单直接复用，不重复开单。
+    if (action.riskLevel === 'admin' && !params.viaApprovalExecutor) {
+      const reused = this.dedupeAdminApproval(group, action, caller, input)
+      if (reused) {
+        return { ok: false, status: 'approval_required', approvalId: reused.id, actionId: action.id, message: `已有待审的高危调用单：${reused.id}（批准后自动完成调用）` }
+      }
+      const approval = this.ctx.audit.createApproval({
+        kind: 'connector.action.admin',
+        title: `高危调用：${action.service}/${action.id}`,
+        payload: {
+          // 操作数据（action 入参）可入审批负载；provider 凭证绝不入——两段式连接审批同理
+          actionId: action.id, service: action.service,
+          inputHash: sha256Hex(JSON.stringify(input)),
+          input,
+          permGroupId: group.id, permGroupName: group.name, orgId: group.orgId,
+          ...(params.alias ? { alias: params.alias } : {}),
+          caller: { type: caller.type, id: caller.id, name: caller.name, actChain: caller.actChain },
+        },
+        requesterId: caller.id,
+        requesterName: caller.name,
+      })
+      return {
+        ok: false, status: 'approval_required', approvalId: approval.id, actionId: action.id,
+        message: `action ${action.id} 为 admin 风险级，已生成审批单，批准后自动完成调用`,
+      }
+    }
+
+    // ⑤ 滑动窗口限流：key=<permGroupId>:<callerType>:<callerId>
+    const bucketKey = `${group.id}:${caller.type}:${caller.id}`
+    const minuteMark = Date.now()
+    const bucket = (this.rateBuckets.get(bucketKey) ?? []).filter((mark) => minuteMark - mark < 60_000)
+    if (bucket.length >= group.rateLimitPerMin) {
+      this.rateBuckets.set(bucketKey, bucket)
+      this.countErrors(`限流触发：${bucketKey}`)
+      return { ok: false, status: 'rate_limited', error: `触发限流：${group.rateLimitPerMin} 次/分钟`, latencyMs: Date.now() - started }
+    }
+    bucket.push(minuteMark)
+    this.rateBuckets.set(bucketKey, bucket)
+
+    // ⑥ billing.precheck
+    const precheck = this.ctx.billing.precheck(group.orgId, group.precheckCents)
+    if (!precheck.ok) {
+      return { ok: false, status: 'quota_exceeded', error: precheck.reason, latencyMs: Date.now() - started }
+    }
+
+    // ⑦ 取/铸 oct_ 令牌 + 数据面执行（含 401/connection_not_allowed 自动恢复，P1 修正⑥）
+    try {
+      const octToken = await this.obtainOctToken(group)
+      const idempotencyKey = action.riskLevel === 'read' ? undefined : crypto.randomUUID()
+      const chosenAlias = params.alias ?? (policy.connections?.length === 1 ? policy.connections[0]! : undefined)
+      const outcome = await this.executeWithRecovery(group, action, {
+        input, alias: chosenAlias, idempotencyKey,
+      }, octToken)
+
+      // 数据面信封：统计平台审计补记边缘情形（meta.auditPersisted=false，P1 修正⑧）
+      const auditPersisted = outcome.meta['auditPersisted'] !== false
+      const runId = typeof outcome.meta['executionId'] === 'string' ? outcome.meta['executionId'] as string : newId('run')
+
+      // 收尾：usage.record 为计费事实源（幂等键=connector:<runId>，trace_id=executionId）
+      let metered = true
+      try {
+        this.ctx.usage.record({
+          org: group.orgId,
+          subject: `${caller.type}:${caller.id}`,
+          principal: `org:${group.orgId}`,
+          resource: `connector:${action.service}`,
+          meters: [{ key: 'calls', value: 1, unit: '次' }],
+          idempotency_key: `connector:${runId}`,
+          trace_id: runId,
+        })
+      } catch (error) {
+        metered = false
+        this.ctx.logger('connector').warn('usage 计量登记失败', error)
+      }
+      if (!metered) {
+        this.countErrors(`计量失败：connector:${action.service}`)
+      }
+      this.noteSuccessSignal()
+
+      // 补记 + 低阈告警（T-28）
+      if (!auditPersisted) {
+        this.ctx.audit.record({
+          type: 'invoke', actorType: caller.type === 'user' ? 'human' : 'machine',
+          actorId: caller.id, actorName: caller.name,
+          action: 'connector.invoke.recovered-audit', resourceType: 'connector_action',
+          resourceId: runId, resourceName: `${action.service}/${action.id}`,
+          result: 'ok',
+          detail: `sidecar 报 auditPersisted=false，结果有效但上游审计未落库——平台补记本条（runId=${runId}）`,
+          ...(caller.actChain?.length ? { actChain: caller.actChain } : {}),
+        })
+        this.countErrors(`auditPersisted=false 补记：${runId}`)
+      }
+
+      // invoke 审计事件（audit 插件订阅落 invoke 日志，透传 actChain + runId）
+      this.ctx.platformBus.emit(PlatformEvents.ConnectorInvoked, {
+        ok: true, service: action.service, actionId: action.id, runId,
+        serviceRisk: action.riskLevel, permGroupId: group.id,
+        callerType: caller.type, callerId: caller.id, callerName: caller.name,
+        latencyMs: Date.now() - started, actChain: caller.actChain,
+        auditPersisted, metered,
+      })
+
+      return {
+        ok: true, status: 'ok', runId, latencyMs: Date.now() - started,
+        data: outcome.data, meta: outcome.meta, metered,
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.noteBusinessFailure(message)
+      this.emitDeniedEvent(caller, params.actionId, message, started, true)
+      const code = error instanceof OcError ? error.code : 'execute_failed'
+      return { ok: false, status: 'error', error: message, latencyMs: Date.now() - started, code }
+    }
+  }
+
+  /** 复用同意图 pending 审批单，防止重复开单轰炸审批中心。 */
+  private dedupeAdminApproval(group: ConnectorPermGroupRecord, action: CatalogActionRecord, caller: InvokeCaller, input: Record<string, unknown>): ApprovalLike | undefined {
+    const inputHash = sha256Hex(JSON.stringify(input))
+    return this.ctx.audit.approvals().find((item) =>
+      item.kind === 'connector.action.admin' && item.status === 'pending'
+      && (item as { requesterId?: string }).requesterId === caller.id
+      && String((item.payload as Record<string, unknown>)['actionId'] ?? '') === action.id
+      && String((item.payload as Record<string, unknown>)['permGroupId'] ?? '') === group.id
+      && String((item.payload as Record<string, unknown>)['inputHash'] ?? '') === inputHash)[0]
+  }
+
+  /** 执行包装：401/connection_not_allowed → 按最新快照 PUT 更新令牌后重试一次（P1 修正⑥）。 */
+  private async executeWithRecovery(
+    group: ConnectorPermGroupRecord,
+    action: CatalogActionRecord,
+    options: { input: Record<string, unknown>; alias?: string; idempotencyKey?: string },
+    octToken: string,
+  ): Promise<{ data: unknown; meta: Record<string, unknown> }> {
+    const attempt = async (token: string) => {
+      const { client } = this.requireClient()
+      return await client.executeAction(action.id, options, token)
+    }
+    try {
+      const outcome = await attempt(octToken)
+      return { data: outcome.data, meta: outcome.meta }
+    } catch (error) {
+      const recoverable = error instanceof OcError && (error.code === 'connection_not_allowed' || error.code === 'unauthorized' || error.status === 401)
+      if (!recoverable) throw error
+      // 自动恢复：镜像最新快照（新连接合入 allowedConnections 等）后取最新令牌重试一次
+      await this.mirrorTokenPolicy(group).catch(() => undefined)
+      this.tokenValueCache.delete(group.id)
+      const freshToken = await this.obtainOctToken(group)
+      try {
+        const retried = await attempt(freshToken)
+        return { data: retried.data, meta: retried.meta }
+      } catch (retryError) {
+        const message = retryError instanceof Error ? retryError.message : String(retryError)
+        this.countErrors(`自动恢复重试仍失败：${message}`)
+        throw retryError
+      }
+    }
+  }
+
+  private emitDeniedEvent(caller: InvokeCaller, actionId: string, reason: string, startedAt: number, isError = false): void {
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorInvoked, {
+      ok: false, actionId, service: actionId.split('.')[0] ?? '',
+      callerType: caller.type, callerId: caller.id, callerName: caller.name,
+      error: reason, latencyMs: Date.now() - startedAt, actChain: caller.actChain, failed: isError,
+    })
+  }
+
+  /** 失败率计数 + 告警评估（evaluateAlerts 读 context.value）。 */
+  private errorCounter = new Map<string, number[]>()
+
+  private countErrors(label: string): void {
+    const key = 'connector_error_rate'
+    const times = (this.errorCounter.get(key) ?? []).filter((mark) => Date.now() - mark < 10 * 60_000)
+    times.push(Date.now())
+    this.errorCounter.set(key, times)
+    this.ctx.audit.evaluateAlerts(key, {
+      value: times.length, label,
+      resourceType: 'connector_hub',
+      resourceId: 'gateway',
+    })
+  }
+
+  /** 真实调用失败计入延迟探活之外的失败率（metricsOnly，不开熔断）。 */
+  private noteBusinessFailure(message: string): void {
+    this.countErrors(message.slice(0, 120))
+  }
+
+  // -- 定时任务（#7 巡检 / #11 对账） -------------------------------------------
+
+  /** 组织巡检 + 可选目录漂移自动同步（PATROL_INTERVAL）。 */
+  async runPatrols(autoCatalog: boolean | undefined): Promise<{ violations: Array<Record<string, unknown>>; catalogDrift?: Record<string, unknown> }> {
+    const violations: Array<Array<Record<string, unknown>>> = []
+    const groupViolations: Array<Record<string, unknown>> = []
+    void violations
+    const status = this.gatewayStatus()
+    if (!status.available) return { violations: groupViolations }
+    const { client } = this.requireClient()
+    const [remoteTokens, remoteConnections] = await Promise.all([client.listRuntimeTokens(), client.listConnections()])
+    const remoteById = new Map(remoteTokens.filter((token) => token.id).map((token) => [token.id, token]))
+    const connectionsById = new Map(remoteConnections.filter((item) => item.id).map((item) => [item.id, item]))
+    for (const group of this.permGroups().all()) {
+      const ledger = this.tokens().findOne((item) => item.permGroupId === group.id)
+      if (!ledger) continue
+      const token = remoteById.get(ledger.ocTokenId)
+      if (!token) {
+        groupViolations.push({ kind: 'token_missing_on_sidecar', groupId: group.id, name: group.name, ocTokenId: ledger.ocTokenId })
+        continue
+      }
+      const bound = Array.isArray(token.policy && (token.policy as Record<string, unknown>)['allowedConnections'])
+        ? ((token.policy as Record<string, unknown>)['allowedConnections'] as string[])
+        : []
+      for (const connectionId of bound) {
+        const conn = connectionsById.get(connectionId)
+        const belongsToOrg = conn
+          ? this.connections().findOne((item) => item.ocConnectionId === connectionId && item.ownerOrgId === group.orgId) !== undefined
+            || (conn.connectionName ?? '').startsWith(`org:${group.orgId}:`)
+          : this.connections().findOne((item) => item.ocConnectionId === connectionId && item.ownerOrgId === group.orgId) !== undefined
+        if (!belongsToOrg) {
+          groupViolations.push({
+            kind: 'token_binds_foreign_connection', groupId: group.id, name: group.name,
+            ocTokenId: ledger.ocTokenId, connectionId,
+            alias: conn?.connectionName ?? '',
+            expectedPrefix: `org:${group.orgId}:`,
+          })
+        }
+      }
+    }
+    if (groupViolations.length > 0) {
+      this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewaySynced, {
+        kind: 'org_patrol', violations: groupViolations, at: nowIso(),
+      })
+      this.ctx.audit.fire({
+        severity: 'warning',
+        title: '[连接器 org 巡检] 令牌绑定越界',
+        message: `发现 ${groupViolations.length} 处「令牌绑定连接 ∉ 组内 org」不一致：${JSON.stringify(groupViolations).slice(0, 220)}`,
+        resourceType: 'connector_gateway',
+      })
+    }
+    let catalogDrift: Record<string, unknown> | undefined
+    const record = this.gateways().all()[0]
+    const shouldSyncCatalog = autoCatalog ?? ((record?.autoCatalogSyncMinutes ?? 0) > 0)
+    if (shouldSyncCatalog) {
+      try {
+        const syncResult = await this.syncCatalog('patrol')
+        catalogDrift = { added: syncResult.added, removed: syncResult.removed, skippedServices: syncResult.skippedServices }
+      } catch (error) {
+        catalogDrift = { error: error instanceof Error ? error.message : String(error) }
+      }
+    }
+    return { violations: groupViolations, ...(catalogDrift !== undefined ? { catalogDrift } : {}) }
+  }
+
+  /**
+   * runs 对账（#11，P1 修正⑦）：usage.record 为计费事实源；本任务按 runtimeTokenId 做
+   * 总量交叉校验 + 盗用检测——有 run 无 meter 即绕行告警（critical，人工复核不自动处置）。
+   * cursor 增量 + run id 去重（重叠窗口安全）；对账周期默认 5 分钟 ≪ RUN_LIMIT 轮转窗口。
+   */
+  async reconcileRuns(options: { maxPages?: number } = {}): Promise<{ checkedRuns: number; bypassRuns: string[]; knownTokens: number; matchedMeters: number; cursor?: string }> {
+    const status = this.gatewayStatus()
+    if (!status.available) return { checkedRuns: 0, bypassRuns: [], knownTokens: 0, matchedMeters: 0 }
+    const { client } = this.requireClient()
+    const stateCollection = this.runsState()
+    let state = stateCollection.findOne((item) => item.key === 'reconcile')
+    if (!state) {
+      state = stateCollection.insert({ id: newId('crn'), key: 'reconcile', processedIds: [], createdAt: nowIso(), updatedAt: nowIso() })
+    }
+    const processed = new Set(state.processedIds ?? [])
+    const ledgers = this.tokens().all()
+    const managedTokenIds = new Set(ledgers.map((item) => item.ocTokenId))
+    const bypassRuns: string[] = []
+    let checked = 0
+    let matched = 0
+    let cursor = state.cursor
+    const maxPages = options.maxPages ?? 10
+    for (let page = 0; page < maxPages; page++) {
+      const response = await client.listRuns({ limit: 200, ...(cursor ? { cursor } : {}) })
+      for (const run of response.items) {
+        if (!run.id || processed.has(run.id)) continue
+        processed.add(run.id)
+        if (run.runtimeTokenId && managedTokenIds.has(run.runtimeTokenId)) {
+          checked++
+          const meterCount = countUsageByTrace(this.ctx, run.id)
+          if (meterCount > 0) matched++
+          else bypassRuns.push(run.id)
+        }
+      }
+      cursor = response.nextCursor
+      if (!response.nextCursor || response.items.length === 0) break
+    }
+    const trimmed = [...processed].slice(-PROCESSED_RUN_CAP)
+    stateCollection.update(state.id, { cursor, processedIds: trimmed, lastRunAt: nowIso(), updatedAt: nowIso() })
+    if (bypassRuns.length > 0) {
+      this.ctx.audit.fire({
+        severity: 'critical',
+        title: '[连接器对账] 绕行调用（有 run 无 meter）',
+        message: `检测到 ${bypassRuns.length} 条经平台铸造令牌的 sidecar run 无对应 usage 计量：${bypassRuns.slice(0, 20).join(', ')}`,
+        resourceType: 'connector_reconcile',
+      })
+    }
+    return { checkedRuns: checked, bypassRuns, knownTokens: managedTokenIds.size, matchedMeters: matched, ...(cursor ? { cursor } : {}) }
+  }
+
+  /** runs 视图（控制台/CLI 只读展示；不做处置建议，人工复核）。 */
+  async listRunsView(params: { limit?: number; service?: string; ok?: boolean } = {}): Promise<{ items: OcRunLog[]; knownTokens: number }> {
+    if (!this.gatewayStatus().available) return { items: [], knownTokens: 0 }
+    const { client } = this.requireClient()
+    const page = await client.listRuns({ limit: Math.min(params.limit ?? 100, 500), ...(params.service ? { service: params.service } : {}), ...(params.ok !== undefined ? { ok: params.ok } : {}) })
+    return { items: page.items, knownTokens: this.tokens().count() }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 模块级辅助
+// ---------------------------------------------------------------------------
+
+const OC_DEFAULT_TIMEOUT = 15_000
+
+/** top-level 键与点路径通吃的 denyParams 拦截。 */
+function hasInputKey(input: Record<string, unknown>, deniedKey: string): boolean {
+  if (Object.hasOwn(input, deniedKey)) return true
+  if (!deniedKey.includes('.')) return false
+  let node: unknown = input
+  for (const segment of deniedKey.split('.')) {
+    if (node === null || typeof node !== 'object' || !Object.hasOwn(node as Record<string, unknown>, segment)) return false
+    node = (node as Record<string, unknown>)[segment]
+  }
+  return true
+}
+
+function countUsageByTrace(ctx: Context, traceId: string): number {
+  const rows = ctx.txnStore.sql<{ n: number }>('SELECT COUNT(*) AS n FROM usage_events WHERE trace_id = ?', [traceId])
+  return Number(rows[0]?.n ?? 0)
+}
+
+function normalizeAuthType(value: string): ConnectionReferenceRecord['authType'] {
+  if (value === 'oauth' || value === 'oauth2' || value === 'bearer_config') return 'oauth'
+  if (value === 'custom_credential') return 'custom_credential'
+  if (value === 'no_auth' || value === 'none') return 'no_auth'
+  return 'api_key'
+}
+
+// ---------------------------------------------------------------------------
+// 插件
+// ---------------------------------------------------------------------------
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    connectorHub: ConnectorHubService
+  }
+}
+
+export const name = 'connector'
+export const inject = ['opsStorage', 'platformBus', 'iam', 'audit', 'usage', 'billing', 'txnStore']
+
+export function apply(ctx: Context) {
+  // 与 plugin-mcp 相同的装配形态：构造即注册（provide='connectorHub'），
+  // 审批执行器闭包直接持实例引用——避免执行器跨插件访问 ctx.connectorHub 的注入校验问题。
+  const hub = new ConnectorHubService(ctx)
+  // 部署后迁移前置：生产存量角色不会因 BuiltinRoles 只插不改而获得 connector.* 权限点，
+  // 插件装配期执行一次性幂等迁移（iam 侧实现，先例 agent-scopes-usage-write-v1 思路）。
+  try {
+    ctx.iam.ensureConnectorPermissionsMigration()
+  } catch (error) {
+    ctx.logger('connector').warn('角色权限迁移暂缓（iam 未就绪时宿主会重新依赖解析）', error)
+  }
+  ctx.effect(() => ctx.audit.registerExecutor('connector.connect', async (payload) => {
+    // 两段式设计（journal 决策②）：凭证绝不入审批负载——通过即登记，实际创建由发起人携 approvalId 完成
+    return { acknowledged: true, note: '审批通过：发起人现在可以提交实际连接凭证（POST /api/connector/connections/* 带 approvalId）', provider: payload['provider'] ?? '' }
+  }))
+  ctx.effect(() => ctx.audit.registerExecutor('connector.action.admin', async (payload) => {
+    const callerPayload = (payload['caller'] ?? {}) as { type?: InvokeCaller['type']; id?: string; name?: string; actChain?: InvokeCaller['actChain'] }
+    const result = await hub.invokeAction({
+      type: callerPayload.type ?? 'user',
+      id: callerPayload.id ?? '',
+      name: callerPayload.name ?? '',
+      ...(callerPayload.actChain?.length ? { actChain: callerPayload.actChain } : {}),
+    }, {
+      actionId: String(payload['actionId']),
+      input: (payload['input'] ?? {}) as Record<string, unknown>,
+      ...(typeof payload['alias'] === 'string' && payload['alias'] ? { alias: payload['alias'] } : {}),
+      viaApprovalExecutor: true,
+    })
+    if (!result.ok) throw new Error(result.status === 'approval_required' ? '递归审批异常：不应再次生成审批单' : result.error)
+    return { runId: result.runId, status: result.status, latencyMs: result.latencyMs }
+  }))
+  ctx.plugin(connectorTools)
+}

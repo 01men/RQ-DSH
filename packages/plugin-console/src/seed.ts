@@ -542,7 +542,51 @@ async function seedDemo(ctx: Context): Promise<void> {
   void skillWeb
   void auditor
 
+  // 连接器纳管演示数据（env 门禁：OOMOL_CONNECT_DEMO_SEED=1 时才注入——
+  // 网关指向 OOMOL_CONNECT_STUB_URL（selftest stub / 真实 sidecar），避免生产基线出现死连接噪音）
+  seedConnectorDemo(ctx)
+
   logger.info('演示数据初始化完成')
+}
+
+/** 连接器纳管演示种子：网关引用 + no_auth 虚拟连接 + 只读权限组模板（dev-plan-connector 工作单 #13）。 */
+function seedConnectorDemo(ctx: Context): void {
+  if (process.env.OOMOL_CONNECT_DEMO_SEED !== '1') return
+  const hub = ctx.connectorHub
+  if (hub.gateways().all().length === 0) {
+    void hub.configureGateway({
+      baseUrl: process.env.OOMOL_CONNECT_STUB_URL ?? 'http://127.0.0.1:7363',
+      adminToken: 'env:OOMOL_CONNECT_ADMIN_TOKEN',
+      autoCatalogSyncMinutes: 0,
+    }, 'demo-seed').catch(() => undefined)
+  }
+  const rootOrg = ctx.iam.orgs().findOne((org) => org.parentId === null)
+  if (!rootOrg) return
+  const existing = hub.connections().findOne((item) => item.provider === 'hackernews' && item.ownerOrgId === rootOrg.id)
+  if (!existing) {
+    void hub.createConnection({
+      orgId: rootOrg.id,
+      actor: { id: 'system', name: 'demo-seed' },
+      provider: 'hackernews',
+      aliasSuffix: 'seed-noauth',
+      authType: 'no_auth',
+    }).catch(() => undefined)
+  }
+  const group = hub.permGroups().findOne((item) => item.name === '连接器只读模板（演示）')
+  if (!group && rootOrg) {
+    const everyoneGroup = ctx.iam.groups().findOne((item) => item.type === 'static')
+    try {
+      hub.createPermGroup({
+        name: '连接器只读模板（演示）',
+        description: 'riskCap=read + readOnly 的安全起步模板：仅允许读取类 action',
+        orgId: rootOrg.id,
+        policies: { hackernews: { allowedActions: ['hackernews.*'], riskCap: 'read', constraints: { readOnly: true } } },
+        subjects: [...(everyoneGroup ? [{ type: 'user_group' as const, id: everyoneGroup.id, name: everyoneGroup.name }] : [])],
+        rateLimitPerMin: 60,
+        precheckCents: 0,
+      })
+    } catch { /* 种子非关键路径：缺组织/成员时静默跳过 */ }
+  }
 }
 
 /** 确定性伪随机（种子固定，保证每次演示数据一致）。 */

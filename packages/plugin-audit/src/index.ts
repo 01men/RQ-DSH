@@ -59,6 +59,8 @@ export interface CostRecord extends RecordBase {
   appId?: string
   agentId?: string
   mcpServiceId?: string
+  /** 连接器纳管资源归集维度（connector:<service> 的 service 段）。 */
+  connectorService?: string
   llmTokens: number
   toolCalls: number
   costYuan: number
@@ -143,6 +145,43 @@ export class AuditService extends Service {
         actChain: p.actChain,
       })
     })
+    // 连接器纳管（open-connector 融合）：invoke 日志透传 actChain + runId（runId 无独立字段，进 resourceId）
+    ctx.platformBus.on(PlatformEvents.ConnectorInvoked, (payload) => {
+      const p = payload as {
+        ok?: boolean; service?: string; actionId?: string; runId?: string
+        callerType?: string; callerId?: string; callerName?: string
+        latencyMs?: number; error?: string; actChain?: Array<{ name: string; type: string }>
+        auditPersisted?: boolean
+      }
+      this.record({
+        type: 'invoke', actorType: p.callerType === 'user' ? 'human' : 'machine', actorId: p.callerId ?? '', actorName: p.callerName ?? '',
+        action: 'connector.invoke', resourceType: 'connector_action', resourceId: p.runId ?? '', resourceName: `${p.service ?? ''}/${p.actionId ?? ''}`,
+        result: p.ok ? 'ok' : 'error',
+        detail: `run=${p.runId ?? ''} latency=${p.latencyMs ?? 0}ms${p.ok ? '' : ` 调用失败：${p.error ?? ''}`}${p.auditPersisted === false ? '（sidecar 审计未落库，平台已补记）' : ''}`,
+        ...(p.actChain?.length ? { actChain: p.actChain } : {}),
+      })
+    })
+    ctx.platformBus.on(PlatformEvents.ConnectorGatewayChanged, auditOf('change', 'connector.gateway.changed'))
+    ctx.platformBus.on(PlatformEvents.ConnectorGatewayUnhealthy, (payload) => {
+      const p = payload as { baseUrl?: string; consecutiveFails?: number; reason?: string }
+      this.record({
+        type: 'invoke', actorType: 'system', actorId: 'connector-probe', actorName: '连接器探活',
+        action: 'connector.gateway.unhealthy', resourceType: 'connector_gateway', resourceId: 'gateway', resourceName: p.baseUrl ?? '',
+        result: 'error', detail: `连续失败 ${p.consecutiveFails ?? 0} 次（fail-closed）：${p.reason ?? ''}`,
+      })
+    })
+    ctx.platformBus.on(PlatformEvents.ConnectorConnected, auditOf('change', 'connector.connected'))
+    ctx.platformBus.on(PlatformEvents.ConnectorDisconnected, auditOf('change', 'connector.disconnected'))
+    ctx.platformBus.on(PlatformEvents.ConnectorPermGroupChanged, auditOf('change', 'connector.permgroup.changed'))
+    ctx.platformBus.on(PlatformEvents.ConnectorGatewaySynced, (payload) => {
+      const p = payload as { kind?: string; violations?: unknown[] }
+      this.record({
+        type: 'change', actorType: 'system', actorId: 'connector-patrol', actorName: '连接器巡检',
+        action: 'connector.gateway.synced', resourceType: 'connector_gateway', resourceId: String(p.kind ?? ''), resourceName: '',
+        result: (p.violations?.length ?? 0) > 0 ? 'error' : 'ok',
+        detail: JSON.stringify(payload).slice(0, 300),
+      })
+    })
     ctx.platformBus.on(PlatformEvents.SkillPublished, auditOf('change', 'skill.publish'))
     ctx.platformBus.on(PlatformEvents.SkillDeprecated, auditOf('change', 'skill.deprecate'))
     ctx.platformBus.on(PlatformEvents.SkillInstalled, auditOf('change', 'skill.install'))
@@ -224,6 +263,7 @@ export class AuditService extends Service {
       const agentId = event.subject.startsWith('agent:') ? event.subject.slice(6) : undefined
       const appId = event.principal.startsWith('app:') ? event.principal.slice(4) : undefined
       const mcpServiceId = event.resource.startsWith('mcp:') ? event.resource.slice(4) : undefined
+      const connectorService = event.resource.startsWith('connector:') ? event.resource.slice('connector:'.length) : undefined
       const tokens = event.meters
         .filter((meter) => meter.key === 'input_tokens' || meter.key === 'output_tokens' || meter.key === 'tokens')
         .reduce((sum, meter) => sum + meter.value, 0)
@@ -232,8 +272,9 @@ export class AuditService extends Service {
         ...(agentId !== undefined ? { agentId } : {}),
         ...(appId !== undefined ? { appId } : {}),
         ...(mcpServiceId !== undefined ? { mcpServiceId } : {}),
+        ...(connectorService !== undefined ? { connectorService } : {}),
         llmTokens: event.resource.startsWith('model:') ? tokens : 0,
-        toolCalls: event.resource.startsWith('mcp:') ? 1 : 0,
+        toolCalls: event.resource.startsWith('mcp:') || connectorService !== undefined ? 1 : 0,
         costYuan: Math.round(event.pricing.charge_cents) / 100,
       })
     })
@@ -349,7 +390,8 @@ export class AuditService extends Service {
       cost.date === input.date
       && (cost.appId ?? '') === (input.appId ?? '')
       && (cost.agentId ?? '') === (input.agentId ?? '')
-      && (cost.mcpServiceId ?? '') === (input.mcpServiceId ?? ''))
+      && (cost.mcpServiceId ?? '') === (input.mcpServiceId ?? '')
+      && (cost.connectorService ?? '') === (input.connectorService ?? ''))
     if (existing) {
       this.costs().update(existing.id, {
         llmTokens: existing.llmTokens + input.llmTokens,

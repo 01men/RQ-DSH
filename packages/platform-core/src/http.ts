@@ -189,12 +189,16 @@ export class HttpServerService extends Service {
       raw: req,
       res,
       ok(data, init) {
+        // 幂等守卫：错误处理器已写过响应时忽略（连接器路由的错误透传与外层 guarded 的兜底
+        // 存在同请求双写路径，二次 writeHead 会抛 ERR_HTTP_HEADERS_SENT）
+        if (res.headersSent) return
         const payload = data === undefined ? { ok: true } : { ok: true, data }
         const text = JSON.stringify(payload)
         res.writeHead(init?.status ?? 200, { 'content-type': 'application/json; charset=utf-8' })
         res.end(text)
       },
       fail(status, code, message, extra) {
+        if (res.headersSent) return
         const payload = JSON.stringify({ ok: false, error: { code, message, ...extra } })
         res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
         res.end(payload)
