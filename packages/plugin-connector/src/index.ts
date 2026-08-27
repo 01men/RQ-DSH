@@ -25,6 +25,8 @@ import * as connectorTools from './tools.ts'
 
 export interface GatewayRecord extends RecordBase {
   baseUrl: string
+  /** 维护性下线（connector.offline 审批语义）：为真时探活直接跳过，避免定时器自动复活。 */
+  maintOffline?: boolean
   /** 管理面 Bearer：`env:VAR` 间接引用（生产强制）；测试可直填 stub 口令。 */
   adminToken: string
   status: 'unconfigured' | 'healthy' | 'unavailable'
@@ -69,6 +71,11 @@ export interface ConnectionReferenceRecord extends RecordBase {
   requestId?: string
   approvalId?: string
   errorReason?: string
+  /** 连接级维护下线（connector.offline）：非空时刷新不覆盖、授权链拒绝经由该连接的调用。 */
+  offlinedAt?: string
+  offlinedBy?: string
+  /** 下线前的原状态（恢复时回滚参考；默认 active）。 */
+  offlinedStatusFrom?: 'pending' | 'active' | 'error'
 }
 
 export interface ProviderPolicy {
@@ -287,6 +294,11 @@ export class ConnectorHubService extends Service {
   async probeGateway(): Promise<{ ok: boolean; latencyMs: number; reason?: string }> {
     const record = this.gateways().all()[0]
     if (!record) return { ok: false, latencyMs: 0, reason: '未配置' }
+    if (record.maintOffline) {
+      // 维护下线态：探活直接跳过（定时器不复活），仅刷新时间戳
+      this.gateways().update(record.id, { health: { ...record.health, lastProbeAt: nowIso() } })
+      return { ok: false, latencyMs: 0, reason: record.unavailableReason ?? '审批下线（维护态，探活跳过）' }
+    }
     // 强制 env 门禁先于网络探测（P0 修正①）：加密钥缺失或管理口令不可解析即 unavailable +
     // 告警计数——这两个是部署期硬问题；而「尚未探活」属于正常过渡态，必须继续真实探测。
     const encryptionMissing = process.env.OOMOL_CONNECT_ENCRYPTION_KEY === undefined
@@ -356,6 +368,67 @@ export class ConnectorHubService extends Service {
     const record = this.gateways().all()[0]
     if (!record || (record.health.consecutiveFails === 0 && record.status === 'healthy')) return
     this.gateways().update(record.id, { status: 'healthy', unavailableReason: undefined, health: { ...record.health, consecutiveFails: 0 } })
+  }
+
+  /** connector.offline 执行器语义①：网关维护下线（fail-closed 立即生效，探活跳过防自动复活）。 */
+  async offlineGateway(reason: string): Promise<GatewayRecord | undefined> {
+    const record = this.gateways().all()[0]
+    if (!record) return undefined
+    const updated = this.gateways().update(record.id, {
+      maintOffline: true,
+      status: 'unavailable',
+      unavailableReason: `审批下线：${reason}`,
+    })
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayChanged, { baseUrl: updated.baseUrl, action: 'gateway_offline', reason })
+    this.ctx.audit.record({
+      type: 'change', actorType: 'system', actorId: 'connector-offline', actorName: '审批执行',
+      action: 'connector.gateway.offline', resourceType: 'connector_gateway', resourceId: updated.id,
+      resourceName: updated.baseUrl, result: 'ok', detail: reason,
+    })
+    return updated
+  }
+
+  /** 恢复上线：清除维护标记并立即真实探活。 */
+  async onlineGateway(): Promise<{ ok: boolean; latencyMs: number; reason?: string }> {
+    const record = this.gateways().all()[0]
+    if (record && record.maintOffline) {
+      this.gateways().update(record.id, { maintOffline: false, unavailableReason: undefined })
+    }
+    return await this.probeGateway()
+  }
+
+  /** connector.offline 执行器语义②：连接引用下线（平台侧拒绝经由它的调用；sidecar 凭证不受影响）。 */
+  async offlineConnection(id: string, options: { actorName: string; reason: string }): Promise<ConnectionReferenceRecord> {
+    const ref = this.connections().get(id)
+    if (!ref) throw new Error(`连接引用不存在：${id}`)
+    if (ref.status === 'offlined') return ref
+    const updated = this.connections().update(id, {
+      offlinedStatusFrom: ref.status,
+      status: 'offlined',
+      offlinedAt: nowIso(),
+      offlinedBy: options.actorName,
+      errorReason: `审批下线：${options.reason}`,
+    } as Partial<ConnectionReferenceRecord>)
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorDisconnected, {
+      connectionId: id, alias: ref.alias, provider: ref.provider, orgId: ref.ownerOrgId,
+      actor: options.actorName, action: 'offline', reason: options.reason,
+    })
+    return updated
+  }
+
+  /** 连接恢复：清下线标记并回查 sidecar 状态（网关不可达时停留 pending 待下次轮询收敛）。 */
+  async onlineConnection(id: string): Promise<ConnectionReferenceRecord> {
+    const ref = this.connections().get(id)
+    if (!ref) throw new Error(`连接引用不存在：${id}`)
+    this.connections().update(id, {
+      offlinedStatusFrom: undefined, offlinedAt: undefined, offlinedBy: undefined,
+      errorReason: undefined, status: ref.offlinedStatusFrom === 'pending' ? 'pending' : 'active',
+    } as Partial<ConnectionReferenceRecord>)
+    try {
+      return await this.confirmConnectionStatus({ connectionId: id }) ?? this.connections().get(id)!
+    } catch {
+      return this.connections().get(id)!
+    }
   }
 
   // -- 目录同步（#3） ---------------------------------------------------------
@@ -621,6 +694,7 @@ export class ConnectorHubService extends Service {
       ? this.connections().get(filter.connectionId)
       : this.connections().findOne((item) => item.requestId === filter.requestId)
     if (!ref) return undefined
+    if (ref.offlinedAt) return ref // 维护下线态：状态轮询不复活连接
     const summaries = await client.listConnections()
     const match = summaries.find((item) => item.connectionName === ref.alias && item.service === ref.provider)
     if (!match) {
@@ -681,6 +755,7 @@ export class ConnectorHubService extends Service {
     const summaries = await client.listConnections()
     const scope = orgId ? this.connections().find((item) => item.ownerOrgId === orgId) : this.connections().all()
     for (const ref of scope) {
+      if (ref.offlinedAt) continue // 维护下线态：刷新不覆盖（audit 口径保持下线原因）
       const match = summaries.find((item) => item.connectionName === ref.alias)
       if (!match) continue
       this.connections().update(ref.id, { ...this.summarize(match, ref), updatedAt: nowIso() } as Partial<ConnectionReferenceRecord>)
@@ -1048,11 +1123,25 @@ export class ConnectorHubService extends Service {
       return { ok: false, status: 'quota_exceeded', error: precheck.reason, latencyMs: Date.now() - started }
     }
 
+    // 连接级下线闸：指定别名或策略唯一绑定连接处于维护下线态 → 平台侧直接拒绝
+    const effectiveAlias = params.alias ?? (policy.connections?.length === 1 ? policy.connections[0]! : undefined)
+    if (effectiveAlias) {
+      const boundRef = this.connections().findOne((item) => item.alias === effectiveAlias && item.ownerOrgId === group.orgId)
+      if (!boundRef) {
+        this.emitDeniedEvent(caller, params.actionId, `连接不存在或不属于本组织：${effectiveAlias}`, started)
+        return { ok: false, status: 'denied', error: `连接不存在或不属于本组织：${effectiveAlias}`, latencyMs: Date.now() - started }
+      }
+      if (boundRef.offlinedAt) {
+        this.emitDeniedEvent(caller, params.actionId, `连接已下线：${effectiveAlias}（${boundRef.errorReason ?? ''}）`, started)
+        return { ok: false, status: 'denied', error: `连接已下线：${effectiveAlias}`, latencyMs: Date.now() - started }
+      }
+    }
+
     // ⑦ 取/铸 oct_ 令牌 + 数据面执行（含 401/connection_not_allowed 自动恢复，P1 修正⑥）
     try {
       const octToken = await this.obtainOctToken(group)
       const idempotencyKey = action.riskLevel === 'read' ? undefined : crypto.randomUUID()
-      const chosenAlias = params.alias ?? (policy.connections?.length === 1 ? policy.connections[0]! : undefined)
+      const chosenAlias = effectiveAlias
       const outcome = await this.executeWithRecovery(group, action, {
         input, alias: chosenAlias, idempotencyKey,
       }, octToken)
@@ -1097,12 +1186,21 @@ export class ConnectorHubService extends Service {
       }
 
       // invoke 审计事件（audit 插件订阅落 invoke 日志，透传 actChain + runId）
+      const finalLatencyMs = Date.now() - started
       this.ctx.platformBus.emit(PlatformEvents.ConnectorInvoked, {
         ok: true, service: action.service, actionId: action.id, runId,
         serviceRisk: action.riskLevel, permGroupId: group.id,
         callerType: caller.type, callerId: caller.id, callerName: caller.name,
-        latencyMs: Date.now() - started, actChain: caller.actChain,
+        latencyMs: finalLatencyMs, actChain: caller.actChain,
         auditPersisted, metered,
+      })
+      // 延迟告警口径：单次耗时直评（规则播种见 seedConnectorDemo 的 connector_latency 条目）
+      this.ctx.audit.evaluateAlerts('connector_latency', {
+        value: finalLatencyMs,
+        resourceType: 'connector_action',
+        resourceId: action.id,
+        service: action.service,
+        permGroupId: group.id,
       })
 
       return {
@@ -1367,6 +1465,17 @@ export function apply(ctx: Context) {
   } catch (error) {
     ctx.logger('connector').warn('角色权限迁移暂缓（iam 未就绪时宿主会重新依赖解析）', error)
   }
+  ctx.effect(() => ctx.audit.registerExecutor('connector.offline', async (payload) => {
+    // 计划书 §2.7：连接/网关下线走 L4 审批，通过后 executor 落地
+    const scope = String(payload['scope'] ?? 'gateway')
+    const reason = String(payload['reason'] ?? '审批通过下线')
+    if (scope === 'connection') {
+      const ref = await hub.offlineConnection(String(payload['connectionId'] ?? ''), { actorName: 'approval-center', reason })
+      return { scope, connectionId: ref.id, alias: ref.alias, status: ref.status }
+    }
+    const record = await hub.offlineGateway(reason)
+    return { scope: 'gateway', status: record?.status, baseUrl: record?.baseUrl }
+  }))
   ctx.effect(() => ctx.audit.registerExecutor('connector.connect', async (payload) => {
     // 两段式设计（journal 决策②）：凭证绝不入审批负载——通过即登记，实际创建由发起人携 approvalId 完成
     return { acknowledged: true, note: '审批通过：发起人现在可以提交实际连接凭证（POST /api/connector/connections/* 带 approvalId）', provider: payload['provider'] ?? '' }

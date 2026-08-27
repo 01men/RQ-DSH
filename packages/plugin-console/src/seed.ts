@@ -572,6 +572,21 @@ function seedConnectorDemo(ctx: Context): void {
       authType: 'no_auth',
     }).catch(() => undefined)
   }
+  // 告警规则播种（③ 运营口径）：错误率 critical + 延迟 warning——幂等播种，不覆盖运营已调阈值
+  if (!ctx.audit.alertRules().findOne((item) => item.metric === 'connector_error_rate')) {
+    ctx.audit.createAlertRule({
+      name: '连接器调用错误率', metric: 'connector_error_rate', operator: 'gt',
+      threshold: 5, windowMinutes: 10, severity: 'critical', channels: ['dingtalk'], enabled: true,
+      description: '10 分钟内 invoke 失败/自动恢复仍失败/审计补记计分超阈',
+    })
+  }
+  if (!ctx.audit.alertRules().findOne((item) => item.metric === 'connector_latency')) {
+    ctx.audit.createAlertRule({
+      name: '连接器调用延迟', metric: 'connector_latency', operator: 'gt',
+      threshold: 3000, windowMinutes: 10, severity: 'warning', channels: ['dingtalk'], enabled: true,
+      description: '单次调用耗时超 3s（p95 运营关注口径；evaluateAlerts 逐调用评估）',
+    })
+  }
   const group = hub.permGroups().findOne((item) => item.name === '连接器只读模板（演示）')
   if (!group && rootOrg) {
     const everyoneGroup = ctx.iam.groups().findOne((item) => item.type === 'static')

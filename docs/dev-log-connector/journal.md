@@ -98,3 +98,24 @@
 - **指南 v0.2 章节**：一定位与红线 → 二部署拓扑（ASCII，管理面/数据面标注）→ 三 sidecar 部署（compose pin v1.4.0 完整内容 + `${VAR:?}` 编排层 fail-closed、node 直跑、强制 env 表 + 双强制项缺失平台侧 fail-closed 文案、assumeEnv 预演）→ 四 OAuth 回调两拓扑 runbook（直连/反代各自 DNS·端口·配置步骤·取舍 + 速查表 + 自备 App 四步）→ 五 M0 step-by-step（探活→铸 oct_→登录→import 真实请求/响应示例→工具同步→权限组→execute_action 冒烟→回收）→ 六治理降级声明（P2 修正⑬ 五点 + bridgeFrom 徽章）→ 七 M1+ CLI 速览 → 八生产验证清单（A sidecar/B M0 桥接 T-25/C 三类 provider 全谱系/D fail-closed 逃生）→ 九升级与边界 + 故障排查 → 十撰写说明。
 - **涉及文件**：`docs/connector-integration.md`（重构补全，v0.1→v0.2）；`docs/dev-log-connector/{journal.md,PROGRESS.md}`（协议回写）。未触碰任何代码文件，未运行 npm 命令。
 - **遗留风险**：①真实环境桥接联调缺口（#1 partial 的唯一缺口）——执行人按指南 §八 清单勾选回填，完成后 #14 完稿；②指南 §5.6 的 execute_action 参数名以 tools/list inputSchema 为准的口径需在真实联调时确认（open-connector `/mcp` 工具 schema 属上游文档未细载项）；③「桥接过渡」徽章 UI（#/mcp 已随 #9 落地 mcp.js 渲染，#/connectors 侧徽章 hover 文案以 §六 声明为准）。
+
+## [2026-08-27] lead-agent —— 验收意见四项处理 + 上游 v1.4.0 源码实证
+
+### 验收闭环（用户验收反馈逐条落账）
+1. **① connector.offline 执行器**：已补齐——hub 新增 `offlineGateway/onlineGateway/offlineConnection/onlineConnection` 四方法；`apply()` 注册 `connector.offline` executor（scope=gateway|connection 双分支）；探活引入 `maintOffline` 维护墓碑（30s 定时器不会自动复活，这是与普通探活失败的本质区别）；连接级下线引用新增 `offlinedAt/offlinedBy/offlinedStatusFrom` 字段，refresh/confirm 轮询对 offlined 态一律跳过不复活；invoke 增加连接级闸（策略唯一绑定别名或显式 alias 处于下线态 → 平台侧直接 denied「已下线」，不发 sidecar）。REST：POST /api/connector/gateway/{offline,online}、connections/:id/{offline,online}（默认 L4 审批、viaApproval=false 为管理员直连留痕路径）。CLI：gateway offline --reason [--direct]/online；connections offline <id> --reason [--direct]/online。selftest 新增双 scope 闭环断言（审批通过→executor 落地→fail-closed→恢复 healthy→连接 direct 下线→经由调用被拒→恢复 active）。
+2. **② M0 真实联调回填**：本机确证无 docker（docker not found；ghcr 可达 401 正常，非网络阻塞）——生产部署步骤物理上无法在开发机执行，**维持 #1 partial，待运维按集成指南 §八清单在生产主机勾选回填**。本轮完成了清单 B/C 项的全部代码侧可验证部分：
+   - 克隆上游 tag v1.4.0 至 D:\DSH-07\_upstream-oc（后已清理），源码级实证：`connection_not_allowed` 错误码（src/core/action-policy.ts L10/L190）、token 策略四数组 allowedActions/blockedActions/**allowedProxies**/allowedConnections（同文件 L30/L37）、x-oo-connector-alias（src/core/guarded-fetch.ts）——与我方 client.ts/镜像假设逐项吻合。
+   - 吸收 cto-doc-agent 对 M0 形态的两处更正进 stub 与断言：/mcp 数据面鉴权=管理口令(bootstrap)或合法 oct_（此前 stub 未校验）；工具规范形态=**execute_action(actionId,input)**（tools/list 已加 canonical 条目，legacy 别名保留兼容既有 T-25 断言），并新增「桥接 execute_action 规范调用」断言。
+3. **③ connector_latency 规则播种**：seedConnectorDemo 幂等播种两条规则——connector_error_rate(critical, gt 5) 与 connector_latency(warning, gt 3000ms)；hub invoke 成功尾部按单次耗时直评 evaluateAlerts('connector_latency',{value})（p95 运营关注口径，引擎语义为超阈即报）。selftest 断言两条规则随 DEMO 实例在场且 severity 正确。
+4. **④ POST /mcp 直调 connector_execute 断言**：验收项原定"下次迭代"，成本极低故**本轮提前闭合**——rawReq tools/call id=88 直调 connector_execute，断言身份注入链路 + runId/exec-* 回执 + data.echo.viaMcp 透传。
+
+### 技术债确认
+- **多实例 oct_ 内存令牌缓存改造**：已知约束——每权限组令牌值仅存进程内存 Map，多实例横向扩展时各实例缓存漂移（重启惰性重铸+DELETE 旧值仅保证单实例收敛）。CTO 台账已登记；可能的演进方向（记录备查）：a) sidecar 支持 token 值二次获取/JWKS 形态则直取；b) 平台引入共享 KV（依赖部署形态决策）前维持单实例红线写进部署文档；c) short-TTL 重铸风暴防护。在本仓不做提前动工。
+
+### 门禁与快照
+- npm run lint:manifests：70/70 ✅
+- npm run selftest：**531/531 通过（exit=0）**（首轮 521 → 验收轮 +9 offline/规则/mcp 直调 +1 execute_action 规范形态）
+- 快照：D:\DSH-07\snapshots\post-acceptance.tgz（pre-M0/post-M2 仍在）
+
+### 协作备注
+- 本条目不动 cto-doc-agent 的任何历史条目与其对集成指南 §八 的结构化交付；两处 M0 口径更正已在其条目内说明，我方以代码+stub+断言形式吸收完毕。PROGRESS.md #1 行仅做句尾追加（上游实证结论），其状态判定（partial 待真实联调）不变。

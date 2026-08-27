@@ -7,9 +7,9 @@
  *   - 工具桥：POST /api/tools/execute 让 CLI/外部系统以同一套工具契约调用平台
  *   - 首次启动种子数据（演示环境）
  */
-import { join, dirname } from 'node:path'
+import { join, dirname, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, createReadStream } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
 import { createPluginContext, platformVersionInfo } from '../../platform-core/src/index.ts'
@@ -1500,6 +1500,34 @@ export function apply(ctx: Context) {
     return result
   })
 
+  // connector.offline：网关维护下线（默认 L4 审批；viaApproval=false 需管理员显式绕行并留痕）
+  guarded('POST', '/api/connector/gateway/offline', 'connector.gateway.write', async (exchange) => {
+    const input = body<{ reason?: string; viaApproval?: boolean }>(exchange)
+    if (!input.reason?.trim()) throw new Error('下线必须填写原因（护栏要求，处置复盘依赖该口径）')
+    const info = caller(exchange)
+    if (input.viaApproval === false) {
+      const record = await ctx.connectorHub.offlineGateway(input.reason)
+      changeLog(exchange, 'connector.gateway.offline', 'connector_gateway', record?.id ?? 'gateway', input.reason, '直连模式（无审批）')
+      return { offlined: true, mode: 'direct' }
+    }
+    const approval = ctx.audit.createApproval({
+      kind: 'connector.offline',
+      title: `连接器网关维护下线：${input.reason.slice(0, 40)}`,
+      payload: { scope: 'gateway', reason: input.reason, requesterId: info.userId ?? info.principalId, requesterName: info.name },
+      requesterId: info.userId ?? info.principalId,
+      requesterName: info.name,
+    })
+    changeLog(exchange, 'connector.gateway.offline.request', 'approval_center', approval.id, input.reason, 'L4 审批单已创建')
+    return { approvalRequired: true, approvalId: approval.id }
+  })
+
+  // 恢复上线：低风险运维动作（清除维护标记并立即探活），不设审批
+  guarded('POST', '/api/connector/gateway/online', 'connector.gateway.write', async (exchange) => {
+    const result = await ctx.connectorHub.onlineGateway()
+    changeLog(exchange, 'connector.gateway.online', 'connector_gateway', 'gateway', '', result.ok ? `healthy ${result.latencyMs}ms` : (result.reason ?? ''))
+    return { ...result, online: true }
+  })
+
   // -- 目录 -----------------------------------------------------------------
   guarded('GET', '/api/connector/catalog', 'connector.catalog.read', (exchange) => {
     const q = (exchange.query.get('q') ?? '').toLowerCase()
@@ -1613,6 +1641,35 @@ export function apply(ctx: Context) {
   guarded('POST', '/api/connector/connections/refresh', 'connector.connection.read', async (exchange) => {
     const orgFilter = exchange.query.get('orgId') ?? undefined
     return await runWithOcErrors(exchange, () => ctx.connectorHub.refreshConnections(orgFilter))
+  })
+
+  guarded('POST', '/api/connector/connections/:id/offline', 'connector.connection.write', async (exchange) => {
+    const input = body<{ reason?: string; viaApproval?: boolean }>(exchange)
+    if (!input.reason?.trim()) throw new Error('下线必须填写原因（护栏要求）')
+    const id = exchange.params['id']!
+    const info = caller(exchange)
+    if (input.viaApproval === false) {
+      const ref = await runWithOcErrors(exchange, () => ctx.connectorHub.offlineConnection(id, { actorName: info.name, reason: input.reason! }))
+      if (!ref) return
+      changeLog(exchange, 'connector.connection.offline', 'connector_connection', id, ref.alias, input.reason)
+      return { offlined: true, mode: 'direct', reference: maskReference(ref) }
+    }
+    const approval = ctx.audit.createApproval({
+      kind: 'connector.offline',
+      title: `下线连接：${id}`,
+      payload: { scope: 'connection', connectionId: id, reason: input.reason, requesterId: info.userId ?? info.principalId, requesterName: info.name },
+      requesterId: info.userId ?? info.principalId,
+      requesterName: info.name,
+    })
+    changeLog(exchange, 'connector.connection.offline.request', 'approval_center', approval.id, id, input.reason)
+    return { approvalRequired: true, approvalId: approval.id }
+  })
+
+  guarded('POST', '/api/connector/connections/:id/online', 'connector.connection.write', async (exchange) => {
+    const restored = await runWithOcErrors(exchange, () => ctx.connectorHub.onlineConnection(exchange.params['id']!))
+    if (!restored) return
+    changeLog(exchange, 'connector.connection.online', 'connector_connection', restored.id, restored.alias, '')
+    return { online: true, reference: maskReference(restored) }
   })
 
   guarded('DELETE', '/api/connector/connections/:id', 'connector.connection.write', async (exchange) => {
@@ -2056,6 +2113,82 @@ export function apply(ctx: Context) {
     const { path } = body<{ path: string }>(exchange)
     const info = caller(exchange)
     return await ctx.nasRegistry.downloadFile(exchange.params['id']!, path, { id: info.userId ?? info.principalId, name: info.name })
+  })
+
+  /**
+   * 流式文件下载（浏览器端真正拿到文件）：先调 downloadFile 让网关落盘到 staging，
+   * 再以 attachment 头 + content-disposition 触发浏览器保存。query: path=/share/file,
+   * inline=1 表示预览（inline）而非下载（attachment）。
+   */
+  http.register('GET', '/api/nas/:id/fs/file', async (exchange) => {
+    const header = String(exchange.headers['authorization'] ?? '')
+    if (!header.startsWith('Bearer ')) {
+      exchange.fail(401, 'UNAUTHORIZED', '缺少 Bearer 令牌，请先登录')
+      return
+    }
+    const verified = ctx.authn.verify(header.slice(7))
+    const info: CallerInfo = {
+      kind: verified.principal.type,
+      principalId: verified.principal.id,
+      ...(verified.principal.type === 'human' && verified.principal.refId ? { userId: verified.principal.refId } : {}),
+      name: verified.principal.name,
+      permissions: verified.scopes,
+      actChain: verified.actChain,
+    }
+    if (!info.permissions.includes('*') && !info.permissions.includes('nas.read')) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId ?? info.principalId,
+        actorName: info.name,
+        point: 'nas.read',
+        path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', '缺少权限点 nas.read')
+      return
+    }
+    const id = exchange.params['id']!
+    const filePath = exchange.query.get('path')
+    const inline = exchange.query.get('inline') === '1'
+    if (!filePath) {
+      exchange.fail(400, 'BAD_REQUEST', '缺少 path 查询参数')
+      return
+    }
+    let resolved: { localFile: string; bytes: number }
+    try {
+      resolved = await ctx.nasRegistry.resolveDownloadedFile(id, filePath)
+      // 触发一次实际下载（幂等：网关对同一 destDir+同文件覆盖写）
+      await ctx.nasRegistry.downloadFile(id, filePath, { id: info.userId ?? info.principalId, name: info.name })
+      // 重读文件大小（网关可能刚覆盖写）
+      const fresh = await import('node:fs/promises').then((m) => m.stat(resolved.localFile).catch(() => null))
+      if (fresh?.isFile() && fresh.size > 0) resolved = { localFile: resolved.localFile, bytes: fresh.size }
+    } catch (error) {
+      exchange.fail(502, 'DOWNLOAD_FAILED', error instanceof Error ? error.message : String(error))
+      return
+    }
+    const filename = filePath.split('/').filter(Boolean).pop() || 'file'
+    const ext = extname(filename).toLowerCase()
+    const type = NAS_DOWNLOAD_MIME[ext] ?? 'application/octet-stream'
+    const disposition = `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(filename)}`
+    exchange.res.writeHead(200, {
+      'content-type': type,
+      'content-length': String(resolved.bytes),
+      'content-disposition': disposition,
+      'cache-control': 'no-cache',
+    })
+    createReadStream(resolved.localFile).pipe(exchange.res)
+  })
+
+  /** 批量上传（保留目录结构）：files = [{ relativePath, contentBase64 }]，destDir=目标目录。 */
+  guarded('POST', '/api/nas/:id/fs/upload-many', 'nas.write', async (exchange) => {
+    const input = body<{ files: Array<{ relativePath: string; contentBase64: string }>; destDir: string }>(exchange)
+    if (!Array.isArray(input.files) || input.files.length === 0) throw new Error('files 不能为空')
+    if (!input.destDir) throw new Error('缺少 destDir')
+    const info = caller(exchange)
+    const result = await ctx.nasRegistry.uploadMany(exchange.params['id']!, input.files.map((f) => ({
+      relativePath: String(f.relativePath ?? '').replace(/^\/+/, ''),
+      contentBase64: String(f.contentBase64 ?? ''),
+    })), String(input.destDir).replace(/^\/+|\/+$/g, ''), { id: info.userId ?? info.principalId, name: info.name })
+    changeLog(exchange, 'nas.fs.upload_many', 'nas', exchange.params['id']!, '', `成功 ${result.uploaded.length} / 失败 ${result.failed.length} → ${input.destDir}`)
+    return result
   })
 
   // -- Agent --------------------------------------------------------------

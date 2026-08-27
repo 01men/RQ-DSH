@@ -149,6 +149,8 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
             connections list [--org=] | connections create --provider= --auth-type=no_auth|api_key|oauth
                      --org=<orgId> [--alias-suffix=main] [--values=@file.json] [--scopes=a,b]
                      connections delete <id> --yes [--force]
+            gateway offline --reason=<原因> [--direct] | gateway online     （L4 审批 / 直连留痕）
+            connections offline <id> --reason= [--direct] | online <id>
             execute --action=<actionId> [--connection=<alias>] [--input=@file.json] [--dry-run]
             perm-groups list | get | create --file=@group.json | impact <id> | delete <id> --yes
             runs [--service=] [--ok=true|false] [--limit=50]
@@ -770,6 +772,21 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
           out([data], ['ok', 'latencyMs', 'reason'])
           return
         }
+        if (sub === 'offline') {
+          const reason = argOf('--reason')
+          if (!reason) fail('用法：connector gateway offline --reason=<原因> [--direct]  （默认 L4 审批；--direct 需管理员并留痕）')
+          const payload = { reason }
+          if (flag('direct')) payload.viaApproval = false
+          const data = await call('POST', '/api/connector/gateway/offline', payload)
+          if (data.approvalRequired) ok(`已生成 L4 审批单 ${data.approvalId}；dshctl approval decide ${data.approvalId} --decision=approve`)
+          else ok('网关已维护下线（fail-closed，invoke 全部拒绝）')
+          return
+        }
+        if (sub === 'online') {
+          const data = await call('POST', '/api/connector/gateway/online')
+          console.log(data.ok ? '\n✔ 网关恢复在线' : `\n✘ 探活未通过：${data.reason ?? ''}`)
+          return
+        }
         out(await call('GET', '/api/connector/gateway'))
         return
       }
@@ -843,6 +860,23 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
           return
         }
       }
+        if (sub === 'offline' || sub === 'online') {
+          const id = argv[2]
+          if (!id) fail(`用法：connector connections ${sub} <id> [--reason= 原因] [--direct]`)
+          if (sub === 'online') {
+            await call('POST', `/api/connector/connections/${id}/online`)
+            ok('连接已恢复（sidecar 状态回查中）')
+            return
+          }
+          const reason = argOf('--reason')
+          if (!reason) fail('下线必须填写原因：connector connections offline <id> --reason=<原因> [--direct]')
+          const payload = { reason }
+          if (flag('direct')) payload.viaApproval = false
+          const data = await call('POST', `/api/connector/connections/${id}/offline`, payload)
+          if (data.approvalRequired) ok(`已生成 L4 审批单 ${data.approvalId}；批准后连接进入下线态`)
+          else ok(`连接已下线：${data.reference?.alias ?? id}`)
+          return
+        }
       // ---- 执行 ----
       if (group === 'execute') {
         const actionId = argOf('--action')

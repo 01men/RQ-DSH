@@ -435,16 +435,33 @@ const ocStub = createServer(async (req, res) => {
     if (msg.method === 'initialize') {
       return ocEnvelope(res, 200, { ...jsonrpc, result: { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'open-connector-stub', version: '1.4.0' } } })
     }
+    // M0 数据面鉴权（对齐集成指南 v0.2 §五）：Bearer 为管理口令（bootstrap 形态）或合法 oct_
+    const mcpBearer = String(req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
+    if (!ocAdmin(req) && !ocTokenByValue.has(mcpBearer)) {
+      return ocEnvelope(res, 401, { ...jsonrpc, error: { code: -32001, message: '/mcp 数据面需 Bearer 管理口令或合法 oct_ 运行时令牌' } })
+    }
     if (msg.method === 'tools/list') {
-      const names = ['hackernews_get_top_stories', 'hackernews_fetch_item', 'hackernews_submit_post', 'github_list_issues', 'github_create_issue']
-      return ocEnvelope(res, 200, { ...jsonrpc, result: { tools: names.map((name) => ({ name, description: `stub ${name}`, inputSchema: { type: 'object' } })) } })
+      const legacyNames = ['hackernews_get_top_stories', 'hackernews_fetch_item', 'hackernews_submit_post', 'github_list_issues', 'github_create_issue']
+      const tools = [
+        // 上游文档未细载项：真实 /mcp 以 execute_action(actionId,input) 为准（cto-doc-agent 核对结论）
+        { name: 'execute_action', description: 'execute an open-connector action', inputSchema: { type: 'object', properties: { actionId: { type: 'string' }, input: { type: 'object' } }, required: ['actionId'] } },
+        ...legacyNames.map((name) => ({ name, description: `stub ${name}（legacy 别名形态）`, inputSchema: { type: 'object' } })),
+      ]
+      return ocEnvelope(res, 200, { ...jsonrpc, result: { tools } })
     }
     if (msg.method === 'tools/call') {
-      const mapped = String(msg.params?.name ?? '').replace(/_/g, '.').replace('.get.top.stories', '.get_top_stories')
-      ocCalls.push({ actionId: msg.params?.name?.replace(/_([a-z])/g, '.$1'), bearerOk: true, alias: null, idempotencyKey: null, input: msg.params?.arguments ?? {} })
+      const toolName = String(msg.params?.name ?? '')
+      const argsIn = msg.params?.arguments ?? {}
+      if (toolName === 'execute_action') {
+        const executionId = `exec-mcp-${++ocSeq}`
+        ocCalls.push({ actionId: String(argsIn.actionId ?? ''), bearerOk: true, alias: null, idempotencyKey: null, input: argsIn.input ?? {} })
+        ocRuns.push({ id: executionId, service: String(argsIn.actionId ?? '').split('.')[0], ok: true, startedAt: new Date().toISOString(), latencyMs: 9 })
+        return ocEnvelope(res, 200, { ...jsonrpc, result: { content: [{ type: 'text', text: JSON.stringify({ bridgeEcho: argsIn, runId: executionId }) }] } })
+      }
+      ocCalls.push({ actionId: toolName.replace(/_([a-z])/g, '.$1'), bearerOk: true, alias: null, idempotencyKey: null, input: argsIn })
       const executionId = `exec-mcp-${++ocSeq}`
       ocRuns.push({ id: executionId, service: 'hackernews', ok: true, startedAt: new Date().toISOString(), latencyMs: 9 })
-      return ocEnvelope(res, 200, { ...jsonrpc, result: { content: [{ type: 'text', text: JSON.stringify({ bridgeEcho: msg.params?.arguments ?? {}, runId: executionId }) }] } })
+      return ocEnvelope(res, 200, { ...jsonrpc, result: { content: [{ type: 'text', text: JSON.stringify({ bridgeEcho: argsIn, runId: executionId }) }] } })
     }
     return ocEnvelope(res, 200, { ...jsonrpc, error: { code: -32601, message: `方法不存在：${msg.method}` } })
   }
@@ -2661,6 +2678,56 @@ try {
   check('工具桥 connector_perm_group_list 返回结构化组清单', toolBridgePermList.ok && toolBridgePermList.data.value.total >= 4, JSON.stringify(toolBridgePermList.data?.value?.total))
   const toolBridgeExecute = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'connector_execute', args: { actionId: 'hackernews.get_top_stories', input: { viaTool: true } } } })
   check('工具桥 connector_execute 身份注入 + 放行', toolBridgeExecute.ok && toolBridgeExecute.data.value.status === 'ok', JSON.stringify(toolBridgeExecute.data?.value).slice(0, 220))
+
+  // ================================================================ 验收回归：offline 审批闭环 / 规则播种 / mcp 直调 execute
+  section('验收回归（offline 闭环 · 规则播种 · mcp 直调 execute）')
+
+  // ③ 运营口径：连接器两条规则随演示种子幂等播种
+  const seedRules = (await api('GET', '/api/audit/alert-rules', { token: admin })).data.rules ?? []
+  check('连接器告警规则已播种（error_rate=critical / latency=warning）',
+    seedRules.some((rule) => rule.metric === 'connector_error_rate' && rule.severity === 'critical')
+    && seedRules.some((rule) => rule.metric === 'connector_latency' && rule.severity === 'warning'),
+    JSON.stringify(seedRules.filter((rule) => String(rule.metric).startsWith('connector_')).map((rule) => [rule.metric, rule.threshold])))
+
+  // ① 网关维护下线：L4 审批闭环（executor 落地 → fail-closed → 恢复探活）
+  const gwOfflineReq = await api('POST', '/api/connector/gateway/offline', { token: admin, body: { reason: '验收回归-维护窗口' } })
+  check('gateway.offline 默认生成 L4 审批单', gwOfflineReq.data?.approvalRequired === true && Boolean(gwOfflineReq.data.approvalId), JSON.stringify(gwOfflineReq).slice(0, 200))
+  await api('POST', `/api/approvals/${gwOfflineReq.data.approvalId}/decide`, { token: admin, body: { decision: 'approve' } })
+  const gwAfterOff = await api('GET', '/api/connector/gateway', { token: admin })
+  check('审批通过 → executor 落地下线（fail-closed，原因含维护说明）', gwAfterOff.data.available === false && /验收回归/.test(String(gwAfterOff.data.reason)), JSON.stringify({ reason: gwAfterOff.data.reason }))
+  const execBlockedMaint = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('维护态 invoke fail-closed 拒绝', execBlockedMaint.data?.status === 'error' || /GATEWAY_UNAVAILABLE|网关/.test(JSON.stringify(execBlockedMaint)), JSON.stringify(execBlockedMaint).slice(0, 200))
+  const gwOnline = await api('POST', '/api/connector/gateway/online', { token: admin })
+  check('恢复上线即真实探活回 healthy', gwOnline.ok && gwOnline.data.ok === true, JSON.stringify(gwOnline).slice(0, 160))
+
+  // ① 连接级下线：direct 模式留痕生效（不经审批的显式管理员路径）
+  const connOffline = await api('POST', `/api/connector/connections/${patRef.id}/offline`, { token: admin, body: { reason: '验收回归-连接巡检', viaApproval: false } })
+  check('连接 direct 下线立即生效（offlined 态留痕）', connOffline.ok && connOffline.data.reference?.status === 'offlined' && connOffline.data.reference.offlinedAt, JSON.stringify(connOffline).slice(0, 220))
+  const execViaOfflined = await api('POST', '/api/connector/execute', { token: connDevLogin.data.token, body: { actionId: 'github.list_issues', input: {} } })
+  check('经由下线连接的调用被平台侧拒绝（连接级闸）', execViaOfflined.ok && execViaOfflined.data?.status === 'denied' && /已下线/.test(String(execViaOfflined.data.error)), JSON.stringify(execViaOfflined).slice(0, 240))
+  const connBack = await api('POST', `/api/connector/connections/${patRef.id}/online`, { token: admin })
+  check('连接恢复后 sidecar 回查转 active', connBack.ok && connBack.data.reference?.status === 'active', JSON.stringify(connBack).slice(0, 220))
+
+  // ④ POST /mcp tools/call 直调 connector_execute（三端最后一环；验收项原定下次迭代，本轮提前闭合）
+  const mcpDirectCall = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 88, method: 'tools/call', params: { name: 'connector_execute', arguments: { actionId: 'hackernews.get_top_stories', input: { viaMcp: true } } } }),
+  })
+  const mcpDirectRaw = jsonBody(mcpDirectCall).result?.content?.[0]?.text ?? ''
+  const mcpDirectOutcome = (() => { try { return JSON.parse(mcpDirectRaw) } catch { return {} } })()
+  check('POST /mcp 直调 connector_execute（身份注入 + runId 回执）',
+    mcpDirectCall.status === 200 && mcpDirectOutcome.status === 'ok' && /^exec-/.test(String(mcpDirectOutcome.runId)) && mcpDirectOutcome.data?.echo?.viaMcp === true, mcpDirectRaw.slice(0, 260))
+
+  // 桥接规范形态：经 execute_action(actionId,input) 调用（集成指南 v0.2 §五口径；legacy 别名仍兼容）
+  const bridgedExecCall = await rawReq('POST', '/mcp', {
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}` },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 89, method: 'tools/call', params: { name: 'mcp_invoke', arguments: { serviceId: bridgedService?.id, tool: 'execute_action', args: { actionId: 'hackernews.get_top_stories', input: { viaExecuteAction: true } } } } }),
+  })
+  const execRaw = jsonBody(bridgedExecCall).result?.content?.[0]?.text ?? ''
+  const execParsed = (() => { try { return JSON.parse(execRaw) } catch { return {} } })()
+  const execBlocks = Array.isArray(execParsed.result) ? JSON.parse(execParsed.result[0]?.text ?? '{}') : {}
+  check('桥接 execute_action 规范调用成功（含 runId 回执）',
+    bridgedExecCall.status === 200 && Boolean(execBlocks.bridgeEcho?.runId ?? execBlocks.runId), execRaw.slice(0, 240))
 
   // ================================================================ /docs 静态发布（文档目录随服务可访问）
   section('/docs 静态发布（接入指南等文档直接可读）')

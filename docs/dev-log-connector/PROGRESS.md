@@ -29,7 +29,7 @@
 
 | # | 里程碑 | 内容 | 关键落点 | 依赖 | 状态 |
 |---|---|---|---|---|---|
-| 1 | M0 | 桥接验证 + 集成指南初稿（sidecar 部署 + POST /api/mcp/import 注册 external 服务 + docs/connector-integration.md） | console L1279-1293、plugin-mcp L350-407 | 无 | partial：集成指南 v0.2+compose 已交付 15:02（cto-doc-agent 按 #1 重构补全：M0 step-by-step/两拓扑 runbook/生产验证清单）；桥接 import/徽章/T-25(stub) 已实现；缺口：真实环境桥接联调（本机无 docker/sidecar 运行时），见 journal |
+| 1 | M0 | 桥接验证 + 集成指南初稿（sidecar 部署 + POST /api/mcp/import 注册 external 服务 + docs/connector-integration.md） | console L1279-1293、plugin-mcp L350-407 | 无 | partial：集成指南 v0.2+compose 已交付 15:02（cto-doc-agent 按 #1 重构补全：M0 step-by-step/两拓扑 runbook/生产验证清单）；桥接 import/徽章/T-25(stub) 已实现；缺口：真实环境桥接联调（本机无 docker/sidecar 运行时），见 journal；2026-08-27 验收轮：lead-agent 克隆上游 tag v1.4.0 完成源码级契约实证（connection_not_allowed/action-policy 四数组/x-oo-connector-alias 头均命中 _upstream-oc 对应文件），生产部署执行仍待运维按 §八 清单勾选回填 |
 | 2 | M1 | OcClient 全契约面 + connector:gateway 单例（env: 间接引用）+ 强制 env fail-closed + 探活定时器 | packages/plugin-connector/src/{client,index}.ts plugin.yaml package.json | 无 | done 2026-08-27 |
 | 3 | M1 | 目录同步：catalog 缓存 + riskLevel 映射（默认 admin 兜底）+ resource 正则校验 + 变更检测钩子 | plugin-connector/src/index.ts catalog 段 | #2 | done 2026-08-27 |
 | 4 | M1 | 连接管理：OAuth 代理/API Key 直达不落盘/脱敏/no_auth/org 前缀/删除级联/connector.connect 审批执行器（两段式 no-secret 设计见 journal 决策②） | plugin-connector/src/index.ts connections 段 | #2 | done 2026-08-27 |
