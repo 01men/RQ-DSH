@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { existsSync, readdirSync, createReadStream } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
-import { createPluginContext, platformVersionInfo } from '../../platform-core/src/index.ts'
+import { createPluginContext, newId, platformVersionInfo } from '../../platform-core/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import { AppRegistryService } from '../../plugin-app/src/index.ts'
 import { seedAll } from './seed.ts'
@@ -142,7 +142,8 @@ export function apply(ctx: Context) {
 
   // -- 鉴权中间件 ---------------------------------------------------------
   http.use((exchange) => {
-    if (!exchange.path.startsWith('/api/') || PUBLIC_PATHS.has(exchange.path) || PUBLIC_PATH_PREFIXES.some((prefix) => exchange.path.startsWith(prefix))) return
+    const ticketDownload = /^\/api\/nas\/[^/]+\/fs\/file$/.test(exchange.path) && Boolean(exchange.query.get('ticket'))
+    if (!exchange.path.startsWith('/api/') || PUBLIC_PATHS.has(exchange.path) || PUBLIC_PATH_PREFIXES.some((prefix) => exchange.path.startsWith(prefix)) || ticketDownload) return
     const header = String(exchange.headers['authorization'] ?? '')
     if (!header.startsWith('Bearer ')) {
       exchange.fail(401, 'UNAUTHORIZED', '缺少 Bearer 令牌，请先登录')
@@ -2115,35 +2116,82 @@ export function apply(ctx: Context) {
     return await ctx.nasRegistry.downloadFile(exchange.params['id']!, path, { id: info.userId ?? info.principalId, name: info.name })
   })
 
+  /** 一次性下载票据（15 秒 TTL）：浏览器 <a> 原生下载无需带 Bearer 头，大文件免内存 blob。 */
+  const downloadTickets = new Map<string, { nasId: string; path: string; userId?: string; principalId: string; userName: string; expiresAt: number }>()
+  guarded('POST', '/api/nas/:id/fs/download-ticket', 'nas.read', (exchange) => {
+    const { path } = body<{ path: string }>(exchange)
+    if (!path) throw new Error('缺少 path')
+    const info = caller(exchange)
+    const ticket = `nastk_${newId('t')}`
+    downloadTickets.set(ticket, {
+      nasId: exchange.params['id']!,
+      path: String(path),
+      ...(info.kind === 'human' && info.userId ? { userId: info.userId } : {}),
+      principalId: info.principalId,
+      userName: info.name,
+      expiresAt: Date.now() + 15_000,
+    })
+    // 清理过期票据
+    for (const [key, value] of downloadTickets) if (value.expiresAt < Date.now()) downloadTickets.delete(key)
+    changeLog(exchange, 'nas.fs.download_ticket', 'nas', exchange.params['id']!, '', `${path}（一次性票据）`)
+    return { ticket, expiresInSec: 15 }
+  })
+
   /**
    * 流式文件下载（浏览器端真正拿到文件）：先调 downloadFile 让网关落盘到 staging，
-   * 再以 attachment 头 + content-disposition 触发浏览器保存。query: path=/share/file,
-   * inline=1 表示预览（inline）而非下载（attachment）。
+   * 再以 attachment 头 + content-disposition 触发浏览器保存。鉴权：Bearer 或一次性票据。
+   * query: path=/share/file, inline=1 表示预览（inline）而非下载（attachment）。
    */
   http.register('GET', '/api/nas/:id/fs/file', async (exchange) => {
+    let info: CallerInfo | undefined
     const header = String(exchange.headers['authorization'] ?? '')
-    if (!header.startsWith('Bearer ')) {
-      exchange.fail(401, 'UNAUTHORIZED', '缺少 Bearer 令牌，请先登录')
-      return
-    }
-    const verified = ctx.authn.verify(header.slice(7))
-    const info: CallerInfo = {
-      kind: verified.principal.type,
-      principalId: verified.principal.id,
-      ...(verified.principal.type === 'human' && verified.principal.refId ? { userId: verified.principal.refId } : {}),
-      name: verified.principal.name,
-      permissions: verified.scopes,
-      actChain: verified.actChain,
-    }
-    if (!info.permissions.includes('*') && !info.permissions.includes('nas.read')) {
-      ctx.platformBus.emit('audit.authz.denied', {
-        actorId: info.userId ?? info.principalId,
-        actorName: info.name,
-        point: 'nas.read',
-        path: exchange.path,
-      })
-      exchange.fail(403, 'FORBIDDEN', '缺少权限点 nas.read')
-      return
+    if (header.startsWith('Bearer ')) {
+      try {
+        const verified = ctx.authn.verify(header.slice(7))
+        info = {
+          kind: verified.principal.type,
+          principalId: verified.principal.id,
+          ...(verified.principal.type === 'human' && verified.principal.refId ? { userId: verified.principal.refId } : {}),
+          name: verified.principal.name,
+          permissions: verified.scopes,
+          actChain: verified.actChain,
+        }
+      } catch { /* 无效令牌走 401 */ }
+      if (!info || (!info.permissions.includes('*') && !info.permissions.includes('nas.read'))) {
+        ctx.platformBus.emit('audit.authz.denied', {
+          actorId: info?.userId ?? info?.principalId ?? '-',
+          actorName: info?.name ?? '-',
+          point: 'nas.read',
+          path: exchange.path,
+        })
+        exchange.fail(403, 'FORBIDDEN', '缺少权限点 nas.read')
+        return
+      }
+    } else {
+      const ticketStr = exchange.query.get('ticket') ?? ''
+      const ticket = downloadTickets.get(ticketStr)
+      if (!ticket || ticket.expiresAt < Date.now()) {
+        downloadTickets.delete(ticketStr)
+        exchange.fail(401, 'TICKET_INVALID', '下载票据缺失/过期（请重新发起下载）')
+        return
+      }
+      downloadTickets.delete(ticketStr) // 一次性消费
+      if (ticket.nasId !== exchange.params['id']!) {
+        exchange.fail(403, 'FORBIDDEN', '下载票据与资产不匹配')
+        return
+      }
+      if ((exchange.query.get('path') ?? '') !== ticket.path) {
+        exchange.fail(403, 'FORBIDDEN', '下载票据与路径不匹配')
+        return
+      }
+      info = {
+        kind: 'human',
+        principalId: ticket.principalId,
+        ...(ticket.userId ? { userId: ticket.userId } : {}),
+        name: ticket.userName,
+        permissions: ['nas.read'],
+        actChain: [],
+      }
     }
     const id = exchange.params['id']!
     const filePath = exchange.query.get('path')
@@ -2154,12 +2202,11 @@ export function apply(ctx: Context) {
     }
     let resolved: { localFile: string; bytes: number }
     try {
-      resolved = await ctx.nasRegistry.resolveDownloadedFile(id, filePath)
-      // 触发一次实际下载（幂等：网关对同一 destDir+同文件覆盖写）
-      await ctx.nasRegistry.downloadFile(id, filePath, { id: info.userId ?? info.principalId, name: info.name })
-      // 重读文件大小（网关可能刚覆盖写）
-      const fresh = await import('node:fs/promises').then((m) => m.stat(resolved.localFile).catch(() => null))
-      if (fresh?.isFile() && fresh.size > 0) resolved = { localFile: resolved.localFile, bytes: fresh.size }
+      // 先经网关 fs_download 落盘到平台 staging（幂等覆盖写），再基于网关回执的 saved_to 解析本地文件
+      const downloaded = await ctx.nasRegistry.downloadFile(id, filePath, { id: info.userId ?? info.principalId, name: info.name })
+      const fresh = await import('node:fs/promises').then((m) => m.stat(downloaded.localFile).catch(() => null))
+      if (!fresh?.isFile()) throw new Error(`下载后仍无法读取落盘文件：${downloaded.localFile}`)
+      resolved = { localFile: downloaded.localFile, bytes: fresh.size }
     } catch (error) {
       exchange.fail(502, 'DOWNLOAD_FAILED', error instanceof Error ? error.message : String(error))
       return
@@ -3172,6 +3219,17 @@ function decorateUser(ctx: Context, user: any) {
     orgName: ctx.iam.orgs().get(user.orgId)?.name ?? '',
     roles: user.roleIds.map((roleId: string) => ctx.iam.roles().get(roleId)).filter(Boolean),
   }
+}
+
+const NAS_DOWNLOAD_MIME: Record<string, string> = {
+  '.txt': 'text/plain; charset=utf-8', '.md': 'text/markdown; charset=utf-8', '.json': 'application/json; charset=utf-8',
+  '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'application/javascript; charset=utf-8',
+  '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+  '.pdf': 'application/pdf', '.zip': 'application/zip', '.tar': 'application/x-tar', '.gz': 'application/gzip', '.7z': 'application/x-7z-compressed',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.wav': 'audio/wav',
+  '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xls': 'application/vnd.ms-excel',
+  '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.doc': 'application/msword',
+  '.csv': 'text/csv; charset=utf-8', '.log': 'text/plain; charset=utf-8',
 }
 
 function summarize(payload: unknown): string {

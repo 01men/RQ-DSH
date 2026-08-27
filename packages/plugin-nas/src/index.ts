@@ -193,54 +193,56 @@ export class NasRegistryService extends Service {
   // -- 文件操作面（全部经网关 tools/call） -----------------------------------
 
   async listShares(id: string, actor?: { id: string; name: string }): Promise<unknown> {
-    return await this.fsCall(id, 'fs_list_shares', {}, { actor })
+    return await this.fsCall(id, 'fs_list_shares', { additional: ['name', 'path', 'isdir'] }, { actor })
   }
 
   async listFiles(id: string, path = '/', actor?: { id: string; name: string }): Promise<unknown> {
-    const { share, subPath } = this.splitPath(id, path)
-    return await this.fsCall(id, 'fs_list', { share, path: subPath }, { actor })
+    const fullPath = this.toFullPath(id, path)
+    return await this.fsCall(id, 'fs_list', { folder_path: fullPath, additional: ['size', 'time', 'type', 'owner', 'perm'] }, { actor })
   }
 
   async getInfo(id: string, path: string, actor?: { id: string; name: string }): Promise<unknown> {
-    const { share, subPath } = this.splitPath(id, path)
-    return await this.fsCall(id, 'fs_get_info', { share, path: subPath }, { actor })
+    const fullPath = this.toFullPath(id, path)
+    return await this.fsCall(id, 'fs_get_info', { path: [fullPath], additional: ['size', 'time', 'type', 'owner', 'perm', 'real_path'] }, { actor })
   }
 
   async search(id: string, pattern: string, path = '/', actor?: { id: string; name: string }): Promise<unknown> {
-    const { share, subPath } = this.splitPath(id, path)
-    return await this.fsCall(id, 'fs_search', { share, path: subPath, pattern }, { actor })
+    const fullPath = this.toFullPath(id, path)
+    return await this.fsCall(id, 'fs_search', { folder_path: fullPath, pattern, recursive: true, limit: 200 }, { actor })
   }
 
   async mkdir(id: string, path: string, actor: { id: string; name: string }): Promise<unknown> {
-    const { share, subPath } = this.splitPath(id, path)
-    const result = await this.fsCall(id, 'fs_create_folder', { share, path: subPath }, { actor })
+    const { parent, name } = this.parentAndName(id, path)
+    const result = await this.fsCall(id, 'fs_create_folder', { folder_path: [parent], name: [name], force_parent: true }, { actor })
     this.fsAudit(actor, 'nas.fs.mkdir', id, path)
     return result
   }
 
   async rename(id: string, path: string, newName: string, actor: { id: string; name: string }): Promise<unknown> {
-    const { share, subPath } = this.splitPath(id, path)
-    const result = await this.fsCall(id, 'fs_rename', { share, path: subPath, new_name: newName }, { actor })
+    const fullPath = this.toFullPath(id, path)
+    const result = await this.fsCall(id, 'fs_rename', { path: [fullPath], name: [newName] }, { actor })
     this.fsAudit(actor, 'nas.fs.rename', id, `${path} → ${newName}`)
     return result
   }
 
   async copyMove(id: string, paths: string[], destination: string, mode: 'copy' | 'move', actor: { id: string; name: string }): Promise<unknown> {
-    const { share, subPath } = this.splitPath(id, destination)
-    const result = await this.fsCall(id, 'fs_copy_move', { share, paths: paths.map((p) => this.splitPath(id, p).subPath), dest: subPath, mode }, { actor })
+    const destFolder = this.toFullPath(id, destination)
+    const srcFull = paths.map((p) => this.toFullPath(id, p))
+    const result = await this.fsCall(id, 'fs_copy_move', { path: srcFull, dest_folder_path: destFolder, overwrite: true, remove_src: mode === 'move' }, { actor, timeoutMs: 120_000 })
     this.fsAudit(actor, `nas.fs.${mode}`, id, `${paths.join(',')} → ${destination}`)
     return result
   }
 
   async delete(id: string, paths: string[], actor: { id: string; name: string }): Promise<unknown> {
-    const result = await this.fsCall(id, 'fs_delete', { share: this.splitPath(id, paths[0] ?? '/').share, paths: paths.map((p) => this.splitPath(id, p).subPath) }, { actor })
+    const fullPaths = paths.map((p) => this.toFullPath(id, p))
+    const result = await this.fsCall(id, 'fs_delete', { path: fullPaths, accurate_progress: false }, { actor, timeoutMs: 120_000 })
     this.fsAudit(actor, 'nas.fs.delete', id, paths.join(','))
     return result
   }
 
   /**
-   * 上传文件到 NAS：buffer/本地文件 → 平台 staging 目录（或资产配置的共享中转目录）
-   * → 网关 fs_upload（fs_upload 在网关进程侧读本地路径，跨机部署需共享 staging 卷）。
+   * 上传文件到 NAS：buffer/本地文件 → 平台 staging 目录 → 网关 fs_upload（网关读本地 staging）。
+   * 超时随字节数放宽（基线 30s + 每 MB 1s，上限 10 分钟）。跨机部署需共享 staging 卷。
    */
   async uploadFile(id: string, input: { buffer?: Buffer; localFile?: string; destPath: string; actor: { id: string; name: string } }): Promise<{ path: string; sizeBytes: number }> {
     const nas = this.requireNas(id)
@@ -257,30 +259,83 @@ export class NasRegistryService extends Service {
     } else {
       throw new Error('uploadFile 需要 buffer 或 localFile 之一')
     }
-    const { share, subPath } = this.splitPath(id, input.destPath)
-    // 真实网关契约（synology-filestation-mcp）：dest_path 为目标目录（DSM 路径，含共享名），
-    // 上传文件名取 basename(local_file)——staging 文件名即目标文件名，故最终路径等于 input.destPath
-    const dirPart = subPath.split('/').filter(Boolean).slice(0, -1).join('/')
-    const destDir = `/${share}${dirPart ? `/${dirPart}` : ''}`
-    await this.fsCall(id, 'fs_upload', { local_file: stagingFile, dest_path: destDir, create_parents: true, overwrite: true }, { actor: input.actor, bytes: sizeBytes })
+    const fullPath = this.toFullPath(id, input.destPath)
+    const destDir = `/${fullPath.split('/').filter(Boolean).slice(0, -1).join('/')}`
+    const timeoutMs = Math.min(600_000, 30_000 + Math.ceil(sizeBytes / (1024 * 1024)) * 1000)
+    await this.fsCall(id, 'fs_upload', { local_file: stagingFile, dest_path: destDir || '/', create_parents: true, overwrite: true }, { actor: input.actor, bytes: sizeBytes, timeoutMs })
     this.fsAudit(input.actor, 'nas.fs.upload', id, `${input.destPath}（${sizeBytes}B，staging=${stagingFile}）`)
     return { path: input.destPath, sizeBytes }
   }
 
-  /** 从 NAS 下载到平台 staging（网关 fs_download 在网关侧落盘，共享卷场景下平台可读）。 */
-  async downloadFile(id: string, path: string, actor: { id: string; name: string }): Promise<{ localFile: string; result: unknown }> {
+  /** 从 NAS 下载到平台 staging（网关 fs_download 在网关侧落盘到 dest_dir）。返回本地绝对路径 + 字节数。 */
+  async downloadFile(id: string, path: string, actor: { id: string; name: string }): Promise<{ localFile: string; bytes: number; savedTo?: string }> {
     const nas = this.requireNas(id)
     const dir = join(this.stagingDir(nas), 'downloads')
     await mkdir(dir, { recursive: true })
-    const { share, subPath } = this.splitPath(id, path)
-    const result = await this.fsCall(id, 'fs_download', { share, path: subPath, dest_dir: dir }, { actor })
-    this.fsAudit(actor, 'nas.fs.download', id, path)
-    return { localFile: join(dir, path.split('/').filter(Boolean).pop() ?? 'file'), result }
+    const fullPath = this.toFullPath(id, path)
+    const result = await this.fsCall(id, 'fs_download', { path: [fullPath], mode: 'download', local_dir: dir }, { actor, timeoutMs: 600_000 })
+    const parsed = extractFirstJson(result)
+    const baseName = fullPath.split('/').filter(Boolean).pop() ?? 'file'
+    const declared = typeof parsed?.saved_to === 'string' ? parsed.saved_to : undefined
+    const candidate = declared ?? join(dir, baseName)
+    let bytes = Number(parsed?.bytes ?? 0)
+    try {
+      const stat = await import('node:fs/promises').then((m) => m.stat(candidate))
+      if (stat.isFile() && stat.size > 0) bytes = stat.size
+      this.fsAudit(actor, 'nas.fs.download', id, `${path} → ${candidate}（${bytes}B）`)
+      return { localFile: candidate, bytes, ...(declared ? { savedTo: declared } : {}) }
+    } catch {
+      this.fsAudit(actor, 'nas.fs.download', id, `${path} → ${candidate}（文件未落盘）`)
+      return { localFile: candidate, bytes }
+    }
   }
 
   async taskStatus(id: string, taskId: string, actor?: { id: string; name: string }): Promise<unknown> {
-    const { share } = this.splitPath(id, '/')
-    return await this.fsCall(id, 'fs_task_status', { share, taskid: taskId }, { actor })
+    return await this.fsCall(id, 'fs_task_status', { taskid: taskId }, { actor })
+  }
+
+  /**
+   * 批量上传（保留目录结构）：files = [{ relativePath, contentBase64 | localPath }]
+   * 顺序调用 fs_upload（NAS 端 create_parents 即可建链），返回每项的最终路径/字节数。
+   */
+  async uploadMany(id: string, items: Array<{ relativePath: string; contentBase64?: string; localPath?: string }>, destDir: string, actor: { id: string; name: string }): Promise<{ uploaded: Array<{ path: string; sizeBytes: number }>; failed: Array<{ relativePath: string; error: string }> }> {
+    const uploaded: Array<{ path: string; sizeBytes: number }> = []
+    const failed: Array<{ relativePath: string; error: string }> = []
+    for (const item of items) {
+      const destPath = `/${destDir}/${item.relativePath}`.replace(/\\/g, '/').replace(/\/+/g, '/')
+      try {
+        if (item.contentBase64 !== undefined) {
+          const buf = Buffer.from(item.contentBase64, 'base64')
+          const result = await this.uploadFile(id, { buffer: buf, destPath, actor })
+          uploaded.push(result)
+        } else if (item.localPath) {
+          const result = await this.uploadFile(id, { localFile: item.localPath, destPath, actor })
+          uploaded.push(result)
+        } else {
+          failed.push({ relativePath: item.relativePath, error: '缺少 contentBase64/localPath' })
+        }
+      } catch (error) {
+        failed.push({ relativePath: item.relativePath, error: error instanceof Error ? error.message : String(error) })
+      }
+    }
+    return { uploaded, failed }
+  }
+
+  /** 解析网关 fs_download 落盘的本地文件绝对路径（不重新调用网关），给 HTTP 层 streamReadFile 使用。 */
+  async resolveDownloadedFile(id: string, path: string): Promise<{ localFile: string; bytes: number }> {
+    const nas = this.requireNas(id)
+    const dir = join(this.stagingDir(nas), 'downloads')
+    const fullPath = this.toFullPath(id, path)
+    const baseName = fullPath.split('/').filter(Boolean).pop() ?? 'file'
+    const candidate = join(dir, baseName)
+    let bytes = 0
+    try {
+      const stat = await import('node:fs/promises').then((m) => m.stat(candidate))
+      bytes = stat.size
+    } catch {
+      throw new Error(`网关落盘文件不存在：${candidate}（请先调用 downloadFile 让网关写入）`)
+    }
+    return { localFile: candidate, bytes }
   }
 
   // -- Skill 包存储配置 -----------------------------------------------------
@@ -340,9 +395,9 @@ export class NasRegistryService extends Service {
     return client
   }
 
-  private async fsCall(id: string, tool: string, args: Record<string, unknown>, meter?: { actor?: { id: string; name: string }; bytes?: number }): Promise<unknown> {
+  private async fsCall(id: string, tool: string, args: Record<string, unknown>, meter?: { actor?: { id: string; name: string }; bytes?: number; timeoutMs?: number }): Promise<unknown> {
     const nas = this.requireOnline(id)
-    const raw = await this.clientFor(nas).call(tool, args)
+    const raw = await this.clientFor(nas).call(tool, args, meter?.timeoutMs ? { timeoutMs: meter.timeoutMs } : undefined)
     this.meterFsUsage(nas, meter)
     return typeof raw === 'string' ? parseMaybeJson(raw) : raw
   }
@@ -366,20 +421,31 @@ export class NasRegistryService extends Service {
     }
   }
 
-  /** 平台路径 → 网关契约的 { share, path }（"/share/a/b" → share="share" path="/a/b"），并收敛到授权根路径内。 */
-  private splitPath(id: string, path: string): { share: string; subPath: string } {
+  /** 平台路径 → 真实网关契约的"绝对路径"（dsm 完整路径，如 /video/folder），并收敛到授权根路径内。
+   *  真实 synology-filestation 网关以 `/volume1/<share>/<sub>` 形态传递，本平台取"平台路径"
+   *  直接作为 DSM 路径（rootPath 默认 "/" 与网关 share 列表根等价）。 */
+  private toFullPath(id: string, path: string): string {
     const nas = this.requireNas(id)
-    const normalized = normalize(`/${path}`).replace(/\\/g, '/')
-    const root = normalize(String(nas.attrs['rootPath'] ?? '/')).replace(/\\/g, '/')
-    if (root !== '/' && !normalized.startsWith(root === '/' ? '/' : root.endsWith('/') ? root : `${root}/`) && normalized !== root) {
+    const normalized = normalize(`/${path}`).replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+    const root = normalize(String(nas.attrs['rootPath'] ?? '/')).replace(/\\/g, '/').replace(/\/+$/, '') || '/'
+    const compareRoot = root === '/' ? '/' : root
+    if (compareRoot !== '/' && !normalized.startsWith(compareRoot === '/' ? '/' : compareRoot.endsWith('/') ? compareRoot : `${compareRoot}/`) && normalized !== compareRoot) {
       throw new Error(`路径 ${normalized} 超出授权根路径 ${root}`)
     }
     const segments = normalized.split('/').filter(Boolean)
-    if (segments.length === 0) throw new Error('路径必须形如 /<共享名>/…')
-    if (segments.includes('..')) throw new Error('路径不允许包含 ..')
-    const share = segments[0]!
-    const subPath = `/${segments.slice(1).join('/')}`
-    return { share, subPath: subPath === '/' ? '/' : subPath }
+    if (segments.some((s) => s === '..')) throw new Error('路径不允许包含 ..')
+    if (segments.length === 0) return root
+    return root === '/' ? `/${segments.join('/')}` : normalized
+  }
+
+  /** 解析创建目录所需的「父目录绝对路径 + 文件名」并保证在 rootPath 内。 */
+  private parentAndName(id: string, path: string): { parent: string; name: string } {
+    const full = this.toFullPath(id, path)
+    const segments = full.split('/').filter(Boolean)
+    if (segments.length < 1) throw new Error('新建目录必须形如 /<share>/name')
+    const name = segments.pop()!
+    const parent = `/${segments.join('/')}`
+    return { parent, name }
   }
 
   private stagingDir(nas: ResourceEntity): string {
@@ -420,6 +486,16 @@ function parseMaybeJson(text: string): unknown {
   } catch {
     return text
   }
+}
+
+/** 兼容网关返回：单字符串块 / 数组块 / 嵌套 JSON；从数组/对象中提取首个 JSON 文本。 */
+function extractFirstJson(result: unknown): Record<string, unknown> | undefined {
+  if (!result) return undefined
+  if (typeof result === 'object' && !Array.isArray(result)) return result as Record<string, unknown>
+  const text = Array.isArray(result) ? (result as Array<Record<string, unknown>>).map((b) => typeof b?.text === 'string' ? b.text : '').join('') : typeof result === 'string' ? result : ''
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{')) return undefined
+  try { return JSON.parse(trimmed) } catch { return undefined }
 }
 
 // ---------------------------------------------------------------------------

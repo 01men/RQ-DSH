@@ -133,14 +133,44 @@ const nasGwStub = createServer(async (req, res) => {
     const args = message.params?.arguments ?? {}
     nasGwCalls.push({ name, args })
     const text = (value) => reply({ content: [{ type: 'text', text: JSON.stringify(value) }] })
-    if (name === 'fs_list_shares') return text({ shares: ['homes', 'skillhub'] })
-    if (name === 'fs_list') return text({ files: [{ name: 'readme.txt', isdir: false }, { name: 'reports', isdir: true }] })
-    if (name === 'fs_get_info') return text({ path: args.path, size: 128, isdir: false })
-    if (name === 'fs_search') return text({ files: [{ path: `/found/${args.pattern}` }] })
-    if (name === 'fs_create_folder') return text({ created: args.path })
-    if (name === 'fs_rename') return text({ renamed: true, new_name: args.new_name })
-    if (name === 'fs_delete') return text({ deleted: args.paths })
-    if (name === 'fs_download') return text({ downloaded: args.path, dest_dir: args.dest_dir })
+    // 对齐真实 synology-filestation 网关契约（folder_path/path 为字符串/数组；create_folder 用 folder_path+name 一一对应数组；download 用 path 数组 + local_dir）
+    if (name === 'fs_list_shares') return text({ shares: [{ name: 'homes', path: '/homes', isdir: true }, { name: 'skillhub', path: '/skillhub', isdir: true }] })
+    if (name === 'fs_list') return text({ files: [{ name: 'readme.txt', isdir: false, size: 128 }, { name: 'reports', isdir: true }], total: 2, offset: 0 })
+    if (name === 'fs_get_info') {
+      const reqPaths = Array.isArray(args.path) ? args.path : [args.path].filter(Boolean)
+      return text({ files: reqPaths.map((p) => ({ path: p, name: String(p).split('/').pop(), size: 128, isdir: false })) })
+    }
+    if (name === 'fs_search') return text({ files: [{ path: `/found/${args.pattern}` }], taskid: 'tsk_1' })
+    if (name === 'fs_create_folder') {
+      const folders = Array.isArray(args.folder_path) ? args.folder_path : [args.folder_path].filter(Boolean)
+      const names = Array.isArray(args.name) ? args.name : [args.name].filter(Boolean)
+      return text({ folders: folders.map((folder, i) => ({ path: `${folder}/${names[i] ?? 'new'}`, name: names[i] })) })
+    }
+    if (name === 'fs_rename') {
+      const reqPaths = Array.isArray(args.path) ? args.path : [args.path].filter(Boolean)
+      const names = Array.isArray(args.name) ? args.name : [args.name].filter(Boolean)
+      return text({ files: reqPaths.map((p, i) => ({ path: `${String(p).split('/').slice(0, -1).join('/')}/${names[i] ?? 'renamed'}`, name: names[i] })) })
+    }
+    if (name === 'fs_copy_move') return text({ success: true, paths: args.path, dest_folder_path: args.dest_folder_path, moved: !!args.remove_src })
+    if (name === 'fs_delete') {
+      const reqPaths = Array.isArray(args.path) ? args.path : [args.path].filter(Boolean)
+      return text({ success: true, deleted: reqPaths })
+    }
+    if (name === 'fs_download') {
+      const reqPaths = Array.isArray(args.path) ? args.path : [args.path].filter(Boolean)
+      const destDir = String(args.local_dir ?? '/tmp')
+      const fsPromises = await import('node:fs/promises')
+      await fsPromises.mkdir(destDir, { recursive: true })
+      const payload = Buffer.from('selftest-download-bytes', 'utf8')
+      const written = []
+      for (const p of reqPaths) {
+        const filename = String(p).split('/').filter(Boolean).pop() ?? 'file.bin'
+        const target = `${destDir}/${filename}`
+        await fsPromises.writeFile(target, payload)
+        written.push({ saved_to: target, bytes: payload.length })
+      }
+      return text(written[0] ?? { saved_to: destDir, bytes: 0 })
+    }
     if (name === 'fs_task_status') return text({ taskid: args.taskid, finished: true })
     if (name === 'fs_upload') {
       // 对齐真实 synology-filestation-mcp 契约：dest_path（目标目录，必填 string）+ local_file（必填 string），
@@ -2163,16 +2193,68 @@ try {
   const nasFiles = await api('GET', `/api/nas/${nasId}/fs?path=/skillhub`, { token: admin })
   check('列目录（fs_list）', nasFiles.ok && JSON.stringify(nasFiles.data).includes('readme.txt'))
   const nasMkdir = await api('POST', `/api/nas/${nasId}/fs/mkdir`, { token: admin, body: { path: '/skillhub/selftest' } })
-  check('创建目录（fs_create_folder）', nasMkdir.ok && nasGwCalls.some((c) => c.name === 'fs_create_folder' && c.args.share === 'skillhub'))
+  check('创建目录（fs_create_folder：folder_path+name 数组一一对应）',
+    nasMkdir.ok && nasGwCalls.some((c) => c.name === 'fs_create_folder' && Array.isArray(c.args.folder_path) && c.args.folder_path[0] === '/skillhub' && Array.isArray(c.args.name) && c.args.name[0] === 'selftest'))
   const nasUpload = await api('POST', `/api/nas/${nasId}/fs/upload`, {
     token: admin,
     body: { contentBase64: Buffer.from('PK\x03\x04selftest-file', 'latin1').toString('base64'), destPath: '/skillhub/selftest/a.zip' },
   })
   check('上传文件（平台 staging → 网关 fs_upload 侧读盘）', nasUpload.ok && nasGwUploads.some((u) => u.destPath === '/skillhub/selftest' && u.filename === 'a.zip' && u.magic === 'PK'))
   const nasSearch = await api('POST', `/api/nas/${nasId}/fs/search`, { token: admin, body: { pattern: 'report', path: '/skillhub' } })
-  check('检索文件（fs_search）', nasSearch.ok && JSON.stringify(nasSearch.data).includes('report'))
+  check('检索文件（fs_search：folder_path 字符串）', nasSearch.ok && JSON.stringify(nasSearch.data).includes('report'))
   const nasDelete = await api('POST', `/api/nas/${nasId}/fs/delete`, { token: admin, body: { paths: ['/skillhub/selftest/a.zip'] } })
-  check('删除文件（fs_delete）', nasDelete.ok && nasGwCalls.some((c) => c.name === 'fs_delete'))
+  check('删除文件（fs_delete：path 数组）', nasDelete.ok && nasGwCalls.some((c) => c.name === 'fs_delete' && Array.isArray(c.args.path) && c.args.path[0] === '/skillhub/selftest/a.zip'))
+
+  // 真实网关契约：fs_list 用 folder_path 字符串
+  const nasFilesCheck = nasGwCalls.find((c) => c.name === 'fs_list' && c.args.folder_path === '/skillhub')
+  check('列目录（fs_list：folder_path 字符串）', !!nasFilesCheck)
+
+  // 重命名（fs_rename：path + name 数组一一对应）
+  const nasRename = await api('POST', `/api/nas/${nasId}/fs/rename`, { token: admin, body: { path: '/skillhub/selftest/a.zip', newName: 'b.zip' } })
+  check('重命名（fs_rename：path+name 数组一一对应）',
+    nasRename.ok && nasGwCalls.some((c) => c.name === 'fs_rename' && Array.isArray(c.args.path) && c.args.path[0] === '/skillhub/selftest/a.zip' && Array.isArray(c.args.name) && c.args.name[0] === 'b.zip'))
+
+  // 批量上传 upload-many（保留目录结构 + base64 集合 → 多次 fs_upload）
+  const manyItems = [
+    { relativePath: 'docs/readme.md', contentBase64: Buffer.from('# 批量上传 README', 'utf8').toString('base64') },
+    { relativePath: 'src/index.js', contentBase64: Buffer.from("console.log('selftest')", 'utf8').toString('base64') },
+    { relativePath: 'src/utils.js', contentBase64: Buffer.from('export const ok = true', 'utf8').toString('base64') },
+  ]
+  const beforeMany = nasGwUploads.length
+  const nasUploadMany = await api('POST', `/api/nas/${nasId}/fs/upload-many`, { token: admin, body: { files: manyItems, destDir: '/skillhub/batch' } })
+  check('批量上传（保留目录结构：docs/、src/ 等）',
+    nasUploadMany.ok && nasUploadMany.data.uploaded.length === 3 && nasUploadMany.data.failed.length === 0
+      && nasGwUploads.slice(beforeMany).map((u) => u.filename).join(',') === 'readme.md,index.js,utils.js'
+      && nasGwUploads.slice(beforeMany).map((u) => u.destPath).join(',') === '/skillhub/batch/docs,/skillhub/batch/src,/skillhub/batch/src')
+
+  // 流式下载（GET /api/nas/:id/fs/file）：先 POST /fs/download 触发网关落盘，再 GET 拿到 bytes
+  const nasDownloadTrigger = await api('POST', `/api/nas/${nasId}/fs/download`, { token: admin, body: { path: '/skillhub/selftest/a.zip' } })
+  check('触发下载落盘（POST /fs/download → 网关 fs_download 真实落盘）',
+    nasDownloadTrigger.ok && typeof nasDownloadTrigger.data.localFile === 'string' && nasDownloadTrigger.data.bytes > 0)
+  const fileResp = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}`, {
+    headers: { authorization: `Bearer ${admin}` },
+  })
+  const fileBytes = fileResp.ok ? Buffer.from(await fileResp.arrayBuffer()) : Buffer.alloc(0)
+  check('浏览器真实下载（GET /fs/file 200 + bytes 一致 + content-disposition attachment）',
+    fileResp.ok && fileBytes.toString('utf8') === 'selftest-download-bytes' && /attachment;\s*filename\*=UTF-8''a\.zip/.test(fileResp.headers.get('content-disposition') ?? ''))
+  const inlineResp = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&inline=1`, {
+    headers: { authorization: `Bearer ${admin}` },
+  })
+  check('inline=1 预览模式（content-disposition: inline）',
+    inlineResp.ok && /inline;\s*filename\*=UTF-8''a\.zip/.test(inlineResp.headers.get('content-disposition') ?? ''))
+  const noAuthDownload = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}`)
+  check('stream 下载无 token 且无票据 401', noAuthDownload.status === 401)
+  // 一次性下载票据：签发 → 免 Bearer 原生 GET → 二次消费被拒
+  const ticketResp = await api('POST', `/api/nas/${nasId}/fs/download-ticket`, { token: admin, body: { path: '/skillhub/selftest/a.zip' } })
+  check('签发一次性下载票据', ticketResp.ok && String(ticketResp.data.ticket).startsWith('nastk_'))
+  const ticketFile = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=${encodeURIComponent(ticketResp.data.ticket)}`)
+  const ticketBytes = ticketFile.ok ? Buffer.from(await ticketFile.arrayBuffer()) : Buffer.alloc(0)
+  check('票据直取文件（无 Bearer，字节一致）', ticketFile.ok && ticketBytes.toString('utf8') === 'selftest-download-bytes',
+    JSON.stringify({ status: ticketFile.status, type: ticketFile.headers.get('content-type'), len: ticketBytes.length }))
+  const ticketReplay = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=${encodeURIComponent(ticketResp.data.ticket)}`)
+  check('票据一次性（重放 401）', ticketReplay.status === 401)
+  const badTicket = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=nastk_bogus`)
+  check('未知票据 401', badTicket.status === 401)
   const nasAudit = await api('GET', `/api/audit/logs?resourceId=${nasId}&limit=20`, { token: admin })
   check('写类文件操作审计留痕', (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.mkdir') && (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.upload'))
 
@@ -2185,6 +2267,8 @@ try {
   const memberLogin = await api('POST', '/api/auth/login', { body: { username: 'yqz', password: 'Ybk@2026' } })
   const member = memberLogin.data?.token
   const memberNas = await api('GET', '/api/nas', { token: member })
+  const noReadPerm = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}`, { headers: { authorization: `Bearer ${member}` } })
+  check('stream 下载无 nas.read 403', noReadPerm.status === 403)
   check('无 nas.read 角色访问被拒（403）', memberNas.status === 403)
   const devNasRead = await api('GET', '/api/nas', { token: dev })
   check('developer 只读放行（nas.read）', devNasRead.ok)

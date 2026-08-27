@@ -8,6 +8,92 @@ import {
 
 const TEMPLATE_LABEL = { readonly: '只读运维', operator: '运维（读+变更）', full: '全部权限' }
 
+/** 复制到剪贴板（clipboard API 不可用时降级为全选提示）。 */
+function copyText(text) {
+  return navigator.clipboard?.writeText(text)
+    .then(() => toast('已复制到剪贴板'))
+    .catch(() => toast('复制失败，请手动选择复制', 'error'))
+}
+
+/** Agent 本体一键接入口令：复制给 Agent 的中文一句话任务模板（含必填占位）。 */
+const AGENT_NL_INSTRUCTION = `【任务】按《榕器平台 · Agent 接入规范》把下面这个 Agent 接入平台 http://192.168.0.7:7300。
+
+Agent 名称：<全局唯一名称>
+描述：<一句话说明>
+模型：<deepseek-chat | deepseek-reasoner | deepseek-coder>
+风险等级：<low | medium | high>
+平台账号：<资源管理员用户名>；口令：<口令>
+
+【执行要求】
+1. 严格按规范执行：登录 → 注册 → 用该 Agent 自己的机器凭证完成"发一句话"验证（GET /api/agents 能在列表找到自己）。
+2. 名称已存在时按规范复用既有 Agent，不得换名重复注册。
+3. clientSecret 只在注册时出现一次，立即安全保存，不得打印到公开输出。
+4. 不做上线/下线等审批操作；若明确要求"可被应用编排"或"正式上线"，先补齐治理属性，再走平台 L4 审批单。
+5. 完成后回报：Agent id（agt_ 前缀）、clientId、"发一句话"调用的状态码与关键证据、以及控制台查看路径。`
+
+/** Agent 本体一键接入口令：复制可直接粘贴终端的 dshctl 命令串。 */
+const AGENT_CLI_COMMAND = `# 1. 设置平台地址与管理员凭证
+export DSHCTL_URL=http://192.168.0.7:7300
+export DSHCTL_USER=<资源管理员用户名>
+export DSHCTL_PASS=<口令>
+
+# 2. 注册 Agent（成功后平台一次性下发 clientId/clientSecret，立即安全保存）
+dshctl agent create \\
+  --name=<全局唯一名称> \\
+  --model=<deepseek-chat|deepseek-reasoner|deepseek-coder> \\
+  --riskLevel=<low|medium|high> \\
+  --description="<一句话说明>" \\
+  --yes
+
+# 3. 用返回的 clientId/clientSecret 换牌
+dshctl auth client-credentials \\
+  --clientId=<mc-...> \\
+  --clientSecret=<cs-...>
+
+# 4. 接入验证（"发一句话"）
+export DSHCTL_TOKEN=<步骤3拿到的token>
+dshctl agent list   # 列表中能找到自己的 agt_ 前缀 id 即接入完成`
+
+/** AI 应用一键接入口令：复制给 Agent 的中文一句话任务模板。 */
+const APP_NL_INSTRUCTION = `【任务】按《榕器平台 · AI 应用接入规范》把下面这个应用接入平台 http://192.168.0.7:7300。
+
+应用名称：<全局唯一名称>
+应用说明：<一句话说明>
+应用类型：<web | h5 | miniapp | desktop | api>
+访问地址：<https://…（可后补）>
+一次性接入码：<向平台管理员索取 enr_ 开头的码，需 operator 模板权限>
+
+【执行要求】
+1. 严格按规范执行：connect_setup（用一次性接入码）→ SSO 登录打通（owner 在控制台签发 OIDC 客户端）→ 指标提报 → 计量对齐。
+2. 接入码一次消费、默认 15 分钟过期：随用随取，禁止保存复用、禁止写入代码或提示词；已使用/过期直接 connect_test。
+3. 403 = 接入码模板权限不足（响应体指明缺哪个权限点），向管理员报告，不要换账号或重试硬闯。
+4. SSO 客户端必须由 owner 在「AI应用→应用详情→SSO配置」签发，机器身份自签一律 403；未完成 SSO 签发无法上线。
+5. 完成后回报：connect_setup 状态、SSO clientId、控制台查看路径（http://192.168.0.7:7300/ →「AI 应用」页）。`
+
+/** AI 应用一键接入口令：复制可直接粘贴终端的 dshctl 命令串。 */
+const APP_CLI_COMMAND = `# 0. 向平台管理员索取一次性接入码（enr_ 开头，operator 模板）
+export DSHCTL_URL=http://192.168.0.7:7300
+export ENROLLMENT_CODE=<enr_...>
+
+# 1. 远程接入（拿到运维机器凭证）
+dshctl connect setup --hubUrl=$DSHCTL_URL --enrollmentCode=$ENROLLMENT_CODE
+dshctl connect test     # 自检：健康检查 + 换牌 + 一次只读调用
+
+# 2. SSO 登录打通（owner 在「AI应用→应用详情→SSO配置」签发后填入）
+export DSHCTL_OIDC_CLIENT_ID=<控制台签发的 client_id>
+export DSHCTL_OIDC_CLIENT_SECRET=<控制台签发的 client_secret>
+# 浏览器打开应用，按 app-sso-integration.md 完成授权码 + PKCE S256 流程
+
+# 3. 每日 09:00 提报前一日指标（不带 --date 会记到当天）
+dshctl app report <appId> \\
+  --date=$(date -d 'yesterday' +%Y-%m-%d) \\
+  --dau=<n> --sessions=<n> --retention7=<n> --avg-depth=<n>
+
+# 4. 仅绕过平台网关的直连消耗才需推送（经平台网关的已自动计量）
+dshctl usage record --org=<组织ID> --subject=user:<用户ID> --principal=org:<组织ID> \\
+  --resource=mcp:<slug> --meter=tokens:<数量>:tokens \\
+  --idempotency-key=<本应用名>:<业务单号>`
+
 export async function renderConnect(content, params) {
   const [codes, clients, principals, oidcClients] = await Promise.all([
     api.get('/api/connect/codes'),
@@ -39,6 +125,103 @@ export async function renderConnect(content, params) {
       </div>
     </div>
 
+    <div class="flex mb-20" style="gap:14px;flex-wrap:wrap;align-items:stretch">
+      <div class="card" style="flex:1;min-width:340px">
+        <div class="card-head"><span class="card-title">${icon('bot', 15)} Agent 本体接入（三步）</span></div>
+        <div class="card-body fs-13" style="line-height:1.9">
+          <div><b>1. 环境</b>：<code class="mono">export DSHCTL_URL=http://192.168.0.7:7300</code>（管理员账号走 <code class="mono">DSHCTL_USER</code>/<code class="mono">DSHCTL_PASS</code>）。</div>
+          <div><b>2. 注册</b>：<code class="mono">dshctl agent create --name=… --model=… --riskLevel=… --yes</code>，平台一次性下发机器凭证 <code class="mono">mc-…</code> / <code class="mono">cs_…</code>。</div>
+          <div><b>3. 验证</b>（"发一句话"）：<code class="mono">dshctl auth client-credentials</code> 换牌 → <code class="mono">dshctl agent list</code> 列表中找到自己的 <code class="mono">agt_…</code> id。</div>
+          <div class="fs-12 text-4 mt-8">需 agent.write 权限；clientSecret 仅注册响应可见，丢失只能轮换或重新注册。完整规范见折叠区。</div>
+          <div class="flex mt-12" style="gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:10px">
+            <button class="btn btn-default btn-sm" data-copy="agent-nl">${icon('copy', 12)} 复制中文指令</button>
+            <button class="btn btn-primary btn-sm" data-copy="agent-cli">${icon('terminal', 12)} 复制命令串</button>
+          </div>
+          <details class="mt-8">
+            <summary class="fs-12 text-3" style="cursor:pointer;padding:4px 0">${icon('chevronDown', 12)} 查看完整规范（agent-app-onboarding.md · Agent 章节）</summary>
+            <pre class="mono fs-12" style="white-space:pre-wrap;background:var(--bg-2);padding:10px;border-radius:6px;margin-top:6px;max-height:360px;overflow:auto">二、Agent 本体接入
+  步骤 A1：注册（颁发机器凭证）
+    POST /api/agents    Authorization: Bearer &lt;token&gt;
+    { name, attrs: { description, model, riskLevel, avatar } }
+    • description 必填；model 枚举 deepseek-chat|deepseek-reasoner|deepseek-coder
+    • riskLevel 枚举 low|medium|high；avatar 一个 emoji
+    • name 全局唯一；重名按幂等策略复用
+    成功响应：data.agent.id (agt_…) + data.credential.{clientId (mc-…), clientSecret (cs_…)}
+    clientSecret 仅此响应可见，平台侧不可再查询
+  步骤 A2：Agent "发一句话"（接入验证）
+    POST /api/auth/client-credentials  { clientId, clientSecret }
+    取 data.token → GET /api/agents  Authorization: Bearer &lt;agent-token&gt;
+    验收：200 且列表能找到自己的 id（在册确认；平台审计留痕）
+
+四、上线与审批（完整态，可选）
+  1. 补齐治理属性（PATCH /api/agents/:id）
+     Agent 上线必填：systemPromptVersion（如 prompt-v1.0）、dataClass
+     进试运行（submit_trial）还需 trialGroups 非空
+  2. 发起流转 POST /api/agents/:id/transition  { action: "online" }
+     online/offline 为审批动作，返回审批单
+  3. 审批执行 GET /api/approvals → POST /api/approvals/:id/decide
+     有 approval.decide 权限者单人通过即执行
+  护栏：禁止绕过审批直接改状态
+
+五、幂等与重试
+  • 重名即复用（GET /api/agents 按 name 找既有资源，不要换名重复注册）
+  • client-credentials 可重复换牌
+  • 失败锁定：登录/换牌连续失败锁来源 IP（15 分钟窗口 5 次起）
+
+七、验收清单
+  [ ] Agent 注册返回 agt_ 前缀 id 与 mc-/cs- 凭证
+  [ ] 机器凭证换牌成功，GET /api/agents 能在列表找到自己（一句话完成）</pre>
+          </details>
+        </div>
+      </div>
+
+      <div class="card" style="flex:1;min-width:340px">
+        <div class="card-head"><span class="card-title">${icon('sparkles', 15)} AI 应用接入（三步）</span></div>
+        <div class="card-body fs-13" style="line-height:1.9">
+          <div><b>1. 远程接入</b>：向平台管理员索取一次性接入码 <code class="mono">enr_…</code>（operator 模板，含 app.write / usage.write），执行 <code class="mono">dshctl connect setup</code> 拿到运维机器凭证。</div>
+          <div><b>2. SSO 登录打通</b>：owner 在「AI 应用 → 应用详情 → SSO 配置」签发 OIDC 客户端；浏览器按 app-sso-integration.md 完成授权码 + PKCE S256。</div>
+          <div><b>3. 指标与计量</b>：每日 09:00 <code class="mono">dshctl app report</code> 提报前日指标；仅绕过平台网关的直连消耗才 <code class="mono">dshctl usage record</code>。</div>
+          <div class="fs-12 text-4 mt-8">机器身份自签 SSO 一律 403；web/h5 应用未完成 SSO 签发无法上线。完整规范见折叠区。</div>
+          <div class="flex mt-12" style="gap:8px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:10px">
+            <button class="btn btn-default btn-sm" data-copy="app-nl">${icon('copy', 12)} 复制中文指令</button>
+            <button class="btn btn-primary btn-sm" data-copy="app-cli">${icon('terminal', 12)} 复制命令串</button>
+          </div>
+          <details class="mt-8">
+            <summary class="fs-12 text-3" style="cursor:pointer;padding:4px 0">${icon('chevronDown', 12)} 查看完整规范（agent-app-onboarding.md · AI 应用章节）</summary>
+            <pre class="mono fs-12" style="white-space:pre-wrap;background:var(--bg-2);padding:10px;border-radius:6px;margin-top:6px;max-height:360px;overflow:auto">三、AI 应用接入
+  步骤 B1：注册
+    POST /api/apps    Authorization: Bearer &lt;token&gt;
+    { name, attrs: { description, appType, icon, url, riskLevel, dataClass, agentIds } }
+    • description 必填；appType 枚举 web|h5|miniapp|desktop|api
+    • riskLevel 枚举 low|medium|high
+    • url、dataClass (public/internal/confidential)、agentIds 为上线前必填，注册时可暂缺
+    • agentIds 编排的 Agent 必须已上线（online），否则 400
+    成功响应：data.app.id (app_…) + data.credential.{clientId, clientSecret}
+  步骤 B2：应用 "发一句话"（接入验证）
+    POST /api/apps/&lt;appId&gt;/metrics-report
+    { dau, sessions, avgDepth, retention7 }
+    验收：200 + GET /api/apps/&lt;appId&gt; 中 data.metrics.sessions ≥ 1
+
+四、上线与审批（完整态，可选）
+  1. 补齐治理属性（PATCH /api/apps/:id）
+     应用上线必填：url、dataClass、agentIds（至少一个已上线 Agent）
+  2. 发起流转 POST /api/apps/:id/transition  { action: "online" }
+  3. 审批执行 GET /api/approvals → POST /api/approvals/:id/decide
+  4. 应用（web/h5）上线还有 SSO 门禁：owner 签发 SSO 客户端
+     POST /api/apps/:id/sso-client，否则上线被拒
+
+五、幂等与重试
+  • 重名即复用（GET /api/apps 按 name 找既有资源）
+  • 指标上报语义：同日 DAU 取最大值、会话数累加；重复上报安全
+
+七、验收清单
+  [ ] 应用注册返回 app_ 前缀 id（编排时确认所依赖 Agent 已 online）
+  [ ] metrics-report 上报 200，GET /api/apps/:id 显示会话数 ≥ 1（一句话完成）</pre>
+          </details>
+        </div>
+      </div>
+    </div>
+
     <div class="tabs">
       ${hasOverview ? '<div class="tab" data-tab="overview">外部接入总览</div>' : ''}
       <div class="tab ${hasOverview ? '' : 'active'}" data-tab="codes">接入码 (${codes.codes.length})</div>
@@ -47,6 +230,23 @@ export async function renderConnect(content, params) {
     <div id="connect-body"></div>`
 
   $('#connect-code-create').onclick = openCreateCode
+
+  /** 接入卡的一键复制按钮：把指定接入口令文本写入剪贴板。 */
+  const COPY_PAYLOAD = {
+    'agent-nl': AGENT_NL_INSTRUCTION,
+    'agent-cli': AGENT_CLI_COMMAND,
+    'app-nl': APP_NL_INSTRUCTION,
+    'app-cli': APP_CLI_COMMAND,
+  }
+  $$('[data-copy]').forEach((btn) => {
+    btn.onclick = () => {
+      const key = btn.dataset.copy
+      const text = COPY_PAYLOAD[key]
+      if (!text) return
+      const ok = copyText(text)
+      if (ok && typeof ok.then === 'function') ok.catch(() => {})
+    }
+  })
 
   const body = $('#connect-body')
   $$('.tab').forEach((el) => {

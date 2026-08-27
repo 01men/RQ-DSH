@@ -134,3 +134,64 @@ skill   submit … [--package=<skill.zip>]             （随提交上传包内�
 - NAS 权限组治理（按主体收敛 fs 写操作）复用 MCP 权限组模型，后续按需映射；
 - `/mcp` 端点暂不提供 GET SSE 长连接（纯 JSON 响应，主流客户端兼容），后续按需补全；
 - fs_upload 的网关侧路径约束见 §2.3——跨机部署需共享 staging 卷（已在配置项与文档中显式化）。
+
+---
+
+## 六、真实网关契约对齐 + 文件浏览/上传/下载全链（v1.2 增补 · 2026-08-27）
+
+> 结论：宿主平台层对 NAS 存储目录的**真实连接访问**已实现并上线自测通过——逐级点击浏览、
+> 多文件/文件夹结构上传、浏览器端原生文件下载全部打通。
+
+### 6.1 真实网关契约（关键修正）
+
+此前 fs_* 映射按想象中的 `{share, path}` 形态传参，与真实 synology-filestation-mcp
+（tools/list 实测）不一致，是"列目录报 folder_path undefined"的根因。现已全面对齐：
+
+| 平台操作 | 真实网关工具与参数形态 |
+|---|---|
+| listShares | `fs_list_shares {}` |
+| listFiles(path) | `fs_list { folder_path }`（完整 DSM 路径字符串） |
+| getInfo(path) | `fs_get_info { path: [..] }` |
+| search | `fs_search { folder_path, pattern, recursive, limit }` |
+| mkdir | `fs_create_folder { folder_path: [父目录], name: [新名], force_parent }` |
+| rename | `fs_rename { path: [原路径], name: [新名] }` |
+| copyMove / delete | `{ path: [...] , dest_folder_path / remove_src }`、`fs_delete { path: [...] }` |
+| uploadFile | `fs_upload { local_file, dest_path=目标目录 }`，超时随字节数放宽 |
+| downloadFile | `fs_download { path: [...], local_dir, mode: 'download' }` → 回执 `{saved_to, bytes}` |
+
+`splitPath` 已替换为 `toFullPath`（rootPath 越权收敛保留）+ `parentAndName`。
+
+### 6.2 新增端点
+
+- `GET /api/nas/:id/fs/file?path=&inline=`：流式文件直出（content-disposition attachment/inline）。
+  鉴权支持两种形态：Bearer 头；或 `POST /api/nas/:id/fs/download-ticket` 签发的 **15 秒一次性票据**
+  （`?ticket=`，一次性消费、绑定 nasId+path）——浏览器 `<a>` 原生下载无需自定义头。
+- `POST /api/nas/:id/fs/upload-many`：批量上传（relativePath 保留目录结构，>50 个文件走该端点）。
+
+### 6.3 前端（nas.js）
+
+- 面包屑逐级点击浏览 + 行内 下载/重命名/删除；
+- 上传弹窗支持多选文件与 webkitdirectory 整文件夹（相对路径结构保留），带待上传清单与进度；
+- 大小/修改时间列兼容网关 `additional.{size,time.mtime}` 结构。
+
+### 6.4 部署排障记录（重要教训）
+
+部署后曾出现「服务监听正常但所有路由 404」：console 插件 inject 声明了 `connectorHub`，
+而部署树缺少提供方 `@dsh-ops/plugin-connector` ——cordis 对缺失依赖的 fiber 是**静默保持 INACTIVE**
+（无日志、await 正常返回）。修复：部署 plugin-connector 包 + boot-all 挂载。教训：
+① 新增 inject 服务必须确认对应插件已在部署树；② 排障利器是逐步 ctx.plugin 探针脚本。
+
+### 6.5 自测结果（2026-08-27 · http://192.168.0.7:7300）
+
+- 本地 selftest：543/543 通过（含 ticket 签发/消费/重放拒绝/未知票据 401）；lint:manifests 70/70；
+- 真机 Playwright 全链：登录 → NAS 板块加载 → 详情抽屉 → 共享层/test/dsh-e2e 逐级点击（截图齐全）→
+  UI 双文件上传 → 文件夹结构上传（sub-dir 自动建链）→ 原生下载 e2e-payload-v2.zip
+  （content-disposition UTF-8 文件名，47B 字节比对一致）→ 测试数据自动清理；
+- API 冒烟：shares/list/mkdir/upload/verify/download 字节比对全通；RBAC 403 与无票据 401 保持。
+
+### 6.6 已知边界
+
+- 网关侧 fs_download 对不存在路径会把 DSM 错误页落成同名文件（上游行为）；平台在 downloadFile
+  后以 stat 兜底，但内容校验需依赖 fs_get_info 预检（后续可加 size 比对二次防呆）；
+- 浏览器上传仍走 base64 JSON（单文件建议 <100MB）；更大文件后续换 multipart 直传；
+- 跨机部署时 staging 共享卷约束不变（见 §2.3）。

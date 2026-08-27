@@ -5,7 +5,8 @@ endpoints:
   - GET/POST /api/nas · GET/PATCH /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）
   - POST /api/nas/:id/transition|health|sync-tools
   - GET /api/nas/:id/fs[?path=] · GET /api/nas/:id/fs/info
-  - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download（经网关 fs_* 工具）
+  - GET /api/nas/:id/fs/file?path=&inline=（流式文件下载：浏览器拿到 bytes + content-disposition attachment|inline）
+  - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download|upload-many（经网关 fs_* 工具）
   - GET/PUT /api/skill-storage（Skill 包存储后端：local | 已纳管 NAS 资产）
 tools:
   - nas_list

@@ -499,7 +499,7 @@ function mountFsBrowser(host, nas, ctx) {
         {
           title: '操作', width: 190, render: (entry) => `
             <span class="flex" style="gap:4px">
-              ${!entry.isDir ? `<button class="btn btn-ghost btn-sm stop" data-download title="下载到平台中转目录">${icon('download', 12)}</button>` : ''}
+              ${!entry.isDir ? `<button class="btn btn-ghost btn-sm stop" data-download title="下载到本机">${icon('download', 12)}</button>` : ''}
               ${canWrite ? `<button class="btn btn-ghost btn-sm stop" data-rename title="重命名">${icon('edit', 12)}</button>` : ''}
               ${canWrite ? `<button class="btn btn-ghost btn-sm stop" data-delete title="删除" style="color:var(--danger)">${icon('trash', 12)}</button>` : ''}
             </span>`,
@@ -510,21 +510,27 @@ function mountFsBrowser(host, nas, ctx) {
       onRowClick: (name, entry) => { if (entry?.isDir) { currentPath = joinPath(currentPath, entry.name); void load() } },
       empty: currentPath ? '空目录' : '未查询到共享文件夹',
     }))
-    tableHost.querySelectorAll('tr').forEach((tr, i) => {
+    tableHost.querySelectorAll('tbody tr').forEach((tr, i) => {
       const entry = entries[i]
       if (!entry) return
       const path = joinPath(currentPath, entry.name)
       const downloadBtn = tr.querySelector('[data-download]')
       if (downloadBtn) downloadBtn.onclick = async (e) => {
         e.stopPropagation()
+        // 一次性票据 + <a> 原生下载：免 Bearer 头，服务端流式直出，大文件不吃内存
+        downloadBtn.classList.add('btn-loading')
         try {
-          const result = await api.post(`/api/nas/${nas.id}/fs/download`, { path })
-          openModal({
-            title: '下载完成',
-            body: `<div class="muted-box" style="display:flex;gap:8px">${icon('check', 15)}<span>文件已下载到平台中转目录（经网关落盘）：</span></div><div class="code-block mt-8">${esc(result.localFile ?? JSON.stringify(result))}</div>`,
-            foot: '<button class="btn btn-primary" data-ok>知道了</button>',
-          })
+          const { ticket } = await api.post(`/api/nas/${nas.id}/fs/download-ticket`, { path })
+          const a = document.createElement('a')
+          a.href = `/api/nas/${nas.id}/fs/file?path=${encodeURIComponent(path)}&ticket=${encodeURIComponent(ticket)}`
+          a.download = entry.name
+          a.style.display = 'none'
+          document.body.appendChild(a)
+          a.click()
+          a.remove()
+          toast(`已开始下载 ${entry.name}`)
         } catch (error) { toast(error.message, 'error') }
+        finally { downloadBtn.classList.remove('btn-loading') }
       }
       const renameBtn = tr.querySelector('[data-rename]')
       if (renameBtn) renameBtn.onclick = (e) => {
@@ -590,27 +596,115 @@ function mountFsBrowser(host, nas, ctx) {
 
   const openUpload = () => {
     const modal = openModal({
-      title: `上传文件 · ${currentPath}`,
+      title: `上传文件 · ${currentPath}`, wide: true,
       body: `
-        ${field('选择本地文件', '<input class="input" type="file" name="file">', { required: true })}
-        <div class="form-hint">文件在浏览器内转 base64 上传至平台中转目录，再经网关 fs_upload 写入 NAS 当前目录。</div>`,
-      foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>上传</button>',
+        <div class="form-grid">
+          <div>
+            <div class="form-label">本地文件（可多选）</div>
+            <input class="input" type="file" name="files" multiple>
+            <div class="form-hint">多个文件将依次上传到当前目录。</div>
+          </div>
+          <div>
+            <div class="form-label">或选择文件夹（保留目录结构）</div>
+            <input class="input" type="file" name="dirs" webkitdirectory directory multiple>
+            <div class="form-hint">支持文件夹内嵌套子目录。仅 Chromium 内核生效。</div>
+          </div>
+        </div>
+        <div id="upload-list" style="margin-top:14px"></div>`,
+      foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>开始上传</button>',
     })
     modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+    const fileInput = modal.body.querySelector('input[name=files]')
+    const dirInput = modal.body.querySelector('input[name=dirs]')
+    const listHost = modal.body.querySelector('#upload-list')
+
+    const collectItems = () => {
+      const items = []
+      const files = fileInput.files ?? []
+      for (const f of files) items.push({ relativePath: f.name, file: f })
+      const dirs = dirInput.files ?? []
+      for (const f of dirs) {
+        const relRaw = String(f.webkitRelativePath ?? f.name)
+        const rel = relRaw.includes('/') ? relRaw.split('/').slice(1).join('/') : f.name
+        items.push({ relativePath: rel, file: f })
+      }
+      return items
+    }
+
+    const renderPreview = () => {
+      const items = collectItems()
+      const totalBytes = items.reduce((s, it) => s + it.file.size, 0)
+      listHost.innerHTML = items.length === 0
+        ? '<div class="muted-box">暂未选择文件</div>'
+        : `<div class="fs-12 text-3 mb-8">待上传 <b>${items.length}</b> 项 · 共 ${fmtBytes(totalBytes)}（点击「开始上传」执行）</div>
+           <div style="max-height:200px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+             ${items.map((it, i) => `<div class="flex" style="padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px">
+               <span class="text-4" style="min-width:32px">${i + 1}.</span>
+               <span class="grow mono" style="word-break:break-all">${esc(it.relativePath)}</span>
+               <span class="text-4">${fmtBytes(it.file.size)}</span>
+             </div>`).join('')}
+           </div>`
+    }
+    fileInput.onchange = renderPreview
+    dirInput.onchange = renderPreview
+    renderPreview()
+
     modal.el.querySelector('[data-ok]').onclick = async (e) => {
       const btn = e.currentTarget
-      const file = modal.body.querySelector('input[type=file]').files?.[0]
-      if (!file) return toast('请选择文件', 'error')
+      const items = collectItems()
+      if (items.length === 0) return toast('请选择文件或文件夹', 'error')
       btn.classList.add('btn-loading')
+      btn.disabled = true
+
+      const destDir = `/${[currentPath, ''].join('/').split('/').filter(Boolean).join('/')}`.replace(/\/+$/, '') || '/'
+      let done = 0
+      let failed = 0
+      listHost.insertAdjacentHTML('beforeend', `<div class="fs-12 mt-8">进度：<b id="upd">0</b> / ${items.length}（失败 <b id="upf" style="color:var(--danger)">0</b>）</div>`)
+      const upd = listHost.querySelector('#upd')
+      const upf = listHost.querySelector('#upf')
+
+      const useBatch = items.length > 50
       try {
-        const contentBase64 = await readFileBase64(file)
-        const result = await api.post(`/api/nas/${nas.id}/fs/upload`, { contentBase64, destPath: joinPath(currentPath, file.name) })
-        toast(`已上传 ${file.name}（${fmtBytes(result.sizeBytes)}）`)
-        modal.close(); void load()
+        if (useBatch) {
+          const files = await Promise.all(items.map(async (it) => ({
+            relativePath: it.relativePath,
+            contentBase64: await readFileBase64(it.file),
+          })))
+          const result = await api.post(`/api/nas/${nas.id}/fs/upload-many`, { files, destDir })
+          done = result.uploaded.length
+          failed = result.failed.length
+          upd.textContent = String(done)
+          upf.textContent = String(failed)
+          if (result.failed.length > 0) console.warn('upload-many failures', result.failed)
+        } else {
+          for (const item of items) {
+            try {
+              const contentBase64 = await readFileBase64(item.file)
+              const destPath = joinPath(currentPath, item.relativePath)
+              await api.post(`/api/nas/${nas.id}/fs/upload`, { contentBase64, destPath })
+              done++
+            } catch (error) {
+              failed++
+              console.warn(`upload ${item.relativePath} failed`, error)
+            }
+            upd.textContent = String(done + failed)
+            upf.textContent = String(failed)
+          }
+        }
+        if (failed === 0) {
+          toast(`已上传 ${done} 项到 ${destDir}`)
+          modal.close(); void load()
+        } else if (done > 0) {
+          toast(`部分成功：${done} 成功 / ${failed} 失败`, 'error')
+          void load()
+        } else {
+          toast(`上传失败：${failed} 项`, 'error')
+        }
       } catch (error) {
         toast(error.message, 'error')
       } finally {
         btn.classList.remove('btn-loading')
+        btn.disabled = false
       }
     }
   }
@@ -663,15 +757,17 @@ function normalizeEntries(raw, allDirs) {
   }
   return arr.map((item) => {
     if (typeof item === 'string') return { name: item, isDir: true }
+    const additional = item?.additional ?? {}
     const name = String(item?.name ?? item?.filename ?? item?.path ?? '')
     let isDir = item?.is_dir ?? item?.isDir ?? item?.isdir
     if (isDir === undefined && item?.type !== undefined) isDir = ['dir', 'directory', 'folder'].includes(String(item.type).toLowerCase())
+    if (isDir === undefined && additional?.type !== undefined) isDir = ['dir', 'directory', 'folder'].includes(String(additional.type).toLowerCase())
     if (isDir === undefined) isDir = item?.size === undefined && !name.includes('.')
     return {
       name,
       isDir: allDirs ? true : Boolean(isDir),
-      size: item?.size ?? item?.sizeBytes,
-      mtime: item?.mtime ?? item?.modified ?? item?.lastModified ?? item?.time,
+      size: item?.size ?? item?.sizeBytes ?? (additional?.size >= 0 ? additional.size : undefined),
+      mtime: item?.mtime ?? item?.modified ?? item?.lastModified ?? item?.time ?? additional?.time?.mtime,
     }
   }).filter((entry) => entry.name).sort((a, b) => (b.isDir - a.isDir) || a.name.localeCompare(b.name))
 }
