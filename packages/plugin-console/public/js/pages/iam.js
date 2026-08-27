@@ -152,6 +152,7 @@ export async function renderIam(content, params, ctx) {
             ${icon(isAll ? 'users' : 'building', 14)}
             <span class="ellipsis">${esc(node.name)}</span>
             <span class="tree-count">${countOf(node, isAll)}</span>
+            ${node.id && !isAll ? `<span class="tree-actions" title="组织维护：新建子组织 / 重命名 / 调整上级 / 删除">${icon('more', 13)}</span>` : ''}
           </div>
           <div class="tree-children ${hasChildren(node) ? 'open' : ''}"></div>
         </div>`)
@@ -164,6 +165,8 @@ export async function renderIam(content, params, ctx) {
         row.classList.add('active')
         void refreshMembers()
       }
+      const actions = el.querySelector('.tree-actions')
+      if (actions) actions.onclick = (e) => { e.stopPropagation(); openOrgMenu(e, node) }
       el.querySelector('.tree-caret').onclick = (e) => {
         e.stopPropagation()
         childrenEl.classList.toggle('open')
@@ -239,6 +242,17 @@ export async function renderIam(content, params, ctx) {
         }
       })
       anchor.click()
+      // 菜单挂在 body 下且默认 absolute（top:100%）会落到文档末尾视口外：
+      // 打开后改写为 fixed 定位到触发点旁，并按实际尺寸做屏幕边界收敛
+      const menuEl = document.body.querySelector(':scope > .dropdown-menu')
+      if (menuEl) {
+        const width = menuEl.offsetWidth || 200
+        const height = menuEl.offsetHeight || 150
+        menuEl.style.position = 'fixed'
+        menuEl.style.right = 'auto'
+        menuEl.style.left = `${Math.max(8, Math.min(e.clientX, window.innerWidth - width - 8))}px`
+        menuEl.style.top = `${Math.max(8, Math.min(e.clientY, window.innerHeight - height - 8))}px`
+      }
     }
 
     async function refreshMembers() {

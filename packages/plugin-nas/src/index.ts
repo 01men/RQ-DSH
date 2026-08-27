@@ -258,7 +258,11 @@ export class NasRegistryService extends Service {
       throw new Error('uploadFile 需要 buffer 或 localFile 之一')
     }
     const { share, subPath } = this.splitPath(id, input.destPath)
-    await this.fsCall(id, 'fs_upload', { share, path: subPath, local_file: stagingFile, overwrite: true }, { actor: input.actor, bytes: sizeBytes })
+    // 真实网关契约（synology-filestation-mcp）：dest_path 为目标目录（DSM 路径，含共享名），
+    // 上传文件名取 basename(local_file)——staging 文件名即目标文件名，故最终路径等于 input.destPath
+    const dirPart = subPath.split('/').filter(Boolean).slice(0, -1).join('/')
+    const destDir = `/${share}${dirPart ? `/${dirPart}` : ''}`
+    await this.fsCall(id, 'fs_upload', { local_file: stagingFile, dest_path: destDir, create_parents: true, overwrite: true }, { actor: input.actor, bytes: sizeBytes })
     this.fsAudit(input.actor, 'nas.fs.upload', id, `${input.destPath}（${sizeBytes}B，staging=${stagingFile}）`)
     return { path: input.destPath, sizeBytes }
   }

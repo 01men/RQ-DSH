@@ -225,12 +225,23 @@ async function openSkillDetail(id, ctx, refresh) {
 
   const downloadBtn = drawer.el.querySelector('#sk-download')
   if (downloadBtn) downloadBtn.onclick = async () => {
-    const result = await api.post(`/api/skills/${skill.id}/download`, {})
-    openModal({
-      title: `SKILL.md · v${skill.currentVersion}`,
-      body: `<div class="code-block" style="max-height:400px">${esc(result.content)}</div><div class="form-hint mt-8">下载已登记（审计可回溯谁下载了哪个版本）</div>`,
-      foot: '<button class="btn btn-primary" data-ok>关闭</button>',
-    })
+    try {
+      // 先登记下载（审计可回溯谁下载了哪个版本），再拉 zip 触发浏览器保存
+      await api.post(`/api/skills/${skill.id}/download`, {})
+      const resp = await fetch(`/api/skills/${skill.id}/package?version=${encodeURIComponent(skill.currentVersion)}`, {
+        headers: { authorization: `Bearer ${session.token}` },
+      })
+      if (!resp.ok) throw new Error(`skill.zip 下载失败（${resp.status}）`)
+      const url = URL.createObjectURL(await resp.blob())
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `${skill.slug}-${skill.currentVersion}.zip`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast('已下载 skill.zip（下载已登记）')
+    } catch (error) { toast(error.message, 'error') }
   }
   const installBtn = drawer.el.querySelector('#sk-install')
   if (installBtn) installBtn.onclick = () => {
@@ -265,8 +276,10 @@ async function openSkillDetail(id, ctx, refresh) {
     modal.el.querySelector('[data-reject]').onclick = async () => {
       const opinion = collectForm(modal.body).opinion
       if (!opinion) return toast('请填写意见', 'error')
-      await api.post(`/api/skills/${skill.id}/approve`, { decision: 'reject', level: needLevel, opinion })
-      toast('已驳回'); modal.close(); drawer.close(); refresh?.()
+      try {
+        await api.post(`/api/skills/${skill.id}/approve`, { decision: 'reject', level: needLevel, opinion })
+        toast('已驳回'); modal.close(); drawer.close(); refresh?.()
+      } catch (error) { toast(error.message, 'error') }
     }
     modal.el.querySelector('[data-ok]').onclick = async () => {
       const opinion = collectForm(modal.body).opinion
@@ -279,8 +292,10 @@ async function openSkillDetail(id, ctx, refresh) {
   }
   const publishBtn = drawer.el.querySelector('#sk-publish')
   if (publishBtn) publishBtn.onclick = async () => {
-    await api.post(`/api/skills/${skill.id}/publish`, {})
-    toast('已上架市场'); drawer.close(); refresh?.()
+    try {
+      await api.post(`/api/skills/${skill.id}/publish`, {})
+      toast('已上架市场'); drawer.close(); refresh?.()
+    } catch (error) { toast(error.message, 'error') }
   }
   const deprecateBtn = drawer.el.querySelector('#sk-deprecate')
   if (deprecateBtn) deprecateBtn.onclick = async () => {
@@ -289,13 +304,15 @@ async function openSkillDetail(id, ctx, refresh) {
       message: '弃用后市场不可安装；存量引用的 Agent 会收到迁移告警。旧版本保留可回滚。',
     })
     if (!result) return
-    const response = await api.post(`/api/skills/${skill.id}/deprecate`, { reason: result.reason })
-    if (response.referencingAgents?.length) {
-      toast(`已弃用；${response.referencingAgents.length} 个 Agent 收到迁移告警`)
-    } else {
-      toast('已弃用')
-    }
-    drawer.close(); refresh?.()
+    try {
+      const response = await api.post(`/api/skills/${skill.id}/deprecate`, { reason: result.reason })
+      if (response.referencingAgents?.length) {
+        toast(`已弃用；${response.referencingAgents.length} 个 Agent 收到迁移告警`)
+      } else {
+        toast('已弃用')
+      }
+      drawer.close(); refresh?.()
+    } catch (error) { toast(error.message, 'error') }
   }
 
   const deleteBtn = drawer.el.querySelector('#sk-delete')

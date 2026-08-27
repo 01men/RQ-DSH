@@ -91,13 +91,13 @@ export class DingTalkAuthAdapter implements IdentityProviderAdapter {
 
   async buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string): Promise<string | null> {
     if (scene === 'in_app') return null
+    // 不带 prompt=consent：已授权过的用户（浏览器持有钉钉会话）可静默通过，缩短回跳链路
     const params = new URLSearchParams({
       client_id: 'demo-app-key',
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'openid corpid',
       state,
-      prompt: 'consent',
     })
     return `https://login.dingtalk.com/oauth2/auth?${params}`
   }
@@ -159,13 +159,14 @@ export class RealDingTalkAuthAdapter implements IdentityProviderAdapter {
 
   async buildAuthorizeUrl(scene: LoginScene, state: string, redirectUri: string): Promise<string | null> {
     if (scene === 'in_app') return null
+    // 不带 prompt=consent：已授权过的用户（浏览器持有钉钉会话）可静默通过，缩短回跳链路；
+    // 组织归属由用户在钉钉「选择你加入的组织」页一次性选定，平台侧不再要求预选主体
     const params = new URLSearchParams({
       client_id: this.credentials.appKey,
       redirect_uri: redirectUri,
       response_type: 'code',
       scope: 'openid corpid',
       state,
-      prompt: 'consent',
     })
     return `https://login.dingtalk.com/oauth2/auth?${params}`
   }
@@ -212,7 +213,10 @@ export class RealDingTalkAuthAdapter implements IdentityProviderAdapter {
     if (!response.ok) {
       throw new ProviderAuthError(`钉钉用户档案获取失败（HTTP ${response.status}）`, 'PROFILE_NOT_FOUND')
     }
-    return { ...payload, corpId: this.credentials.corpId }
+    // 优先采用用户在钉钉组织选择页实际选中的企业（userAccessToken 响应回传的 corpId），
+    // 使「选定哪个组织就以哪个组织的身份命中身份链接」；无回传时按连接器归属兜底
+    const rawCorpId = (tokenSet.raw as { corpId?: string }).corpId
+    return { ...payload, corpId: rawCorpId || this.credentials.corpId }
   }
 
   normalizeProfile(raw: unknown): NormalizedProfile {

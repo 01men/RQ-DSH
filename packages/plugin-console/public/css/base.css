@@ -591,6 +591,13 @@ textarea.form-control { height: auto; min-height: 88px; padding: 9px 12px; resiz
 .tree-caret.open { transform: rotate(90deg); }
 .tree-caret svg { width: 12px; height: 12px; }
 .tree-row .tree-count { font-size: 11px; color: var(--text-4); margin-left: 4px; }
+/* 行内组织维护入口：悬停显形，点击弹出「新建子组织 / 重命名 / 调整上级 / 删除」菜单（右键等效） */
+.tree-row .tree-actions {
+  width: 18px; height: 18px; margin-left: auto; display: none; place-items: center;
+  color: var(--text-3); border-radius: 5px; flex-shrink: 0;
+}
+.tree-row:hover .tree-actions { display: grid; }
+.tree-row .tree-actions:hover { background: var(--surface-2); color: var(--text-1); }
 .tree-children { margin-left: 14px; border-left: 1px solid var(--border); padding-left: 4px; display: none; }
 .tree-children.open { display: block; }
 

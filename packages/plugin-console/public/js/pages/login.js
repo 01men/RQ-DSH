@@ -54,9 +54,9 @@ export function renderLogin(app) {
         <form class="login-form" id="login-form-dingtalk" style="display:none">
           <div id="ding-step-authorize">
             <div id="ding-oauth-list">
-              <button class="btn btn-primary btn-lg btn-block" id="ding-oauth-go" type="button">前往钉钉扫码授权</button>
+              <button class="btn btn-primary btn-lg btn-block" id="ding-oauth-go" type="button">使用钉钉扫码 / 点击头像登录</button>
             </div>
-            <div class="form-hint" style="margin:8px 0 4px">整页跳转钉钉授权：本机已登录钉钉自动识别身份，未登录则出二维码扫码。授权成功自动回跳登录。</div>
+            <div class="form-hint" style="margin:8px 0 4px">整页跳转钉钉授权：已登录钉钉点击头像即可完成，未登录则出二维码扫码；组织归属只需在钉钉「选择你加入的组织」页选定一次。授权过的浏览器会自动回跳。</div>
             <details style="margin-top:12px">
               <summary class="form-hint" style="cursor:pointer">手动输入授权码（演示/mock 备用）</summary>
               <div style="text-align:center;padding:10px 0 6px">
@@ -101,12 +101,17 @@ export function renderLogin(app) {
 
   const tabPassword = $('#login-form-password')
   const tabDing = $('#login-form-dingtalk')
-  // 发起整页跳转授权：多主体接入时按所选主体（configId）发起
+  // 上次使用的接入主体（多主体部署时保持入口视觉一致；身份归属最终以钉钉组织选择为准）
+  const LAST_SSO_CONFIG_KEY = 'heng_ops_last_sso_config'
+  let preferredConfigId = ''
+  try { preferredConfigId = localStorage.getItem(LAST_SSO_CONFIG_KEY) ?? '' } catch { /* 忽略 */ }
+  // 发起整页跳转授权：单一主入口，不再要求在平台侧预选企业主体
   const startDingOauth = async (btn, configId) => {
     btn.classList.add('btn-loading')
     try {
       const auth = await api.post('/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr', ...(configId ? { configId } : {}) })
       if (!auth.authorizeUrl) throw new Error('身份源未返回授权地址（可能为 mock 模式），请改用手动输入授权码')
+      try { localStorage.setItem(LAST_SSO_CONFIG_KEY, configId ?? '') } catch { /* 忽略 */ }
       // 必须整页跳转：弹窗/iframe 会被第三方 Cookie 策略拦截导致授权失败
       window.location.href = auth.authorizeUrl
     } catch (error) {
@@ -114,14 +119,20 @@ export function renderLogin(app) {
       btn.classList.remove('btn-loading')
     }
   }
-  // 多主体接入时每个主体一个授权按钮；仅一条或无主体名称时保持默认单按钮外观
-  const renderDingtalkButtons = (providers) => {
-    if (providers.length < 2) return
+  // 登录入口渲染：一个主按钮直达钉钉授权页；其余已接入主体降级为次要链接，不作为必选步骤
+  const renderDingtalkEntry = (providers) => {
+    if (!providers.some((item) => (item.configId ?? '') === preferredConfigId)) {
+      preferredConfigId = providers[0]?.configId ?? ''
+    }
+    const others = providers.filter((item) => (item.configId ?? '') !== preferredConfigId)
     const holder = $('#ding-oauth-list')
-    holder.innerHTML = providers.map((item, index) => `
-      <button class="btn btn-primary btn-lg btn-block" style="${index ? 'margin-top:8px' : ''}" data-config-id="${esc(item.configId ?? '')}" type="button">钉钉登录（${esc(item.name || item.corpId || '未命名主体')}）</button>`).join('')
-    holder.querySelectorAll('[data-config-id]').forEach((btn) => {
-      btn.onclick = () => void startDingOauth(btn, btn.dataset.configId || undefined)
+    holder.innerHTML = `
+      <button class="btn btn-primary btn-lg btn-block" id="ding-oauth-go" type="button">使用钉钉扫码 / 点击头像登录</button>
+      ${others.length ? `<div class="form-hint" style="margin-top:8px;text-align:center">其他已接入主体：${others.map((item, index) => `
+        <a class="fs-12" style="color:var(--brand-500);cursor:pointer;margin-left:${index ? 8 : 0}px" data-config-id="${esc(item.configId ?? '')}">${esc(item.name || item.corpId || '未命名主体')}</a>`).join('')}</div>` : ''}`
+    $('#ding-oauth-go').onclick = (e) => void startDingOauth(e.currentTarget, preferredConfigId || undefined)
+    holder.querySelectorAll('[data-config-id]').forEach((el) => {
+      el.onclick = () => void startDingOauth($('#ding-oauth-go'), el.dataset.configId || undefined)
     })
   }
   // 三方登录入口按平台配置显隐：未启用任何登录连接器时仅展示账号密码
@@ -132,7 +143,7 @@ export function renderLogin(app) {
       $('#login-sub').textContent = '使用平台账号登录'
       return
     }
-    renderDingtalkButtons(dingtalkProviders)
+    renderDingtalkEntry(dingtalkProviders)
   }).catch(() => { /* 查询失败时保持默认展示 */ })
   app.querySelectorAll('#login-tabs .segmented-item').forEach((el) => {
     el.onclick = () => {
