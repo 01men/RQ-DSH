@@ -27,7 +27,9 @@ curl -s ${origin}/api/agents -H "Authorization: Bearer <token>"
 【第 3 步 · 提报更新（自主更新资料）】
 curl -s -X PATCH ${origin}/api/agents/${agent.id} \\
   -H "Authorization: Bearer <token>" -H 'content-type: application/json' \\
-  -d '{"attrs":{"description":"<最新描述>","version":"<版本号>"}}'
+  -d '{"attrs":{"description":"<最新描述，可注明版本号>","tags":["<版本号，如 v1.0.0>"]}}'
+→ attrs 为白名单制：白名单外字段（含 version，放 attrs 或请求顶层都一样）静默丢弃——返回 200 但不落库。
+  版本登记：通用版本写 tags / description；提示词版本用 systemPromptVersion（上线必填）。PATCH 后 GET 复核生效。
 
 【第 4 步 · 计量自推（可选）】
 仅绕过平台网关直连外部资源时需要：POST ${origin}/api/usage/record（凭自身凭证即可，凭证默认含 usage.write）。
@@ -67,7 +69,9 @@ curl -s -X POST ${origin}/api/apps/${app.id}/metrics-report \\
 【第 3 步 · 提报更新（自主更新资料）】
 curl -s -X PATCH ${origin}/api/apps/${app.id} \\
   -H "Authorization: Bearer <token>" -H 'content-type: application/json' \\
-  -d '{"attrs":{"url":"<最新访问地址>","description":"<最新说明>"}}'
+  -d '{"attrs":{"url":"<最新访问地址>","description":"<最新说明>","publishVersion":"<版本号，如 v1.0.0>"}}'
+→ attrs 为白名单制（应用没有 tags 字段）：白名单外字段（含 version）静默丢弃——返回 200 但不落库。
+  版本登记用 publishVersion；PATCH 后 GET 复核生效。
 
 【第 4 步 · 计量自推（可选）】
 仅绕过平台网关直连消耗才需要：POST ${origin}/api/usage/record（凭证默认含 usage.write）。

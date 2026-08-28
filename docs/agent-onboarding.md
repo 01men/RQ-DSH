@@ -20,6 +20,9 @@
    丢失或疑似泄露立即告诉我，由我执行凭证轮换（dshctl credential rotate，clientId 不变、旧 secret 立即失效、
    存量令牌全部吊销），不要重新注册。
    若返回 400「已存在」：用 dshctl agent list 按名称找到既有 Agent 复用，不要换名重复注册。
+   attrs 是白名单制：白名单外字段（含 version，放 attrs 或请求顶层都一样）静默丢弃——返回 200 但不落库，
+   不要以 200 判定字段生效。平台无通用 version 字段；提示词版本用 systemPromptVersion（上线必填），
+   通用版本写进 description 和 tags（dshctl 不支持，需直接 POST /api/agents 或注册后 PATCH）。
    记下该 Agent 的 orgId（dshctl agent get <agt_...> 可查），第 4 步要用。
 
 2. 登录打通（机器身份，不走 OIDC/SSO）：
