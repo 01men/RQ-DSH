@@ -65,7 +65,9 @@ export class AppRegistryService extends Service {
         name: `app:${(app as any).slug}`,
         refType: 'app',
         refId: app.id,
-        scopes: ['mcp.invoke', 'agent.read', 'skill.read'],
+        // app.read/app.write：注册后凭自身凭证即可完成接入验证（读自身）与指标提报/资料更新
+        //   （metrics-report、PATCH /api/apps/:id 均要求 app.write）；usage.write：直连消耗自推计量
+        scopes: ['mcp.invoke', 'agent.read', 'skill.read', 'app.read', 'app.write', 'usage.write'],
       })
     }
     this.ctx.platformBus.emit(PlatformEvents.AppRegistered, { id: app.id, name: app.name, actor: input.ownerId, type: 'app', slug: app.slug })
@@ -395,4 +397,29 @@ export function apply(ctx: Context) {
   ctx.effect(() => ctx.audit.registerExecutor('app.offline', async (payload) => {
     return registry.offline(String(payload['appId']), 'approval-center', String(payload['reason'] ?? '审批通过下架'))
   }))
+  migrateAppCredentialScopes(ctx)
+}
+
+/** 一次性迁移：为存量应用机器凭证补 app.read/app.write/usage.write（接入验证与指标提报/资料更新能力对齐）。 */
+function migrateAppCredentialScopes(ctx: Context): void {
+  const markers = ctx.opsStorage.collection<{ id: string; doneAt: string }>('app:migrations')
+  const MARK = 'app-scopes-self-serve-v1'
+  if (markers.get(MARK)) return
+  const ADDITIONS = ['app.read', 'app.write', 'usage.write']
+  let patched = 0
+  for (const principal of ctx.authn.principals().find(
+    (item) => item.type === 'machine' && item.refType === 'app' && item.status === 'active' && ADDITIONS.some((scope) => !item.scopes.includes(scope)),
+  )) {
+    const merged = [...principal.scopes, ...ADDITIONS.filter((scope) => !principal.scopes.includes(scope))]
+    ctx.authn.principals().update(principal.id, { scopes: merged })
+    ctx.audit.record({
+      type: 'change', actorType: 'system', actorId: 'app-migration', actorName: '凭证范围迁移',
+      action: 'app.credential.scopes-backfill', resourceType: 'app',
+      resourceId: principal.refId ?? '', resourceName: principal.name, result: 'ok',
+      detail: `补入 ${ADDITIONS.filter((scope) => !principal.scopes.includes(scope)).join('/')}（应用自主接入与提报更新能力对齐）`,
+    })
+    patched++
+  }
+  markers.insert({ id: MARK, doneAt: new Date().toISOString() })
+  if (patched > 0) ctx.logger('app').info(`存量应用凭证迁移完成：${patched} 条补入 ${ADDITIONS.join('/')}`)
 }

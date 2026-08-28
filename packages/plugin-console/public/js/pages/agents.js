@@ -6,6 +6,7 @@ import {
   renderTable, statusBadge, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, timeAgo, emptyState, sparkline, lineChart,
 } from '../ui.js'
+import { buildAgentOnboardingText, openOnboardingModal } from '../onboarding.js'
 
 export async function renderAgents(content, params, ctx) {
   const data = await api.get('/api/agents')
@@ -407,17 +408,18 @@ function openAgentCreate(schema, ctx) {
       const result = await api.post('/api/agents', { name: data.name, slug: data.slug || undefined, attrs })
       modal.close()
       if (result.credential) {
-        openModal({
-          title: '注册成功 · 机器凭证（仅此一次展示）',
-          body: `
-            <div class="desc-grid mb-8">
-              <div class="desc-item"><span class="k">Agent ID</span><span class="v mono">${esc(result.agent.id)}</span></div>
-              <div class="desc-item"><span class="k">标识</span><span class="v mono">${esc(result.agent.slug)}</span></div>
-            </div>
-            <div class="code-block">client_id:     ${esc(result.credential.clientId)}
-client_secret: ${esc(result.credential.clientSecret)}</div>
-            <div class="form-hint mt-8">请妥善保管；当前状态「开发中」，补全治理属性后可提交试运行/上线。</div>`,
-          foot: '<button class="btn btn-primary" data-ok>完成</button>',
+        openOnboardingModal({
+          title: '注册成功 · 接入指引与机器凭证（仅此一次展示）',
+          resourceLabel: 'Agent',
+          resource: result.agent,
+          credential: result.credential,
+          metaRows: [
+            ['Agent ID', result.agent.id],
+            ['标识', result.agent.slug],
+            ['client_id', result.credential.clientId],
+            ['client_secret', result.credential.clientSecret],
+          ],
+          guideText: buildAgentOnboardingText(result.agent, result.credential),
         })
       } else {
         toast('注册成功')

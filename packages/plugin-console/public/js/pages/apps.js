@@ -6,6 +6,7 @@ import {
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, fmtCost, fmtTime, timeAgo, emptyState, lineChart,
 } from '../ui.js'
+import { buildAppOnboardingText, openOnboardingModal } from '../onboarding.js'
 import {
   dataClassLabel, riskClass, riskLabel, typeLabel, stateLabel, actionLabel,
   miniStat, renderTopologyList, barChartSafe,
@@ -495,13 +496,18 @@ function openAppCreate(schema, ctx) {
         })
         modal.close()
         if (result.credential) {
-          openModal({
-            title: '注册成功 · 应用凭证（仅此一次展示）',
-            body: `<div class="code-block">app_id:       ${esc(result.app.id)}
-client_id:     ${esc(result.credential.clientId)}
-client_secret: ${esc(result.credential.clientSecret)}</div>
-              <div class="form-hint mt-8">应用以机器凭证调用平台资源，用户身份经令牌链透传，全程可审计。</div>`,
-            foot: '<button class="btn btn-primary" data-ok>完成</button>',
+          openOnboardingModal({
+            title: '注册成功 · 接入指引与应用凭证（仅此一次展示）',
+            resourceLabel: 'AI 应用',
+            resource: result.app,
+            credential: result.credential,
+            metaRows: [
+              ['应用 ID', result.app.id],
+              ['标识', result.app.slug],
+              ['client_id', result.credential.clientId],
+              ['client_secret', result.credential.clientSecret],
+            ],
+            guideText: buildAppOnboardingText(result.app, result.credential),
           })
         }
         ctx.rerender()

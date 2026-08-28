@@ -2,7 +2,7 @@
 plugin: dsh-plugin-iam
 base: /api
 endpoints:
-  - GET/POST /api/iam/orgs · GET /api/iam/orgs/tree · PATCH/DELETE /api/iam/orgs/:id
+  - GET/POST /api/iam/orgs · GET /api/iam/orgs/tree · PATCH /api/iam/orgs/:id · DELETE /api/iam/orgs/:id（body {cascade:true} 一键级联删除子树，直属账号上移到上级组织）
   - GET/POST /api/iam/users · PATCH /api/iam/users/:id · POST /api/iam/users/import
   - POST /api/iam/users/:id/activate|freeze|unfreeze|deactivate|reset-password
   - POST/DELETE /api/iam/users/:id/bindings[/:provider]

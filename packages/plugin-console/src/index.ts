@@ -852,9 +852,11 @@ export function apply(ctx: Context) {
   })
 
   guarded('DELETE', '/api/iam/orgs/:id', 'iam.org.write', (exchange) => {
-    ctx.iam.deleteOrg(exchange.params['id']!)
-    changeLog(exchange, 'iam.org.delete', 'org', exchange.params['id']!, '')
-    return { deleted: true }
+    const input = body<{ cascade?: boolean }>(exchange)
+    const result = ctx.iam.deleteOrg(exchange.params['id']!, { cascade: input.cascade === true })
+    changeLog(exchange, 'iam.org.delete', 'org', exchange.params['id']!, '',
+      input.cascade ? `级联一键删除：移除组织 ${result.removedOrgs} 个，账号上移 ${result.movedUsers} 人` : '')
+    return result
   })
 
   guarded('GET', '/api/iam/users', 'iam.user.read', (exchange) => {

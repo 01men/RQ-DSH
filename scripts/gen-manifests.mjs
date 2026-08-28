@@ -52,7 +52,7 @@ const PLUGINS = [
       ['iam.connector.synced', 'emit', '三方同步完成'],
     ],
     api: [
-      'GET/POST /api/iam/orgs · GET /api/iam/orgs/tree · PATCH/DELETE /api/iam/orgs/:id',
+      'GET/POST /api/iam/orgs · GET /api/iam/orgs/tree · PATCH /api/iam/orgs/:id · DELETE /api/iam/orgs/:id（body {cascade:true} 一键级联删除子树，直属账号上移到上级组织）',
       'GET/POST /api/iam/users · PATCH /api/iam/users/:id · POST /api/iam/users/import',
       'POST /api/iam/users/:id/activate|freeze|unfreeze|deactivate|reset-password',
       'POST/DELETE /api/iam/users/:id/bindings[/:provider]',
@@ -217,7 +217,8 @@ const PLUGINS = [
       'GET/POST /api/nas · GET/PATCH /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）',
       'POST /api/nas/:id/transition|health|sync-tools',
       'GET /api/nas/:id/fs[?path=] · GET /api/nas/:id/fs/info',
-      'POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download（经网关 fs_* 工具）',
+      'GET /api/nas/:id/fs/file?path=&inline=（流式文件下载：浏览器拿到 bytes + content-disposition attachment|inline）',
+      'POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download|upload-many（经网关 fs_* 工具）',
       'GET/PUT /api/skill-storage（Skill 包存储后端：local | 已纳管 NAS 资产）',
     ],
     tools: ['nas_list', 'nas_get', 'nas_health_check', 'nas_fs_list', 'nas_fs_search', 'nas_fs_mkdir', 'nas_fs_delete', 'nas_fs_upload'],

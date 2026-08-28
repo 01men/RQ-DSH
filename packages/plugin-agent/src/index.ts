@@ -121,7 +121,8 @@ export class AgentRegistryService extends Service {
         refType: 'agent',
         refId: agent.id,
         // connector.invoke：连接器纳管（open-connector 融合）与 mcp.invoke 同级的独立调用权限点
-        scopes: ['mcp.invoke', 'skill.read', 'agent.read', 'usage.write', 'connector.invoke'],
+        // agent.write：注册后凭自身凭证即可完成接入验证后的资料提报更新（PATCH /api/agents/:id）
+        scopes: ['mcp.invoke', 'skill.read', 'agent.read', 'agent.write', 'usage.write', 'connector.invoke'],
       })
     }
     this.ctx.platformBus.emit(PlatformEvents.AgentRegistered, {
@@ -343,6 +344,7 @@ export function apply(ctx: Context) {
   }))
   migrateAgentCredentialScopes(ctx)
   migrateAgentCredentialConnectorInvoke(ctx)
+  migrateAgentCredentialAgentWrite(ctx)
 }
 
 /** 一次性迁移：为存量 Agent 机器凭证补 connector.invoke（幂等标记，先例 agent-scopes-usage-write-v1）。 */
@@ -387,4 +389,26 @@ function migrateAgentCredentialScopes(ctx: Context): void {
   }
   markers.insert({ id: MARK, doneAt: new Date().toISOString() })
   if (patched > 0) ctx.logger('agent').info(`存量 Agent 凭证迁移完成：${patched} 条补入 usage.write`)
+}
+
+/** 一次性迁移：为存量 Agent 机器凭证补 agent.write（注册后可凭自身凭证提报更新资料，先例 agent-scopes-usage-write-v1）。 */
+function migrateAgentCredentialAgentWrite(ctx: Context): void {
+  const markers = ctx.opsStorage.collection<{ id: string; doneAt: string }>('agent:migrations')
+  const MARK = 'agent-scopes-agent-write-v1'
+  if (markers.get(MARK)) return
+  let patched = 0
+  for (const principal of ctx.authn.principals().find(
+    (item) => item.type === 'machine' && item.refType === 'agent' && item.status === 'active' && !item.scopes.includes('agent.write'),
+  )) {
+    ctx.authn.principals().update(principal.id, { scopes: [...principal.scopes, 'agent.write'] })
+    ctx.audit.record({
+      type: 'change', actorType: 'system', actorId: 'agent-migration', actorName: '凭证范围迁移',
+      action: 'agent.credential.agent-write-backfill', resourceType: 'agent',
+      resourceId: principal.refId ?? '', resourceName: principal.name, result: 'ok',
+      detail: '补入 agent.write（注册后自主提报更新能力对齐）',
+    })
+    patched++
+  }
+  markers.insert({ id: MARK, doneAt: new Date().toISOString() })
+  if (patched > 0) ctx.logger('agent').info(`存量 Agent 凭证迁移完成：${patched} 条补入 agent.write`)
 }

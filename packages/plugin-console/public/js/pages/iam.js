@@ -226,11 +226,26 @@ export async function renderIam(content, params, ctx) {
         }
         menu.querySelector('[data-act="delete"]').onclick = async () => {
           anchor.remove()
-          const result = await confirmDialog({ title: '删除组织', message: `确定删除「${esc(node.name)}」？仅当组织下无子组织且无账号时可删除。`, danger: true })
+          // 影响范围预判：子树组织数（不含自身）与直属账号数（usersData 为全量账号）
+          let subOrgCount = 0
+          const countSub = (n) => { for (const c of (n.children ?? [])) { subOrgCount++; countSub(c) } }
+          countSub(node)
+          const directUsers = usersData.users.filter((u) => u.orgId === node.id).length
+          const cascade = subOrgCount > 0 || directUsers > 0
+          const rangeDesc = cascade
+            ? `其下还有 <b>${subOrgCount}</b> 个子组织、<b>${directUsers}</b> 个直属账号。将<b>一键删除整棵子树</b>，直属账号自动上移到上级组织${node.parentId ? '' : '（首个存活组织）'}。`
+            : '该组织为空（无子组织、无直属账号）。'
+          const result = await confirmDialog({
+            title: '删除组织',
+            message: `确定删除「${esc(node.name)}」？${rangeDesc}`,
+            danger: true,
+            confirmText: cascade ? '一键删除整棵子树' : '确认删除',
+          })
           if (!result) return
           try {
-            await api.delete(`/api/iam/orgs/${node.id}`)
-            toast('组织已删除'); location.hash = '#/iam'; ctx.rerender()
+            const res = await api.delete(`/api/iam/orgs/${node.id}`, { cascade })
+            toast(cascade && res.removedOrgs > 1 ? `已删除 ${res.removedOrgs} 个组织，${res.movedUsers} 个账号上移` : '组织已删除')
+            location.hash = '#/iam'; ctx.rerender()
           } catch (error) { toast(error.message, 'error') }
         }
       })

@@ -216,20 +216,25 @@ export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedA
   { code: 'super_admin', name: '平台超级管理员', builtin: true, description: '拥有全部权限点', permissions: ['*'] },
   { code: 'org_admin', name: '组织管理员', builtin: true, description: '管理本组织账号与用户组', permissions: ['console.login', 'iam.*', 'approval.read'] },
   { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS/连接器资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'connector.*', 'approval.read'] },
-  { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'app.read', 'app.write', 'nas.read', 'connector.catalog.read', 'connector.connection.read', 'connector.invoke'] },
+  { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'agent.write', 'app.read', 'app.write', 'nas.read', 'connector.catalog.read', 'connector.connection.read', 'connector.invoke'] },
   { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read'] },
   { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'authn.oidc.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'nas.read', 'audit.read', 'approval.read', 'connector.runs.read', 'connector.connection.read'] },
 ]
 
 /**
  * 内置角色的一次性幂等权限迁移：ensureBuiltinRoles 只插不更新——生产已落库角色不会自动
- * 获得 v1.1 新增的 connector.* 权限点。迁移只做「缺则补」，不触碰用户自定义角色。
+ * 获得后续版本新增的权限点。迁移只做「缺则补」，不触碰用户自定义角色；每次启动都会
+ * 重新比对（幂等），历史标记（connector-permissions-v1）仅作观测。
  */
-export const CONNECTOR_ROLE_MIGRATION: Record<string, string[]> = {
+export const BUILTIN_ROLE_MIGRATION: Record<string, string[]> = {
   resource_admin: ['connector.gateway.write', 'connector.catalog.read', 'connector.connection.read', 'connector.connection.write', 'connector.invoke', 'connector.permgroup.write', 'connector.runs.read'],
-  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke'],
+  // developer 补 agent.write：与 app.write 对称——开发者应能注册/提报更新 Agent（2026-08 修复"总是报没有 agent.write 权限"）
+  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke', 'agent.write'],
   auditor: ['connector.runs.read', 'connector.connection.read'],
 }
+
+/** 兼容别名：迁移通道创建时的历史命名（仅 connector 批次）。 */
+export const CONNECTOR_ROLE_MIGRATION = BUILTIN_ROLE_MIGRATION
 
 // ---------------------------------------------------------------------------
 // 三方连接器接口
@@ -718,11 +723,37 @@ export class IamService extends Service {
     return updated
   }
 
-  deleteOrg(id: string): boolean {
-    this.requireOrg(id)
-    if (this.orgs().find((org) => org.parentId === id).length > 0) throw new Error('存在子组织，无法删除')
-    if (this.users().find((user) => user.orgId === id).length > 0) throw new Error('组织下仍有账号，无法删除')
-    return this.orgs().remove(id)
+  /**
+   * 删除组织。默认仅允许空组织（无子组织且无直属账号）；
+   * cascade=true 一键删除整棵子树：子树内组织全部移除，直接挂载的账号上移到
+   * 存活的最近上级组织（被删根的父组织；删除根组织时上移到首个存活根组织）。
+   */
+  deleteOrg(id: string, options?: { cascade?: boolean }): { deleted: boolean; removedOrgs: number; movedUsers: number; fallbackOrgId?: string } {
+    const org = this.requireOrg(id)
+    if (!options?.cascade) {
+      if (this.orgs().find((item) => item.parentId === id).length > 0) throw new Error('存在子组织，无法删除；请改用「连同子组织一键删除」')
+      if (this.users().find((user) => user.orgId === id).length > 0) throw new Error('组织下仍有账号，无法删除；请改用「连同子组织一键删除」（账号将上移到上级组织）')
+      this.orgs().remove(id)
+      this.ctx.platformBus.emit(PlatformEvents.OrgChanged, { kind: 'delete', orgId: id, name: org.name })
+      return { deleted: true, removedOrgs: 1, movedUsers: 0 }
+    }
+    const subtree = this.orgSubtreeIds(id)
+    const subtreeSet = new Set(subtree)
+    // 账号落点：被删根的父组织必然不在子树内（树无环）；删根组织时落到首个存活根组织
+    const fallbackOrgId = org.parentId ?? this.orgs().find((item) => !subtreeSet.has(item.id) && !item.parentId)[0]?.id ?? null
+    const movedUsers = this.users().find((user) => subtreeSet.has(user.orgId))
+    if (!fallbackOrgId && movedUsers.length > 0) throw new Error('删除后将没有任何组织可挂载账号，请先把账号迁移到其他组织再删除')
+    if (fallbackOrgId) {
+      for (const user of movedUsers) this.users().update(user.id, { orgId: fallbackOrgId })
+    }
+    for (const orgId of subtree) {
+      if (this.orgs().get(orgId)) this.orgs().remove(orgId)
+    }
+    this.ctx.platformBus.emit(PlatformEvents.OrgChanged, {
+      kind: 'delete', orgId: id, name: org.name, cascade: true,
+      removedOrgs: subtree.length, movedUsers: movedUsers.length,
+    })
+    return { deleted: true, removedOrgs: subtree.length, movedUsers: movedUsers.length, ...(fallbackOrgId ? { fallbackOrgId } : {}) }
   }
 
   private requireOrg(id: string): OrgRecord {
@@ -917,7 +948,7 @@ export class IamService extends Service {
     const collection = this.ctx.opsStorage.collection<RecordBase & { key: string; note?: string }>('iam:migrations')
     const marker = collection.findOne((item) => item.key === 'connector-permissions-v1')
     const touched: string[] = []
-    for (const [code, additions] of Object.entries(CONNECTOR_ROLE_MIGRATION)) {
+    for (const [code, additions] of Object.entries(BUILTIN_ROLE_MIGRATION)) {
       const role = this.roles().findOne((item) => item.code === code)
       if (!role) continue
       const missing = additions.filter((point) => !role.permissions.includes(point))

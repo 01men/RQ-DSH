@@ -676,6 +676,7 @@ try {
   const devRole = roleList.data.roles.find((role) => role.code === 'developer')
   const assign = await api('PATCH', `/api/iam/users/${newUser.data.id}`, { token: admin, body: { roleIds: [devRole.id] } })
   check('分配角色', assign.ok && assign.data.roleIds.length === 1)
+  check('开发者角色默认含 agent.write（与 app.write 对称，注册/提报更新闭环）', devRole.permissions.includes('agent.write'))
 
   const importResult = await api('POST', '/api/iam/users/import', { token: admin, body: { items: [
     { username: 'batch01', displayName: '批量一号', orgId: newOrg.data.id },
@@ -701,6 +702,24 @@ try {
   check('移动到自身被拒（环检测）', !moveSelf.ok)
   const moveChild = await api('PATCH', `/api/iam/orgs/${siblingOrg.data.id}`, { token: admin, body: { parentId: newOrg.data.id } })
   check('移动到子孙被拒（环检测）', !moveChild.ok)
+
+  // 组织级联一键删除（2026-08）：任意层级可整棵子树删除，直属账号自动上移到上级组织
+  const cascadeOrgA = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '自测级联母部门', parentId: siblingOrg.data.id } })
+  const cascadeOrgB = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '自测级联子部门', parentId: cascadeOrgA.data.id } })
+  const cascadeUser = await api('POST', '/api/iam/users', { token: admin, body: { username: 'cascadeu01', displayName: '级联上移测试', orgId: cascadeOrgB.data.id } })
+  check('级联删除靶子就绪（母/子组织 + 直属账号）', cascadeOrgA.ok && cascadeOrgB.ok && cascadeUser.ok)
+  const delNonCascade = await api('DELETE', `/api/iam/orgs/${cascadeOrgA.data.id}`, { token: admin })
+  check('存在子组织时普通删除被拒并指路', !delNonCascade.ok && JSON.stringify(delNonCascade.error).includes('一键删除'))
+  const delCascade = await api('DELETE', `/api/iam/orgs/${cascadeOrgA.data.id}`, { token: admin, body: { cascade: true } })
+  check('级联一键删除整棵子树（组织数/上移账号数）', delCascade.ok && delCascade.data.removedOrgs === 2 && delCascade.data.movedUsers === 1, JSON.stringify(delCascade.data))
+  const treeAfterCascade = await api('GET', '/api/iam/orgs/tree', { token: admin })
+  const treeTextAfterCascade = JSON.stringify(treeAfterCascade.data)
+  check('级联后子树全部消失、上级组织仍在', treeAfterCascade.ok && !treeTextAfterCascade.includes('自测级联子部门') && !treeTextAfterCascade.includes('自测级联母部门') && treeTextAfterCascade.includes('自测兄弟部门'))
+  const usersAfterCascade = await api('GET', `/api/iam/users?orgId=${siblingOrg.data.id}`, { token: admin })
+  check('直属账号自动上移到上级组织', usersAfterCascade.ok && usersAfterCascade.data.users.some((u) => u.username === 'cascadeu01' && u.orgId === siblingOrg.data.id))
+  const scratchOrg = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '自测空部门' } })
+  const delEmptyOrg = await api('DELETE', `/api/iam/orgs/${scratchOrg.data.id}`, { token: admin })
+  check('空组织普通删除仍可用（非级联路径回归）', delEmptyOrg.ok && delEmptyOrg.data.removedOrgs === 1)
 
   const groupCreate = await api('POST', '/api/iam/groups', { token: admin, body: { name: '自测静态组', type: 'static', memberIds: [newUser.data.id] } })
   check('创建静态用户组', groupCreate.ok)
@@ -1742,6 +1761,9 @@ try {
   // 凭证默认 usage.write（Agent 自推计量能力）+ 机器身份读台账入审计（agent.verify）
   const selfAgentCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: agentCreate.data.credential.clientId, clientSecret: agentCreate.data.credential.clientSecret } })
   check('新注册 Agent 凭证默认含 usage.write', selfAgentCc.ok && selfAgentCc.data.principal.scopes.includes('usage.write'))
+  check('新注册 Agent 凭证默认含 agent.write（自主提报更新）', selfAgentCc.ok && selfAgentCc.data.principal.scopes.includes('agent.write'))
+  const agentSelfUpdate = await api('PATCH', `/api/agents/${selfAgent.id}`, { token: selfAgentCc.data.token, body: { attrs: { description: '自测用机器人（资料已由 Agent 凭自身凭证提报更新）' } } })
+  check('Agent 凭自身凭证提报更新资料 200（agent.write 生效）', agentSelfUpdate.ok && String(agentSelfUpdate.data.attrs['description']).includes('凭自身凭证提报更新'), JSON.stringify(agentSelfUpdate.error))
 
   const agentVerifyLogs = () => api('GET', '/api/audit/logs?type=auth&resourceType=agent&limit=200', { token: admin })
   const verifyBefore = (await agentVerifyLogs()).data.items.filter((log) => log.action === 'agent.verify').length
@@ -1793,6 +1815,12 @@ try {
   const ssoAppCreate = await api('POST', '/api/apps', { token: ops, body: { name: 'SSO 自测应用', attrs: { description: 'MVP 闭环：注册 → 签发 → 门禁 → 浏览器授权流', appType: 'web', icon: '🔐', url: 'https://sso-app.example.com', riskLevel: 'low', dataClass: 'internal', agentIds: [targetAgent.id] }, agentIds: [targetAgent.id] } })
   check('注册应用（编排在线 Agent，owner=资源管理员）', ssoAppCreate.ok && ssoAppCreate.data.credential.clientId)
   const ssoAppId = ssoAppCreate.data.app.id
+
+  // 应用凭证默认 app.write/app.read（指标提报与自主更新闭环，2026-08）
+  const ssoAppCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: ssoAppCreate.data.credential.clientId, clientSecret: ssoAppCreate.data.credential.clientSecret } })
+  check('新注册应用凭证默认含 app.write/app.read（提报与自更新）', ssoAppCc.ok && ssoAppCc.data.principal.scopes.includes('app.write') && ssoAppCc.data.principal.scopes.includes('app.read'))
+  const ssoAppFirstReport = await api('POST', `/api/apps/${ssoAppId}/metrics-report`, { token: ssoAppCc.data.token, body: { dau: 1, sessions: 1, avgDepth: 1, retention7: 0 } })
+  check('应用凭自身凭证提报指标 200（app.write 生效，"发一句话"）', ssoAppFirstReport.ok)
 
   // 门禁点 1（早反馈）：未签发 SSO 客户端 → 发起上线被拒
   const gateBlocked = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
