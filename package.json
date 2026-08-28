@@ -27,6 +27,7 @@
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
+    "jsdom": "^30.0.1",
     "openid-client": "^6.8.7"
   }
 }

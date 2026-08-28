@@ -2,17 +2,10 @@
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
 import {
-  h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
-  statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
+  h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
+  renderTable, statusBadge, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, timeAgo, emptyState, sparkline, lineChart,
 } from '../ui.js'
-
-/** 复制到剪贴板（降级提示）。 */
-function copyText(text) {
-  return navigator.clipboard?.writeText(text)
-    .then(() => toast('已复制到剪贴板'))
-    .catch(() => toast('复制失败，请手动选择复制', 'error'))
-}
 
 export async function renderAgents(content, params, ctx) {
   const data = await api.get('/api/agents')

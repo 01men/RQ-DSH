@@ -13,7 +13,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import { PlatformEvents, newId, sha256Hex, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
+import { PlatformEvents, newId, sha256Hex, type Collection, type RecordBase, type ToolPrincipal } from '../../platform-core/src/index.ts'
 import { OcClient, OC_VERSION_PIN, type OcConnectionSummary, type OcRunLog, type OcTokenPolicy } from './client.ts'
 import { OcError } from './errors.ts'
 import { heuristicRiskLevel, rankOf, type RiskLevel } from './risk.ts'
@@ -162,6 +162,42 @@ export class ConnectorHubService extends Service {
     this.healthTimer = setInterval(() => void this.probeGateway(), HEALTH_INTERVAL_MS)
     this.patrolTimer = setInterval(() => void this.runPatrols(), PATROL_INTERVAL_MS)
     this.reconcileTimer = setInterval(() => void this.reconcileRuns().catch(() => undefined), RECONCILE_INTERVAL_MS)
+  }
+
+  // -- 工具层身份与组织收敛（REST 与工具路径共用同一套标准，架构审查 P0-1/P0-2） ---------
+
+  /**
+   * 组织可见范围：`*` 权限 → undefined（全部）；human → 归属组织；machine → 绑定 agent/app
+   * 资源的归属组织；外部机器无归属 → null（fail-closed，任何组织的数据都不可见）。
+   * 身份上下文缺失直接抛错，不降级。
+   */
+  orgScopeFor(principal?: ToolPrincipal): string | null | undefined {
+    if (!principal) throw new Error('工具执行缺少身份上下文（fail-closed）')
+    if (principal.permissions.includes('*')) return undefined
+    if (principal.kind === 'human' && principal.userId) {
+      const user = this.ctx.iam.users().get(principal.userId)
+      if (!user) throw new Error(`账号不存在：${principal.userId}`)
+      return user.orgId
+    }
+    return this.boundResourceOrg(principal.principalId) ?? null
+  }
+
+  /** 从执行上下文身份解析 InvokeCaller（与 REST /api/connector/execute 同规则），透传 actChain。 */
+  callerFromPrincipal(principal?: ToolPrincipal): InvokeCaller {
+    if (!principal) throw new Error('工具执行缺少身份上下文（fail-closed）')
+    const act = principal.actChain?.length ? { actChain: principal.actChain } : {}
+    if (principal.kind === 'human') return { type: 'user', id: principal.userId ?? principal.principalId, name: principal.name, ...act }
+    const record = this.ctx.authn.principals().get(principal.principalId)
+    if (record?.refType === 'agent' && record.refId) return { type: 'agent', id: record.refId, name: principal.name, ...act }
+    if (record?.refType === 'app' && record.refId) return { type: 'app', id: record.refId, name: principal.name, ...act }
+    return { type: 'app', id: principal.principalId, name: principal.name, ...act }
+  }
+
+  private boundResourceOrg(principalId: string): string | undefined {
+    const record = this.ctx.authn.principals().get(principalId)
+    if (!record?.refId || (record.refType !== 'agent' && record.refType !== 'app')) return undefined
+    const resource = this.ctx.resourceCore.get(record.refType, record.refId) as { orgId?: string } | undefined
+    return resource && typeof resource.orgId === 'string' ? resource.orgId : undefined
   }
 
   // -- 集合 -----------------------------------------------------------------
@@ -1452,7 +1488,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'connector'
-export const inject = ['opsStorage', 'platformBus', 'iam', 'audit', 'usage', 'billing', 'txnStore']
+export const inject = ['opsStorage', 'platformBus', 'iam', 'audit', 'usage', 'billing', 'txnStore', 'authn', 'resourceCore']
 
 export function apply(ctx: Context) {
   // 与 plugin-mcp 相同的装配形态：构造即注册（provide='connectorHub'），

@@ -119,3 +119,27 @@
 
 ### 协作备注
 - 本条目不动 cto-doc-agent 的任何历史条目与其对集成指南 §八 的结构化交付；两处 M0 口径更正已在其条目内说明，我方以代码+stub+断言形式吸收完毕。PROGRESS.md #1 行仅做句尾追加（上游实证结论），其状态判定（partial 待真实联调）不变。
+
+## [2026-08-28] release-agent —— 架构审查修复验收 + 生产发布（selftest 557/557 + GUI 全绿 + 部署 192.168.0.7）
+
+### 本轮内容
+- 独立架构审查（ARCH-REVIEW-2026-08-28.md）的修复批次的系统验收与发布：
+  P0-1 工具/REST 组织收敛统一（connectorHub.orgScopeFor 一套标准、外部机器 fail-closed 空集）、
+  P0-2 身份注入防自填、机器主体角色化授权（roleIds + resolveMachineScopes）、
+  控制台 authn/connectors/login/connect/iam/agents/apps 多页迭代 + base.css、copyText 抽取至 ui.js。
+- 工具链：jsdom 入库为 devDependency，dom-smoke.mjs 纳入常规门禁。
+
+### 门禁记录（全部本机实测）
+- npm run lint:manifests = 70/70 ✅
+- npm run selftest = 557/557 通过（exit=0）✅
+- node scripts/dom-smoke.mjs（隔离实例 DEMO_SEED=1 :7301 data-guitest）= 14/14 ✅
+  - 修正两处过时脚本预期（非产品回归）：T10 口令弹窗选择器 `#pw-copy`→`#cred-password`（弹窗结构早已更名，实测建号/口令展示/服务端落库均正常）；T14 签发凭证弹窗改异步拉取可绑定资源与授权目录后需 waitFor 打开，且新增授权必填校验（补 `#authz-star` 分支）。
+- 真实浏览器 GUI 验收（Chromium 1440×900 黑盒）：登录双入口、连接器四 Tab、网关抽屉 env 可视化、
+  新建连接三形态（api_key 即刻丢弃提示）、签发凭证空授权拦截 + `*` 一次性凭证、
+  编辑权限即时生效（* → 附加 2 项）、轮换密钥闭环（clientId 不变/旧值吊销）、
+  平台接入双卡、角色弹窗机器凭证同步提示条——全部通过。
+- 已知轻微观察项（不阻塞）：签发凭证「已保存」后主体表格不即时自刷，重进页面计数正确（16→17）；权限编辑路径则即时刷新，两路径体验不一致，可后续统一。
+
+### 发布
+- GitHub：01men/ybkk-AIOS main 提交并推送。
+- 宿主平台：192.168.0.7:/opt/ops-platform（systemd ops-platform，:7300）同步变更文件后重启，健康探活 + 关键接口验证。

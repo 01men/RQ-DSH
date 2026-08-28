@@ -66,9 +66,18 @@ export async function renderAuthn(content, params, ctx) {
           { title: '绑定资源', render: (p) => esc(refLabel(p)) },
           {
             title: '权限范围',
-            render: (p) => p.type !== 'machine' || !p.scopes.length
-              ? '<span class="text-4">—</span>'
-              : `<span class="mono fs-11" style="display:inline-block;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle" title="${esc(p.scopes.join(', '))}">${esc(p.scopes.join(', '))}</span>`,
+            render: (p) => {
+              if (p.type !== 'machine') return '<span class="text-4">—</span>'
+              const resolved = p.resolvedScopes ?? p.scopes ?? []
+              if (!resolved.length) return '<span class="text-4">—</span>'
+              const tip = resolved.includes('*') ? "'*' 全部权限" : resolved.join(', ')
+              if (resolved.includes('*')) return `<span class="badge badge-danger no-dot" title="${esc(tip)}">全部权限（*）</span>`
+              const roleTags = (p.roleNames ?? []).map((name) => `<span class="badge badge-purple no-dot">${esc(name)}</span>`).join(' ')
+              const extra = p.scopes?.length ?? 0
+              const extraTag = extra ? `<span class="fs-11 text-3">附加 ${extra} 项</span>` : ''
+              const summary = [roleTags, extraTag].filter(Boolean).join(' ')
+              return `<span style="display:inline-flex;align-items:center;gap:4px;flex-wrap:wrap;max-width:300px" title="生效权限点：${esc(tip)}">${summary || `<span class="mono fs-11">${esc(tip)}</span>`}</span>`
+            },
           },
           { title: 'ClientId', render: (p) => p.clientId ? `<span class="mono fs-12">${esc(p.clientId)}</span>` : '<span class="text-4">—</span>' },
           { title: '活跃令牌', width: 90, render: (p) => `<span class="col-num">${p.activeTokens}</span>` },
@@ -140,9 +149,9 @@ export async function renderAuthn(content, params, ctx) {
 
   $('#authn-credential').onclick = async () => {
     // 已注册的可绑定主体：选择后自动回填 refType/refId（凭据与资源真正关联），外部系统仍可手填
-    let bindable
+    let bindable, authz
     try {
-      bindable = await api.get('/api/authn/bindable-resources')
+      ;[bindable, authz] = await Promise.all([api.get('/api/authn/bindable-resources'), fetchAuthzOptions()])
     } catch (error) { toast(error.message, 'error'); return }
     const entries = [
       ...bindable.agents.map((a) => ({ value: `agent:${a.id}`, refType: 'agent', refId: a.id, name: a.name, label: `Agent · ${a.name}（${a.status}）`, search: `${a.name} agent ${a.id}`.toLowerCase() })),
@@ -157,11 +166,7 @@ export async function renderAuthn(content, params, ctx) {
             <input class="input" id="cred-bind-q" placeholder="输入关键词过滤，或直接下拉选择" autocomplete="off">
             <select class="select" id="cred-bind" style="margin-top:6px"></select>`, { required: true, full: true })}
           <div id="cred-name-holder" class="form-item full"></div>
-          ${field('权限范围', selectField('scope', [
-            { value: 'mcp.invoke', label: 'MCP 调用' },
-            { value: 'skill.read', label: 'Skill 只读' },
-            { value: '*', label: '全部权限（慎选）' },
-          ]), { hint: '演示环境签发单个权限点；生产建议最小授权' })}
+          ${authzPickerHtml(authz, [], [])}
         </div>`,
       foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>签发</button>',
     })
@@ -193,15 +198,18 @@ export async function renderAuthn(content, params, ctx) {
       }
     }
     renderOptions('')
+    bindAuthzPicker(modal)
     modal.body.querySelector('#cred-bind-q').oninput = (event) => renderOptions(event.target.value)
     bindSelect.onchange = renderNameField
     modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
     modal.el.querySelector('[data-ok]').onclick = async () => {
       const data = collectForm(modal.body)
       const entry = current()
+      const authzPick = collectAuthzPicker(modal)
+      if (!authzPick) return toast('授权不能为空：至少选择机器角色、附加权限点或 *', 'error')
       const payload = entry
-        ? { name: `${entry.refType}:${entry.name}`, refType: entry.refType, refId: entry.refId, scopes: [data.scope] }
-        : { name: data.name, refType: 'external', scopes: [data.scope] }
+        ? { name: `${entry.refType}:${entry.name}`, refType: entry.refType, refId: entry.refId, ...authzPick }
+        : { name: data.name, refType: 'external', ...authzPick }
       if (!payload.name) return toast('外部系统需填写主体名称', 'error')
       try {
         const result = await api.post('/api/authn/principals', payload)
@@ -259,8 +267,15 @@ client_secret: ${esc(result.clientSecret)}</div>
           ${principal.clientId ? `<div class="desc-item"><span class="k">ClientId</span><span class="v mono">${esc(principal.clientId)}</span></div>` : ''}
           <div class="desc-item"><span class="k">绑定资源</span><span class="v">${esc(refLabel(principal))}</span></div>
         </div>
-        ${principal.scopes.length ? `
-          <div class="card-title mb-8">权限范围（机器身份快照）</div>
+        ${(principal.type === 'machine') && (principal.roleIds?.length || principal.scopes.length) ? `
+          <div class="card-title mb-8">权限范围（机器身份）</div>
+          ${principal.roleIds?.length ? `
+            <div class="fs-12 text-3 mb-4">机器角色（随组织角色实时同步）</div>
+            <div class="flex mb-8" style="flex-wrap:wrap;gap:6px">${(principal.roleNames ?? principal.roleIds).map((n) => `<span class="badge badge-purple no-dot">${esc(n)}</span>`).join('')}</div>` : ''}
+          ${principal.scopes.length ? `
+            <div class="fs-12 text-3 mb-4">附加权限点</div>
+            <div class="flex mb-14" style="flex-wrap:wrap;gap:6px">${principal.scopes.map((s) => `<span class="badge badge-brand no-dot mono">${esc(s)}</span>`).join('')}</div>` : '<div class="mb-14"></div>'}` : principal.type === 'human' && principal.scopes.length ? `
+          <div class="card-title mb-8">权限范围（角色解析）</div>
           <div class="flex mb-14" style="flex-wrap:wrap;gap:6px">${principal.scopes.map((s) => `<span class="badge badge-brand no-dot mono">${esc(s)}</span>`).join('')}</div>` : ''}
         <div class="card-title mb-8">令牌（${tokens2.total}）</div>
         ${tokens2.tokens.slice(0, 8).map((t) => `
@@ -298,52 +313,95 @@ client_secret: ${esc(result.clientSecret)}</div>
 
   if (params.get('action') === 'credential') $('#authn-credential').click()
 
-  /** 编辑机器凭证权限范围：按权限目录分组多选；调整后存量令牌联动吊销，机器侧需重新换牌。 */
-  async function openScopesEditor(principal, ctx2) {
-    let catalog
-    try {
-      catalog = (await api.get('/api/iam/permissions')).catalog
-    } catch (error) { toast(error.message, 'error'); return }
+  // ---- 机器授权选择器（签发 / 编辑弹窗共用）：'*' 全部权限 + 机器角色多选 + 附加权限点分组多选 ----
+  async function fetchAuthzOptions() {
+    const [rolesRes, permRes] = await Promise.all([
+      api.get('/api/iam/roles').catch(() => null),
+      api.get('/api/iam/permissions'),
+    ])
+    return { roles: rolesRes?.roles ?? [], catalog: permRes.catalog }
+  }
+
+  function authzPickerHtml(options, selectedRoleIds = [], selectedScopes = []) {
+    const star = selectedScopes.includes('*')
     const groups = new Map()
-    for (const item of catalog) {
+    for (const item of options.catalog) {
       if (!groups.has(item.group)) groups.set(item.group, [])
       groups.get(item.group).push(item)
     }
-    const selected = new Set(principal.scopes ?? [])
-    const modal = openModal({
-      title: `编辑权限范围 · ${principal.name}`, wide: true,
-      body: `
-        <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>调整保存后该主体<b>全部存量令牌立即吊销</b>（收权即时生效），机器侧需用凭证重新换牌，新令牌按新范围签发。</span></div>
+    return `
+      <div class="form-item full mb-14">
         <label class="flex mb-14" style="gap:8px;cursor:pointer;font-weight:600">
-          <input type="checkbox" id="scope-star" ${selected.has('*') ? 'checked' : ''} style="accent-color:var(--danger)">
-          <span style="color:var(--danger)">'*' —— 全部权限（不可与其他权限点混用）</span>
+          <input type="checkbox" id="authz-star" ${star ? 'checked' : ''} style="accent-color:var(--danger)">
+          <span style="color:var(--danger)">'*' —— 全部权限（不可与其他授权混用）</span>
         </label>
-        <div class="form-grid">
+        <label class="form-label">机器角色（与组织角色共用同一目录，角色变更实时同步到本凭证）</label>
+        <div style="max-height:130px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px" id="authz-role-list">
+          ${options.roles.length ? options.roles.map((role) => `
+            <label class="flex" style="gap:6px;font-size:12.5px;cursor:pointer;padding:3px 0">
+              <input type="checkbox" data-role="${esc(role.id)}" ${selectedRoleIds.includes(role.id) ? 'checked' : ''} style="accent-color:var(--brand-500)">
+              <span style="font-weight:600">${esc(role.name)}</span>
+              <span class="text-4 fs-11">${esc(role.description ?? '')}</span>
+            </label>`).join('') : '<div class="text-4 fs-12">角色列表不可读（需要「查看组织」权限），请改用附加权限点</div>'}
+        </div>
+      </div>
+      <div class="form-item full">
+        <label class="form-label">附加权限点（按权限目录分组，生产建议最小授权）</label>
+        <div style="max-height:240px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px">
           ${[...groups.entries()].map(([group, items]) => `
-            <div class="form-item full">
-              <div class="card-title mb-8">${esc(group)}</div>
-              <div class="flex" style="flex-wrap:wrap;gap:6px 14px">
+            <div style="padding:6px 4px">
+              <div class="fs-12" style="font-weight:600;color:var(--text-2)">${esc(group)}</div>
+              <div class="flex" style="flex-wrap:wrap;gap:4px 14px">
                 ${items.map((item) => `
-                  <label class="flex" style="gap:6px;font-size:12px;cursor:pointer" data-point-group>
-                    <input type="checkbox" data-point="${esc(item.point)}" ${selected.has(item.point) ? 'checked' : ''} style="accent-color:var(--brand-500)">
-                    <span>${esc(item.label)}<span class="mono text-4" style="margin-left:4px">${esc(item.point)}</span></span>
+                  <label class="flex" style="gap:6px;font-size:12px;cursor:pointer">
+                    <input type="checkbox" data-point="${esc(item.point)}" ${selectedScopes.includes(item.point) ? 'checked' : ''} style="accent-color:var(--brand-500)">
+                    <span>${esc(item.label)}</span><span class="mono text-4 fs-11">${esc(item.point)}</span>
                   </label>`).join('')}
               </div>
             </div>`).join('')}
-        </div>`,
-      foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存（联动吊销存量令牌）</button>',
-    })
-    const starBox = modal.body.querySelector('#scope-star')
-    const pointBoxes = () => [...modal.body.querySelectorAll('[data-point]')]
-    const syncStar = () => pointBoxes().forEach((box) => { box.disabled = starBox.checked; if (starBox.checked) box.checked = false })
+        </div>
+      </div>`
+  }
+
+  function bindAuthzPicker(modal) {
+    const starBox = modal.body.querySelector('#authz-star')
+    const boxes = () => [...modal.body.querySelectorAll('[data-role],[data-point]')]
+    const syncStar = () => boxes().forEach((box) => { box.disabled = starBox.checked; if (starBox.checked) box.checked = false })
     starBox.onchange = syncStar
     syncStar()
+  }
+
+  /** 返回 { roleIds, scopes }；全空（未勾选 *）时返回 null。 */
+  function collectAuthzPicker(modal) {
+    const star = modal.body.querySelector('#authz-star').checked
+    const roleIds = [...modal.body.querySelectorAll('[data-role]:checked')].map((box) => box.dataset.role)
+    const scopes = [...modal.body.querySelectorAll('[data-point]:checked')].map((box) => box.dataset.point)
+    if (!star && !roleIds.length && !scopes.length) return null
+    return { roleIds, scopes: star ? ['*'] : scopes }
+  }
+
+  /** 编辑机器凭证权限范围：机器角色 + 附加权限点分组多选；调整后存量令牌联动吊销，机器侧需重新换牌。 */
+  async function openScopesEditor(principal, ctx2) {
+    let authz
+    try {
+      authz = await fetchAuthzOptions()
+    } catch (error) { toast(error.message, 'error'); return }
+    const selectedRoles = principal.roleIds ?? []
+    const selectedScopes = (principal.scopes ?? []).filter((scope) => scope !== '*')
+    const modal = openModal({
+      title: `编辑权限范围 · ${principal.name}`, wide: true,
+      body: `
+        <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>调整保存后该主体<b>全部存量令牌立即吊销</b>（收权即时生效），机器侧需用凭证重新换牌，新令牌按新范围签发。机器角色的权限点随角色编辑<b>实时同步</b>，无需重新换牌。</span></div>
+        ${authzPickerHtml(authz, selectedRoles, selectedScopes)}`,
+      foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存（联动吊销存量令牌）</button>',
+    })
+    bindAuthzPicker(modal)
     modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
     modal.el.querySelector('[data-ok]').onclick = async () => {
-      const scopes = starBox.checked ? ['*'] : pointBoxes().filter((box) => box.checked).map((box) => box.dataset.point)
-      if (!scopes.length) return toast('scopes 不能为空（或勾选 *）', 'error')
+      const authzPick = collectAuthzPicker(modal)
+      if (!authzPick) return toast('授权不能为空：至少选择机器角色、附加权限点或 *', 'error')
       try {
-        await api.patch(`/api/authn/principals/${principal.id}`, { scopes })
+        await api.patch(`/api/authn/principals/${principal.id}`, authzPick)
         modal.close()
         toast('权限范围已更新；存量令牌已联动吊销，机器侧需重新换牌')
         ctx2.rerender()

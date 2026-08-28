@@ -449,7 +449,7 @@ export function apply(ctx: Context) {
     const { clientId, clientSecret } = body<{ clientId: string; clientSecret: string }>(exchange)
     try {
       const result = ctx.authn.clientCredentialsLogin(clientId, clientSecret)
-      exchange.ok({ token: result.token, expiresAt: result.record.expiresAt, principal: { id: result.principal.id, name: result.principal.name, scopes: result.principal.scopes } })
+      exchange.ok({ token: result.token, expiresAt: result.record.expiresAt, principal: { id: result.principal.id, name: result.principal.name, scopes: result.record.scopes } })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(401, 'CC_FAILED', message)
@@ -1071,7 +1071,16 @@ export function apply(ctx: Context) {
       // 脱敏：clientSecretHash 为签名级凭证哈希，一律不外发
       const { clientSecretHash, ...safe } = principal
       void clientSecretHash
-      return { ...safe, activeTokens: ctx.authn.activeTokenCount(principal.id) }
+      // 机器主体补充角色明细与解析后的生效权限（前端展示用）
+      const roleNames = (principal.roleIds ?? [])
+        .map((roleId) => ctx.iam.roles().get(roleId)?.name)
+        .filter((name): name is string => Boolean(name))
+      return {
+        ...safe,
+        roleNames,
+        resolvedScopes: principal.type === 'machine' ? ctx.authn.resolveMachineScopes(principal) : safe.scopes,
+        activeTokens: ctx.authn.activeTokenCount(principal.id),
+      }
     }),
   }))
 
@@ -1082,9 +1091,10 @@ export function apply(ctx: Context) {
   }))
 
   guarded('POST', '/api/authn/principals', 'authn.principal.write', (exchange) => {
-    const input = body<{ name: string; refType?: 'agent' | 'app' | 'external'; refId?: string; scopes: string[] }>(exchange)
+    const input = body<{ name: string; refType?: 'agent' | 'app' | 'external'; refId?: string; roleIds?: string[]; scopes: string[] }>(exchange)
     const created = ctx.authn.createMachineCredential(input)
-    changeLog(exchange, 'authn.principal.create', 'principal', created.principal.id, input.name, input.refId ? `绑定 ${input.refType}:${input.refId}` : '')
+    const summary = [input.roleIds?.length ? `角色×${input.roleIds.length}` : '', input.scopes.length ? `权限点×${input.scopes.length}` : ''].filter(Boolean).join(' + ')
+    changeLog(exchange, 'authn.principal.create', 'principal', created.principal.id, input.name, input.refId ? `绑定 ${input.refType}:${input.refId} · ${summary}` : summary)
     return { principalId: created.principal.id, clientId: created.clientId, clientSecret: created.clientSecret, note: '密钥仅此一次返回' }
   })
 
@@ -1102,13 +1112,18 @@ export function apply(ctx: Context) {
   })
 
   guarded('PATCH', '/api/authn/principals/:id', 'authn.principal.write', (exchange) => {
-    const { scopes } = body<{ scopes: string[] }>(exchange)
-    if (!Array.isArray(scopes) || scopes.some((scope) => typeof scope !== 'string')) {
-      exchange.fail(400, 'BAD_REQUEST', 'scopes 必填（字符串数组）')
+    const { roleIds, scopes } = body<{ roleIds?: string[]; scopes?: string[] }>(exchange)
+    const hasRoles = Array.isArray(roleIds)
+    const hasScopes = Array.isArray(scopes)
+    if ((!hasRoles && !hasScopes) || (hasRoles && roleIds!.some((id) => typeof id !== 'string')) || (hasScopes && scopes!.some((scope) => typeof scope !== 'string'))) {
+      exchange.fail(400, 'BAD_REQUEST', 'roleIds / scopes 至少提供一项（字符串数组）')
       return
     }
-    const principal = ctx.authn.updateMachineScopes(exchange.params['id']!, scopes)
-    changeLog(exchange, 'authn.principal.scopes', 'principal', principal.id, principal.name, scopes.join(','))
+    const principal = ctx.authn.updateMachineScopes(exchange.params['id']!, {
+      ...(hasRoles ? { roleIds } : {}),
+      ...(hasScopes ? { scopes } : {}),
+    })
+    changeLog(exchange, 'authn.principal.scopes', 'principal', principal.id, principal.name, [principal.roleIds?.length ? `角色×${principal.roleIds.length}` : '', scopes?.length ? `权限点×${scopes.length}` : ''].filter(Boolean).join(' + '))
     const { clientSecretHash, ...safe } = principal
     void clientSecretHash
     return safe
@@ -1436,19 +1451,17 @@ export function apply(ctx: Context) {
   }
 
   /**
-   * 连接器域组织可见范围：超管可带 ?orgId= 查任意组织；普通用户锁定在自身归属组织
-   * （跨 org 不可见，T-20 的 UI 半段；数据面仍由权限组 authorize 双保险）。
+   * 连接器域组织可见范围：超管可带 ?orgId= 查任意组织；普通用户锁定在自身归属组织；
+   * 机器收敛到绑定资源的归属组织，外部机器无归属 → 无可见数据（fail-closed）。
+   * 与工具路径共用 connectorHub.orgScopeFor，REST/工具一套标准（审查 P0-1）。
    */
-  const restrictOrgScope = (exchange: HttpExchange): string | undefined => {
+  const restrictOrgScope = (exchange: HttpExchange): string | null | undefined => {
     const info = caller(exchange)
     const requested = exchange.query.get('orgId') ?? undefined
     if (info.permissions.includes('*')) return requested
-    if (info.kind === 'human' && info.userId) {
-      const user = ctx.iam.users().get(info.userId)
-      if (!user) throw new Error(`账号不存在：${info.userId}`)
-      return user.orgId
-    }
-    return requested
+    const scope = ctx.connectorHub.orgScopeFor(info)
+    if (scope === undefined) return requested
+    return scope
   }
 
   /** 连接引用对外回显：无凭证字段（结构保证），maskedProfile 已在服务侧脱敏。 */
@@ -1572,8 +1585,9 @@ export function apply(ctx: Context) {
   // -- 连接 -----------------------------------------------------------------
   guarded('GET', '/api/connector/connections', 'connector.connection.read', (exchange) => {
     const restrictedOrg = restrictOrgScope(exchange)
+    if (restrictedOrg === null) return { total: 0, connections: [] }
     const refs = ctx.connectorHub.connections().find((item) =>
-      (!restrictedOrg || item.ownerOrgId === restrictedOrg))
+      (restrictedOrg === undefined || item.ownerOrgId === restrictedOrg))
     return { total: refs.length, connections: refs.map(maskReference) }
   })
 
@@ -1703,7 +1717,8 @@ export function apply(ctx: Context) {
   // -- 权限组 -----------------------------------------------------------------
   guarded('GET', '/api/connector/perm-groups', 'connector.connection.read', (exchange) => {
     const orgFilter = restrictOrgScope(exchange)
-    const groups = ctx.connectorHub.permGroups().find((group) => (!orgFilter || group.orgId === orgFilter))
+    if (orgFilter === null) return { total: 0, groups: [] }
+    const groups = ctx.connectorHub.permGroups().find((group) => (orgFilter === undefined || group.orgId === orgFilter))
     return { total: groups.length, groups }
   })
 
@@ -2997,22 +3012,13 @@ export function apply(ctx: Context) {
 
   /**
    * 工具身份注入：服务端以令牌解析的调用者身份为准，禁止调用方自填身份参数。
-   * REST 工具桥与 /mcp 端点（平台 MCP Server）共用同一套注入规则。
+   * connector_execute / mcp_invoke 的调用方身份已改为经 exec.principal 传递（schema 无 caller* 参数），
+   * 不再走 args 注入；其余工具的 approver/requester/actor 仍由此处覆盖。
    */
   const injectToolIdentity = (name: string, inputArgs: Record<string, unknown>, info: CallerInfo): Record<string, unknown> => {
     const args = { ...inputArgs }
     const principalId = info.userId ?? info.principalId
-    if (name === 'mcp_invoke') {
-      const mcpCaller = resolveMcpCaller(info)
-      args.callerType = mcpCaller.type
-      args.callerId = mcpCaller.id
-      args.callerName = mcpCaller.name
-    } else if (name === 'connector_execute') {
-      const connectorCaller = resolveConnectorCaller(info)
-      args.callerType = connectorCaller.type
-      args.callerId = connectorCaller.id
-      args.callerName = connectorCaller.name
-    } else if (name === 'approval_decide' || name === 'skill_approve') {
+    if (name === 'approval_decide' || name === 'skill_approve') {
       args.approverId = principalId
       args.approverName = info.name
     } else if (name === 'agent_offline' || name === 'mcp_offline' || name === 'iam_sync_run') {
@@ -3028,6 +3034,10 @@ export function apply(ctx: Context) {
     }
     return args
   }
+
+  guarded('GET', '/api/tools/schemas', 'console.login', () => ({
+    tools: ctx.tools.schemas().map((tool) => ({ name: tool.name, description: tool.description, permission: tool.permission, parameters: tool.parameters })),
+  }))
 
   guarded('POST', '/api/tools/execute', 'console.login', async (exchange) => {
     const input = body<{ name: string; args?: Record<string, unknown> }>(exchange)
@@ -3047,7 +3057,7 @@ export function apply(ctx: Context) {
       return
     }
     const args = injectToolIdentity(input.name, input.args ?? {}, info)
-    const result = await ctx.tools.execute({ name: input.name, arguments: args })
+    const result = await ctx.tools.execute({ name: input.name, arguments: args, principal: info })
     return result
   })
 
@@ -3149,7 +3159,7 @@ export function apply(ctx: Context) {
           })
           return reply({ content: [{ type: 'text', text: `缺少权限点 ${definition.permission}（调用方 ${info.name}），调用被拒绝` }], isError: true })
         }
-        const result = await ctx.tools.execute({ name, arguments: injectToolIdentity(name, args, info) })
+        const result = await ctx.tools.execute({ name, arguments: injectToolIdentity(name, args, info), principal: info })
         return reply({
           content: result.content.length > 0 ? result.content : [{ type: 'text', text: JSON.stringify(result.value ?? null) }],
           isError: result.isError,

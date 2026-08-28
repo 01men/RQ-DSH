@@ -634,9 +634,55 @@ textarea.form-control { height: auto; min-height: 88px; padding: 9px 12px; resiz
   background-size: 44px 44px;
   mask-image: radial-gradient(720px 560px at 40% 45%, #000 30%, transparent 78%);
 }
-.login-hero-inner { position: relative; z-index: 1; max-width: 520px; }
+.login-hero-inner { position: relative; z-index: 1; max-width: 560px; }
 .login-hero h1 { font-size: 34px; font-weight: 700; letter-spacing: 1px; line-height: 1.3; margin: 22px 0 14px; }
 .login-hero p { color: #9aa1b2; font-size: 14.5px; line-height: 1.8; }
+.login-hero-grid {
+  margin-top: 30px;
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px;
+}
+.login-hero-card {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 16px 16px 18px;
+  transition: transform .2s ease, background .2s ease, border-color .2s ease;
+}
+.login-hero-card:hover {
+  transform: translateY(-2px);
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(165, 180, 252, 0.35);
+}
+.login-hero-card-ic {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: linear-gradient(135deg, rgba(124, 92, 245, 0.35), rgba(79, 110, 247, 0.25));
+  border: 1px solid rgba(165, 180, 252, 0.25);
+  display: grid; place-items: center;
+  margin-bottom: 10px;
+}
+.login-hero-card-ic svg { width: 16px; height: 16px; color: #c7d2fe; }
+.login-hero-card-title { font-size: 14.5px; font-weight: 600; margin-bottom: 4px; color: #fff; }
+.login-hero-card-desc { font-size: 12.5px; color: #9aa1b2; line-height: 1.6; }
+.login-hero-strip {
+  margin-top: 28px;
+  display: flex; gap: 28px;
+  padding: 16px 20px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+}
+.login-hero-stat { display: flex; flex-direction: column; }
+.login-hero-stat .num {
+  font-size: 22px; font-weight: 700; line-height: 1.1;
+  background: linear-gradient(120deg, #c7d2fe, #a5b4fc);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.login-hero-stat .lab { font-size: 12px; color: #9aa1b2; margin-top: 4px; }
+@media (max-width: 980px) {
+  .login-hero-grid { grid-template-columns: 1fr; }
+  .login-hero-strip { gap: 18px; padding: 14px 16px; }
+  .login-hero-stat .num { font-size: 18px; }
+}
 .login-hero-points { margin-top: 34px; display: flex; flex-direction: column; gap: 14px; }
 .login-point { display: flex; gap: 12px; align-items: flex-start; }
 .login-point-ic {
@@ -760,3 +806,90 @@ textarea.form-control { height: auto; min-height: 88px; padding: 9px 12px; resiz
   display: flex; flex-direction: column; align-items: center; gap: 8px;
 }
 .tbl-empty svg { color: var(--border-strong); }
+
+/* ---------- 连接器：上手指引与键值布局 ---------- */
+.section-title { font-size: 13px; font-weight: 600; color: var(--text-2); }
+.muted { color: var(--text-3); }
+.kv-list { display: flex; flex-direction: column; gap: 0; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.kv { display: flex; align-items: baseline; gap: 12px; padding: 9px 14px; font-size: 12.5px; border-top: 1px solid var(--border); }
+.kv:first-child { border-top: none; }
+.kv .k { flex-shrink: 0; width: 210px; color: var(--text-3); }
+.kv .v { color: var(--text-1); word-break: break-all; line-height: 1.55; }
+
+.cn-guide {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-l);
+  box-shadow: var(--shadow-s);
+  overflow: hidden;
+}
+.cn-guide-hero {
+  padding: 24px 28px 20px;
+  display: flex; gap: 16px; align-items: flex-start;
+  background:
+    radial-gradient(640px 180px at 10% 0%, rgba(79, 110, 247, 0.10), transparent 62%),
+    radial-gradient(520px 180px at 92% 0%, rgba(168, 85, 247, 0.09), transparent 62%),
+    var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.cn-guide-hero-ic {
+  width: 44px; height: 44px; border-radius: 12px; flex-shrink: 0;
+  background: var(--brand-gradient); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 6px 16px rgba(79, 110, 247, 0.32);
+}
+.cn-guide-hero-ic svg { width: 22px; height: 22px; }
+.cn-guide-title { font-size: 16px; font-weight: 600; color: var(--text-1); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.cn-guide-desc { font-size: 12.5px; color: var(--text-3); margin-top: 5px; line-height: 1.7; max-width: 680px; }
+.cn-guide-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; padding: 20px 28px 4px; }
+@media (max-width: 1100px) { .cn-guide-steps { grid-template-columns: 1fr; } }
+.cn-step {
+  position: relative; display: flex; flex-direction: column; gap: 10px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px 16px 14px; background: var(--surface);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+.cn-step:hover { border-color: var(--brand-300); box-shadow: var(--shadow); transform: translateY(-2px); }
+.cn-step-head { display: flex; align-items: center; gap: 10px; }
+.cn-step-no {
+  width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0;
+  display: inline-grid; place-items: center;
+  background: var(--brand-gradient); color: #fff;
+  font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums;
+  box-shadow: 0 3px 8px rgba(79, 110, 247, 0.30);
+}
+.cn-step-no.cn-done { background: var(--ok); box-shadow: 0 3px 8px rgba(16, 185, 129, 0.28); }
+.cn-step-title { font-size: 13.5px; font-weight: 600; color: var(--text-1); }
+.cn-step-desc { font-size: 12px; color: var(--text-3); line-height: 1.75; }
+.cn-step-desc code { font-family: var(--mono); font-size: 11px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--text-2); }
+.cn-step-foot { margin-top: auto; padding-top: 4px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; min-height: 30px; }
+.cn-step-done-tip { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: #047857; background: var(--ok-bg); border: 1px solid var(--ok-border); border-radius: 6px; padding: 4px 10px; }
+.cn-step-done-tip svg { width: 13px; height: 13px; }
+.cn-guide-forms { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 4px 28px 8px; }
+@media (max-width: 1100px) { .cn-guide-forms { grid-template-columns: 1fr; } }
+.cn-form-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; background: var(--surface-2); }
+.cn-form-card:hover { border-color: var(--brand-200); }
+.cn-form-tag { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 600; border-radius: 6px; padding: 3px 9px; margin-bottom: 8px; }
+.cn-form-tag svg { width: 12px; height: 12px; }
+.cn-form-tag.t-free { color: #047857; background: var(--ok-bg); border: 1px solid var(--ok-border); }
+.cn-form-tag.t-oauth { color: #1d4ed8; background: var(--info-bg); border: 1px solid var(--info-border); }
+.cn-form-tag.t-key { color: #b45309; background: var(--warn-bg); border: 1px solid var(--warn-border); }
+.cn-form-name { font-size: 13px; font-weight: 600; color: var(--text-1); margin-bottom: 5px; }
+.cn-form-desc { font-size: 12px; color: var(--text-3); line-height: 1.7; }
+.cn-guide-tips { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 16px 28px 22px; }
+.cn-tip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; color: var(--text-3);
+  background: var(--surface-2); border: 1px dashed var(--border-strong);
+  border-radius: 999px; padding: 4px 12px;
+}
+.cn-tip svg { width: 12px; height: 12px; color: var(--brand-500); flex-shrink: 0; }
+.cn-guide-sec { padding: 14px 0 4px; }
+.cn-guide-sec + .cn-guide-sec { border-top: 1px dashed var(--border); margin-top: 10px; }
+.cn-guide-sec-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--text-1); margin-bottom: 8px; }
+.cn-guide-sec-title svg { width: 15px; height: 15px; color: var(--brand-500); }
+.cn-guide-sec p { font-size: 12.5px; color: var(--text-3); line-height: 1.8; margin: 0; }
+.cn-guide-sec p code { font-family: var(--mono); font-size: 11px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; color: var(--text-2); }
+.grid { display: grid; gap: 14px; }
+.grid-4 { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 1100px) { .grid-4 { grid-template-columns: repeat(2, 1fr); } }

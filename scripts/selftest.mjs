@@ -795,6 +795,29 @@ try {
   const createTypo = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'typo-machine', refType: 'external', scopes: ['usage.wrtie'] } })
   check('创建凭证即校验权限点（入口防拼错）', !createTypo.ok && JSON.stringify(createTypo.error).includes('非法权限点'))
 
+  // 机器角色：凭证引用组织角色（共用 iam:roles），权限随角色编辑实时同步，无需换牌
+  const mrole = await api('POST', '/api/iam/roles', { token: admin, body: { name: '机器角色自测', code: 'mrole_selftest', description: 'selftest', permissions: ['agent.read'] } })
+  check('创建机器角色（组织角色目录）', mrole.ok && !!mrole.data.id)
+  const roleCred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'role-machine', refType: 'external', roleIds: [mrole.data.id], scopes: [] } })
+  check('签发仅角色授权的机器凭证（scopes 可空）', roleCred.ok)
+  const roleCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: roleCred.data.clientId, clientSecret: roleCred.data.clientSecret } })
+  check('换牌 scope 解析自角色权限点', roleCc.ok && [...roleCc.data.principal.scopes].sort().join(',') === 'agent.read')
+  const roleMachine = roleCc.data.token
+  const roleAllowed = await api('GET', '/api/agents', { token: roleMachine })
+  check('角色授权机器可调用角色权限范围内的接口', roleAllowed.ok)
+  const mroleShrink = await api('PATCH', `/api/iam/roles/${mrole.data.id}`, { token: admin, body: { permissions: ['skill.read'] } })
+  const roleAfterShrink = await api('GET', '/api/agents', { token: roleMachine })
+  check('角色收权后存量令牌实时降级（无需换牌）', mroleShrink.ok && roleAfterShrink.status === 403)
+  const roleCc2 = await api('POST', '/api/auth/client-credentials', { body: { clientId: roleCred.data.clientId, clientSecret: roleCred.data.clientSecret } })
+  check('重新换牌按新角色范围签发', roleCc2.ok && [...roleCc2.data.principal.scopes].sort().join(',') === 'skill.read')
+  const roleCredPlus = await api('PATCH', `/api/authn/principals/${roleCred.data.principalId}`, { token: admin, body: { roleIds: [mrole.data.id], scopes: ['usage.write'] } })
+  const principalAfterPlus = (await api('GET', '/api/authn/principals', { token: admin })).data.principals.find((p) => p.id === roleCred.data.principalId)
+  check('角色 + 附加权限点并集生效（列表含角色名与解析后权限）', roleCredPlus.ok && principalAfterPlus.roleNames.includes('机器角色自测') && principalAfterPlus.resolvedScopes.includes('skill.read') && principalAfterPlus.resolvedScopes.includes('usage.write'))
+  const emptyAuthz = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'empty-machine', refType: 'external', scopes: [] } })
+  check('无角色且无权限点的凭证被拒', !emptyAuthz.ok)
+  const ghostRole = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'ghost-machine', refType: 'external', roleIds: ['pri_nonexist'], scopes: ['agent.read'] } })
+  check('引用不存在的角色被拒', !ghostRole.ok && JSON.stringify(ghostRole.error).includes('机器角色不存在'))
+
   const rotateCred = await api('POST', `/api/authn/principals/${govCred.data.principalId}/rotate-secret`, { token: admin })
   check('轮换 clientSecret（clientId 不变 + note 提示 + 无 hash 外发）', rotateCred.ok && rotateCred.data.clientId === govCred.data.clientId && !!rotateCred.data.note && !JSON.stringify(rotateCred.data).includes('Hash'))
   const oldSecretAfterRotate = await api('POST', '/api/auth/client-credentials', { body: { clientId: govCred.data.clientId, clientSecret: govCred.data.clientSecret } })
@@ -2762,6 +2785,30 @@ try {
   check('工具桥 connector_perm_group_list 返回结构化组清单', toolBridgePermList.ok && toolBridgePermList.data.value.total >= 4, JSON.stringify(toolBridgePermList.data?.value?.total))
   const toolBridgeExecute = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'connector_execute', args: { actionId: 'hackernews.get_top_stories', input: { viaTool: true } } } })
   check('工具桥 connector_execute 身份注入 + 放行', toolBridgeExecute.ok && toolBridgeExecute.data.value.status === 'ok', JSON.stringify(toolBridgeExecute.data?.value).slice(0, 220))
+
+  // -- 工具面权限收敛负向用例（架构审查 P0-1/P0-2：org 收敛 + 身份出参数层） -------
+  const toolSchemas = (await api('GET', '/api/tools/schemas', { token: admin })).data.tools ?? []
+  const connListTool = toolSchemas.find((tool) => tool.name === 'connector_connection_list')
+  const connExecTool = toolSchemas.find((tool) => tool.name === 'connector_execute')
+  check('工具 schema 不再暴露 orgId / callerId（身份与 org 收敛移出参数层）',
+    Boolean(connListTool) && !JSON.stringify(connListTool.parameters).includes('orgId')
+    && Boolean(connExecTool) && !JSON.stringify(connExecTool.parameters).includes('callerId'), JSON.stringify({ list: connListTool?.parameters, exec: connExecTool?.parameters }).slice(0, 240))
+
+  const devOrgId = devUserSearch.orgId
+  const devForge = await api('POST', '/api/tools/execute', { token: connDevLogin.data.token, body: { name: 'connector_connection_list', args: { orgId: connOrg } } })
+  const devForgeList = devForge.data?.value?.connections ?? []
+  check('低权限用户伪造 args.orgId 无效（工具仅返回其归属组织连接）',
+    devForge.ok && devForgeList.every((item) => item.ownerOrgId === devOrgId), JSON.stringify({ devOrgId, got: devForgeList.map((item) => item.ownerOrgId) }).slice(0, 240))
+
+  const devRestForge = await api('GET', `/api/connector/connections?orgId=${connOrg}`, { token: connDevLogin.data.token })
+  check('REST 路径同一套收敛（?orgId= 对非 * 用户无效）', devRestForge.ok && (devRestForge.data.connections ?? []).every((item) => item.ownerOrgId === devOrgId), JSON.stringify(devRestForge.data).slice(0, 160))
+
+  const extReader = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'ext-connector-reader', refType: 'external', scopes: ['console.login', 'connector.connection.read'] } })
+  const extCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: extReader.data.clientId, clientSecret: extReader.data.clientSecret } })
+  const extList = await api('POST', '/api/tools/execute', { token: extCc.data.token, body: { name: 'connector_connection_list', args: {} } })
+  check('外部机器（无资源归属）连接列表 fail-closed 返回空', extList.ok && extList.data.value.total === 0 && String(extList.data.value.note ?? '').includes('fail-closed'), JSON.stringify(extList.data?.value).slice(0, 220))
+  const extPermGroups = await api('POST', '/api/tools/execute', { token: extCc.data.token, body: { name: 'connector_perm_group_list', args: { orgId: connOrg } } })
+  check('外部机器权限组枚举同样 fail-closed（伪造 orgId 无效）', extPermGroups.ok && extPermGroups.data.value.total === 0, JSON.stringify(extPermGroups.data?.value).slice(0, 180))
 
   // ================================================================ 验收回归：offline 审批闭环 / 规则播种 / mcp 直调 execute
   section('验收回归（offline 闭环 · 规则播种 · mcp 直调 execute）')

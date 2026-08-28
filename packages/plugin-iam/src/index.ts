@@ -987,12 +987,10 @@ export class IamService extends Service {
     return updated
   }
 
-  /** 计算用户的实际权限点集合（角色并集，支持通配）。 */
-  userPermissions(userId: string): string[] {
-    const user = this.users().get(userId)
-    if (!user) return []
+  /** 解析一组角色的实际权限点集合（并集，支持通配）；人机两侧共用同一解析规则。 */
+  resolveRolePermissions(roleIds: string[]): string[] {
     const result = new Set<string>()
-    for (const roleId of user.roleIds) {
+    for (const roleId of roleIds) {
       const role = this.roles().get(roleId)
       if (!role) continue
       if (role.permissions.includes('*')) return ['*']
@@ -1008,6 +1006,13 @@ export class IamService extends Service {
       }
     }
     return [...result]
+  }
+
+  /** 计算用户的实际权限点集合（角色并集，支持通配）。 */
+  userPermissions(userId: string): string[] {
+    const user = this.users().get(userId)
+    if (!user) return []
+    return this.resolveRolePermissions(user.roleIds)
   }
 
   hasPermission(userId: string, point: string): boolean {

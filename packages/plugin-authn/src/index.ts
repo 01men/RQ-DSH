@@ -34,7 +34,9 @@ export interface PrincipalRecord extends RecordBase {
   status: 'active' | 'disabled'
   clientId?: string
   clientSecretHash?: string
-  /** 机器身份的权限点快照（human 实时解析角色）。 */
+  /** 机器角色：引用 iam:roles 的角色 ID，权限随角色实时同步（human 走 user.roleIds，同一存储）。 */
+  roleIds?: string[]
+  /** 附加直接权限点（与 roleIds 并集生效；须命中权限目录，防拼错）。 */
   scopes: string[]
 }
 
@@ -566,14 +568,17 @@ export class AuthnService extends Service {
     })
   }
 
-  /** 创建机器身份凭证（Client Credentials）。secret 仅返回一次；scopes 须命中权限目录（防拼错）。 */
+  /** 创建机器身份凭证（Client Credentials）。secret 仅返回一次；授权 = 机器角色（roleIds，实时同步）+ 附加权限点（scopes，须命中权限目录）。 */
   createMachineCredential(input: {
     name: string
     refType?: 'agent' | 'app' | 'external'
     refId?: string
+    roleIds?: string[]
     scopes: string[]
   }): { principal: PrincipalRecord; clientId: string; clientSecret: string } {
     this.assertMachineScopes(input.scopes)
+    this.assertMachineRoles(input.roleIds ?? [])
+    if ((input.roleIds ?? []).length === 0 && input.scopes.length === 0) throw new Error('授权不能为空：至少选择机器角色或附加权限点')
     const clientId = `mc-${newId('id').slice(3)}`
     const clientSecret = generateSecret('cs')
     const principal = this.principals().insert({
@@ -585,6 +590,7 @@ export class AuthnService extends Service {
       status: 'active',
       clientId,
       clientSecretHash: sha256Hex(clientSecret),
+      ...((input.roleIds ?? []).length > 0 ? { roleIds: input.roleIds } : {}),
       scopes: input.scopes,
     })
     return { principal, clientId, clientSecret }
@@ -597,9 +603,9 @@ export class AuthnService extends Service {
     return this.principals().update(id, { status: 'disabled' })
   }
 
-  /** 校验机器身份权限范围：恰为 ['*'] 或全部命中权限目录（防拼错，如 usage.wrtie）。 */
+  /** 校验机器身份附加权限点：恰为 ['*'] 或全部命中权限目录（防拼错，如 usage.wrtie）；可空（授权可全部来自机器角色）。 */
   private assertMachineScopes(scopes: string[]): void {
-    if (scopes.length === 0) throw new Error('scopes 不能为空')
+    if (scopes.length === 0) return
     if (scopes.includes('*')) {
       if (scopes.length !== 1) throw new Error("'*' 不可与其他权限点混用")
       return
@@ -609,13 +615,35 @@ export class AuthnService extends Service {
     if (invalid.length > 0) throw new Error(`非法权限点：${invalid.join('、')}（须为权限目录中的点，或仅 '*'）`)
   }
 
-  /** 调整机器身份权限范围；联动吊销全部存量令牌（收权即时生效，下次换牌按新范围签发）。 */
-  updateMachineScopes(id: string, scopes: string[]): PrincipalRecord {
+  /** 校验机器角色引用：角色必须真实存在（共用 iam:roles 存储）。 */
+  private assertMachineRoles(roleIds: string[]): void {
+    for (const roleId of roleIds) {
+      if (!this.ctx.iam.roles().get(roleId)) throw new Error(`机器角色不存在：${roleId}`)
+    }
+  }
+
+  /** 机器主体生效权限 = 角色权限（通配符展开，实时同步）∪ 附加直接权限点。 */
+  resolveMachineScopes(principal: PrincipalRecord): string[] {
+    const fromRoles = this.ctx.iam.resolveRolePermissions(principal.roleIds ?? [])
+    if (fromRoles.includes('*') || principal.scopes.includes('*')) return ['*']
+    const merged = new Set([...fromRoles, ...principal.scopes])
+    return [...merged]
+  }
+
+  /** 调整机器身份授权（机器角色 / 附加权限点）；联动吊销全部存量令牌（收权即时生效，下次换牌按新范围签发）。 */
+  updateMachineScopes(id: string, patch: { roleIds?: string[]; scopes?: string[] }): PrincipalRecord {
     const principal = this.principals().get(id)
     if (!principal) throw new Error(`身份不存在：${id}`)
     if (principal.type !== 'machine') throw new Error('仅机器身份支持调整权限范围')
+    const roleIds = patch.roleIds ?? principal.roleIds ?? []
+    const scopes = patch.scopes ?? principal.scopes
     this.assertMachineScopes(scopes)
-    const updated = this.principals().update(id, { scopes })
+    this.assertMachineRoles(roleIds)
+    if (roleIds.length === 0 && scopes.length === 0) throw new Error('授权不能为空：至少保留机器角色或附加权限点')
+    const updated = this.principals().update(id, {
+      ...(patch.roleIds !== undefined ? { roleIds } : {}),
+      ...(patch.scopes !== undefined ? { scopes } : {}),
+    })
     this.revokePrincipalTokens(id, '权限范围调整联动')
     return updated
   }
@@ -722,7 +750,7 @@ export class AuthnService extends Service {
     const { token, record } = this.issueToken(principal.id, {
       kind: 'machine',
       ttlHours: 2,
-      scopes: principal.scopes,
+      scopes: this.resolveMachineScopes(principal),
       issuedBy: 'client_credentials',
     })
     this.ctx.platformBus.emit(PlatformEvents.TokenIssued, { jti: record.jti, principalId: principal.id, kind: 'machine' })
@@ -830,9 +858,10 @@ export class AuthnService extends Service {
     const principal = this.principals().get(record.principalId)
     if (!principal) throw new Error('令牌主体不存在')
     if (principal.status !== 'active') throw new Error('令牌主体已禁用')
+    // 人机均实时解析：human 按用户角色、machine 按机器角色+附加权限点，角色变更即时同步到存量令牌
     const scopes = principal.type === 'human'
       ? this.ctx.iam.userPermissions(principal.refId ?? '')
-      : record.scopes
+      : this.resolveMachineScopes(principal)
     this.tokens().update(record.id, { lastUsedAt: new Date().toISOString() })
     return { principal, token: record, scopes, actChain: record.actChain }
   }

@@ -1,7 +1,7 @@
 /**
  * connector 插件对模型/CLI/工具桥暴露的工具（defineTool → ctx.tools 三端自动同契约）。
- * 权限点与 REST 对齐；connector_execute 的调用方身份由 console injectToolIdentity 注入，
- * 防止 Agent 自填身份绕过授权链（对齐 mcp_invoke 先例）。
+ * 权限点与 REST 对齐；身份与组织范围一律取自执行上下文 exec.principal（入口从令牌解析注入），
+ * schema 不声明 caller 星号参数与 orgId——上下文缺失即 fail-closed，杜绝自填身份与跨 org 枚举。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '../../platform-core/src/index.ts'
@@ -46,13 +46,15 @@ export function apply(ctx: Context) {
     description: '列出连接器连接引用（org 内；含脱敏 profile——平台永不回显凭证原文）。',
     permission: 'connector.connection.read',
     parameters: {
-      orgId: { type: 'string', description: '组织 ID（跨 org 用户仅能看自身授权范围，由服务端过滤）' },
       provider: { type: 'string', description: '按 provider 过滤' },
     },
     output: { type: 'object', additionalProperties: true },
-    async execute(args) {
+    async execute(args, exec) {
+      // org 范围由服务端从执行上下文收敛（与 REST restrictOrgScope 同一逻辑），不接受入参
+      const orgScope = ctx.connectorHub.orgScopeFor(exec.principal)
+      if (orgScope === null) return { total: 0, connections: [], note: '当前身份无组织归属，连接可见范围为空（fail-closed）' }
       const refs = ctx.connectorHub.connections().find((item) =>
-        (!args.orgId || item.ownerOrgId === args.orgId) && (!args.provider || item.provider === args.provider))
+        (orgScope === undefined || item.ownerOrgId === orgScope) && (!args.provider || item.provider === args.provider))
       return {
         total: refs.length,
         connections: refs.map((item) => ({
@@ -75,17 +77,11 @@ export function apply(ctx: Context) {
       input: { type: 'object', description: 'action 入参' },
       connection: { type: 'string', description: '指定命名连接别名（org:<orgId>:<name>）' },
       dryRun: { type: 'boolean', description: 'true 时只做授权链预演不真实调用' },
-      callerType: { type: 'string', enum: ['user', 'agent', 'app'], description: '调用方类型（服务端注入，Agent 勿自填）' },
-      callerId: { type: 'string', description: '调用方 ID（服务端注入）' },
-      callerName: { type: 'string', description: '调用方名称（服务端注入）' },
     },
     output: { type: 'object', additionalProperties: true },
-    async execute(args) {
-      return await ctx.connectorHub.invokeAction({
-        type: args.callerType ?? 'user',
-        id: args.callerId ?? 'tool-bridge',
-        name: args.callerName ?? 'tool-bridge',
-      }, {
+    async execute(args, exec) {
+      // 调用方身份取自执行上下文（入口从令牌解析），缺失即 fail-closed，不再有共享身份兜底
+      return await ctx.connectorHub.invokeAction(ctx.connectorHub.callerFromPrincipal(exec.principal), {
         actionId: args.actionId,
         input: args.input ?? {},
         ...(args.connection ? { alias: args.connection } : {}),
@@ -98,12 +94,12 @@ export function apply(ctx: Context) {
     name: 'connector_perm_group_list',
     description: '列出连接器权限组（policies/subjects/rateLimitPerMin/precheckCents 与令牌台账状态）。',
     permission: 'connector.connection.read',
-    parameters: {
-      orgId: { type: 'string', description: '按组织过滤' },
-    },
+    parameters: {},
     output: { type: 'object', additionalProperties: true },
-    async execute(args) {
-      const groups = ctx.connectorHub.permGroups().find((group) => (!args.orgId || group.orgId === args.orgId))
+    async execute(args, exec) {
+      const orgScope = ctx.connectorHub.orgScopeFor(exec.principal)
+      if (orgScope === null) return { total: 0, groups: [], note: '当前身份无组织归属，权限组可见范围为空（fail-closed）' }
+      const groups = ctx.connectorHub.permGroups().find((group) => (orgScope === undefined || group.orgId === orgScope))
       return {
         total: groups.length,
         groups: groups.map((group) => ({

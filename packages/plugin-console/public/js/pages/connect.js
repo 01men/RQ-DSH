@@ -2,18 +2,11 @@
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
 import {
-  h, $, $$, esc, toast, openModal, confirmDialog,
+  h, $, $$, esc, toast, openModal, confirmDialog, copyText,
   renderTable, statusBadge, collectForm, field, inputField, selectField, fmtTime, timeAgo,
 } from '../ui.js'
 
 const TEMPLATE_LABEL = { readonly: '只读运维', operator: '运维（读+变更）', full: '全部权限' }
-
-/** 复制到剪贴板（clipboard API 不可用时降级为全选提示）。 */
-function copyText(text) {
-  return navigator.clipboard?.writeText(text)
-    .then(() => toast('已复制到剪贴板'))
-    .catch(() => toast('复制失败，请手动选择复制', 'error'))
-}
 
 /** Agent 本体一键接入口令：复制给 Agent 的中文一句话任务模板（含必填占位）。 */
 const AGENT_NL_INSTRUCTION = `【任务】按《榕器平台 · Agent 接入规范》把下面这个 Agent 接入平台 http://192.168.0.7:7300。
@@ -484,18 +477,7 @@ export async function renderConnect(content, params) {
         </div>`,
       foot: '<button class="btn btn-primary" data-cancel>我已保存</button>',
     })
-    modal.el.querySelector('#connect-copy-code').onclick = async () => {
-      try {
-        await navigator.clipboard.writeText(created.code)
-        toast('已复制到剪贴板')
-      } catch {
-        const range = document.createRange()
-        range.selectNode(modal.el.querySelector('#connect-one-time-code'))
-        getSelection().removeAllRanges()
-        getSelection().addRange(range)
-        toast('已全选，请按 Ctrl+C 复制', 'info')
-      }
-    }
+    modal.el.querySelector('#connect-copy-code').onclick = () => copyText(created.code)
     renderConnect(content, params)
   }
 

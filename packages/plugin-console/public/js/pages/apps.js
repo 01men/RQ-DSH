@@ -2,7 +2,7 @@
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
 import {
-  h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
+  h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, fmtCost, fmtTime, timeAgo, emptyState, lineChart,
 } from '../ui.js'
@@ -218,13 +218,6 @@ async function openAppDetail(id, ctx) {
       toast('已删除'); drawer.close(); ctx.rerender()
     } catch (error) { toast(error.message, 'error') }
   }
-}
-
-/** 复制到剪贴板（降级提示）。 */
-function copyText(text) {
-  return navigator.clipboard?.writeText(text)
-    .then(() => toast('已复制到剪贴板'))
-    .catch(() => toast('复制失败，请手动选择复制', 'error'))
 }
 
 /** SSO 配置 tab：未签发 → 签发引导；已签发 → 回调管理 / 轮换 / 启停 / discovery。 */

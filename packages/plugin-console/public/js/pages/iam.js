@@ -2,17 +2,10 @@
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
 import {
-  h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
+  h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   renderTable, statusBadge, collectForm, field, inputField, selectField, textareaField,
   attachDropdown, timeAgo, emptyState,
 } from '../ui.js'
-
-/** 复制到剪贴板（clipboard API 不可用时降级全选提示）。 */
-function copyText(text) {
-  return navigator.clipboard?.writeText(text)
-    .then(() => toast('已复制到剪贴板'))
-    .catch(() => toast('复制失败，请手动选择复制', 'error'))
-}
 
 /**
  * 账号凭据展示弹窗：用户名/口令标红突出、逐项与整体一键复制；
@@ -594,6 +587,7 @@ export async function renderIam(content, params, ctx) {
             ${field('描述', inputField('description', { value: role?.description ?? '' }), { full: true })}
           </div>
           <div class="card-title mb-8">权限点（菜单 + API + 数据范围）</div>
+          <div class="muted-box mb-8" style="font-size:12px">引用此角色的<b>机器凭证</b>权限将实时同步：此处保存后立即生效，无需调整凭证。</div>
           <div style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px" id="new-role-perms">
             ${[...groups.entries()].map(([group, perms]) => `
               <div style="padding:6px 4px">
@@ -845,9 +839,7 @@ export async function renderIam(content, params, ctx) {
         foot: `<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>${isEdit ? '保存' : '创建'}</button>`,
       })
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
-      modal.el.querySelector('#conn-copy-callback').onclick = () => {
-        void navigator.clipboard?.writeText(callbackUrl).then(() => toast('已复制'))
-      }
+      modal.el.querySelector('#conn-copy-callback').onclick = () => copyText(callbackUrl)
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
         if (!data2.name) return toast('主体名称不能为空', 'error')

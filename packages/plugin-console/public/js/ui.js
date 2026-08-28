@@ -86,6 +86,37 @@ export function toast(message, type = 'success') {
   }, 2600)
 }
 
+/**
+ * 复制文本到剪贴板。navigator.clipboard 仅在安全上下文（HTTPS/localhost）可用，
+ * 控制台常经局域网 HTTP 访问，此时降级为 execCommand 方案。
+ */
+export function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text)
+      .then(() => toast('已复制到剪贴板'))
+      .catch(() => {
+        if (copyTextFallback(text)) toast('已复制到剪贴板')
+        else toast('复制失败，请手动选择复制', 'error')
+      })
+  }
+  if (copyTextFallback(text)) toast('已复制到剪贴板')
+  else toast('复制失败，请手动选择复制', 'error')
+}
+
+/** 非安全上下文下的剪贴板降级：临时 textarea + execCommand('copy')。 */
+function copyTextFallback(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none'
+  document.body.appendChild(ta)
+  ta.focus()
+  ta.select()
+  let ok = false
+  try { ok = document.execCommand('copy') } catch { ok = false }
+  ta.remove()
+  return ok
+}
+
 // ---------- Drawer ----------
 export function openDrawer({ title, sub, body, foot, wide, onClose }) {
   closeDrawer()

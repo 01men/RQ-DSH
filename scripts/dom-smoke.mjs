@@ -239,8 +239,9 @@ await test('T10 IAM 创建账号全流程 + 口令展示弹窗（iam.js:212/229/
   const orgSelect = $('.modal select[name=orgId]')
   orgSelect.value = orgSelect.querySelector('option:not([value=""])')?.value ?? orgSelect.options[0]?.value ?? ''
   $('.modal [data-ok]').click()
-  assert(await waitFor(() => $('#pw-copy')), '创建成功后应展示随机口令弹窗（仅一次）')
-  $('#pw-copy').closest('.modal').querySelector('[data-cancel]').click()
+  assert(await waitFor(() => $('#cred-password')), '创建成功后应展示凭据弹窗（用户名+口令，仅一次）')
+  assert($('#cred-password').textContent.length >= 8, '初始口令应为随机强口令')
+  $('#cred-password').closest('.modal').querySelector('[data-cancel]').click()
   assert(await modalGone(), '「我已妥善传达」应关闭口令弹窗')
   const users = (await api.get('/api/iam/users')).users
   assert(users.some((u) => u.username === 'smoke' + RUN_ID), '服务端应真实创建该账号')
@@ -287,8 +288,11 @@ await test('T14 认证中心 签发凭证弹窗（authn.js:126 回归）', async
   const { renderAuthn } = await P('pages/authn.js')
   await renderAuthn(freshContent(), new URLSearchParams(), ctxOf())
   $('#authn-credential').click()
-  assert($('.modal [data-ok]'), '签发凭证弹窗应打开')
+  // 弹窗打开前需异步拉取可绑定资源与授权目录，等待打开
+  assert(await waitFor(() => $('.modal [data-ok]')), '签发凭证弹窗应打开')
   $('.modal [name=name]').value = 'external:smoke-test'
+  // 授权选择器为必填（至少选机器角色、附加权限点或 *）；冒烟走 '*' 全权限分支
+  $('.modal #authz-star').click()
   $('.modal [data-ok]').click()
   assert(await waitFor(() => $$('.modal').some((m) => m.textContent.includes('client_secret'))), '签发后应展示凭证（仅一次）')
   const credModal = $$('.modal').find((m) => m.textContent.includes('client_secret'))

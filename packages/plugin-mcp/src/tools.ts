@@ -2,13 +2,23 @@
  * mcp 插件对模型暴露的工具。
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { defineTool } from '../../platform-core/src/index.ts'
+import { defineTool, type ToolPrincipal } from '../../platform-core/src/index.ts'
 
 export const name = 'mcp-tools'
-export const inject = ['tools', 'mcpRegistry']
+export const inject = ['tools', 'mcpRegistry', 'authn']
 
 export function apply(ctx: Context) {
   const t = ctx.tools
+
+  /** 调用方身份取自执行上下文（入口从令牌解析），缺失即 fail-closed；schema 不声明 caller* 参数。 */
+  const callerFromPrincipal = (principal?: ToolPrincipal): { type: 'user' | 'agent' | 'app'; id: string; name: string } => {
+    if (!principal) throw new Error('工具执行缺少身份上下文（fail-closed）')
+    if (principal.kind === 'human') return { type: 'user', id: principal.userId ?? principal.principalId, name: principal.name }
+    const record = ctx.authn.principals().get(principal.principalId)
+    if (record?.refType === 'agent' && record.refId) return { type: 'agent', id: record.refId, name: principal.name }
+    if (record?.refType === 'app' && record.refId) return { type: 'app', id: record.refId, name: principal.name }
+    return { type: 'app', id: principal.principalId, name: principal.name }
+  }
 
   t.register(defineTool({
     name: 'mcp_service_list',
@@ -94,23 +104,16 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'mcp_invoke',
-    description: '通过 MCP 网关调用工具（统一鉴权/限流/审计）。callerType: user|agent|app。',
+    description: '通过 MCP 网关调用工具（统一鉴权/限流/审计）。调用方身份由服务端从令牌解析。',
     permission: 'mcp.invoke',
     parameters: {
       serviceId: { type: 'string', required: true, description: '服务 ID' },
       tool: { type: 'string', required: true, description: '工具名' },
       args: { type: 'object', description: '工具参数' },
-      callerType: { type: 'string', enum: ['user', 'agent', 'app'], description: '调用方类型，默认 user' },
-      callerId: { type: 'string', description: '调用方 ID' },
-      callerName: { type: 'string', description: '调用方名称' },
     },
     output: { type: 'object', additionalProperties: true },
-    async execute(args) {
-      return await ctx.mcpRegistry.invoke({
-        type: args.callerType ?? 'user',
-        id: args.callerId ?? 'agent-tool',
-        name: args.callerName ?? 'dsh agent',
-      }, args.serviceId, args.tool, args.args ?? {})
+    async execute(args, exec) {
+      return await ctx.mcpRegistry.invoke(callerFromPrincipal(exec.principal), args.serviceId, args.tool, args.args ?? {})
     },
   }))
 

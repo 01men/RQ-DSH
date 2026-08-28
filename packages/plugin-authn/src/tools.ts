@@ -107,7 +107,7 @@ export function apply(ctx: Context) {
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args) {
-      const principal = ctx.authn.updateMachineScopes(args.principalId, args.scopes)
+      const principal = ctx.authn.updateMachineScopes(args.principalId, { scopes: args.scopes })
       const { clientSecretHash, ...safe } = principal
       void clientSecretHash
       return { ...safe, note: '存量令牌已全部吊销，机器侧需用凭证重新换牌' }

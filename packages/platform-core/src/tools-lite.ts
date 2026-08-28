@@ -16,12 +16,24 @@ export interface ContentBlock {
   text: string
 }
 
+/** 调用者身份（由入口从令牌解析后注入，工具内禁止从 args 读取身份）。 */
+export interface ToolPrincipal {
+  kind: 'human' | 'machine'
+  principalId: string
+  userId?: string
+  name: string
+  permissions: string[]
+  actChain?: Array<{ name: string; type: string }>
+}
+
 export interface ToolRunContext {
   callId: string
   name: string
   signal: AbortSignal
   agent?: unknown
   token?: symbol
+  /** 调用者身份；身份类工具在缺失时应 fail-closed 而非降级到共享身份。 */
+  principal?: ToolPrincipal
 }
 
 export interface ToolDefinitionLite {
@@ -103,7 +115,7 @@ export class ToolRuntimeLite extends Service {
     return this.definitions.has(name)
   }
 
-  async execute(input: { name: string; arguments?: unknown; signal?: AbortSignal }): Promise<ToolExecutionResultLite> {
+  async execute(input: { name: string; arguments?: unknown; signal?: AbortSignal; principal?: ToolPrincipal }): Promise<ToolExecutionResultLite> {
     const started = Date.now()
     const callId = randomUUID()
     const name = input.name
@@ -120,7 +132,7 @@ export class ToolRuntimeLite extends Service {
       }
     }
     const signal = input.signal ?? new AbortController().signal
-    const exec: ToolRunContext = { callId, name, signal }
+    const exec: ToolRunContext = { callId, name, signal, ...(input.principal ? { principal: input.principal } : {}) }
     try {
       const value = await definition.execute(structuredClone(args), exec)
       const content = safeRender(definition, args, value)

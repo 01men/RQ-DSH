@@ -12,21 +12,36 @@ export function renderLogin(app) {
             <img class="brand-mark brand-logo" src="/rongqi_ai.png" alt="榕器" style="width:46px;height:46px;border-radius:12px">
             <div style="font-size:19px;font-weight:600;letter-spacing:2px">榕器 · 企业AI资源治理平台</div>
           </div>
-          <h1>企业 AI 资源<br>统一纳管与治理平台</h1>
-          <p>组织账号、MCP 服务、Skill 市场、Agent 本体、AI 应用——五类资源一套身份、一套权限、一套审计。</p>
-          <div class="login-hero-points">
-            <div class="login-point">
-              <div class="login-point-ic">${icon('puzzle')}</div>
-              <div><b>一切皆插件</b><span>基于 DeepSeek Harness 插件架构，九大业务域即插即用</span></div>
+          <h1>让团队一起用 AI<br>把每一份资源都管起来</h1>
+          <p>组织账号、MCP 服务、Skill 市场、Agent 本体、AI 应用——五类资源一套身份、一套权限、一套审计。一个工作台，撑起企业的全部 AI 资产。</p>
+
+          <div class="login-hero-grid">
+            <div class="login-hero-card">
+              <div class="login-hero-card-ic">${icon('puzzle')}</div>
+              <div class="login-hero-card-title">一切皆插件</div>
+              <div class="login-hero-card-desc">基于 DeepSeek Harness 插件架构，九大业务域即插即用，按团队需要随用随上。</div>
             </div>
-            <div class="login-point">
-              <div class="login-point-ic">${icon('shieldCheck')}</div>
-              <div><b>注册即治理</b><span>双轨身份 + RBAC + 令牌网关，全链路审计留痕</span></div>
+            <div class="login-hero-card">
+              <div class="login-hero-card-ic">${icon('shieldCheck')}</div>
+              <div class="login-hero-card-title">注册即治理</div>
+              <div class="login-hero-card-desc">双轨身份 + RBAC + 令牌网关，从接入到调用全链路留痕，企业合规一次到位。</div>
             </div>
-            <div class="login-point">
-              <div class="login-point-ic">${icon('gitBranch')}</div>
-              <div><b>依赖可穿透</b><span>应用 → Agent → MCP/Skill 拓扑一图可视，影响面先知</span></div>
+            <div class="login-hero-card">
+              <div class="login-hero-card-ic">${icon('gitBranch')}</div>
+              <div class="login-hero-card-title">依赖可穿透</div>
+              <div class="login-hero-card-desc">应用 → Agent → MCP/Skill 拓扑一图可视，谁依赖谁、影响多大，先知再改。</div>
             </div>
+            <div class="login-hero-card">
+              <div class="login-hero-card-ic">${icon('zap')}</div>
+              <div class="login-hero-card-title">开箱即协作</div>
+              <div class="login-hero-card-desc">一份资源全员共享，权限随角色流转，团队从第一天就在同一套资产上工作。</div>
+            </div>
+          </div>
+
+          <div class="login-hero-strip">
+            <div class="login-hero-stat"><span class="num">9</span><span class="lab">业务域即插即用</span></div>
+            <div class="login-hero-stat"><span class="num">5</span><span class="lab">类资源统一纳管</span></div>
+            <div class="login-hero-stat"><span class="num">1</span><span class="lab">套身份与审计</span></div>
           </div>
         </div>
         <div class="login-hero-footer">© 2026 元冰可 · 基于 DeepSeek Harness 构建</div>
