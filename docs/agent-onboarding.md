@@ -33,11 +33,29 @@
    （换牌连续失败 5 次会锁定该 clientId 15 分钟，且逐次升级，最高 24 小时）。
    Agent 是机器身份，没有 redirect_uri，也不需要 SSO 客户端签发和用户授权页。
 
-3. 接入验证（"发一句话"）：带上一步令牌 GET /api/agents，
-   返回 200 且列表中能找到自己的 agt_ 前缀 id 即接入完成。
-   该调用以机器身份记入平台审计（action=agent.verify，控制台「审计」页可查），可作接入证据。
-   调用量与成功率由平台经网关自动统计（dshctl agent metrics <agt_...> 可查）；
-   DAU/会话数等指标提报是 AI 应用的义务，与你无关。
+3. 接入验证（"发一句话"：首次运营数据提报）：带上一步令牌
+   POST /api/agents/<本Agent的agt_...>/metrics-report  body {"dau":1,"sessions":1,"uniqueUsers":1}
+   返回 200 且 GET /api/agents/<agt_...> 中 metrics.sessions ≥ 1 即接入完成（提报动作记入平台审计）。
+   【接入义务（强制，不是倡导）】此后必须每日定时提报运营数据（与 AI 应用同级）：
+   - dau：日活跃用户数（同日多次上报取最大）；sessions：对话会话数（同日累加）；
+     uniqueUsers：对话去重用户数；有用户明细时随报 userIds 列表（平台侧即刻哈希脱敏去重，不落明文）。
+   - 重复上报安全，可带 date（YYYY-MM-DD）补录历史；漏报导致平台运营数据失真，接入验收以本接口 200 为准。
+   - 同时必须提报交互界面地址：PATCH /api/agents/<agt_...>  body {"attrs":{"entryUrl":"https://<真实交互入口>"}}
+     （白名单内字段）——平台控制台据此在 Agent 卡片与详情页提供直达入口与授权访问，PATCH 后 GET 复核。
+   - 调用量/成功率/Token 由平台经网关自动统计（dshctl agent metrics <agt_...> 可查），
+     与上述提报口径互补，不能互相替代。
+
+3.5 平台授权直达（交互界面建议支持的免登通道）：
+   控制台「打开交互界面 / 带平台身份打开」不再裸跳转：平台先签发一次性入场票据，再以
+   <entryUrl>#entry_ticket=<票据> 打开交互界面。交互界面侧只需两步：
+   - 从 URL fragment 读取 entry_ticket（fragment 不进服务端日志，优于 query）；
+   - POST /api/authn/entry-tickets/redeem  body {"ticket":"<票据>"}
+     → 响应 data.identity 即平台用户身份：sub / username / name / org{id,name,tenantId} / roles / tenant；
+       另返回 refType=agent、refId=<agt_...> 供校验票据确系发给本 Agent。
+   票据一次性（重放被拒）、默认 120 秒过期（ENTRY_TICKET_TTL_SECONDS 可调 30~600）、
+   兑换时实时校验账号状态；签发与兑换均入审计（agent.entry.ticket.*）。
+   票据无效/过期时引导用户回控制台重新点击打开即可，不要缓存重试。
+   注：签发侧授权=负责人/绑定用户/管理员（使用即授权留痕）；标准 OIDC 应用仍走 /oauth/authorize。
 
 4. 计量口径（防漏计与双计）：
    - 经平台 MCP 网关 / 模型网关的调用，平台已自动计量——禁止再手动推送，否则同一消耗双计费。
@@ -55,5 +73,6 @@
    不做上线/下线等审批操作；若任务明确要求"正式上线"或"可被应用编排"，
    先补齐治理属性（systemPromptVersion、dataClass；试运行还需 trialGroups），再走平台 L4 审批流，不得绕过。
 
-【完成后回报】Agent id（agt_ 前缀）、clientId、"发一句话"调用的状态码与关键证据
-（响应片段 + 审计页 agent.verify 记录）、控制台查看路径（http://192.168.0.7:7300/ →「Agent 本体」页）。
+【完成后回报】Agent id（agt_ 前缀）、clientId、首次运营数据提报（metrics-report）与 entryUrl 提报的
+状态码与关键证据（响应片段 + 控制台「Agent 本体 → 监控」页运营数据、审计页 agent.metrics.report 记录）、
+控制台查看路径（http://192.168.0.7:7300/ →「Agent 本体」页）。

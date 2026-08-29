@@ -4,15 +4,36 @@ import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   renderTable, statusBadge, collectForm, field, inputField, selectField, textareaField,
-  fmtNum, fmtPct, timeAgo, emptyState, sparkline, lineChart,
+  fmtNum, fmtPct, timeAgo, emptyState, sparkline, lineChart, maybeShowConceptCard,
 } from '../ui.js'
 import { buildAgentOnboardingText, openOnboardingModal } from '../onboarding.js'
+
+/** 平台授权直达：签发一次性入场票据后带 #entry_ticket 打开交互界面（裸跳转已下线）。 */
+export async function openAgentEntry(agent) {
+  try {
+    const issued = await api.post(`/api/agents/${agent.id}/entry-ticket`)
+    window.open(`${agent.attrs['entryUrl']}#entry_ticket=${encodeURIComponent(issued.ticket)}`, '_blank', 'noopener')
+    toast(`已带平台身份打开（票据 ${issued.ttlSeconds}s 内有效，已留痕审计）`)
+  } catch (error) { toast(error.message, 'error') }
+}
 
 export async function renderAgents(content, params, ctx) {
   const data = await api.get('/api/agents')
   const agents = data.agents
   const schema = data.schema
   let view = 'card'
+
+  // 首次访问概念卡（易用性整改：Agent 术语对业务成员有门槛）
+  maybeShowConceptCard(content, 'agents', {
+    icon: 'bot',
+    title: 'Agent 是什么？',
+    subtitle: 'Agent = 能替人执行任务的智能助手，注册后即拥有平台身份。',
+    points: [
+      '注册即纳管：平台颁发唯一 ID 与机器凭证，权限边界清晰。',
+      '上线要审批：上线走审批流，下线自动吊销凭证并通知绑定用户。',
+      '全程可追溯：每个 Agent 的调用、成本、审计都能穿透到人。',
+    ],
+  })
 
   content.innerHTML = `
     <div class="page-head">
@@ -77,9 +98,12 @@ export async function renderAgents(content, params, ctx) {
             <div class="res-foot">
               <span class="metric">${icon('activity', 13)}${fmtNum(agent.metrics.calls)} 调用</span>
               <span class="metric">${icon('check', 13)}${fmtPct(agent.metrics.successRate)}</span>
+              ${agent.attrs['entryUrl'] ? `<a class="btn btn-ghost btn-sm" data-entry href="javascript:void(0)">${icon('external', 13)}交互界面</a>` : ''}
               <span style="margin-left:auto" class="text-4">${esc(agent.attrs['ownerName'] ?? '')}</span>
             </div>
           </div>`)
+        const entryBtn = card.querySelector('[data-entry]')
+        if (entryBtn) entryBtn.onclick = (e) => { e.stopPropagation(); void openAgentEntry(agent) }
         card.onclick = () => openAgentDetail(agent.id, ctx)
         grid.appendChild(card)
       }
@@ -154,6 +178,8 @@ async function openAgentDetail(id, ctx) {
         <div class="tab active" data-tab="overview">概览</div>
         <div class="tab" data-tab="monitor">监控</div>
         <div class="tab" data-tab="access">权限与绑定</div>
+        <div class="tab" data-tab="resources">资源授权</div>
+        <div class="tab" data-tab="sso">${icon('key', 13)} SSO 配置</div>
         <div class="tab" data-tab="deps">依赖拓扑</div>
         <div class="tab" data-tab="audit">审计</div>
         <div class="tab" data-tab="lifecycle">生命周期</div>
@@ -171,6 +197,9 @@ async function openAgentDetail(id, ctx) {
           <div class="desc-item"><span class="k">Agent ID</span><span class="v mono">${esc(agent.id)}</span></div>
           <div class="desc-item"><span class="k">底层模型</span><span class="v">${esc(agent.attrs['model'] ?? '—')}</span></div>
           <div class="desc-item"><span class="k">提示词版本</span><span class="v mono">${esc(agent.attrs['systemPromptVersion'] ?? '未登记')}</span></div>
+          <div class="desc-item"><span class="k">交互界面</span><span class="v">${agent.attrs['entryUrl']
+            ? `<button class="btn btn-default btn-sm" id="ag-open-entry">${icon('external', 13)}带平台身份打开</button>`
+            : '<span class="text-4">未提报（接入后由 Agent 凭自身凭证 PATCH attrs.entryUrl）</span>'}</span></div>
           <div class="desc-item"><span class="k">机器凭证</span><span class="v">${agent.credential ? `<span class="badge badge-ok no-dot">已颁发</span> <span class="mono fs-12">${esc(agent.credential.clientId)}</span>` : '<span class="text-4">未颁发</span>'}</span></div>
           <div class="desc-item"><span class="k">创建时间</span><span class="v">${timeAgo(agent.createdAt)}</span></div>
           <div class="desc-item"><span class="k">最近活跃</span><span class="v">${agent.metrics.lastActiveAt ? timeAgo(agent.metrics.lastActiveAt) : '—'}</span></div>
@@ -200,17 +229,56 @@ token:    ${esc(result.token)}</div>`,
           modal.el.querySelector('#obo-copy').onclick = () => void copyText(result.token)
         } catch (error) { toast(error.message, 'error') }
       }
+      const openEntryBtn = tabBody.querySelector('#ag-open-entry')
+      if (openEntryBtn) openEntryBtn.onclick = () => void openAgentEntry(agent)
     }
     if (tab === 'monitor') {
       tabBody.innerHTML = `
         <div class="card card-pad mb-14">
-          <div class="card-title mb-8">近 14 天调用量</div>
+          <div class="card-title mb-8">运营数据（Agent 提报口径 · 接入义务）</div>
+          <div class="stat-grid mb-8" style="grid-template-columns:repeat(3,1fr)">
+            ${miniStat('users', '今日 DAU', fmtNum(agent.metrics.dau ?? 0))}
+            ${miniStat('users', '今日对话用户（去重）', fmtNum(agent.metrics.uniqueUsers ?? 0))}
+            ${miniStat('activity', '累计对话会话', fmtNum(agent.metrics.sessions))}
+          </div>
+          <div class="form-hint">由 Agent 每日主动提报（POST /api/agents/:id/metrics-report）；未提报即为本页空缺，可在审计中按 agent.metrics.report 追溯提报记录。</div>
+        </div>
+        <div class="card card-pad mb-14">
+          <div class="card-title mb-8">近 14 天调用量（网关自动归集口径）</div>
           ${lineChart([agent.metrics.series.map((s) => s.calls)], { width: 640, height: 150 })}
         </div>
         <div class="card card-pad">
           <div class="card-title mb-8">近 14 天 Token 消耗</div>
           ${barChartSafe(agent.metrics.series.map((s) => ({ label: s.date, value: s.tokens })), 640, 150)}
         </div>`
+    }
+    if (tab === 'resources') {
+      tabBody.innerHTML = '<div class="text-4 fs-12">加载中…</div>'
+      void (async () => {
+        const [pgData, svcData] = await Promise.all([
+          api.get('/api/mcp/perm-groups').catch(() => ({ groups: [] })),
+          api.get('/api/mcp/services').catch(() => ({ services: [] })),
+        ])
+        const svcName = new Map((svcData.services ?? []).map((s) => [s.id, s.name]))
+        const granted = (pgData.groups ?? []).filter((g) => (g.subjects ?? []).some((s) => s.type === 'agent' && s.id === agent.id))
+        tabBody.innerHTML = granted.length ? `
+          <div class="card-title mb-8">MCP 资源授权（Agent 视角反查）</div>
+          ${granted.map((g) => `
+            <div class="card card-pad mb-10">
+              <div class="flex"><b class="fs-13">${esc(g.name)}</b><span class="fs-12 text-4" style="margin-left:auto">${esc(g.description ?? '')}</span></div>
+              ${Object.entries(g.policies ?? {}).map(([sid, p]) => `
+                <div class="flex fs-12" style="padding:6px 0;border-bottom:1px solid var(--border)">
+                  <span class="mono">${esc(svcName.get(sid) ?? sid)}</span>
+                  <span class="badge badge-muted no-dot" style="margin-left:auto">${p.allowedTools === '*' ? '全部工具' : `${(p.allowedTools ?? []).length} 个工具`}</span>
+                  ${p.constraints?.readOnly ? '<span class="badge badge-info no-dot">只读</span>' : ''}
+                </div>`).join('')}
+            </div>`).join('')}
+          <div class="form-hint mt-8">授权关系在「MCP 服务 → 权限组 → 绑定主体」中维护；MCP 网关强制校验，未授权服务的调用直接拒绝并在审计留痕。</div>
+        ` : `
+          <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>该 Agent 尚未被任何 MCP 权限组授权——网关将拒绝其全部 MCP 调用。</span></div>
+          <div class="form-hint">前往「MCP 服务 → 权限组 → 绑定主体」勾选本 Agent，即可按服务/工具粒度授予访问范围（支持只读约束）。</div>
+        `
+      })()
     }
     if (tab === 'access') {
       tabBody.innerHTML = `
@@ -246,6 +314,45 @@ token:    ${esc(result.token)}</div>`,
           } catch (error) { toast(error.message, 'error') }
         }
       }
+    }
+    if (tab === 'sso') {
+      const entryUrl = agent.attrs['entryUrl']
+      if (!entryUrl) {
+        tabBody.innerHTML = `
+          <div class="card card-pad">
+            <div class="card-title mb-8">${icon('key', 14)} 平台授权直达（entry-ticket）</div>
+            <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>该 Agent 尚未提报交互界面地址——提报 <code class="mono">attrs.entryUrl</code> 后本页即可配置平台身份直达。</span></div>
+            <div class="form-hint">接入后由 Agent 凭自身凭证提报：PATCH /api/agents/:id {"attrs":{"entryUrl":"https://…"}}（接入提示词已含该义务）。</div>
+          </div>`
+        return
+      }
+      tabBody.innerHTML = `
+        <div class="card card-pad mb-14">
+          <div class="flex-between mb-8">
+            <div class="card-title">${icon('key', 14)} 平台授权直达（entry-ticket）</div>
+            <span class="badge badge-ok no-dot">已启用</span>
+          </div>
+          <div class="desc-grid mb-14">
+            <div class="desc-item"><span class="k">交互界面</span><span class="v mono">${esc(entryUrl)}</span></div>
+            <div class="desc-item"><span class="k">兑换端点</span><span class="v mono">POST /api/authn/entry-tickets/redeem</span></div>
+            <div class="desc-item"><span class="k">票据时效</span><span class="v">一次性 · 短时（默认 120s，ENTRY_TICKET_TTL_SECONDS 可调）</span></div>
+            <div class="desc-item"><span class="k">使用授权</span><span class="v">负责人 / 绑定用户 / 管理员（使用即授权留痕）</span></div>
+          </div>
+          <div class="flex" style="gap:8px">
+            <button class="btn btn-primary" id="ag-sso-open">${icon('external', 14)}带平台身份打开交互界面</button>
+          </div>
+          <div class="form-hint mt-8">与 AI 应用「SSO 配置」同一管理模式：标准 OIDC 接入走 /oauth/authorize（授权码 + PKCE S256）；任意 entryUrl 零改造直达走 entry-ticket。</div>
+        </div>
+        <div class="card card-pad">
+          <div class="card-title mb-8">${icon('plug', 14)} 交互界面接入（前端三步）</div>
+          <div class="muted-box mb-8" style="font-size:12.5px;line-height:2">
+            ① 控制台「带平台身份打开」→ 签发一次性票据并以 <code class="mono">#entry_ticket=&lt;ticket&gt;</code> 片段跳转交互界面<br>
+            ② 交互界面读取 URL fragment，调 <code class="mono">POST /api/authn/entry-tickets/redeem</code> body {"ticket":"…"}<br>
+            ③ 兑换响应返回平台身份 <code class="mono">identity</code>（sub / username / name / org / roles / tenant），业务权限界面内自理
+          </div>
+          <div class="form-hint">票据重放被拒、过期即焚、兑换时实时校验账号状态；签发与兑换均入审计（agent.entry.ticket.*）。</div>
+        </div>`
+      tabBody.querySelector('#ag-sso-open').onclick = () => void openAgentEntry(agent)
     }
     if (tab === 'deps') {
       const topo = agent.topology

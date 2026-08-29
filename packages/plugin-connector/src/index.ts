@@ -151,6 +151,8 @@ export class ConnectorHubService extends Service {
   private healthTimer: ReturnType<typeof setInterval> | undefined
   private patrolTimer: ReturnType<typeof setInterval> | undefined
   private reconcileTimer: ReturnType<typeof setInterval> | undefined
+  /** unhealthy 事件节流状态：gatewayId → { 已发阈值, 已发原因 }（测试 DEF-02：防审计刷屏）。 */
+  private unhealthyEmitState = new Map<string, { threshold: number; reason?: string }>()
 
   constructor(ctx: Context) {
     super(ctx, 'connectorHub')
@@ -347,11 +349,7 @@ export class ConnectorHubService extends Service {
         status: 'unavailable', unavailableReason: reason,
         health: { lastProbeAt: nowIso(), consecutiveFails: fails },
       })
-      if (fails >= 3) {
-        this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayUnhealthy, {
-          baseUrl: record.baseUrl, consecutiveFails: fails, reason, resourceType: 'connector_gateway', resourceId: record.id,
-        })
-      }
+      this.emitUnhealthyThrottled(record, fails, reason)
       return { ok: false, latencyMs: 0, reason }
     }
     const started = Date.now()
@@ -364,6 +362,7 @@ export class ConnectorHubService extends Service {
         status: 'healthy', unavailableReason: undefined,
         health: { lastProbeAt: nowIso(), latencyMs, consecutiveFails: 0 },
       })
+      this.unhealthyEmitState.delete(record.id)
       if (previous !== 'healthy') {
         this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayChanged, { baseUrl: record.baseUrl, status: 'healthy', recoveredFrom: previous })
       }
@@ -371,16 +370,13 @@ export class ConnectorHubService extends Service {
     } catch (error) {
       const fails = record.health.consecutiveFails + 1
       const reason = error instanceof Error ? error.message : String(error)
+      const latencyMs = Date.now() - started
       this.gateways().update(record.id, {
         status: 'unavailable', unavailableReason: reason,
-        health: { lastProbeAt: nowIso(), consecutiveFails: fails },
+        health: { lastProbeAt: nowIso(), latencyMs, consecutiveFails: fails },
       })
-      if (fails >= 3) {
-        this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayUnhealthy, {
-          baseUrl: record.baseUrl, consecutiveFails: fails, reason, resourceType: 'connector_gateway', resourceId: record.id,
-        })
-      }
-      return { ok: false, latencyMs: Date.now() - started, reason }
+      this.emitUnhealthyThrottled(record, fails, reason)
+      return { ok: false, latencyMs, reason }
     }
   }
 
@@ -393,17 +389,32 @@ export class ConnectorHubService extends Service {
       status: 'unavailable', unavailableReason: reason,
       health: { ...record.health, lastProbeAt: nowIso(), consecutiveFails: fails },
     })
-    if (fails >= 3) {
-      this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayUnhealthy, {
-        baseUrl: record.baseUrl, consecutiveFails: fails, reason, resourceType: 'connector_gateway', resourceId: record.id,
-      })
-    }
+    this.emitUnhealthyThrottled(record, fails, reason)
   }
 
   private noteSuccessSignal(): void {
     const record = this.gateways().all()[0]
-    if (!record || (record.health.consecutiveFails === 0 && record.status === 'healthy')) return
+    if (!record) return
+    this.unhealthyEmitState.delete(record.id)
+    if (record.health.consecutiveFails === 0 && record.status === 'healthy') return
     this.gateways().update(record.id, { status: 'healthy', unavailableReason: undefined, health: { ...record.health, consecutiveFails: 0 } })
+  }
+
+  /**
+   * 网关不健康事件按递增阈值节流（3→10→30→100…），失败原因变化时立即补发一次；
+   * 恢复健康即清零。测试 DEF-02：探活每 30s 一轮，原实现 fails≥3 后每轮都发事件，
+   * 长故障（如部署 env 缺失未修复）一天可产生近 3000 条重复审计与工作台事件流刷屏。
+   */
+  private emitUnhealthyThrottled(record: GatewayRecord, fails: number, reason: string): void {
+    const state = this.unhealthyEmitState.get(record.id)
+    const thresholds = [3, 10, 30, 100, 300, 1000, 3000, 10000]
+    const next = thresholds.find((t) => t > (state?.threshold ?? 0))
+    const reasonChanged = state !== undefined && state.reason !== reason
+    if (!reasonChanged && (next === undefined || fails < next)) return
+    this.unhealthyEmitState.set(record.id, { threshold: next ?? state!.threshold, reason })
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorGatewayUnhealthy, {
+      baseUrl: record.baseUrl, consecutiveFails: fails, reason, resourceType: 'connector_gateway', resourceId: record.id,
+    })
   }
 
   /** connector.offline 执行器语义①：网关维护下线（fail-closed 立即生效，探活跳过防自动复活）。 */

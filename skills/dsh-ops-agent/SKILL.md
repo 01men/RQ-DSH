@@ -6,7 +6,7 @@ Agent 注册与属性登记、用户绑定、试运行/上线/下线生命周期
 
 ## 调用方式（工具优先）
 平台已把运维能力注册为 dsh 工具，**回答现状问题（查询/盘点/排障）必须直接调用工具获取真实数据，禁止凭记忆回答**：
-- agent_list / agent_get / agent_metrics / agent_offline / agent_bind_user
+- agent_list / agent_get / agent_metrics / agent_metrics_report / agent_offline / agent_bind_user
 （工具参数见各工具 schema；下文手册中的 `dshctl ...` 为「平台独立部署 + HTTP API 运维」场景的 CLI 备选，需 DSHCTL_TOKEN/DSHCTL_USER，在 dsh 会话内一般用不到。）
 
 ## 前置条件
@@ -25,8 +25,10 @@ agent.write / agent.approve 权限；上线审批需第二管理员配合。
 
 ### 场景 2：注册新 Agent
 `dshctl agent create --name=<名称> --model=deepseek-chat --riskLevel=low`
-→ 返回机器凭证（仅一次；scopes 含 mcp.invoke/skill.read/agent.read/usage.write，Agent 可自推直连消耗的计量）。
+→ 返回机器凭证（仅一次；scopes 含 mcp.invoke/skill.read/agent.read/agent.write/usage.write，Agent 可自推直连消耗的计量）。
 补全 systemPromptVersion/dataClass 后方可上线。
+运营数据提报是接入义务（与 AI 应用同级）：Agent 必须每日 POST /api/agents/<id>/metrics-report
+（dau/sessions/uniqueUsers，明细可传 userIds 平台侧哈希脱敏），并 PATCH attrs.entryUrl 提报交互界面地址。
 凭证 secret 丢失/泄露：找管理员执行 `dshctl credential rotate <principalId>` 轮换（clientId 不变、旧值立即失效），无需重新注册。
 
 ### 场景 3：上线流程

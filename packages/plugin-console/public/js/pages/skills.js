@@ -4,7 +4,7 @@ import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
   statusBadge, collectForm, field, inputField, selectField, textareaField,
-  fmtNum, timeAgo, emptyState,
+  fmtNum, timeAgo, emptyState, maybeShowConceptCard,
 } from '../ui.js'
 
 const COVERS = ['linear-gradient(135deg,#4f6ef7,#7c5cf5)', 'linear-gradient(135deg,#10b981,#34d399)', 'linear-gradient(135deg,#f59e0b,#fbbf24)', 'linear-gradient(135deg,#8b5cf6,#a78bfa)', 'linear-gradient(135deg,#3b82f6,#60a5fa)', 'linear-gradient(135deg,#ef4444,#f87171)']
@@ -12,6 +12,17 @@ const COVER_ICONS = { '办公提效': 'file', '研发效能': 'terminal', '客�
 
 export async function renderSkills(content, params, ctx) {
   const data = await api.get('/api/skills')
+  // 首次访问概念卡（易用性整改：Skill 术语对业务成员有门槛）
+  maybeShowConceptCard(content, 'skills', {
+    icon: 'sparkles',
+    title: 'Skill 是什么？',
+    subtitle: 'Skill = 给 Agent 用的「专项技能包」，像手机装 App 一样即装即用。',
+    points: [
+      '能做什么：生成周报、读取合同要点、分析销售数据等专项任务。',
+      '怎么上架：提交 → 自动安全扫描 → 两级审批 → 版本化上架，高风险需安全团队加签。',
+      '怎么使用：按场景在市场挑选，下载安装即登记依赖，随时可停用。',
+    ],
+  })
 
   content.innerHTML = `
     <div class="page-head">

@@ -4,6 +4,7 @@ import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   renderTable, statusBadge, collectForm, field, inputField, selectField, textareaField,
+  searchableSelectField, mountSearchableSelects,
   attachDropdown, timeAgo, emptyState,
 } from '../ui.js'
 
@@ -209,12 +210,13 @@ export async function renderIam(content, params, ctx) {
           const excluded = new Set()
           const collectSubtree = (n) => { excluded.add(n.id); (n.children ?? []).forEach(collectSubtree) }
           collectSubtree(node)
-          const candidates = flattenTree(treeData).filter((o) => !excluded.has(o.id))
+          const candidates = flattenTreePaths(treeData).filter((o) => !excluded.has(o.value))
           const modal = openModal({
             title: `调整上级组织（${esc(node.name)}）`,
-            body: field('上级组织', selectField('parentId', [{ value: '', label: '（作为顶级组织）' }, ...candidates.map((o) => ({ value: o.id, label: '　'.repeat(o.depth) + o.name }))], { value: node.parentId ?? '' })),
+            body: field('上级组织', searchableSelectField('parentId', candidates, { value: node.parentId ?? '', emptyLabel: '（作为顶级组织）', placeholder: '点击选择上级组织' })),
             foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
           })
+          mountSearchableSelects(modal.body)
           modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
           modal.el.querySelector('[data-ok]').onclick = async () => {
             const data = collectForm(modal.body)
@@ -277,7 +279,7 @@ export async function renderIam(content, params, ctx) {
               <div class="flex" style="gap:10px">
                 <div class="avatar sm">${esc(u.displayName.slice(0, 1))}</div>
                 <div>
-                  <div class="col-strong">${esc(u.displayName)}</div>
+                  <div class="col-strong">${esc(u.displayName)}${nameStatusMismatch(u)}</div>
                   <div class="col-sub">@${esc(u.username)}</div>
                 </div>
               </div>`,
@@ -308,16 +310,18 @@ export async function renderIam(content, params, ctx) {
           <div class="form-grid">
             ${field('姓名', inputField('displayName'), { required: true })}
             ${field('用户名', inputField('username', { placeholder: '字母数字，如 zhangsan' }), { required: true })}
-            ${field('所属组织', selectField('orgId', flattenTree(tree).map((o) => ({ value: o.id, label: '　'.repeat(o.depth) + o.name }))), { required: true })}
+            ${field('所属组织', searchableSelectField('orgId', flattenTreePaths(tree), { placeholder: '点击选择：输入部门名搜索，显示「法人 / 部门」全路径' }), { required: true, full: true, hint: '同名部门跨法人重复，请认准完整路径再选' })}
             ${field('职位', inputField('title'))}
             ${field('邮箱', inputField('email', { placeholder: '选填，默认 username@yuanbingke.com' }), { full: true })}
           </div>
           <div class="form-hint">创建后将生成随机初始口令（仅展示一次），账号状态为「正常」。</div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
+      mountSearchableSelects(modal.body)
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const data = collectForm(modal.body)
+        if (!data.orgId) return toast('请选择所属组织（支持搜索）', 'error')
         try {
           const result = await api.post('/api/iam/users', data)
           modal.close()
@@ -340,10 +344,11 @@ export async function renderIam(content, params, ctx) {
       const modal = openModal({
         title: '新建组织',
         body: `
-          ${field('上级组织', selectField('parentId', [{ value: '', label: '（作为顶级组织）' }, ...flattenTree(tree).map((o) => ({ value: o.id, label: '　'.repeat(o.depth) + o.name }))], { value: parentId ?? '' }))}
+          ${field('上级组织', searchableSelectField('parentId', flattenTreePaths(tree), { value: parentId ?? '', emptyLabel: '（作为顶级组织）', placeholder: '点击选择上级组织' }), { hint: '选择后新组织挂在「法人 / 部门」路径下' })}
           ${field('组织名称', inputField('name'), { required: true })}`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
+      mountSearchableSelects(modal.body)
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const data = collectForm(modal.body)
@@ -431,10 +436,11 @@ export async function renderIam(content, params, ctx) {
               ${field('职位', inputField('title', { value: user.title }))}
               ${field('邮箱', inputField('email', { value: user.email }))}
               ${field('手机号', inputField('phone', { value: user.phone }))}
-              ${field('所属组织', selectField('orgId', flattenTree(tree2).map((o) => ({ value: o.id, label: '　'.repeat(o.depth) + o.name })), { value: user.orgId }), { full: true })}
+              ${field('所属组织', searchableSelectField('orgId', flattenTreePaths(tree2), { value: user.orgId, placeholder: '点击选择：输入部门名搜索，显示「法人 / 部门」全路径' }), { full: true, hint: '同名部门跨法人重复，请认准完整路径再选' })}
             </div>`,
           foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
         })
+        mountSearchableSelects(modal.body)
         modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
         modal.el.querySelector('[data-ok]').onclick = async () => {
           try {
@@ -713,11 +719,12 @@ export async function renderIam(content, params, ctx) {
           </div>
           <div class="form-hint" style="margin:0 0 10px">动态组规则：按部门子树 + 职位过滤，实时生效</div>
           <div class="form-grid">
-            ${field('圈人部门（动态组）', selectField('ruleOrgId', [{ value: '', label: '（不限）' }, ...flattenTree(tree).map((o) => ({ value: o.id, label: '　'.repeat(o.depth) + o.name }))], { value: group?.rule?.orgIds?.[0] ?? '' }))}
+            ${field('圈人部门（动态组）', searchableSelectField('ruleOrgId', flattenTreePaths(tree), { value: group?.rule?.orgIds?.[0] ?? '', emptyLabel: '（不限）', placeholder: '点击选择部门' }))}
             ${field('职位过滤（动态组）', inputField('ruleTitle', { value: group?.rule?.title, placeholder: '如：算法工程师' }))}
           </div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
       })
+      mountSearchableSelects(modal.body)
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const data2 = collectForm(modal.body)
@@ -740,8 +747,9 @@ export async function renderIam(content, params, ctx) {
   async function renderConnectors(params2, ctx2) {
     const [data, orgs] = await Promise.all([api.get('/api/iam/connectors'), api.get('/api/iam/orgs')])
     const configs = data.configs ?? []
-    // 目标组织展示/下拉共用：平铺组织列表按 parentId 还原层级后拍平成缩进序列
+    // 目标组织展示/下拉共用：平铺组织列表按 parentId 还原层级后拍平（带全路径，UI-04）
     const orgOptions = flattenOrgList(orgs)
+    const orgPathOptions = buildOrgPaths(orgs)
     const orgNameOf = (id) => orgOptions.find((o) => o.id === id)?.name
     // 回调地址按当前访问地址自动生成（与后端发起授权时按 Host 头拼接的 redirect_uri 一致），
     // 直接复制到钉钉开发者后台的登录重定向地址即可，无需手填。全部主体共用同一回调地址。
@@ -848,11 +856,12 @@ export async function renderIam(content, params, ctx) {
               { value: 'third_party_wins', label: '以三方为准' },
               { value: 'platform_wins', label: '以平台为准' },
             ], { value: config?.conflictStrategy ?? 'manual' }))}
-            ${field('目标组织', selectField('targetOrgId', [{ value: '', label: '（平台根）' }, ...orgOptions.map((o) => ({ value: o.id, label: '　'.repeat(o.depth) + o.name }))], { value: config?.targetOrgId ?? '' }), { hint: '同步下来的三方部门与人员挂到该组织下，空值为平台根' })}
+            ${field('目标组织', searchableSelectField('targetOrgId', orgPathOptions, { value: config?.targetOrgId ?? '', emptyLabel: '（平台根）', placeholder: '点击选择目标组织' }), { hint: '同步下来的三方部门与人员挂到该组织下，空值为平台根' })}
             ${field(' ', `<label class="flex"><input type="checkbox" name="loginEnabled" ${config?.loginEnabled ? 'checked' : ''} style="accent-color:var(--brand-500)"> 允许钉钉扫码登录控制台</label>`)}
           </div>`,
         foot: `<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>${isEdit ? '保存' : '创建'}</button>`,
       })
+      mountSearchableSelects(modal.body)
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.el.querySelector('#conn-copy-callback').onclick = () => copyText(callbackUrl)
       modal.el.querySelector('[data-ok]').onclick = async () => {
@@ -895,8 +904,14 @@ export async function renderIam(content, params, ctx) {
 
   // ------------------------------------------------------------------
   async function renderConflicts() {
-    const data = await api.get('/api/iam/conflicts')
+    const [data, orgs] = await Promise.all([
+      api.get('/api/iam/conflicts'),
+      api.get('/api/iam/orgs'),
+    ])
     const pending = data.conflicts
+    // UI-07：org_id 原文（org_xxx）对业务用户无意义且无法判断差异实质，
+    // 统一解析为「法人 / 部门」全路径展示；同名部门靠路径区分。
+    const orgPathById = new Map(buildOrgPaths(orgs).map((opt) => [opt.value, opt.label]))
     $('#conflict-count').textContent = String(pending.length)
     $('#iam-actions').innerHTML = ''
     const body = $('#iam-body')
@@ -938,11 +953,15 @@ export async function renderIam(content, params, ctx) {
       })
       body.appendChild(card)
     }
-    function diffRows(data) {
-      return Object.entries(data ?? {}).filter(([k]) => k !== 'jobNumber').map(([k, v]) => `
+    function diffRows(rowData) {
+      return Object.entries(rowData ?? {}).filter(([k]) => k !== 'jobNumber').map(([k, v]) => {
+        // 部门差异显示完整路径而非原始 ID；组织已被删除时如实说明
+        const value = k === 'orgId' ? (orgPathById.get(String(v)) ?? `${v}（该组织已不在平台组织树中）`) : v
+        return `
         <div class="flex" style="padding:3px 0;font-size:12.5px">
-          <span class="text-4" style="width:64px">${fieldName(k)}</span><span>${esc(String(v ?? '—'))}</span>
-        </div>`).join('')
+          <span class="text-4" style="width:70px;flex-shrink:0">${fieldName(k)}</span><span>${esc(String(value ?? '—'))}</span>
+        </div>`
+      }).join('')
     }
   }
 }
@@ -951,11 +970,22 @@ export async function renderIam(content, params, ctx) {
 function providerName(provider) {
   return { dingtalk: '钉钉', feishu: '飞书', wecom: '企业微信' }[provider] ?? provider
 }
+/**
+ * UI-05：姓名里含「已废除/离职/退休」等状态字样但账号状态仍是「正常」时给出提示徽标。
+ * 根因多为改名后未停用（数据卫生），提示管理员进入详情核实处理。
+ */
+function nameStatusMismatch(user) {
+  if (user.status !== 'active') return ''
+  const keywords = ['废除', '已废', '离职', '退休', '辞退', '解聘', '停用', '注销', '删除']
+  const hit = keywords.find((kw) => String(user.displayName ?? '').includes(kw))
+  if (!hit) return ''
+  return ` <span class="badge badge-warn no-dot" title="姓名含「${esc(hit)}」字样，但账号状态仍为「正常」，可能是改名后未停用，请进入详情核实">名称疑似已${esc(hit)}？</span>`
+}
 function strategyName(strategy) {
   return { manual: '人工确认', third_party_wins: '以三方为准', platform_wins: '以平台为准' }[strategy] ?? strategy
 }
 function fieldName(key) {
-  return { displayName: '姓名', title: '职位', orgId: '部门', orgName: '部门', unionId: '三方ID' }[key] ?? key
+  return { displayName: '姓名', title: '职位', orgId: '所属部门', orgName: '部门名称', unionId: '三方ID' }[key] ?? key
 }
 function syncStatCard(label, value, color) {
   return `
@@ -968,6 +998,18 @@ function flattenTree(nodes, depth = 0, out = []) {
   for (const node of nodes ?? []) {
     out.push({ id: node.id, name: node.name, depth })
     flattenTree(node.children ?? [], depth + 1, out)
+  }
+  return out
+}
+/**
+ * 拍平组织树为带「法人 / 部门」完整路径的选项序列（UI-04）：
+ * 跨法人同名部门极多，仅凭名称无法区分，选项统一展示全路径并按顶级组织（法人）分组。
+ */
+function flattenTreePaths(nodes, parentPath = [], rootName = '', out = []) {
+  for (const node of nodes ?? []) {
+    const path = [...parentPath, node.name]
+    out.push({ value: node.id, label: path.join(' / '), group: rootName || node.name })
+    flattenTreePaths(node.children ?? [], path, rootName || node.name, out)
   }
   return out
 }
@@ -989,6 +1031,27 @@ function flattenOrgList(orgs) {
   }
   walk('', 0)
   return out
+}
+/** 平铺组织列表 → 带「法人 / 部门」全路径的可搜索选项（UI-04，与 flattenTreePaths 输出同构）。 */
+function buildOrgPaths(orgs) {
+  const byId = new Map((orgs ?? []).map((o) => [o.id, o]))
+  const pathOf = (org) => {
+    const parts = []
+    let cur = org
+    const seen = new Set()
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id)
+      parts.unshift(cur.name)
+      cur = cur.parentId ? byId.get(cur.parentId) : undefined
+    }
+    return parts.join(' / ')
+  }
+  const ordered = flattenOrgList(orgs)
+  return ordered.map((item) => {
+    const org = byId.get(item.id)
+    const label = pathOf(org)
+    return { value: item.id, label, group: label.split(' / ')[0] ?? label }
+  })
 }
 function debounce(fn, ms) {
   let timer

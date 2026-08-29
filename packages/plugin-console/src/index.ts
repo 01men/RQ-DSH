@@ -20,7 +20,7 @@ import { seedAll } from './seed.ts'
 export const name = 'console'
 export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
-  'iam', 'authn', 'oidc', 'audit', 'usage', 'billing', 'market', 'modelGateway',
+  'iam', 'authn', 'oidc', 'entryTickets', 'audit', 'usage', 'billing', 'market', 'modelGateway',
   'mcpRegistry', 'nasRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
   'connectorHub',
 ]
@@ -29,6 +29,9 @@ interface CallerInfo {
   kind: 'human' | 'machine'
   principalId: string
   userId?: string
+  /** machine 专属：凭证关联资源（refType=agent 时 modelgw 等调用以 agent:<refId> 为计量主体）。 */
+  refType?: string
+  refId?: string
   name: string
   permissions: string[]
   actChain: Array<{ name: string; type: string }>
@@ -49,6 +52,8 @@ const PUBLIC_PATHS = new Set([
   '/api/market/developers/login',
   // 接入码本身即凭证（一次性 + TTL + 按 IP 失败锁定），enroll 端点公开
   '/api/connect/enroll',
+  // 平台授权直达：一次性短时票据回平台换取身份（票据本身即临时凭证）
+  '/api/authn/entry-tickets/redeem',
 ])
 
 /** 动态路径的公开前缀（OIDC 授权页查询：仅回显客户端名/scope，不泄露 redirect_uri）。 */
@@ -155,6 +160,7 @@ export function apply(ctx: Context) {
         kind: verified.principal.type,
         principalId: verified.principal.id,
         ...(verified.principal.type === 'human' && verified.principal.refId ? { userId: verified.principal.refId } : {}),
+        ...(verified.principal.type === 'machine' ? { refType: verified.principal.refType, refId: verified.principal.refId } : {}),
         name: verified.principal.name,
         permissions: verified.scopes,
         actChain: verified.actChain,
@@ -493,7 +499,7 @@ export function apply(ctx: Context) {
     const pendingApprovals = ctx.audit.approvals().find((item) => item.status === 'pending')
     const unreadAlerts = ctx.audit.alerts().find((item) => !item.read)
     const recentEvents = ctx.platformBus.recent(20).map((event) => ({
-      name: event.name, at: event.at, payload: summarize(event.payload),
+      name: event.name, at: event.at, payload: summarize(event.payload), detail: summarizeDetail(event.payload),
     }))
     const costTrend = ctx.audit.costReport('date').sort((a, b) => a.key.localeCompare(b.key)).slice(-14)
     return {
@@ -663,14 +669,21 @@ export function apply(ctx: Context) {
   })
 
   // 资源/主体的展示名解析（成本报表与效益分析共用）
+  const RESOURCE_KIND_LABELS: Record<string, string> = {
+    mcp: 'MCP 服务', model: '模型路由', skill: 'Skill', nas: 'NAS 存储', app: 'AI 应用', agent: 'Agent',
+  }
   const labelOfResource = (resource: string) => {
-    const [kind, key] = [resource.slice(0, resource.indexOf(':')), resource.slice(resource.indexOf(':') + 1)]
-    if (kind === 'mcp') return ctx.mcpRegistry.services().findOne((item) => item.slug === key)?.name ?? resource
-    if (kind === 'model') return ctx.modelGateway.models().findOne((item) => item.slug === key)?.displayName ?? resource
-    if (kind === 'skill') return ctx.skillHub.skills().get(key)?.name ?? resource
-    if (kind === 'nas') return ctx.nasRegistry.get(key)?.name ?? resource
-    if (kind === 'app') return ctx.resourceCore.list('app').find((item) => item.slug === key)?.name ?? resource
-    return resource
+    const idx = resource.indexOf(':')
+    const kind = idx >= 0 ? resource.slice(0, idx) : ''
+    const key = idx >= 0 ? resource.slice(idx + 1) : resource
+    const unnamed = `未命名${RESOURCE_KIND_LABELS[kind] ?? ''}资产`
+    if (kind === 'mcp') return ctx.mcpRegistry.services().findOne((item) => item.slug === key)?.name ?? unnamed
+    if (kind === 'model') return ctx.modelGateway.models().findOne((item) => item.slug === key)?.displayName ?? unnamed
+    if (kind === 'skill') return ctx.skillHub.skills().get(key)?.name ?? unnamed
+    if (kind === 'nas') return ctx.nasRegistry.get(key)?.name ?? unnamed
+    if (kind === 'app') return ctx.resourceCore.list('app').find((item) => item.slug === key)?.name ?? unnamed
+    // 资产已删除/未注册时不再以原始 ID 充当名称（消耗榜出现两遍 nas:nas_xxx 的可读性问题）
+    return unnamed
   }
   const labelOfPrincipal = (principal: string) => {
     if (principal.startsWith('org:')) return ctx.iam.orgs().get(principal.slice(4))?.name ?? principal
@@ -863,6 +876,12 @@ export function apply(ctx: Context) {
     const orgId = exchange.query.get('orgId') ?? undefined
     const status = exchange.query.get('status') ?? undefined
     const q = exchange.query.get('q') ?? undefined
+    // 分页（测试 §9）：page/pageSize 可选，缺省返回全量保持旧客户端兼容
+    const pageParam = Number(exchange.query.get('page') ?? 0)
+    const sizeParam = Number(exchange.query.get('pageSize') ?? 0)
+    const paginated = Number.isInteger(pageParam) && pageParam > 0 && Number.isInteger(sizeParam) && sizeParam > 0
+    const page = paginated ? pageParam : 0
+    const pageSize = paginated ? Math.min(500, sizeParam) : 0
     const orgScope = orgId ? new Set(ctx.iam.orgSubtreeIds(orgId)) : undefined
     const users = ctx.iam.users().find((user) => {
       if (status && user.status !== status) return false
@@ -870,9 +889,11 @@ export function apply(ctx: Context) {
       if (q && !`${user.displayName}${user.username}${user.email}`.toLowerCase().includes(q.toLowerCase())) return false
       return true
     }).sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    const sliced = page > 0 && pageSize > 0 ? users.slice((page - 1) * pageSize, page * pageSize) : users
     return {
       total: users.length,
-      users: users.map((user) => decorateUser(ctx, user)),
+      ...(page > 0 && pageSize > 0 ? { page, pageSize } : {}),
+      users: sliced.map((user) => decorateUser(ctx, user)),
     }
   })
 
@@ -2321,6 +2342,17 @@ export function apply(ctx: Context) {
     return agent
   })
 
+  // 运营数据提报（Agent 接入义务，与 AI 应用 metrics-report 同级）：dau 同日取最大、会话数累加、用户哈希去重并集
+  guarded('POST', '/api/agents/:id/metrics-report', 'agent.write', (exchange) => {
+    const id = exchange.params['id']!
+    const input = body<{ dau?: number; sessions?: number; userIds?: string[]; uniqueUsers?: number; date?: string }>(exchange)
+    ctx.agentRegistry.reportUsage(id, input)
+    const agent = ctx.resourceCore.get('agent', id)!
+    changeLog(exchange, 'agent.metrics.report', 'agent', id, agent.name,
+      `dau=${input.dau ?? '-'} sessions=${input.sessions ?? '-'} users=${input.userIds?.length ?? input.uniqueUsers ?? '-'} date=${input.date ?? '当日'}`)
+    return ctx.agentRegistry.metrics(id)
+  })
+
   guarded('POST', '/api/agents/:id/bindings', 'agent.write', (exchange) => {
     const { userId } = body<{ userId: string }>(exchange)
     const binding = ctx.agentRegistry.bindUser(exchange.params['id']!, userId, caller(exchange).name)
@@ -2375,6 +2407,68 @@ export function apply(ctx: Context) {
     const result = ctx.agentRegistry.issueOnBehalfOfToken(exchange.params['id']!, verified)
     changeLog(exchange, 'agent.obo_token', 'agent', exchange.params['id']!, '', `链路：${result.actChain.map((item) => (item as { name: string }).name).join(' → ')}`)
     return result
+  })
+
+  // -- 平台授权直达（entry-ticket）：控制台「打开交互界面/打开应用」带平台身份访问 ---------
+  /**
+   * 签发 Agent 入场票据（human-only）：「使用即授权留痕」——仅 owner、绑定用户或管理员可直达，
+   * 未授权用户被拒并指路绑定流程。票据一次性 + 短时（默认 120s），Agent 前端以
+   * POST /api/authn/entry-tickets/redeem 兑换平台身份（详见 docs/agent-onboarding.md）。
+   */
+  guarded('POST', '/api/agents/:id/entry-ticket', 'agent.read', (exchange) => {
+    const info = caller(exchange)
+    if (info.kind !== 'human' || !info.userId) {
+      exchange.fail(403, 'FORBIDDEN', '平台授权直达仅限登录用户（human），机器身份不可签发入场票据')
+      return
+    }
+    const id = exchange.params['id']!
+    const agent = ctx.resourceCore.get('agent', id)
+    if (!agent) throw new Error(`Agent 不存在：${id}`)
+    const isOwner = agent.ownerId === info.userId
+    const isBound = ctx.agentRegistry.boundUsers(id).some((item) => item.userId === info.userId)
+    const isAdmin = info.permissions.includes('*') || info.permissions.includes('agent.write')
+    if (!isOwner && !isBound && !isAdmin) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId, actorName: info.name, point: `agent.entry(owner:${id})`, path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', `仅 Agent 负责人或绑定用户可直达「${agent.name}」交互界面（使用即授权留痕），请联系负责人在「权限与绑定」中绑定`)
+      return
+    }
+    const issued = ctx.entryTickets.issue({ refType: 'agent', refId: id, userId: info.userId, userName: info.name })
+    changeLog(exchange, 'agent.entry.ticket.issue', 'agent', id, agent.name, `一次性入场票据（${issued.ttlSeconds}s）`)
+    return issued
+  })
+
+  /** 签发应用入场票据（human-only）：登录用户即可领取（应用内业务权限由应用自身裁决）。 */
+  guarded('POST', '/api/apps/:id/entry-ticket', 'app.read', (exchange) => {
+    const info = caller(exchange)
+    if (info.kind !== 'human' || !info.userId) {
+      exchange.fail(403, 'FORBIDDEN', '平台授权直达仅限登录用户（human），机器身份不可签发入场票据')
+      return
+    }
+    const id = exchange.params['id']!
+    const app = ctx.resourceCore.get('app', id)
+    if (!app) throw new Error(`应用不存在：${id}`)
+    const issued = ctx.entryTickets.issue({ refType: 'app', refId: id, userId: info.userId, userName: info.name })
+    changeLog(exchange, 'app.entry.ticket.issue', 'app', id, app.name, `一次性入场票据（${issued.ttlSeconds}s）`)
+    return issued
+  })
+
+  /** 兑换入场票据（公开端点，票据本身即临时凭证）：一次性消费 → 实时校验用户状态 → 交付平台身份。 */
+  http.register('POST', '/api/authn/entry-tickets/redeem', (exchange) => {
+    const input = body<{ ticket?: string }>(exchange)
+    const clientIp = String(exchange.raw.socket?.remoteAddress ?? 'unknown')
+    try {
+      const result = ctx.entryTickets.redeem(String(input.ticket ?? ''), clientIp)
+      ctx.audit.record({
+        type: 'auth', actorType: 'human', actorId: result.identity.sub, actorName: result.identity.name,
+        action: `${result.refType}.entry.ticket.redeem`, resourceType: result.refType, resourceId: result.refId,
+        resourceName: result.refId, result: 'ok', detail: '平台授权直达票据兑换（身份已交付目标交互界面）',
+      })
+      exchange.ok(result)
+    } catch (error) {
+      exchange.fail(400, 'ENTRY_TICKET_INVALID', error instanceof Error ? error.message : String(error))
+    }
   })
 
   // -- App ----------------------------------------------------------------
@@ -2959,7 +3053,10 @@ export function apply(ctx: Context) {
     const orgId = input.orgId
       ?? (info.kind === 'human' && info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined)
     if (!orgId) throw new Error('未指定计费组织（orgId），且调用者无可归属组织')
-    const subject = info.kind === 'human' ? `user:${info.userId ?? info.principalId}` : `app:${info.principalId}`
+    // 计量主体：human=user:<id>；machine 凭证关联 Agent 时=agent:<refId>（usage.recorded 回灌 Agent 台账的依据），其余机器=app:<principalId>
+    const subject = info.kind === 'human'
+      ? `user:${info.userId ?? info.principalId}`
+      : (info.refType === 'agent' && info.refId ? `agent:${info.refId}` : `app:${info.principalId}`)
     return await ctx.modelGateway.invoke({
       model: input.model,
       messages: input.messages,
@@ -3244,14 +3341,40 @@ const NAS_DOWNLOAD_MIME: Record<string, string> = {
   '.csv': 'text/csv; charset=utf-8', '.log': 'text/plain; charset=utf-8',
 }
 
+/** 事件摘要用字段标签（按信息量排序，命中即拼入人话摘要；未列出的内部字段不外显）。 */
+const EVENT_FIELD_LABELS: Array<[string, string]> = [
+  ['title', '标题'], ['name', '名称'], ['displayName', '姓名'], ['reason', '原因'], ['message', '信息'],
+  ['error', '错误'], ['actorName', '操作人'], ['username', '用户名'], ['userId', '账号'], ['version', '版本'],
+  ['service', '服务'], ['actionId', '动作'], ['provider', '平台'], ['alias', '连接'], ['baseUrl', '网关地址'],
+  ['status', '状态'], ['result', '结果'], ['kind', '类型'],
+]
+/** 摘要中常见英文枚举值的中文转译（测试 UI-03：事件流不留裸英文码）。 */
+const EVENT_VALUE_LABELS: Record<string, string> = {
+  created: '创建', updated: '更新', deleted: '删除', approved: '通过', rejected: '驳回',
+  healthy: '健康', unavailable: '不可用', ok: '成功', failed: '失败', catalog: '目录',
+}
+
+/** 事件流人话摘要（测试 UI-03）：优先取业务字段拼「标签：值」句，绝不回退裸 JSON——原始 payload 走 detail 字段收进「详情」。 */
 function summarize(payload: unknown): string {
   if (payload === null || payload === undefined) return ''
-  if (typeof payload === 'object') {
-    const record = payload as Record<string, unknown>
-    for (const key of ['name', 'title', 'reason', 'message', 'version', 'actorName']) {
-      if (typeof record[key] === 'string') return String(record[key])
-    }
-    return JSON.stringify(payload).slice(0, 80)
+  if (typeof payload !== 'object') return String(payload).slice(0, 120)
+  const record = payload as Record<string, unknown>
+  const bits: string[] = []
+  for (const [key, label] of EVENT_FIELD_LABELS) {
+    const value = record[key]
+    if (value === undefined || value === null || value === '') continue
+    if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') continue
+    const text = String(value)
+    bits.push(`${label}：${EVENT_VALUE_LABELS[text] ?? text.slice(0, 80)}`)
+    if (bits.length >= 3) break
   }
-  return String(payload).slice(0, 80)
+  return bits.join('；')
+}
+
+/** 原始 payload 压缩串（仅用于「详情」折叠展示，防止误读也保留排查线索）。 */
+function summarizeDetail(payload: unknown): string | undefined {
+  if (payload === null || payload === undefined || typeof payload !== 'object') return undefined
+  const json = JSON.stringify(payload)
+  if (!json || json === '{}') return undefined
+  return json.slice(0, 400)
 }

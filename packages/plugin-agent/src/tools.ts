@@ -87,6 +87,30 @@ export function apply(ctx: Context) {
   }))
 
   t.register(defineTool({
+    name: 'agent_metrics_report',
+    description: '上报 Agent 运营指标（日活 DAU/对话会话数/对话用户去重统计，可指定 date 补录历史）。Agent 接入后的强制义务：每日定时向平台提报，与 AI 应用 metrics-report 同级；调用/成功率/Token 由平台网关自动归集，无须重复上报。',
+    permission: 'agent.write',
+    parameters: {
+      agentId: { type: 'string', required: true, description: 'Agent ID' },
+      dau: { type: 'integer', description: '日活跃用户数（同日多次上报取最大值）' },
+      sessions: { type: 'integer', description: '对话会话数（同日多次上报累加）' },
+      uniqueUsers: { type: 'integer', description: '对话去重用户数（无法提供 ID 明细时只报数量；ID 明细走 REST userIds 字段）' },
+      date: { type: 'string', description: '指标日期 YYYY-MM-DD（默认今天；补录历史时指定）' },
+    },
+    output: { type: 'object', additionalProperties: true },
+    async execute(args) {
+      const agentId = String(args.agentId)
+      ctx.agentRegistry.reportUsage(agentId, {
+        ...(args.dau !== undefined ? { dau: Number(args.dau) } : {}),
+        ...(args.sessions !== undefined ? { sessions: Number(args.sessions) } : {}),
+        ...(args.uniqueUsers !== undefined ? { uniqueUsers: Number(args.uniqueUsers) } : {}),
+        ...(args.date !== undefined && args.date !== '' ? { date: String(args.date) } : {}),
+      })
+      return { reported: true, metrics: ctx.agentRegistry.metrics(agentId) }
+    },
+  }))
+
+  t.register(defineTool({
     name: 'agent_bind_user',
     description: '为 Agent 绑定用户（记录"哪些用户可使用该 Agent"，使用即授权留痕）。',
     permission: 'agent.write',

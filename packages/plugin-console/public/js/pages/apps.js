@@ -4,7 +4,7 @@ import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
-  fmtNum, fmtPct, fmtCost, fmtTime, timeAgo, emptyState, lineChart,
+  fmtNum, fmtPct, fmtCost, fmtTime, timeAgo, emptyState, lineChart, maybeShowConceptCard,
 } from '../ui.js'
 import { buildAppOnboardingText, openOnboardingModal } from '../onboarding.js'
 import {
@@ -14,9 +14,30 @@ import {
 
 const APP_TYPE = { web: ['Web 应用', 'globe'], h5: ['H5', 'app'], miniapp: ['小程序', 'app'], desktop: ['桌面端', 'server'], api: ['API 服务', 'plug'] }
 
+/** 平台授权直达：签发一次性入场票据后带 #entry_ticket 打开应用（裸跳转已下线，与应用自有 OIDC 接入互不影响）。 */
+async function openAppEntry(app) {
+  try {
+    const issued = await api.post(`/api/apps/${app.id}/entry-ticket`)
+    window.open(`${app.attrs['url']}#entry_ticket=${encodeURIComponent(issued.ticket)}`, '_blank', 'noopener')
+    toast(`已带平台身份打开（票据 ${issued.ttlSeconds}s 内有效，已留痕审计）`)
+  } catch (error) { toast(error.message, 'error') }
+}
+
 export async function renderApps(content, params, ctx) {
   const data = await api.get('/api/apps')
   const apps = data.apps
+
+  // 首次访问概念卡（易用性整改）
+  maybeShowConceptCard(content, 'apps', {
+    icon: 'app',
+    title: 'AI 应用是什么？',
+    subtitle: 'AI 应用 = 员工直接使用的智能应用入口（问答助手、文档助手等）。',
+    points: [
+      '形态多样：在 Agent 底座上扩展 Web / H5 / 小程序等访问入口。',
+      '依赖可穿透：应用 → Agent → MCP/Skill 的调用链与成本一图归集。',
+      '治理统一：谁能用、用了多少，走平台统一身份与审计。',
+    ],
+  })
 
   content.innerHTML = `
     <div class="page-head">
@@ -56,9 +77,12 @@ export async function renderApps(content, params, ctx) {
           <span class="metric">${icon('users', 13)}UV ${fmtNum(app.metrics.uv ?? 0)}</span>
           <span class="metric">${icon('users', 13)}DAU ${fmtNum(app.metrics.dau)}</span>
           <span class="metric">${icon('activity', 13)}会话 ${fmtNum(app.metrics.sessions)}</span>
+          ${app.attrs['url'] ? `<a class="btn btn-ghost btn-sm" data-entry href="javascript:void(0)">${icon('external', 13)}打开</a>` : ''}
           <span style="margin-left:auto" class="text-4">${esc(app.attrs['ownerName'] ?? '')}</span>
         </div>
       </div>`)
+    const entryBtn = card.querySelector('[data-entry]')
+    if (entryBtn) entryBtn.onclick = (e) => { e.stopPropagation(); void openAppEntry(app) }
     card.onclick = () => openAppDetail(app.id, ctx)
     holder.appendChild(card)
   }
@@ -80,6 +104,7 @@ async function openAppDetail(id, ctx) {
         <span class="badge ${riskClass(app.attrs['riskLevel'])} no-dot">风险：${riskLabel(app.attrs['riskLevel'])}</span>
         <span class="badge badge-info no-dot">密级：${dataClassLabel(app.attrs['dataClass'])}</span>
         ${(app.attrs['channels'] ?? []).map((ch) => `<span class="badge badge-muted no-dot">${esc(ch)}</span>`).join('')}
+        ${app.attrs['url'] ? `<button class="btn btn-default btn-sm" id="app-open-entry">${icon('external', 13)}带平台身份打开应用</button>` : '<span class="text-4 fs-12">未登记访问地址</span>'}
       </div>
 
       <div class="stat-grid mb-20" style="grid-template-columns:repeat(6,1fr)">
@@ -107,6 +132,8 @@ async function openAppDetail(id, ctx) {
   })
 
   const tabBody = drawer.body.querySelector('#app-tab-body')
+  const openEntryBtn = drawer.body.querySelector('#app-open-entry')
+  if (openEntryBtn) openEntryBtn.onclick = () => void openAppEntry(app)
   const renderTab = (tab) => {
     if (tab === 'topology') {
       tabBody.innerHTML = `
@@ -221,7 +248,7 @@ async function openAppDetail(id, ctx) {
   }
 }
 
-/** SSO 配置 tab：未签发 → 签发引导；已签发 → 回调管理 / 轮换 / 启停 / discovery。 */
+/** SSO 配置 tab：未签发 → 签发引导；已签发 → 回调管理 / 轮换 / 启停 / discovery；两态均附「平台直达」卡片。 */
 function renderSsoTab(holder, app, ctx) {
   const sso = app.sso
   const enforced = (app.ssoEnforceTypes ?? []).includes(app.attrs['appType'])
@@ -240,8 +267,10 @@ function renderSsoTab(holder, app, ctx) {
         ${enforced ? `<div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--warn-border);background:var(--warn-bg)">${icon('alert', 15)}<span><b>${esc(app.attrs['appType'])} 形态应用上线门禁</b>：未完成 SSO 签发前，上线审批将被拒绝。</span></div>` : ''}
         <button class="btn btn-primary" id="sso-issue">${icon('key', 14)}签发 SSO 客户端</button>
         <a class="btn btn-default" href="https://github.com/01men/ybkk-AIOS/blob/main/docs/app-sso-integration.md" target="_blank" style="margin-left:8px">接入文档</a>
-      </div>`
+      </div>
+      ${entryDirectCardHtml(app)}`
     holder.querySelector('#sso-issue').onclick = () => openIssueSsoModal(app, ctx)
+    wireEntryDirectCard(holder, app)
     return
   }
   const active = sso.status === 'active'
@@ -290,9 +319,11 @@ function renderSsoTab(holder, app, ctx) {
         <a class="btn btn-default btn-sm" href="https://github.com/01men/ybkk-AIOS/blob/main/docs/app-sso-integration.md" target="_blank">接入文档</a>
       </div>
       <div class="form-hint mt-8">应用侧按 OIDC 标准接入（openid-client / oidc-client-ts 一行 discovery 驱动）；id_token 验签公钥见 JWKS：<code class="mono">${esc(sso.discovery.issuer)}/.well-known/jwks.json</code></div>
-    </div>`
+    </div>
+    ${entryDirectCardHtml(app)}`
   holder.querySelector('#sso-copy-id').onclick = () => void copyText(sso.clientId)
   holder.querySelector('#sso-copy-discovery').onclick = () => void copyText(`${sso.discovery.issuer}/.well-known/openid-configuration`)
+  wireEntryDirectCard(holder, app)
   holder.querySelector('#sso-save').onclick = async () => {
     const redirectUris = holder.querySelector('#sso-redirects').value.split('\n').map((s) => s.trim()).filter(Boolean)
     const postLogoutUris = holder.querySelector('#sso-postlogouts').value.split('\n').map((s) => s.trim()).filter(Boolean)
@@ -332,6 +363,38 @@ function renderSsoTab(holder, app, ctx) {
       toast('客户端已启用'); openAppDetail(app.id, ctx)
     } catch (error) { toast(error.message, 'error') }
   }
+}
+
+/** 平台直达（entry-ticket）卡片：与应用自有 OIDC 接入互补，未签发 SSO 客户端也可用。 */
+function entryDirectCardHtml(app) {
+  if (!app.attrs['url']) {
+    return `
+      <div class="card card-pad mt-14">
+        <div class="card-title mb-8">${icon('external', 14)} 平台直达（entry-ticket）</div>
+        <div class="form-hint">未登记访问地址（attrs.url）——登记后控制台即可带平台身份直达应用。</div>
+      </div>`
+  }
+  return `
+    <div class="card card-pad mt-14">
+      <div class="flex-between mb-8">
+        <div class="card-title">${icon('external', 14)} 平台直达（entry-ticket）</div>
+        <span class="badge badge-ok no-dot">已启用</span>
+      </div>
+      <div class="desc-grid mb-14">
+        <div class="desc-item"><span class="k">访问地址</span><span class="v mono">${esc(app.attrs['url'])}</span></div>
+        <div class="desc-item"><span class="k">兑换端点</span><span class="v mono">POST /api/authn/entry-tickets/redeem</span></div>
+        <div class="desc-item"><span class="k">票据时效</span><span class="v">一次性 · 短时（默认 120s）</span></div>
+      </div>
+      <div class="flex" style="gap:8px">
+        <button class="btn btn-primary" id="sso-entry-open">${icon('external', 14)}带平台身份打开应用</button>
+      </div>
+      <div class="form-hint mt-8">「打开应用」按钮已升级为带平台身份直达：签发一次性票据后以 <code class="mono">#entry_ticket=…</code> 打开，应用前端兑换平台身份；与上方标准 OIDC 授权码接入互不影响。</div>
+    </div>`
+}
+
+function wireEntryDirectCard(holder, app) {
+  const btn = holder.querySelector('#sso-entry-open')
+  if (btn) btn.onclick = () => void openAppEntry(app)
 }
 
 /** 签发 SSO 客户端弹窗（redirectUris / 类型 / 同意策略）。 */

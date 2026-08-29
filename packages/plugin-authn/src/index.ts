@@ -18,8 +18,10 @@ import {
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import * as authnTools from './tools.ts'
 import { OidcService } from './oidc.ts'
+import { EntryTicketService } from './entry-ticket.ts'
 
 export * from './oidc.ts'
+export * from './entry-ticket.ts'
 
 // ---------------------------------------------------------------------------
 // 数据模型
@@ -153,9 +155,10 @@ export class AuthnService extends Service {
       if (change.kind === 'remove') this.refreshIndex.delete(hash)
       else this.refreshIndex.set(hash, change.record.id)
     })
-    // 过期令牌清理（评审 M2：撤销/过期记录不无限增长）：启动即清 + 每日巡检
+    // 过期令牌清理（评审 M2 / 测试 DEF-03：撤销/过期记录不无限增长，小时级巡检控制内存与存储膨胀）：
+    // 启动即清 + 每小时巡检
     this.cleanupExpiredTokens()
-    this.cleanupTimer = setInterval(() => this.cleanupExpiredTokens(), 24 * 3600_000)
+    this.cleanupTimer = setInterval(() => this.cleanupExpiredTokens(), 3600_000)
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     })
@@ -536,7 +539,7 @@ export class AuthnService extends Service {
     return candidates.some((secret) => createHmac('sha256', secret).update(body).digest('base64url') === signature)
   }
 
-  /** 清理过期/吊销令牌（评审 M2）：过期 7 天后物理删除，撤销状态不再无限累积。 */
+  /** 清理过期/吊销令牌（评审 M2）：过期 7 天后物理删除（保留一个 refresh 周期用于重放取证），撤销状态不再无限累积。 */
   cleanupExpiredTokens(): number {
     const cutoff = Date.now() - 7 * 24 * 3600_000
     let removed = 0
@@ -891,8 +894,17 @@ export class AuthnService extends Service {
     return count
   }
 
+  /** 令牌是否仍活跃（DEF-03：过期/已轮转的记录不计入「活跃令牌」，避免计数随运行时长失真）。 */
+  isTokenActive(token: TokenRecord, now = Date.now()): boolean {
+    if (token.revokedAt) return false
+    if (new Date(token.expiresAt).getTime() <= now) return false
+    // 已轮转的 refresh token（同链已换发新令牌）不再是活跃凭证
+    if (token.kind === 'refresh' && token.rotatedAt) return false
+    return true
+  }
+
   activeTokenCount(principalId: string): number {
-    return this.tokens().find((item) => item.principalId === principalId && !item.revokedAt).length
+    return this.tokens().find((item) => item.principalId === principalId && this.isTokenActive(item)).length
   }
 }
 
@@ -919,5 +931,6 @@ export const inject = ['opsStorage', 'platformBus', 'iam', 'httpServer']
 export function apply(ctx: Context) {
   ctx.plugin(AuthnService)
   ctx.plugin(OidcService)
+  ctx.plugin(EntryTicketService)
   ctx.plugin(authnTools)
 }

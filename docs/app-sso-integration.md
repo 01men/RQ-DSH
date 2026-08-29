@@ -143,4 +143,21 @@ OIDC_ISSUER=https://sso.yourcompany.com   # discovery/JWKS/端点全部按此拼
 - **多环境 issuer**：一套应用对接多套平台环境时，按环境变量注入不同 issuer / client；`iss` 回跳参数与 id_token `iss` 可用于 mix-up 防护校验。
 - **id_token vs userinfo**：只关心登录身份 → 验 `id_token`（本地 JWKS 验签）即可；需要最新组织/角色/状态 → 调 `userinfo`（实时、且能感知冻结）。
 - **回调后拿到的 roles 是业务角色吗**：不是。`roles` 是平台治理角色；业务角色请应用内自理。
+
+## 九、平台直达（entry-ticket，与应用 OIDC 接入互补）
+
+控制台「打开应用 / 带平台身份打开应用」不再裸跳转 `attrs.url`：登录用户先向平台领取一次性入场票据，
+再以 `<url>#entry_ticket=<票据>` 打开应用；应用前端读取 fragment 后回平台兑换平台身份：
+
+```
+POST /api/authn/entry-tickets/redeem          （公开端点，无须 Bearer）
+body {"ticket":"etk_…"}
+→ 200 { refType:"app", refId:"<应用ID>", identity:{ sub, username, name, org, roles, tenant } }
+```
+
+- 适合**未做 OIDC 接入**的应用/交互界面零改造获得平台身份；已按本指南接入的应用不受影响，两种通道并存。
+- 票据一次性（重放被拒）、默认 120s 过期（`ENTRY_TICKET_TTL_SECONDS` 可调 30~600）、兑换时实时校验账号状态；
+  签发与兑换均入审计（`app.entry.ticket.*`）。
+- 与标准授权码流的分工：需要**长期令牌/refresh/标准 RP 语义**走 `/oauth/authorize`（授权码 + PKCE S256）；
+  只需要**单次进入时的用户身份**用 entry-ticket（无 secret、无换牌，应用后端可后置接入）。
 - **报错回跳**：授权失败一律 302 平台错误页（`/#/oauth/error`），不会重定向到外部地址（防开放重定向）；拒绝授权（`consent=false`）会按标准以 `error=access_denied` 回跳。

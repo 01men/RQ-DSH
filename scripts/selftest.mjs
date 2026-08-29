@@ -1762,6 +1762,7 @@ try {
   const selfAgentCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: agentCreate.data.credential.clientId, clientSecret: agentCreate.data.credential.clientSecret } })
   check('新注册 Agent 凭证默认含 usage.write', selfAgentCc.ok && selfAgentCc.data.principal.scopes.includes('usage.write'))
   check('新注册 Agent 凭证默认含 agent.write（自主提报更新）', selfAgentCc.ok && selfAgentCc.data.principal.scopes.includes('agent.write'))
+  check('新注册 Agent 凭证默认含 modelgw.invoke（模型网关调用）', selfAgentCc.ok && selfAgentCc.data.principal.scopes.includes('modelgw.invoke'))
   const agentSelfUpdate = await api('PATCH', `/api/agents/${selfAgent.id}`, { token: selfAgentCc.data.token, body: { attrs: { description: '自测用机器人（资料已由 Agent 凭自身凭证提报更新）' } } })
   check('Agent 凭自身凭证提报更新资料 200（agent.write 生效）', agentSelfUpdate.ok && String(agentSelfUpdate.data.attrs['description']).includes('凭自身凭证提报更新'), JSON.stringify(agentSelfUpdate.error))
 
@@ -1776,8 +1777,56 @@ try {
   const verifyLogs = (await agentVerifyLogs()).data.items
   check('机器身份读台账入审计（agent.verify 留痕）', verifyLogs.some((log) => log.action === 'agent.verify' && log.actorId === selfAgentCc.data.principal.id))
 
+  // 运营数据提报（Agent 接入义务，与 AI 应用 metrics-report 同级，2026-08）
+  const agentReport1 = await api('POST', `/api/agents/${selfAgent.id}/metrics-report`, { token: selfAgentCc.data.token, body: { dau: 3, sessions: 5, userIds: ['u001', 'u002'] } })
+  check('Agent 凭自身凭证提报运营数据 200（agent.write 生效，首提即"发一句话"）', agentReport1.ok && agentReport1.data.sessions === 5 && agentReport1.data.dau === 3, JSON.stringify(agentReport1.error))
+  const agentReport2 = await api('POST', `/api/agents/${selfAgent.id}/metrics-report`, { token: selfAgentCc.data.token, body: { dau: 2, sessions: 1, userIds: ['u002', 'u003'] } })
+  check('Agent 提报语义：同日 dau 取最大、会话累加、用户哈希去重并集', agentReport2.ok && agentReport2.data.dau === 3 && agentReport2.data.sessions === 6 && agentReport2.data.uniqueUsers === 3, JSON.stringify(agentReport2.error ?? agentReport2.data))
+  const agentReportBad = await api('POST', `/api/agents/${selfAgent.id}/metrics-report`, { token: selfAgentCc.data.token, body: { dau: -1 } })
+  check('Agent 提报校验：负数 dau 被拒', !agentReportBad.ok)
+  const agentReportBadDate = await api('POST', `/api/agents/${selfAgent.id}/metrics-report`, { token: selfAgentCc.data.token, body: { dau: 1, date: '2026/08/01' } })
+  check('Agent 提报校验：非法 date 被拒', !agentReportBadDate.ok)
+  const agentReportGhost = await api('POST', '/api/agents/agt_ghost/metrics-report', { token: selfAgentCc.data.token, body: { dau: 1 } })
+  check('Agent 提报校验：不存在的 Agent 被拒', !agentReportGhost.ok)
+  const agentReportTool = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'agent_metrics_report', args: { agentId: selfAgent.id, dau: 4, sessions: 2 } } })
+  check('工具 agent_metrics_report 上报（同日 dau 取最大）', agentReportTool.ok && agentReportTool.data.isError === false && agentReportTool.data.value.reported === true && agentReportTool.data.value.metrics.dau === 4)
+  const agentEntryUrl = await api('PATCH', `/api/agents/${selfAgent.id}`, { token: selfAgentCc.data.token, body: { attrs: { entryUrl: 'https://bot.example.com/chat' } } })
+  check('Agent 自主提报交互界面地址（entryUrl 白名单生效）', agentEntryUrl.ok && agentEntryUrl.data.attrs['entryUrl'] === 'https://bot.example.com/chat', JSON.stringify(agentEntryUrl.error))
+
   const agentSelfMeter = await api('POST', '/api/usage/record', { token: selfAgentCc.data.token, body: { org: tenantOrg.data.id, subject: `agent:${selfAgent.id}`, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 100, unit: 'token' }], idempotency_key: 'test-usage-agent-self-1' } })
   check('Agent 机器令牌自推计量 200（usage.write 生效）', agentSelfMeter.ok && agentSelfMeter.data.pricing.charge_cents === 3)
+
+  // 调用统计口径补全（2026-08）：usage.recorded 回灌 + 防双计
+  const agentMetricsAfterSelfMeter = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
+  check('防双计①：自推 mcp:* 计量不回灌调用台账（MCP 口径归 McpInvoked，宁缺勿重）',
+    agentMetricsAfterSelfMeter.ok && agentMetricsAfterSelfMeter.data.metrics.calls === 0 && (agentMetricsAfterSelfMeter.data.metrics.gwCalls ?? 0) === 0,
+    JSON.stringify(agentMetricsAfterSelfMeter.data?.metrics))
+
+  // 模型网关回灌闭环：Agent 凭自身凭证调用模型网关 → usage.recorded(subject=agent:<id>) 回灌调用台账
+  const agentModelStub = createServer(async (req, res) => {
+    if (req.url.endsWith('/chat/completions')) {
+      await readBody(req)
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: 'agent 模型网关回灌 stub' } }], usage: { prompt_tokens: 120, completion_tokens: 1500 } }))
+      return
+    }
+    res.writeHead(404).end('{}')
+  })
+  await new Promise((resolve) => agentModelStub.listen(0, '127.0.0.1', resolve))
+  const agentModelPort = agentModelStub.address().port
+  const agentModelReg = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ds-stub-agent', displayName: 'Agent 回灌验证', provider: 'deepseek', endpoint: `http://127.0.0.1:${agentModelPort}/v1`, apiKey: 'stub-key', listCentsPerKTokens: 1, costCentsPerKTokens: 0 } })
+  check('Agent 验证模型目录登记', agentModelReg.ok)
+  // 第 5 步曾对 tenantOrg 设 30 分月度预算用于验证拦截，此处放开以让回灌链路通过预检
+  await api('PUT', `/api/billing/budgets/${tenantOrg.data.id}`, { token: admin, body: { monthlyCents: 1_000_000 } })
+  const agentGwInvoke = await api('POST', '/api/modelgw/invoke', { token: selfAgentCc.data.token, body: { model: 'ds-stub-agent', messages: [{ role: 'user', content: 'hi' }], orgId: tenantOrg.data.id } })
+  check('Agent 凭自身凭证调用模型网关 200（modelgw.invoke 生效）', agentGwInvoke.ok && agentGwInvoke.data.outputTokens === 1500, JSON.stringify(agentGwInvoke.error ?? agentGwInvoke.data))
+  const agentGwEvent = await api('GET', '/api/usage/events?resource=model:ds-stub-agent', { token: admin })
+  check('网关计量事件主体为 agent:<id>（回灌依据）', agentGwEvent.ok && agentGwEvent.data.items[0]?.subject === `agent:${selfAgent.id}`, JSON.stringify(agentGwEvent.data?.items?.[0]?.subject))
+  const agentMetricsAfterGw = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
+  check('模型网关调用回灌 Agent 台账（calls=1 / tokens=1620 / gwCalls=1）',
+    agentMetricsAfterGw.ok && agentMetricsAfterGw.data.metrics.calls === 1 && agentMetricsAfterGw.data.metrics.tokens === 1620 && agentMetricsAfterGw.data.metrics.gwCalls === 1,
+    JSON.stringify(agentMetricsAfterGw.data?.metrics))
+  agentModelStub.close()
 
   const onlineTooEarly = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: ops, body: { action: 'online' } })
   check('缺治理属性不可上线（校验）', !onlineTooEarly.ok)
@@ -1791,6 +1840,36 @@ try {
 
   const bind = await api('POST', `/api/agents/${selfAgent.id}/bindings`, { token: admin, body: { userId: devUser.id } })
   check('绑定用户（授权留痕）', bind.ok)
+
+  // 平台授权直达（entry-ticket，2026-08）：签发授权边界 → 兑换身份 → 一次性/防伪造
+  const auditorUserId = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('楚天阔'), { token: admin })).data.users[0].id
+  const entryMachineDenied = await api('POST', `/api/agents/${selfAgent.id}/entry-ticket`, { token: selfAgentCc.data.token, body: {} })
+  check('直达票据：机器身份签发被拒（human-only）', entryMachineDenied.status === 403, JSON.stringify(entryMachineDenied))
+  const entryUnbound = await api('POST', `/api/agents/${selfAgent.id}/entry-ticket`, { token: auditor, body: {} })
+  check('直达票据：未授权用户被拒 403（owner/绑定用户/管理员之外，使用即授权留痕）', entryUnbound.status === 403, JSON.stringify(entryUnbound))
+  const bindAuditor = await api('POST', `/api/agents/${selfAgent.id}/bindings`, { token: admin, body: { userId: auditorUserId } })
+  check('直达票据：绑定审计员（构造纯绑定用户路径）', bindAuditor.ok)
+  const entryBound = await api('POST', `/api/agents/${selfAgent.id}/entry-ticket`, { token: auditor, body: {} })
+  check('直达票据：绑定用户签发 200（一次性票据 + TTL）', entryBound.ok && entryBound.data.ticket.startsWith('etk_') && entryBound.data.ttlSeconds >= 30, JSON.stringify(entryBound.error))
+  const redeemOk = await rawReq('POST', '/api/authn/entry-tickets/redeem', {
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: entryBound.data.ticket }),
+  })
+  const redeemBody = jsonBody(redeemOk)
+  check('直达票据：公开端点兑换平台身份（sub/roles/tenant + refType/refId）',
+    redeemOk.status === 200 && redeemBody.data?.refType === 'agent' && redeemBody.data?.refId === selfAgent.id
+    && redeemBody.data?.identity?.sub === auditorUserId && Array.isArray(redeemBody.data?.identity?.roles) && Boolean(redeemBody.data?.identity?.tenant),
+    JSON.stringify(redeemBody))
+  const redeemReplay = await rawReq('POST', '/api/authn/entry-tickets/redeem', {
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: entryBound.data.ticket }),
+  })
+  check('直达票据：重放兑换被拒（一次性消费）', redeemReplay.status === 400, `${redeemReplay.status} ${redeemReplay.body.slice(0, 120)}`)
+  const redeemForged = await rawReq('POST', '/api/authn/entry-tickets/redeem', {
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: 'etk_forged_0000000000000000000000000000000000000000' }),
+  })
+  check('直达票据：伪造票据被拒', redeemForged.status === 400)
 
   // L4 上线：单人审批制——发起人（admin）自审通过
   const onlineRequest = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: admin, body: { action: 'online', note: '自测上线' } })
@@ -1821,6 +1900,18 @@ try {
   check('新注册应用凭证默认含 app.write/app.read（提报与自更新）', ssoAppCc.ok && ssoAppCc.data.principal.scopes.includes('app.write') && ssoAppCc.data.principal.scopes.includes('app.read'))
   const ssoAppFirstReport = await api('POST', `/api/apps/${ssoAppId}/metrics-report`, { token: ssoAppCc.data.token, body: { dau: 1, sessions: 1, avgDepth: 1, retention7: 0 } })
   check('应用凭自身凭证提报指标 200（app.write 生效，"发一句话"）', ssoAppFirstReport.ok)
+
+  // 平台授权直达：应用入场票据（与 Agent 同一服务，refType=app）
+  const appTicketMachine = await api('POST', `/api/apps/${ssoAppId}/entry-ticket`, { token: ssoAppCc.data.token, body: {} })
+  check('应用直达票据：机器身份签发被拒（human-only）', appTicketMachine.status === 403)
+  const appTicket = await api('POST', `/api/apps/${ssoAppId}/entry-ticket`, { token: admin, body: {} })
+  check('应用直达票据：登录用户签发 200', appTicket.ok && appTicket.data.ticket.startsWith('etk_'), JSON.stringify(appTicket.error))
+  const appRedeem = await rawReq('POST', '/api/authn/entry-tickets/redeem', {
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket: appTicket.data.ticket }),
+  })
+  const appRedeemBody = jsonBody(appRedeem)
+  check('应用直达票据：兑换返回 refType=app + 平台身份', appRedeem.status === 200 && appRedeemBody.data?.refType === 'app' && appRedeemBody.data?.refId === ssoAppId && Boolean(appRedeemBody.data?.identity?.sub), JSON.stringify(appRedeemBody))
 
   // 门禁点 1（早反馈）：未签发 SSO 客户端 → 发起上线被拒
   const gateBlocked = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })

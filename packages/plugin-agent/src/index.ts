@@ -8,6 +8,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import {
   PlatformEvents, newId,
   type Collection, type RecordBase, type ResourceTypeSpec,
@@ -35,6 +36,12 @@ export interface AgentUsageRecord extends RecordBase {
   okCalls: number
   tokens: number
   totalLatencyMs: number
+  /** 来源维度：usage.recorded 回灌归集的调用数（模型网关等，无延迟数据）；calls 含该部分。 */
+  gwCalls?: number
+  /** 日活跃用户数（提报语义：同日多次上报取最大；网关归集不产生该字段）。 */
+  dau?: number
+  /** 对话用户去重统计（提报侧传 userIds，平台侧即刻哈希脱敏，同日取并集；不落明文）。 */
+  userHashes?: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -54,7 +61,7 @@ export class AgentRegistryService extends Service {
     ctx.platformBus.on(PlatformEvents.McpInvoked, (payload) => {
       const p = payload as { callerType: string; callerId: string; ok: boolean; tokens: number; latencyMs: number }
       if (p.callerType !== 'agent') return
-      this.recordUsage(p.callerId, { calls: 1, okCalls: p.ok ? 1 : 0, tokens: p.tokens, latencyMs: p.latencyMs })
+      this.recordUsage(p.callerId, { calls: 1, okCalls: p.ok ? 1 : 0, tokens: p.tokens, latencyMs: p.latencyMs }, 'mcp')
       // 行为监测：频次突增检测（10 分钟窗口超过 120 次）
       const nowMs = Date.now()
       const times = (this.usageCounter.get(p.callerId) ?? []).filter((t) => nowMs - t < 10 * 60_000)
@@ -70,6 +77,28 @@ export class AgentRegistryService extends Service {
           resourceId: p.callerId,
         })
       }
+    })
+
+    // 调用统计口径补全：订阅 usage.recorded 回灌模型网关等非 MCP 调用（McpInvoked 只覆盖 MCP 网关）。
+    // 防双计规则（三条，缺一即双计/脏计）：
+    //   1. 只认 subject=agent:<id> 且 Agent 存在的事件——seed 历史数据与悬空主体不计；
+    //   2. resource mcp:* 一律跳过——MCP 网关对同一调用双发 McpInvoked（上方监听已计），
+    //      自推计量误报 mcp:* 时同样跳过（网关已计，宁缺勿重）；
+    //   3. meters 含 downloads/installs 观测键跳过——Skill 下载/安装是生命周期事件而非调用。
+    // 消费幂等：经 usage.consume 消费水位（INSERT OR IGNORE），replay/死信重投不会重复回灌；
+    // 投影义务：所有消费方必须 project（usage.reconcile 全量比对，缺投影即「对账不平」告警）。
+    ctx.usage.consume('agent-registry', (event) => {
+      ctx.usage.project('agent-registry', event)
+      if (!event.subject.startsWith('agent:')) return
+      const agentId = event.subject.slice('agent:'.length)
+      if (!ctx.resourceCore.collection('agent').get(agentId)) return
+      if (event.resource.startsWith('mcp:')) return
+      if (event.meters.some((meter) => meter.key === 'downloads' || meter.key === 'installs')) return
+      // 网关仅在成功返回后计量：回灌事件按成功调用计；延迟无数据不摊薄均值（见 metrics）
+      const tokens = event.meters
+        .filter((meter) => meter.key === 'input_tokens' || meter.key === 'output_tokens' || meter.key === 'tokens')
+        .reduce((sum, meter) => sum + meter.value, 0)
+      this.recordUsage(agentId, { calls: 1, okCalls: 1, tokens, latencyMs: 0 }, 'gateway')
     })
 
     // Skill 弃用 → 通知引用 Agent 的负责人（存量引用告警）
@@ -120,9 +149,10 @@ export class AgentRegistryService extends Service {
         name: `agent:${(agent as any).slug}`,
         refType: 'agent',
         refId: agent.id,
-        // connector.invoke：连接器纳管（open-connector 融合）与 mcp.invoke 同级的独立调用权限点
-        // agent.write：注册后凭自身凭证即可完成接入验证后的资料提报更新（PATCH /api/agents/:id）
-        scopes: ['mcp.invoke', 'skill.read', 'agent.read', 'agent.write', 'usage.write', 'connector.invoke'],
+      // connector.invoke：连接器纳管（open-connector 融合）与 mcp.invoke 同级的独立调用权限点
+      // agent.write：注册后凭自身凭证即可完成接入验证后的资料提报更新（PATCH /api/agents/:id）
+      // modelgw.invoke：模型网关调用（LLM 是 Agent 的第一消耗品；计量经 usage.recorded 回灌本台账）
+      scopes: ['mcp.invoke', 'skill.read', 'agent.read', 'agent.write', 'usage.write', 'connector.invoke', 'modelgw.invoke'],
       })
     }
     this.ctx.platformBus.emit(PlatformEvents.AgentRegistered, {
@@ -248,8 +278,10 @@ export class AgentRegistryService extends Service {
 
   // -- 监测 -------------------------------------------------------------
 
-  recordUsage(agentId: string, usage: { sessions?: number; calls: number; okCalls: number; tokens: number; latencyMs: number }): void {
+  /** 归集/回灌入口：source=mcp（McpInvoked，带延迟）| gateway（usage.recorded 回灌，无延迟）。 */
+  recordUsage(agentId: string, usage: { sessions?: number; calls: number; okCalls: number; tokens: number; latencyMs: number }, source: 'mcp' | 'gateway' = 'mcp'): void {
     const date = new Date().toISOString().slice(0, 10)
+    const gwDelta = source === 'gateway' ? usage.calls : 0
     const existing = this.usage().findOne((item) => item.agentId === agentId && item.date === date)
     if (existing) {
       this.usage().update(existing.id, {
@@ -258,6 +290,7 @@ export class AgentRegistryService extends Service {
         okCalls: existing.okCalls + usage.okCalls,
         tokens: existing.tokens + usage.tokens,
         totalLatencyMs: existing.totalLatencyMs + usage.latencyMs,
+        gwCalls: (existing.gwCalls ?? 0) + gwDelta,
       })
     } else {
       this.usage().insert({
@@ -269,6 +302,7 @@ export class AgentRegistryService extends Service {
         okCalls: usage.okCalls,
         tokens: usage.tokens,
         totalLatencyMs: usage.latencyMs,
+        gwCalls: gwDelta,
       })
     }
     if (usage.tokens > 0) {
@@ -282,6 +316,46 @@ export class AgentRegistryService extends Service {
     }
   }
 
+  /**
+   * Agent 自主提报运营指标（REST /api/agents/:id/metrics-report、工具 agent_metrics_report 汇入）。
+   * 接入义务（与 AI 应用 metrics-report 同级）：语义对齐——同日 dau 取最大、会话数累加、
+   * 用户去重集取并集；userIds 平台侧即刻哈希脱敏后入库，不落明文；可指定 date 补录历史（YYYY-MM-DD）。
+   */
+  reportUsage(agentId: string, report: { dau?: number; sessions?: number; userIds?: string[]; uniqueUsers?: number; date?: string }): void {
+    if (!this.ctx.resourceCore.get('agent', agentId)) throw new Error(`Agent 不存在：${agentId}`)
+    const date = report.date ?? new Date().toISOString().slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`date 格式非法：${date}（应为 YYYY-MM-DD）`)
+    for (const [key, value] of [['dau', report.dau], ['sessions', report.sessions], ['uniqueUsers', report.uniqueUsers]] as const) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 0)) throw new Error(`${key} 必须是非负整数（收到：${value}）`)
+    }
+    const hashes = (report.userIds ?? []).map((id) => createHash('sha256').update(String(id)).digest('hex').slice(0, 16))
+    if (report.uniqueUsers !== undefined && hashes.length > report.uniqueUsers) {
+      throw new Error(`userIds 数量（${hashes.length}）不应大于 uniqueUsers（${report.uniqueUsers}）`)
+    }
+    const existing = this.usage().findOne((item) => item.agentId === agentId && item.date === date)
+    if (existing) {
+      const merged = new Set([...(existing.userHashes ?? []), ...hashes])
+      this.usage().update(existing.id, {
+        dau: Math.max(existing.dau ?? 0, report.dau ?? 0, merged.size),
+        sessions: existing.sessions + (report.sessions ?? 0),
+        ...(merged.size > 0 ? { userHashes: [...merged] } : {}),
+      })
+    } else {
+      this.usage().insert({
+        id: newId('agu'),
+        agentId,
+        date,
+        sessions: report.sessions ?? 0,
+        calls: 0,
+        okCalls: 0,
+        tokens: 0,
+        totalLatencyMs: 0,
+        dau: Math.max(report.dau ?? 0, hashes.length),
+        ...(hashes.length > 0 ? { userHashes: hashes } : {}),
+      })
+    }
+  }
+
   metrics(agentId: string): {
     sessions: number
     calls: number
@@ -289,21 +363,32 @@ export class AgentRegistryService extends Service {
     tokens: number
     avgLatencyMs: number
     lastActiveAt: string
-    series: Array<{ date: string; calls: number; tokens: number }>
+    dau: number
+    uniqueUsers: number
+    gwCalls: number
+    series: Array<{ date: string; calls: number; tokens: number; sessions: number; dau: number }>
   } {
     const rows = this.usage().find((item) => item.agentId === agentId).sort((a, b) => a.date.localeCompare(b.date))
+    const today = rows.at(-1)
     const calls = rows.reduce((sum, row) => sum + row.calls, 0)
     const okCalls = rows.reduce((sum, row) => sum + row.okCalls, 0)
     const tokens = rows.reduce((sum, row) => sum + row.tokens, 0)
     const latency = rows.reduce((sum, row) => sum + row.totalLatencyMs, 0)
+    const gwCalls = rows.reduce((sum, row) => sum + (row.gwCalls ?? 0), 0)
+    // 均值分母只取带延迟数据的调用（MCP 网关口径）：网关回灌事件无延迟，摊薄会失真
+    const latencyCalls = Math.max(calls - gwCalls, 0)
     return {
       sessions: rows.reduce((sum, row) => sum + row.sessions, 0),
       calls,
       successRate: calls === 0 ? 1 : Math.round((okCalls / calls) * 1000) / 1000,
       tokens,
-      avgLatencyMs: calls === 0 ? 0 : Math.round(latency / calls),
+      avgLatencyMs: latencyCalls === 0 ? 0 : Math.round(latency / latencyCalls),
       lastActiveAt: rows.at(-1)?.updatedAt ?? '',
-      series: rows.slice(-14).map((row) => ({ date: row.date, calls: row.calls, tokens: row.tokens })),
+      // 运营口径（提报）：今日 DAU 与今日对话用户去重数
+      dau: today?.dau ?? 0,
+      uniqueUsers: today?.userHashes?.length ?? 0,
+      gwCalls,
+      series: rows.slice(-14).map((row) => ({ date: row.date, calls: row.calls, tokens: row.tokens, sessions: row.sessions, dau: row.dau ?? 0 })),
     }
   }
 
@@ -330,7 +415,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'agent'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'iam', 'audit']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'iam', 'audit', 'usage']
 
 export function apply(ctx: Context) {
   const registry = new AgentRegistryService(ctx)
@@ -345,6 +430,7 @@ export function apply(ctx: Context) {
   migrateAgentCredentialScopes(ctx)
   migrateAgentCredentialConnectorInvoke(ctx)
   migrateAgentCredentialAgentWrite(ctx)
+  migrateAgentCredentialModelgwInvoke(ctx)
 }
 
 /** 一次性迁移：为存量 Agent 机器凭证补 connector.invoke（幂等标记，先例 agent-scopes-usage-write-v1）。 */
@@ -411,4 +497,26 @@ function migrateAgentCredentialAgentWrite(ctx: Context): void {
   }
   markers.insert({ id: MARK, doneAt: new Date().toISOString() })
   if (patched > 0) ctx.logger('agent').info(`存量 Agent 凭证迁移完成：${patched} 条补入 agent.write`)
+}
+
+/** 一次性迁移：为存量 Agent 机器凭证补 modelgw.invoke（先例 agent-scopes-connector-invoke-v1）。 */
+function migrateAgentCredentialModelgwInvoke(ctx: Context): void {
+  const markers = ctx.opsStorage.collection<{ id: string; doneAt: string }>('agent:migrations')
+  const MARK = 'agent-scopes-modelgw-invoke-v1'
+  if (markers.get(MARK)) return
+  let patched = 0
+  for (const principal of ctx.authn.principals().find(
+    (item) => item.type === 'machine' && item.refType === 'agent' && item.status === 'active' && !item.scopes.includes('modelgw.invoke'),
+  )) {
+    ctx.authn.principals().update(principal.id, { scopes: [...principal.scopes, 'modelgw.invoke'] })
+    ctx.audit.record({
+      type: 'change', actorType: 'system', actorId: 'agent-migration', actorName: '凭证范围迁移',
+      action: 'agent.credential.modelgw-invoke-backfill', resourceType: 'agent',
+      resourceId: principal.refId ?? '', resourceName: principal.name, result: 'ok',
+      detail: '补入 modelgw.invoke（模型网关调用 + usage.recorded 回灌口径补全）',
+    })
+    patched++
+  }
+  markers.insert({ id: MARK, doneAt: new Date().toISOString() })
+  if (patched > 0) ctx.logger('agent').info(`存量 Agent 凭证迁移完成：${patched} 条补入 modelgw.invoke`)
 }

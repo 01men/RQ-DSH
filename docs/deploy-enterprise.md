@@ -40,7 +40,7 @@ npm start -- --port 7300 --data ./data    # 首次启动执行基线初始化（
 # 4. 验证
 curl -X POST localhost:7300/api/auth/login -H 'content-type: application/json' \
      -d '{"username":"admin","password":"<口令>"}'        # 应返回 token
-npm run selftest                                          # 244 项断言（隔离实例，不碰生产数据）
+npm run selftest                                          # 端到端断言（隔离实例，不碰生产数据）
 npm run lint:manifests                                    # 60 项清单校验
 ```
 
@@ -51,12 +51,19 @@ npm run lint:manifests                                    # 60 项清单校验
 [Service]
 WorkingDirectory=/opt/ops-platform
 Environment=ADMIN_PASSWORD=<强口令>
+# 连接器网关门禁（缺失则连接器页持续「网关不可用」，探活失败刷审计——测试报告 DEF-02）
+Environment=OOMOL_CONNECT_ADMIN_TOKEN=<强口令>
+Environment=OOMOL_CONNECT_ENCRYPTION_KEY=<32 字节以上随机串>
+# 端口占用守卫：孤儿进程抢占端口会让 restart 静默失效（测试报告 DEF-04），启动前先检测
+ExecStartPre=/opt/ops-platform/scripts/guard-port.sh 7300
 ExecStart=/usr/bin/node src/main.ts --port 7300 --data /opt/ops-platform/data
 Restart=always
 ```
 
 运维要点：
 
+- **运维铁律**：一律经 `systemctl` 启停服务，禁止绕过 systemd 手工 `node src/main.ts` 拉起
+  （孤儿进程抢端口后，`systemctl restart` 会失败或旧进程继续占端口，变更不生效且难以排查）。
 - **备份**：冷备整个 `--data` 目录即可（JSON 原子落盘 + SQLite WAL）。资金/计量数据在 `txnstore.db`。
 - **升级（v1.1+ 内置更新检查）**：平台默认每 24h 自动向上游 GitHub 仓库发起一次版本检查（可在控制台
   顶栏「平台更新」抽屉或 `dshctl update set` 调整/关闭）；发现新版本时控制台顶栏出现「可更新」徽标，
@@ -174,7 +181,7 @@ DSHCTL_URL=http://宿主IP:7300 DSHCTL_USER=admin DSHCTL_PASS=*** \
    a. GET / 返回 200；
    b. POST /api/auth/login（admin + 口令）返回 token；
    c. GET /api/overview（Bearer token）返回 200；
-   d. npm run selftest 244/244 通过；npm run lint:manifests 60/60 通过。
+   d. npm run selftest 全部通过；npm run lint:manifests 70/70 通过。
 6.（可选，仅当"接入 dsh"=是）按仓库 docs/deploy-enterprise.md 第三节生成 overlay 并以
    pnpm dsh web --patch 启动，验证两进程共享同一 data/。
 7. 回报：commit hash、服务地址、admin 首登是否成功、自测结果、初始口令交付方式（不得明文贴在公开渠道）。
@@ -188,7 +195,7 @@ DSHCTL_URL=http://宿主IP:7300 DSHCTL_USER=admin DSHCTL_PASS=*** \
 ## 六、验收清单
 
 - [ ] `GET /` 200，控制台可登录（admin + `ADMIN_PASSWORD`）
-- [ ] `npm run selftest` 244/244、`npm run lint:manifests` 60/60
+- [ ] `npm run selftest` 全绿、`npm run lint:manifests` 70/70
 - [ ] 生产数据目录**不含**演示数据（`data/iam~users.json` 无 ops/hr/dev 等演示账号）
 - [ ] （形态 B）dsh web 启动且 Agent 能回答 `dshctl mcp list` 类问题
 - [ ] （形态 C）远程电脑 `connect_status` 显示 remote 模式；宿主「平台接入」页可见该客户端

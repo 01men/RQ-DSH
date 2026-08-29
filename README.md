@@ -40,8 +40,8 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）445 项端到端断言
-npm run lint:manifests  # 插件清单五面 YAML 校验（65 项）
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）591 项端到端断言
+npm run lint:manifests  # 插件清单五面 YAML 校验（70 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
 

@@ -192,6 +192,10 @@ export class ResourceCoreService extends Service {
           break
         default:
           if (typeof value !== 'string') errors.push(`「${field.label}」必须是字符串`)
+          else if (looksLikeCorruptedText(value)) {
+            // 测试 DEF-06：注册端编码错误（如 GBK 字节流按 UTF-8 解码）产生的乱码不再入库上架
+            errors.push(`「${field.label}」含乱码字符（疑似编码错误），请以 UTF-8 编码重新提交`)
+          }
       }
     }
     return errors
@@ -422,6 +426,25 @@ export interface TopologyNode {
   status: string
   statusLabel: string
   children: TopologyNode[]
+}
+
+/**
+ * 文本乱码检测（测试 DEF-06）：识别注册端编码错误入库的文本。
+ * 判定依据（命中任一即视为乱码）：
+ *   1. U+FFFD 替换符——字节流非合法 UTF-8 被解码时产生；
+ *   2. 控制字符（除 \t \n \r）或私用区/非字符码位——正常业务文案不会出现；
+ *   3. 经典乱码标记串（锟斤拷/烫烫烫/连续 ?? 占位）。
+ */
+export function looksLikeCorruptedText(value: string): boolean {
+  if (!value) return false
+  for (const ch of value) {
+    const code = ch.codePointAt(0)!
+    if (code === 0xfffd) return true
+    if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) return true
+    if (code >= 0xe000 && code <= 0xf8ff) return true
+    if (code >= 0xfff0 && code <= 0xffff) return true
+  }
+  return /锟斤拷|烫烫烫|\?{6,}/.test(value)
 }
 
 // ---------------------------------------------------------------------------

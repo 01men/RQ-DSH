@@ -417,8 +417,149 @@ export function selectField(name, options, { value } = {}) {
     `<option value="${esc(opt.value)}" ${opt.value === value ? 'selected' : ''}>${esc(opt.label)}</option>`).join('')}</select>`
 }
 
+// ---------- 可搜索选择器（UI-04：长列表选择，如 150+ 组织） ----------
+// 原生 select 无法搜索、无法展示全路径，同名部门极易选错；此组件弹出可过滤的
+// 路径列表，选项按 group（如法人）分组展示完整路径。
+let pickerSeq = 0
+const pickerRegistry = new Map()
+
+/**
+ * @param options Array<{ value, label, group? }> — label 建议传完整路径（如「法人 / 部门」）
+ * @param opts.emptyLabel 允许空值时的占位项文案（如「（作为顶级组织）」）；不传则必选
+ */
+export function searchableSelectField(name, options, { value, placeholder = '点击选择，支持搜索', emptyLabel } = {}) {
+  const key = `ss${++pickerSeq}`
+  pickerRegistry.set(key, { options, emptyLabel, placeholder })
+  const selected = options.find((opt) => opt.value === value)
+  return `
+    <div class="searchable-select" data-sselect="${key}">
+      <input type="hidden" name="${esc(name)}" value="${esc(value ?? '')}">
+      <input class="input" type="text" readonly data-ss-display placeholder="${esc(placeholder)}" value="${esc(selected?.label ?? '')}" title="${esc(selected?.label ?? '')}">
+      <div class="searchable-select-menu" data-ss-menu>
+        <div class="searchable-select-search">${icon('search', 14)}<input type="text" data-ss-q placeholder="输入名称或路径关键词过滤"></div>
+        <div class="searchable-select-list" data-ss-list></div>
+      </div>
+    </div>`
+}
+
+/** 在容器内激活所有 searchable-select（弹窗内容插入 DOM 后调用一次）。 */
+let pickerGlobalBound = false
+export function mountSearchableSelects(rootEl) {
+  // 全局点击关闭只绑一次，避免每次弹窗都向 document 累积监听器
+  if (!pickerGlobalBound) {
+    pickerGlobalBound = true
+    document.addEventListener('click', (e) => {
+      document.querySelectorAll('.searchable-select.open').forEach((p) => {
+        if (!p.contains(e.target)) p.classList.remove('open')
+      })
+    })
+  }
+  rootEl?.querySelectorAll('[data-sselect]').forEach((picker) => {
+    const key = picker.dataset.sselect
+    const conf = pickerRegistry.get(key)
+    pickerRegistry.delete(key)
+    if (!conf) return
+    const hidden = picker.querySelector('[name]')
+    const display = picker.querySelector('[data-ss-display]')
+    const menu = picker.querySelector('[data-ss-menu]')
+    const qEl = picker.querySelector('[data-ss-q]')
+    const list = picker.querySelector('[data-ss-list]')
+    let lastValue = hidden.value
+
+    const renderList = (keyword) => {
+      const kw = (keyword ?? '').trim().toLowerCase()
+      const matched = conf.options.filter((opt) => !kw || String(opt.label).toLowerCase().includes(kw) || String(opt.group ?? '').toLowerCase().includes(kw))
+      if (!matched.length && !conf.emptyLabel) {
+        list.innerHTML = '<div class="searchable-select-empty">没有匹配的选项</div>'
+        return
+      }
+      // 按 group 分组（保持传入顺序），无 group 的归入同一组
+      const groups = new Map()
+      for (const opt of matched) {
+        const g = opt.group ?? ''
+        if (!groups.has(g)) groups.set(g, [])
+        groups.get(g).push(opt)
+      }
+      let html = ''
+      if (!kw && conf.emptyLabel) {
+        html += `<div class="searchable-select-item" data-value="">${esc(conf.emptyLabel)}</div>`
+      }
+      for (const [group, opts] of groups) {
+        if (group) html += `<div class="searchable-select-group">${esc(group)}</div>`
+        for (const opt of opts) {
+          // 全路径展示：父链弱化、末级名称强调，同名部门一眼可辨
+          const label = String(opt.label)
+          const cut = label.lastIndexOf(' / ')
+          const visual = cut >= 0
+            ? `<span class="path-muted">${esc(label.slice(0, cut + 3))}</span>${esc(label.slice(cut + 3))}`
+            : esc(label)
+          const active = opt.value === lastValue ? ' active' : ''
+          html += `<div class="searchable-select-item${active}" data-value="${esc(opt.value)}" title="${esc(label)}">${visual}</div>`
+        }
+      }
+      if (!matched.length) html += '<div class="searchable-select-empty">没有匹配的选项，换个关键词试试</div>'
+      list.innerHTML = html
+      list.querySelectorAll('.searchable-select-item').forEach((item) => {
+        item.onclick = () => {
+          const opt = conf.options.find((o) => String(o.value) === item.dataset.value)
+          hidden.value = item.dataset.value
+          lastValue = item.dataset.value
+          display.value = opt?.label ?? ''
+          display.title = opt?.label ?? ''
+          closeMenu()
+        }
+      })
+      const active = list.querySelector('.searchable-select-item.active')
+      if (active) active.scrollIntoView({ block: 'center' })
+    }
+
+    const openMenu = () => {
+      picker.classList.add('open')
+      renderList('')
+      qEl.value = ''
+      setTimeout(() => qEl.focus(), 0)
+    }
+    const closeMenu = () => picker.classList.remove('open')
+    display.onclick = () => { picker.classList.contains('open') ? closeMenu() : openMenu() }
+    qEl.oninput = () => renderList(qEl.value)
+    menu.onclick = (e) => e.stopPropagation()
+  })
+}
+
 export function textareaField(name, { placeholder, value, rows = 3 } = {}) {
   return `<textarea class="form-control" name="${name}" rows="${rows}" placeholder="${esc(placeholder ?? '')}">${esc(value ?? '')}</textarea>`
+}
+
+// ---------- 首次访问概念卡（Skill/Agent/MCP/AI 应用术语解释，每模块仅展示一次） ----------
+const CONCEPT_SEEN_PREFIX = 'heng_ops_concept_'
+
+/**
+ * 模块首次访问时在页头下方显示非阻塞概念卡（一句话定位 + 3 条要点 +「知道了」）。
+ * 用内联横幅而非弹窗：弹窗会与页面自身的创建/编辑弹窗产生关闭时序冲突，
+ * 且首次用户往往正要去执行操作，非阻塞不打断任务路径。
+ * 已读标记存 localStorage；隐私模式下读写失败时静默降级为本次会话不记忆。
+ */
+export function maybeShowConceptCard(contentEl, key, { icon: ic = 'info', title, subtitle, points }) {
+  if (!contentEl) return
+  let seen = false
+  try { seen = localStorage.getItem(CONCEPT_SEEN_PREFIX + key) === '1' } catch { /* 读取失败视为未读 */ }
+  if (seen) return
+  const card = h(`
+    <div class="concept-banner mb-14">
+      <div class="concept-icon">${icon(ic, 22)}</div>
+      <div class="grow">
+        <div class="concept-title">初次了解 · ${esc(title)}</div>
+        <div class="concept-sub">${esc(subtitle)}</div>
+        <ul class="concept-points">${points.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>
+      </div>
+      <button class="btn btn-default btn-sm" data-concept-ok>知道了</button>
+    </div>`)
+  card.querySelector('[data-concept-ok]').onclick = () => {
+    card.remove()
+    try { localStorage.setItem(CONCEPT_SEEN_PREFIX + key, '1') } catch { /* 写入失败仅影响下次仍会显示 */ }
+  }
+  // 调用点位于 innerHTML 赋值之前，挂到微任务保证插入时页面骨架已就绪
+  queueMicrotask(() => contentEl.prepend(card))
 }
 
 // ---------- 分页 ----------

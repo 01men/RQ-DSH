@@ -25,6 +25,7 @@ export const AGENT_TYPE_SPEC: ResourceTypeSpec = {
         { value: 'deepseek-coder', label: 'DeepSeek Coder', hint: '代码任务' },
       ] },
       { key: 'systemPromptVersion', label: '系统提示词版本', type: 'string', group: 'tech', requiredForOnline: true, placeholder: '如 prompt-v3.2', hint: '上线前必须登记' },
+      { key: 'entryUrl', label: '交互界面地址', type: 'url', group: 'tech', placeholder: 'https://…', hint: 'Agent 面向用户的真实交互入口；接入后由 Agent 凭自身凭证提报（接入义务），控制台据此提供直达入口' },
       { key: 'skills', label: '关联 Skill', type: 'tags', group: 'tech', defaultValue: [], hint: '从市场安装后自动回填' },
       { key: 'mcpPermGroupIds', label: 'MCP 权限组', type: 'tags', group: 'tech', defaultValue: [], hint: '授予该 Agent 的工具访问范围' },
       { key: 'env', label: '运行环境', type: 'enum', group: 'tech', defaultValue: 'sandbox', options: [

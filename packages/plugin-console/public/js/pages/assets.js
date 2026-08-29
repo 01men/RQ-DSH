@@ -1,7 +1,7 @@
 /** 资产运营：企业 AI 资产统一台账 / 健康巡检 / 成本报表。 */
 import { api } from '../api.js'
 import { icon } from '../icons.js'
-import { $, esc, toast } from '../ui.js'
+import { $, esc, toast, statusBadge } from '../ui.js'
 
 const TYPE_META = {
   mcp: ['MCP 服务', 'plug'],
@@ -15,17 +15,10 @@ const TYPE_META = {
 /** 金额（分）→ 元展示。 */
 const fmtCents = (cents) => `¥${(cents / 100).toFixed(2)}`
 
-function statusBadge(status) {
-  const tone = ['online', 'published', 'healthy'].includes(status) ? 'badge-ok'
-    : ['gray', 'trial'].includes(status) ? 'badge-info'
-    : ['offline', 'down', 'unhealthy'].includes(status) ? 'badge-danger'
-    : ['draft', 'pending', 'pending_approval'].includes(status) ? 'badge-warn' : 'badge-muted'
-  return `<span class="badge ${tone}">${esc(status)}</span>`
-}
-
+// UI-06：生命周期/健康码统一改用 ui.js 的中文徽标（statusBadge，online→已上线、degraded→降级…），
+// 不再直接渲染英文码。
 function healthBadge(health) {
-  const tone = health === 'healthy' ? 'badge-ok' : health === 'degraded' ? 'badge-warn' : health === 'down' ? 'badge-danger' : 'badge-muted'
-  return `<span class="badge ${tone}">${esc(health ?? 'unknown')}</span>`
+  return statusBadge(health ?? 'unknown')
 }
 
 /** 类型徽章：小图标 + 名称。 */
@@ -91,13 +84,13 @@ export async function renderAssets(content, params, { rerender }) {
         <div class="stat-icon" style="background:var(--ok-bg);color:#047857">${icon('activity', 18)}</div>
         <div class="stat-value">${Object.values(inv.summary.byType).reduce((s, v) => s + v.inService, 0)}</div>
         <div class="stat-label">在服务资产</div>
-        <div class="stat-foot">online / gray / published</div>
+        <div class="stat-foot">已上线 / 灰度中 / 已上架</div>
       </div>
       <div class="stat-card">
         <div class="stat-icon" style="background:${inv.summary.unhealthy > 0 ? 'var(--danger-bg)' : 'var(--ok-bg)'};color:${inv.summary.unhealthy > 0 ? '#b91c1c' : '#047857'}">${icon(inv.summary.unhealthy > 0 ? 'alert' : 'shieldCheck', 18)}</div>
         <div class="stat-value" style="color:${inv.summary.unhealthy > 0 ? 'var(--danger)' : 'inherit'}">${inv.summary.unhealthy}</div>
         <div class="stat-label">健康异常</div>
-        <div class="stat-foot">down / degraded</div>
+        <div class="stat-foot">不可用 / 降级</div>
       </div>
       <div class="stat-card">
         <div class="stat-icon" style="background:var(--purple-bg);color:#6d28d9">${icon('coins', 18)}</div>

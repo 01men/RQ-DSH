@@ -4,7 +4,7 @@ import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
-  fmtNum, fmtPct, timeAgo, emptyState, sparkline, barChart, lineChart,
+  fmtNum, fmtPct, timeAgo, emptyState, sparkline, barChart, lineChart, maybeShowConceptCard,
 } from '../ui.js'
 
 const ICON_COLORS = { kb: ['#eef2ff', '#4f6ef7'], chart: ['#ecfdf5', '#10b981'], ticket: ['#fff7ed', '#f97316'], hr: ['#f5f3ff', '#8b5cf6'], fx: ['#fef2f2', '#ef4444'], mcp: ['#eff6ff', '#3b82f6'] }
@@ -12,6 +12,18 @@ const ICON_COLORS = { kb: ['#eef2ff', '#4f6ef7'], chart: ['#ecfdf5', '#10b981'],
 export async function renderMcp(content, params, ctx) {
   const data = await api.get('/api/mcp/services')
   const services = data.services
+
+  // 首次访问概念卡（易用性整改：MCP 术语对业务成员有门槛）
+  maybeShowConceptCard(content, 'mcp', {
+    icon: 'plug',
+    title: 'MCP 是什么？',
+    subtitle: 'MCP = Agent 连接外部工具与数据的标准接口，可以理解为「万能插头」。',
+    points: [
+      '供给侧：把知识库、工单、图表等能力以统一规格提供给 Agent 调用。',
+      '供给链路：注册登记 → 安全审核 → 测试验证 → 灰度发布 → 运行监控。',
+      '平台托管：网关统一鉴权、限流熔断，调用全程计量计费。',
+    ],
+  })
 
   content.innerHTML = `
     <div class="page-head">

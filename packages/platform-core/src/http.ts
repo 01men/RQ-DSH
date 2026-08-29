@@ -241,6 +241,11 @@ export class HttpServerService extends Service {
         .filter(({ prefix }) => url.pathname === prefix || url.pathname.startsWith(`${prefix}/`))
         .sort((a, b) => b.prefix.length - a.prefix.length)
       if (staticCandidates.length > 0) {
+        // DEF-01：API 请求永不回落到静态资源/SPA 页面，未匹配路由一律 404 JSON
+        if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
+          exchange.fail(404, 'NOT_FOUND', `路由不存在：${method} ${url.pathname}`)
+          return
+        }
         const best = staticCandidates[0]!
         await this.serveFromDir(exchange, best.entry, url.pathname.slice(best.prefix.length))
         return

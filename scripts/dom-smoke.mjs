@@ -236,8 +236,13 @@ await test('T10 IAM 创建账号全流程 + 口令展示弹窗（iam.js:212/229/
   assert($('.modal [data-ok]'), '创建账号弹窗应打开')
   $('.modal [name=displayName]').value = '冒烟测试账号'
   $('.modal [name=username]').value = 'smoke' + RUN_ID
-  const orgSelect = $('.modal select[name=orgId]')
-  orgSelect.value = orgSelect.querySelector('option:not([value=""])')?.value ?? orgSelect.options[0]?.value ?? ''
+  // UI-04 整改后组织选择为可搜索选择器：点开展示框 → 等待选项列表 → 点选第一个非空选项
+  $('.modal [data-ss-display]').click()
+  assert(await waitFor(() => $('.modal .searchable-select.open .searchable-select-item')), '组织选择器应展开选项列表')
+  const orgItem = $$('.modal .searchable-select.open .searchable-select-item').find((el) => el.dataset.value)
+  assert(orgItem, '组织选项列表应有可选项')
+  orgItem.click()
+  assert($('.modal [name=orgId]').value, '点选后隐藏字段应写入组织 ID')
   $('.modal [data-ok]').click()
   assert(await waitFor(() => $('#cred-password')), '创建成功后应展示凭据弹窗（用户名+口令，仅一次）')
   assert($('#cred-password').textContent.length >= 8, '初始口令应为随机强口令')
