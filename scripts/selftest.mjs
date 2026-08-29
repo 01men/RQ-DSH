@@ -1865,6 +1865,13 @@ try {
     body: JSON.stringify({ ticket: entryBound.data.ticket }),
   })
   check('直达票据：重放兑换被拒（一次性消费）', redeemReplay.status === 400, `${redeemReplay.status} ${redeemReplay.body.slice(0, 120)}`)
+  check('直达票据：兑换响应放行跨域（任意 entryUrl 前端可读取，ACAO=*）', redeemReplay.headers['access-control-allow-origin'] === '*', JSON.stringify(redeemReplay.headers))
+  const redeemPreflight = await rawReq('OPTIONS', '/api/authn/entry-tickets/redeem', {
+    headers: { origin: 'http://192.168.0.7:6060', 'access-control-request-method': 'POST', 'access-control-request-headers': 'content-type' },
+  })
+  check('直达票据：OPTIONS 预检 204 + ACAO（跨域浏览器流程可通）',
+    redeemPreflight.status === 204 && redeemPreflight.headers['access-control-allow-origin'] === '*' && String(redeemPreflight.headers['access-control-allow-headers'] ?? '').includes('content-type'),
+    `${redeemPreflight.status} ${JSON.stringify(redeemPreflight.headers)}`)
   const redeemForged = await rawReq('POST', '/api/authn/entry-tickets/redeem', {
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ ticket: 'etk_forged_0000000000000000000000000000000000000000' }),

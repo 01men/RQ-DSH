@@ -2454,10 +2454,27 @@ export function apply(ctx: Context) {
     return issued
   })
 
-  /** 兑换入场票据（公开端点，票据本身即临时凭证）：一次性消费 → 实时校验用户状态 → 交付平台身份。 */
+  /**
+   * 兑换入场票据（公开端点，票据本身即临时凭证）：一次性消费 → 实时校验用户状态 → 交付平台身份。
+   * CORS：本端点的调用方是任意 entryUrl 的交互界面前端（来源不可枚举，票据即凭证），
+   * 放行任意 Origin 的 POST + OPTIONS 预检；平台其余 /api 仍保持同源收紧。
+   */
+  const redeemCorsHeaders: Record<string, string> = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'POST, OPTIONS',
+    'access-control-allow-headers': 'content-type',
+    'access-control-max-age': '600',
+  }
+  http.register('OPTIONS', '/api/authn/entry-tickets/redeem', (exchange) => {
+    if (!exchange.res.writableEnded) {
+      exchange.res.writeHead(204, redeemCorsHeaders)
+      exchange.res.end()
+    }
+  })
   http.register('POST', '/api/authn/entry-tickets/redeem', (exchange) => {
     const input = body<{ ticket?: string }>(exchange)
     const clientIp = String(exchange.raw.socket?.remoteAddress ?? 'unknown')
+    for (const [key, value] of Object.entries(redeemCorsHeaders)) exchange.res.setHeader(key, value)
     try {
       const result = ctx.entryTickets.redeem(String(input.ticket ?? ''), clientIp)
       ctx.audit.record({
