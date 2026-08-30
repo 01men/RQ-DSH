@@ -14,6 +14,7 @@
  *
  * 认证：DSHCTL_TOKEN 环境变量，或 admin 账号自动登录。
  */
+import fs from 'node:fs'
 const BASE = process.env.DSHCTL_URL ?? 'http://127.0.0.1:7300'
 const argv = process.argv.slice(2)
 
@@ -47,6 +48,15 @@ async function call(method, path, body) {
     fail(`${message}（${code}）`)
   }
   return payload?.data
+}
+
+function readFileSyncLocal(path) {
+  try {
+    return fs.readFileSync(path, 'utf8')
+  } catch {
+    fail(`文件不存在或不可读：${path}`)
+    return ''
+  }
 }
 
 function fail(message) {
@@ -143,6 +153,10 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
             health <id> | online <id> | offline <id> --reason=
             shares <id> | files <id> [--path=] | mkdir <id> --path= | delete <id> --path=
             upload <id> --file=<本地路径> --dest=<NAS路径> | search <id> --pattern= [--path=]
+            authz check --nas=<id> --user=<平台或钉钉userId> --path=<路径> --op=read|download|write|modify|delete|share|admin [--override]
+            authz scope --nas=<id> --user=<userId>
+            authz rules get | rules set [--observe-only=on|off] [--degrade-readonly=on|off] [--c-groups=组名1,组名2]
+            authz rules import --file=<rules.json> | decisions [--decision=deny] [--limit=50]
   connector gateway get | gateway set --base-url= --admin-token-env=VAR | gateway health
             catalog providers [--search=] | catalog actions [--service=] [--search=]
             catalog action <actionId> [--guide]
@@ -574,6 +588,63 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       const action = argv[0] ?? 'list'
       const id = argv[1]
       await ensureToken()
+      if (action === 'authz') {
+        const sub = argv[1]
+        if (sub === 'check') {
+          const nasId = argOf('--nas')
+          const user = argOf('--user')
+          const path = argOf('--path')
+          const op = argOf('--op')
+          if (!nasId || !user || !path || !op) fail('用法：nas authz check --nas=<id> --user=<userId> --path=<路径> --op=<操作> [--override]')
+          const data = await call('POST', '/api/nas/authz/check', {
+            nasId, userId: user, paths: String(path).split(','), op,
+            ...(flag('override') ? { override: true } : {}),
+          })
+          out(data, null, `判定：${data.decision === 'allow' ? 'ALLOW' : 'DENY'}（角色 ${data.role ?? '—'}${data.cTag ? ' +C' : ''}，作用域 ${(data.scope ?? []).join(' ')}）`)
+          return
+        }
+        if (sub === 'scope') {
+          const nasId = argOf('--nas')
+          const user = argOf('--user')
+          if (!nasId || !user) fail('用法：nas authz scope --nas=<id> --user=<userId>')
+          out(await call('GET', `/api/nas/authz/scope?nasId=${encodeURIComponent(nasId)}&userId=${encodeURIComponent(user)}`))
+          return
+        }
+        if (sub === 'rules') {
+          const verb = argv[2] ?? 'get'
+          if (verb === 'get') { out(await call('GET', '/api/nas/authz/rules')); return }
+          if (verb === 'import') {
+            const file = argOf('--file')
+            if (!file) fail('用法：nas authz rules import --file=<rules.json>')
+            out(await call('POST', '/api/nas/authz/rules/import', JSON.parse(readFileSyncLocal(file))))
+            return
+          }
+          if (verb === 'set') {
+            const current = await call('GET', '/api/nas/authz/rules')
+            const patch = { ifVersion: current.version }
+            const observe = argOf('--observe-only')
+            if (observe !== undefined) patch.observeOnly = String(observe) === 'on'
+            const degrade = argOf('--degrade-readonly')
+            if (degrade !== undefined) patch.degradeAllToReadonly = String(degrade) === 'on'
+            const cGroups = argOf('--c-groups')
+            if (cGroups !== undefined) patch.cGroups = String(cGroups).split(',').map((item) => item.trim()).filter(Boolean)
+            const saved = await call('PUT', '/api/nas/authz/rules', patch)
+            ok(`规则已更新（version ${current.version} → ${saved.version}）`)
+            return
+          }
+          fail('用法：nas authz rules get | set [...] | import --file=<rules.json>')
+          return
+        }
+        if (sub === 'decisions') {
+          const search = new URLSearchParams()
+          if (flag('decision')) search.set('decision', flag('decision'))
+          search.set('limit', String(argOf('--limit') ?? 50))
+          out(await call('GET', `/api/nas/authz/decisions?${search}`))
+          return
+        }
+        fail('用法：nas authz check | scope | rules | decisions')
+        return
+      }
       if (action === 'list') {
         const search = new URLSearchParams()
         if (flag('status')) search.set('status', flag('status'))

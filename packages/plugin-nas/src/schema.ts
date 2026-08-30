@@ -27,6 +27,8 @@ export const NAS_TYPE_SPEC: ResourceTypeSpec = {
       { key: 'accessToken', label: '网关访问令牌', type: 'string', group: 'access', required: true, requiredForOnline: true, placeholder: 'Bearer 令牌（回显脱敏）', hint: '网关侧签发的访问凭证，存储保留原文、展示层掩码' },
       { key: 'nasIp', label: 'NAS 设备 IP', type: 'string', group: 'access', required: true, requiredForOnline: true, placeholder: '192.168.0.196', hint: '经 X-NAS-IP 头路由到网关背后的具体设备' },
       { key: 'rootPath', label: '授权根路径', type: 'string', group: 'access', defaultValue: '/', placeholder: '/（默认全部）', hint: '纳管范围收敛到该子树（展示与审计口径）' },
+      { key: 'orgRoot', label: '接入组织锚点', type: 'string', group: 'access', placeholder: '如「智造平台」（平台级组织名或 orgId）', hint: '数据权限作用域推导锚点（dev-plan-nas-authz §2.1）：留空 = 该 NAS 对数据权限全 deny' },
+      { key: 'orgPathOverrides', label: '组织目录映射表', type: 'string', group: 'access', placeholder: '{"org_xxx": "/生产"}', hint: 'JSON 对象：orgId → 目录前缀，优先于名字推导——组织改名/合并不漂移（R1）' },
       { key: 'stagingDir', label: '上传中转目录', type: 'string', group: 'access', placeholder: '（默认 <dataDir>/nas-staging）', hint: 'fs_upload 在网关侧读取本地路径：网关与平台需同机部署，或把此目录配置为共享挂载点' },
       { key: 'dataClass', label: '数据密级', type: 'enum', group: 'governance', required: true, defaultValue: 'internal', options: [
         { value: 'public', label: '公开' },

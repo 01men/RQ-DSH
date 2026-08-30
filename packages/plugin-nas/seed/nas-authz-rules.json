@@ -1,0 +1,11 @@
+{
+  "$comment": "NAS 数据权限规则种子（dev-plan-nas-authz §2.1 种子导入；与 hermes_nas_rbac_rules.md 等价的 JSON 形态）。经 POST /api/nas/authz/rules/import 幂等导入：cGroups 按动态用户组名解析（部署间无 ID 耦合，解析不到的组名在响应 unresolvedGroups 中报告）；矩阵为内置默认值（P 全放行 / D 无 admin / T 无 delete,share,admin / M 仅 read,download,write；C 叠加只读），如需覆盖在 matrixOverrides 中按 {\"D\":{\"delete\":false}} 形态声明。",
+  "version": 1,
+  "tenantId": "t_default",
+  "matrixOverrides": {},
+  "exceptions": [],
+  "cGroups": ["跨域协作者"],
+  "externalReadPaths": [],
+  "observeOnly": true,
+  "degradeAllToReadonly": false
+}

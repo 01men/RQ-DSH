@@ -25,6 +25,12 @@ export interface OrgRecord extends RecordBase {
   customFields: Record<string, string>
   /** 所属租户（多租户最小集，v1.2 第 2 步；缺省 t_default 兜底存量数据）。 */
   tenantId?: string
+  /**
+   * 组织负责人（NAS 数据权限 P/D/T 角色推导依据，dev-plan-nas-authz §2.1）。
+   * 事实源：钉钉连接器同步 dept_manager_userid_list；兼容 customFields['leaderUserIds'] 逗号分隔旧口径。
+   * 多负责人全部推导为对应负责人角色（co-leader）；为空时 nasAuthz 发 leaderVacant 告警。
+   */
+  leaderUserIds?: string[]
 }
 
 /** 租户（多租户最小集）：计量/钱包/分账的租户维度载体。 */
@@ -63,6 +69,17 @@ export interface UserRecord extends RecordBase {
   jobNumber?: string
   lastLoginAt?: string
   frozenReason?: string
+  /**
+   * 账号类型（NAS 数据权限特殊账号规则，dev-plan-nas-authz §2.1）：
+   * internal=正式员工（缺省）；external=外部顾问/合作方（白名单目录只读）；
+   * suspended-review=可疑标记（全 deny + 审计转人工复核）。
+   */
+  accountType?: 'internal' | 'external' | 'suspended-review'
+  /**
+   * 主归属组织（跨部门兼任语义，dev-plan-nas-authz §2.1）：缺省取组织链最深者。
+   * orgId ≠ primaryOrgId 时，orgId 组织子树仅授只读（兼任只读，避免双写冲突）。
+   */
+  primaryOrgId?: string
 }
 
 export interface RoleRecord extends RecordBase {
@@ -85,6 +102,13 @@ export interface UserGroupRecord extends RecordBase {
   rule?: UserGroupRule
   memberIds: string[]
   description: string
+  /**
+   * 是否为 NAS 数据权限 C 角色关联的动态用户组（dev-plan-nas-authz §2.2）。
+   * 由 nasAuthz 规则导入/更新时回写标记；重算漂移时无论幅度大小都发 cGroupDrift 告警。
+   */
+  authzRoleC?: boolean
+  /** 成员重算漂移告警阈值（人数，缺省 5；仅对未标记 authzRoleC 的组生效）。 */
+  driftAlertThreshold?: number
 }
 
 export interface ConnectorConfigRecord extends RecordBase {
@@ -140,6 +164,16 @@ export interface SyncConflictRecord extends RecordBase {
   resolvedAt?: string
 }
 
+/** 动态用户组成员快照（C 组漂移可观测，dev-plan-nas-authz §2.2）。 */
+export interface GroupSnapshotRecord extends RecordBase {
+  groupId: string
+  memberIds: string[]
+  computedAt: string
+}
+
+/** 组成员漂移告警默认阈值（人数）。 */
+export const DEFAULT_GROUP_DRIFT_THRESHOLD = 5
+
 // ---------------------------------------------------------------------------
 // 权限点目录
 // ---------------------------------------------------------------------------
@@ -182,6 +216,10 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'skill.storage.write', label: '配置 Skill 包存储后端（本地/NAS）', group: 'Skill 市场' },
   { point: 'nas.read', label: '查看 NAS 存储', group: 'NAS 存储' },
   { point: 'nas.write', label: '管理 NAS 存储（纳管/上线/文件读写）', group: 'NAS 存储' },
+  // NAS 数据权限（dev-plan-nas-authz §2.3）：check 供网关/hermes 专用资源账号调用，read/write 供规则管理
+  { point: 'nas.authz.check', label: 'NAS 数据权限判定（check/scope）', group: 'NAS 存储' },
+  { point: 'nas.authz.read', label: '查看 NAS 数据权限规则与判定留痕', group: 'NAS 存储' },
+  { point: 'nas.authz.write', label: '管理 NAS 数据权限规则/例外（含破窗 override）', group: 'NAS 存储' },
   { point: 'agent.read', label: '查看 Agent', group: 'Agent 本体' },
   { point: 'agent.write', label: '管理 Agent', group: 'Agent 本体' },
   { point: 'agent.approve', label: '审批 Agent 上线', group: 'Agent 本体' },
@@ -230,7 +268,8 @@ export const BUILTIN_ROLE_MIGRATION: Record<string, string[]> = {
   resource_admin: ['connector.gateway.write', 'connector.catalog.read', 'connector.connection.read', 'connector.connection.write', 'connector.invoke', 'connector.permgroup.write', 'connector.runs.read'],
   // developer 补 agent.write：与 app.write 对称——开发者应能注册/提报更新 Agent（2026-08 修复"总是报没有 agent.write 权限"）
   developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke', 'agent.write'],
-  auditor: ['connector.runs.read', 'connector.connection.read'],
+  // auditor 补 nas.authz.read：审计员可查看 NAS 数据权限规则与判定留痕（dev-plan-nas-authz §2.3）
+  auditor: ['connector.runs.read', 'connector.connection.read', 'nas.authz.read'],
 }
 
 /** 兼容别名：迁移通道创建时的历史命名（仅 connector 批次）。 */
@@ -241,7 +280,7 @@ export const CONNECTOR_ROLE_MIGRATION = BUILTIN_ROLE_MIGRATION
 // ---------------------------------------------------------------------------
 
 export interface RemoteDirectory {
-  orgs: Array<{ remoteId: string; name: string; parentRemoteId: string | null }>
+  orgs: Array<{ remoteId: string; name: string; parentRemoteId: string | null; /** 部门负责人三方 userId 列表（钉钉 dept_manager_userid_list），nasAuthz 角色推导依据。 */ managerRemoteIds?: string[] }>
   users: Array<{ remoteId: string; name: string; jobNumber: string; title: string; orgRemoteId: string; email: string; active: boolean }>
 }
 
@@ -259,13 +298,13 @@ export class DingTalkConnector implements OrgConnector {
 
   private directory: RemoteDirectory = {
     orgs: [
-      { remoteId: 'dd_root', name: '元冰可集团', parentRemoteId: null },
-      { remoteId: 'dd_tech', name: '技术中心', parentRemoteId: 'dd_root' },
-      { remoteId: 'dd_ai', name: 'AI 平台部', parentRemoteId: 'dd_tech' },
-      { remoteId: 'dd_be', name: '后端部', parentRemoteId: 'dd_tech' },
-      { remoteId: 'dd_fe', name: '前端部', parentRemoteId: 'dd_tech' },
-      { remoteId: 'dd_prod', name: '产品运营部', parentRemoteId: 'dd_root' },
-      { remoteId: 'dd_mkt', name: '市场部', parentRemoteId: 'dd_root' },
+      { remoteId: 'dd_root', name: '元冰可集团', parentRemoteId: null, managerRemoteIds: ['dd_u001'] },
+      { remoteId: 'dd_tech', name: '技术中心', parentRemoteId: 'dd_root', managerRemoteIds: ['dd_u001'] },
+      { remoteId: 'dd_ai', name: 'AI 平台部', parentRemoteId: 'dd_tech', managerRemoteIds: ['dd_u002'] },
+      { remoteId: 'dd_be', name: '后端部', parentRemoteId: 'dd_tech', managerRemoteIds: ['dd_u004'] },
+      { remoteId: 'dd_fe', name: '前端部', parentRemoteId: 'dd_tech', managerRemoteIds: ['dd_u005'] },
+      { remoteId: 'dd_prod', name: '产品运营部', parentRemoteId: 'dd_root', managerRemoteIds: ['dd_u006'] },
+      { remoteId: 'dd_mkt', name: '市场部', parentRemoteId: 'dd_root', managerRemoteIds: ['dd_u008'] },
     ],
     users: [
       { remoteId: 'dd_u001', name: '陈远舟', jobNumber: 'DD0001', title: '技术总监', orgRemoteId: 'dd_tech', email: 'chenyz@yuanbingke.com', active: true },
@@ -357,7 +396,7 @@ export class RealDingTalkConnector implements OrgConnector {
   async fetchDirectory(): Promise<RemoteDirectory> {
     const rootId = this.syncOrgRoot
     const rootInfo = await this.getDepartment(rootId)
-    const orgs: RemoteDirectory['orgs'] = [{ remoteId: rootId, name: rootInfo.name, parentRemoteId: null }]
+    const orgs: RemoteDirectory['orgs'] = [{ remoteId: rootId, name: rootInfo.name, parentRemoteId: null, ...(rootInfo.managerRemoteIds ? { managerRemoteIds: rootInfo.managerRemoteIds } : {}) }]
     const users: RemoteDirectory['users'] = []
     // 自根部门 BFS（上限 3 层 / 每层 50 部门，防御异常目录）
     let frontier = [rootId]
@@ -366,7 +405,7 @@ export class RealDingTalkConnector implements OrgConnector {
       for (const deptId of frontier.slice(0, 50)) {
         for (const childId of await this.listSubDepartmentIds(deptId)) {
           const child = await this.getDepartment(childId)
-          orgs.push({ remoteId: childId, name: child.name, parentRemoteId: deptId })
+          orgs.push({ remoteId: childId, name: child.name, parentRemoteId: deptId, ...(child.managerRemoteIds ? { managerRemoteIds: child.managerRemoteIds } : {}) })
           next.push(childId)
         }
       }
@@ -382,10 +421,11 @@ export class RealDingTalkConnector implements OrgConnector {
     return { orgs, users }
   }
 
-  /** 部门详情（取名；根部门 dept_id=1 返回企业名）。 */
-  private async getDepartment(deptId: string): Promise<{ name: string }> {
-    const payload = await this.topapi<{ result?: { name?: string } }>('/topapi/v2/department/get', { dept_id: Number(deptId) })
-    return { name: payload.result?.name ?? `部门 ${deptId}` }
+  /** 部门详情（取名 + 负责人列表；根部门 dept_id=1 返回企业名）。 */
+  private async getDepartment(deptId: string): Promise<{ name: string; managerRemoteIds?: string[] }> {
+    const payload = await this.topapi<{ result?: { name?: string; dept_manager_userid_list?: string[] } }>('/topapi/v2/department/get', { dept_id: Number(deptId) })
+    const managerRemoteIds = (payload.result?.dept_manager_userid_list ?? []).filter((id) => Boolean(id))
+    return { name: payload.result?.name ?? `部门 ${deptId}`, ...(managerRemoteIds.length > 0 ? { managerRemoteIds } : {}) }
   }
 
   /** 下一级子部门 ID 列表（不受授权范围限制）。 */
@@ -672,7 +712,7 @@ export class IamService extends Service {
     return sortRec(roots)
   }
 
-  createOrg(input: { name: string; parentId?: string | null; order?: number; customFields?: Record<string, string>; tenantId?: string }): OrgRecord {
+  createOrg(input: { name: string; parentId?: string | null; order?: number; customFields?: Record<string, string>; tenantId?: string; leaderUserIds?: string[] }): OrgRecord {
     if (!input.name?.trim()) throw new Error('组织名称不能为空')
     const parentId = input.parentId ?? null
     if (parentId && !this.orgs().get(parentId)) throw new Error(`父组织不存在：${parentId}`)
@@ -689,9 +729,28 @@ export class IamService extends Service {
       status: 'active',
       customFields: input.customFields ?? {},
       ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
+      ...(input.leaderUserIds !== undefined ? { leaderUserIds: input.leaderUserIds } : {}),
     })
     this.ctx.platformBus.emit(PlatformEvents.OrgChanged, { kind: 'create', orgId: record.id, name: record.name })
     return record
+  }
+
+  /** 维护组织负责人（控制台补录 / leaderVacant 告警后的处置入口）。传空数组即清空。 */
+  setOrgLeaders(id: string, leaderUserIds: string[]): OrgRecord {
+    this.requireOrg(id)
+    for (const userId of leaderUserIds) {
+      if (!this.users().get(userId)) throw new Error(`负责人账号不存在：${userId}`)
+    }
+    return this.orgs().update(id, { leaderUserIds: [...new Set(leaderUserIds)] })
+  }
+
+  /** 兼容读取：负责人历史口径 customFields['leaderUserIds']（逗号分隔），结构化字段优先。 */
+  leadersOf(orgId: string): string[] {
+    const org = this.orgs().get(orgId)
+    if (!org) return []
+    if (Array.isArray(org.leaderUserIds)) return org.leaderUserIds
+    const legacy = String(org.customFields?.['leaderUserIds'] ?? '').trim()
+    return legacy ? legacy.split(',').map((item) => item.trim()).filter(Boolean) : []
   }
 
   renameOrg(id: string, name: string): OrgRecord {
@@ -869,9 +928,13 @@ export class IamService extends Service {
     return updated
   }
 
-  updateUser(id: string, patch: Partial<Pick<UserRecord, 'displayName' | 'email' | 'phone' | 'title' | 'orgId'>>): UserRecord {
+  updateUser(id: string, patch: Partial<Pick<UserRecord, 'displayName' | 'email' | 'phone' | 'title' | 'orgId' | 'accountType' | 'primaryOrgId'>>): UserRecord {
     this.requireUser(id)
     if (patch.orgId && !this.orgs().get(patch.orgId)) throw new Error(`组织不存在：${patch.orgId}`)
+    if (patch.primaryOrgId && !this.orgs().get(patch.primaryOrgId)) throw new Error(`主归属组织不存在：${patch.primaryOrgId}`)
+    if (patch.accountType !== undefined && !['internal', 'external', 'suspended-review'].includes(patch.accountType)) {
+      throw new Error(`非法账号类型：${patch.accountType}`)
+    }
     return this.users().update(id, patch)
   }
 
@@ -1103,6 +1166,48 @@ export class IamService extends Service {
     })
   }
 
+  /** 动态用户组成员快照（dev-plan-nas-authz §2.2：重算结果落快照，漂移可观测）。 */
+  groupSnapshots(): Collection<GroupSnapshotRecord> {
+    return this.ctx.opsStorage.collection<GroupSnapshotRecord>('iam:groupSnapshots')
+  }
+
+  /**
+   * 重算全部动态用户组成员并与快照比对（连接器同步收尾 / REST 手动触发）。
+   * 漂移人数 ≥ 阈值（组上 driftAlertThreshold，缺省 5）或组被标记为 NAS C 关联组（authzRoleC）
+   * 时发 `nas.authz.cGroupDrift` 事件——防止 HR 调整静默改变跨域只读范围。
+   * 返回本次发生漂移的组清单（含增减明细），供调用方展示/断言。
+   */
+  refreshGroupSnapshots(actor: string): Array<{ groupId: string; groupName: string; added: string[]; removed: string[]; threshold: number; alerted: boolean }> {
+    const drifts: Array<{ groupId: string; groupName: string; added: string[]; removed: string[]; threshold: number; alerted: boolean }> = []
+    for (const group of this.groups().find((item) => item.type === 'dynamic')) {
+      const memberIds = this.resolveGroupMembers(group.id).map((user) => user.id).sort()
+      const existing = this.groupSnapshots().findOne((item) => item.groupId === group.id)
+      const previous = existing?.memberIds ?? null
+      if (previous !== null) {
+        const prevSet = new Set(previous)
+        const nextSet = new Set(memberIds)
+        const added = memberIds.filter((id) => !prevSet.has(id))
+        const removed = previous.filter((id) => !nextSet.has(id))
+        if (added.length > 0 || removed.length > 0) {
+          const threshold = group.driftAlertThreshold ?? DEFAULT_GROUP_DRIFT_THRESHOLD
+          // C 关联组任何幅度的漂移都告警（跨域只读范围敏感）；其余组按阈值
+          const alerted = group.authzRoleC === true || (added.length + removed.length) >= threshold
+          if (alerted) {
+            this.ctx.platformBus.emit('nas.authz.cGroupDrift', {
+              groupId: group.id, groupName: group.name, added, removed,
+              addedCount: added.length, removedCount: removed.length, threshold, actor,
+            })
+          }
+          drifts.push({ groupId: group.id, groupName: group.name, added, removed, threshold, alerted })
+        }
+      }
+      const record: GroupSnapshotRecord = { id: existing?.id ?? `gsn_${group.id}`, groupId: group.id, memberIds, computedAt: new Date().toISOString() }
+      if (existing) this.groupSnapshots().update(existing.id, record)
+      else this.groupSnapshots().insert(record)
+    }
+    return drifts
+  }
+
   // -- 三方接入 -----------------------------------------------------------
 
   /** 按平台类型取第一条配置（旧调用兼容；多主体请用 connectorConfigById/resolveConnectorConfig）。 */
@@ -1324,6 +1429,21 @@ export class IamService extends Service {
 
     let conflicts = 0
     let frozen = 0
+
+    // 负责人同步（dev-plan-nas-authz 步骤 1）：dept_manager_userid_list → 平台 userId（identityLinks 反查）。
+    // 远端显式给空列表=清空负责人；字段缺省=不动本地（兼容旧目录源）。映射不上的远端负责人被丢弃（不落悬空 ID）。
+    let leaderSynced = 0
+    for (const remoteOrg of directory.orgs) {
+      if (!Array.isArray(remoteOrg.managerRemoteIds)) continue
+      const localOrgId = remoteOrgToId.get(remoteOrg.remoteId)
+      if (!localOrgId) continue
+      const leaderUserIds = remoteOrg.managerRemoteIds
+        .map((remoteUserId) => this.identityLinks().findOne((link) => link.provider === provider && link.providerUserId === remoteUserId && (link.corpId ?? '') === config.corpId)?.userId)
+        .filter((id): id is string => Boolean(id))
+      this.orgs().update(localOrgId, { leaderUserIds })
+      leaderSynced++
+    }
+
     for (const remoteUser of directory.users) {
       const orgId = remoteOrgToId.get(remoteUser.orgRemoteId)
       if (!orgId) continue
@@ -1379,7 +1499,11 @@ export class IamService extends Service {
       }
     }
 
-    const result = { ok: true, created, updated, conflicts, frozen, message: `同步完成：新建 ${created}，更新 ${updated}，冲突 ${conflicts}，离职冻结 ${frozen}` }
+    // 动态用户组重算快照 + 漂移告警（dev-plan-nas-authz §2.2）：HR 调整 title/org 后
+    // 组成员可能静默变化，同步收尾时统一重算并与快照比对，漂移超阈值或涉及 C 关联组即告警。
+    const drifts = this.refreshGroupSnapshots('connector-sync')
+
+    const result = { ok: true, created, updated, conflicts, frozen, message: `同步完成：新建 ${created}，更新 ${updated}，冲突 ${conflicts}，离职冻结 ${frozen}${leaderSynced > 0 ? `，负责人 ${leaderSynced}` : ''}${drifts.length > 0 ? `，组漂移 ${drifts.length}` : ''}` }
     this.connectorConfigs().update(config.id, { lastSyncAt: new Date().toISOString(), lastSyncResult: result })
     this.ctx.platformBus.emit(PlatformEvents.ConnectorSynced, { provider, actor, ...result })
     return result

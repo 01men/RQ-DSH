@@ -6,6 +6,12 @@
  * 用法：npm run selftest
  */
 import { spawn } from 'node:child_process'
+// NAS 数据权限纯函数引擎（dev-plan-nas-authz O8：引擎直接单测，不经服务层）
+import {
+  MATRIX_DEFAULT, buildOrgIndex, check as engineCheck, deriveRole, findVacantLeaderOrgs, nearestLeaderOrg,
+} from '../packages/plugin-nas/src/authz/engine.ts'
+import { readFileSync as __readFileSyncSeed } from 'node:fs'
+const NAS_AUTHZ_SEED = JSON.parse(__readFileSyncSeed(new URL('../packages/plugin-nas/seed/nas-authz-rules.json', import.meta.url), 'utf8'))
 import { createServer, request as httpRequest } from 'node:http'
 import { createHash } from 'node:crypto'
 import { rm, mkdir } from 'node:fs/promises'
@@ -131,7 +137,7 @@ const nasGwStub = createServer(async (req, res) => {
   if (message.method === 'tools/call') {
     const name = String(message.params?.name ?? '')
     const args = message.params?.arguments ?? {}
-    nasGwCalls.push({ name, args })
+    nasGwCalls.push({ name, args, onBehalf: req.headers['x-on-behalf-user'] ?? null })
     const text = (value) => reply({ content: [{ type: 'text', text: JSON.stringify(value) }] })
     // 对齐真实 synology-filestation 网关契约（folder_path/path 为字符串/数组；create_folder 用 folder_path+name 一一对应数组；download 用 path 数组 + local_dir）
     if (name === 'fs_list_shares') return text({ shares: [{ name: 'homes', path: '/homes', isdir: true }, { name: 'skillhub', path: '/skillhub', isdir: true }] })
@@ -2304,6 +2310,113 @@ try {
   check('工具 connect_code_create 签发接入码', toolCodeCreate.ok && toolCodeCreate.data.isError === false && toolCodeCreate.data.value.code.startsWith('enr_'))
 
   // ================================================================ NAS 资产（FS 文件存储）
+  section('NAS 数据权限引擎（纯函数单测 engine.ts，dev-plan-nas-authz §四）')
+  {
+    const eo = [
+      { id: 'eo1', name: '智造平台', parentId: null, leaderUserIds: ['e_p', 'e_p2'] },
+      { id: 'eo2', name: '生产部', parentId: 'eo1', leaderUserIds: ['e_d'] },
+      { id: 'eo3', name: '总装12线', parentId: 'eo2', leaderUserIds: ['e_t'] },
+      { id: 'eo4', name: '质检线', parentId: 'eo2', leaderUserIds: [] },
+    ]
+    const idx = buildOrgIndex(eo)
+    const nas1 = { id: 'en1', rootPath: '/', orgRoot: '智造平台' }
+    const now = '2026-08-29T00:00:00Z'
+    const baseRules = { version: 1, exceptions: [], cGroups: ['eg_c'], externalReadPaths: [{ nasId: 'en1', path: '/外部白名单' }], observeOnly: true, degradeAllToReadonly: false }
+    const u = (id, orgId, extra = {}) => ({ id, displayName: id, orgId, ...extra })
+    const run = (user, paths, op, opt = {}) => engineCheck(
+      { userId: user.id, nasId: opt.nasId ?? 'en1', paths, op, now, ...(opt.override !== undefined ? { override: opt.override } : {}) },
+      { orgIndex: idx, user, nas: opt.nas ?? nas1, rules: opt.rules ?? baseRules, cGroupHits: opt.cGroupHits ?? [] },
+    )
+    const inScope = '/智造平台/生产部/总装12线/a.txt'
+
+    // 角色推导
+    check('推导：平台负责人 → P', deriveRole(u('e_p', 'eo1'), idx).role === 'P')
+    check('推导：部门负责人 → D', deriveRole(u('e_d', 'eo2'), idx).role === 'D')
+    check('推导：班组负责人 → T', deriveRole(u('e_t', 'eo3'), idx).role === 'T')
+    check('推导：班组成员 → M', deriveRole(u('e_m', 'eo3'), idx).role === 'M')
+    check('多负责人 co-leader：双负责人均得 P 且 reasons 标注',
+      deriveRole(u('e_p2', 'eo1'), idx).role === 'P'
+      && run(u('e_p2', 'eo1'), [inScope], 'read').reasons.some((r) => r.includes('co-leader')))
+    check('挂根组织非负责人 → 全 deny', run(u('e_root', 'eo1'), ['/智造平台/x'], 'read').decision === 'deny'
+      && run(u('e_root', 'eo1'), ['/智造平台/x'], 'read').reasons.some((r) => r.includes('root-no-role')))
+    check('未落班组（部门根非负责人）→ 只读', run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], 'read').decision === 'allow'
+      && run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], 'write').decision === 'deny')
+    check('兼任：主归属正常写 + 兼任子树仅只读',
+      run(u('e_m2', 'eo4', { primaryOrgId: 'eo3' }), [inScope], 'write').decision === 'allow'
+      && run(u('e_m2', 'eo4', { primaryOrgId: 'eo3' }), ['/智造平台/生产部/质检线/a.txt'], 'write').decision === 'deny'
+      && run(u('e_m2', 'eo4', { primaryOrgId: 'eo3' }), ['/智造平台/生产部/质检线/a.txt'], 'read').decision === 'allow')
+    check('负责人悬空检测：质检线在列', findVacantLeaderOrgs(idx, { withUserOrgIds: new Set(['eo3', 'eo4']) }).some((o) => o.id === 'eo4'))
+
+    // 判定序：显式 deny > 显式 allow > 角色矩阵 > 默认 deny
+    const rulesEx = {
+      ...baseRules,
+      exceptions: [
+        { id: 'ex_deny', effect: 'deny', nasId: 'en1', path: '/智造平台/生产部/*', ops: ['read'] },
+        { id: 'ex_allow', effect: 'allow', nasId: 'en1', path: '/智造平台/生产部/总装12线', ops: ['read'] },
+      ],
+    }
+    const exDeny = run(u('e_m', 'eo3'), ['/智造平台/生产部/总装12线/a.txt'], 'read', { rules: rulesEx })
+    check('判定序：显式 deny 压过显式 allow', exDeny.decision === 'deny' && exDeny.ruleId === 'ex_deny')
+    const readonlyOps = ['write', 'modify', 'delete', 'share', 'admin']
+    check('readonly 语义（未落班组只读态）：写类全拒/读下载放行',
+      readonlyOps.every((op) => run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], op).decision === 'deny')
+      && run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], 'read').decision === 'allow'
+      && run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], 'download').decision === 'allow')
+    check('M 矩阵：写文件放行/改结构删除分享管理拒绝',
+      run(u('e_m', 'eo3'), [inScope], 'write').decision === 'allow'
+      && ['modify', 'delete', 'share', 'admin'].every((op) => run(u('e_m', 'eo3'), [inScope], op).decision === 'deny'))
+    check('矩阵一致性：内置矩阵 M 行与判定一致',
+      Object.entries(MATRIX_DEFAULT.M).every(([op, allow]) => (run(u('e_m', 'eo3'), [inScope], op).decision === 'allow') === allow))
+
+    // 例外过期 / C 叠加
+    const rulesExp = {
+      ...baseRules,
+      exceptions: [{ id: 'ex_tmp', effect: 'allow', nasId: 'en1', path: '/智造平台/生产部/质检线/外部/*', ops: ['read'], expiresAt: '2026-08-01T00:00:00Z' }],
+    }
+    check('例外 expiresAt 过期即失效（回落矩阵后越界 deny）',
+      run(u('e_m', 'eo3'), ['/智造平台/生产部/质检线/外部/a'], 'read', { rules: rulesExp }).decision === 'deny')
+    const rulesExp2 = { ...rulesExp, exceptions: [{ ...rulesExp.exceptions[0], expiresAt: '2026-09-01T00:00:00Z' }] }
+    check('例外未过期即生效',
+      run(u('e_m', 'eo3'), ['/智造平台/生产部/质检线/外部/a'], 'read', { rules: rulesExp2 }).decision === 'allow')
+    check('C 叠加：跨域只读放行、写拒绝',
+      run(u('e_m', 'eo3'), ['/智造平台/生产部/质检线/外部/b'], 'read', { cGroupHits: ['eg_c'] }).decision === 'allow'
+      && run(u('e_m', 'eo3'), ['/智造平台/生产部/质检线/外部/b'], 'write', { cGroupHits: ['eg_c'] }).decision === 'deny')
+    const rulesCWrite = { ...baseRules, exceptions: [{ id: 'ex_cw', effect: 'allow', nasId: 'en1', path: '/智造平台/生产部/质检线/外部/b', ops: ['write'] }] }
+    check('C 白名单目录写需显式 allow',
+      run(u('e_m', 'eo3'), ['/智造平台/生产部/质检线/外部/b'], 'write', { rules: rulesCWrite, cGroupHits: ['eg_c'] }).decision === 'allow')
+
+    // 边界 / 多 NAS / 映射表优先
+    check('边界：路径超出组织子树 deny', run(u('e_m', 'eo3'), ['/智造平台/其他/x'], 'read').decision === 'deny')
+    check('多 NAS：B 平台 NAS 对 A 平台成员 deny（orgRoot 不在链上）',
+      run(u('e_m', 'eo3'), ['/x'], 'read', { nasId: 'en2', nas: { id: 'en2', rootPath: '/', orgRoot: '市场部' } }).decision === 'deny')
+    const overriddenNas = { id: 'en1', rootPath: '/', orgRoot: '智造平台', orgPathOverrides: { eo3: '/总装A' } }
+    check('orgPathOverrides 优先于名字推导',
+      run(u('e_m', 'eo3'), ['/总装A/x'], 'read', { nas: overriddenNas }).decision === 'allow'
+      && run(u('e_m', 'eo3'), ['/智造平台/生产部/总装12线/x'], 'read', { nas: overriddenNas }).decision === 'deny')
+    const renamedIdx = buildOrgIndex(eo.map((o) => (o.id === 'eo3' ? { ...o, name: '总装十二线' } : o)))
+    const renamedRun = engineCheck(
+      { userId: 'e_m', nasId: 'en1', paths: ['/总装A/x'], op: 'read', now },
+      { orgIndex: renamedIdx, user: u('e_m', 'eo3'), nas: overriddenNas, rules: baseRules, cGroupHits: [] },
+    )
+    check('组织改名作用域不漂移（映射表按 orgId 命中）', renamedRun.decision === 'allow' && renamedRun.scope[0] === '/总装A')
+    check('override 破窗放行（并留痕标记）',
+      run(u('e_m', 'eo3'), ['/任意/x'], 'delete', { override: true }).decision === 'allow'
+      && run(u('e_m', 'eo3'), ['/任意/x'], 'delete', { override: true }).override === true)
+    const degradeRules = { ...baseRules, degradeAllToReadonly: true }
+    check('degradeAllToReadonly：allow 视作 readonly',
+      run(u('e_d', 'eo2'), ['/智造平台/生产部/x'], 'write', { rules: degradeRules }).decision === 'deny')
+    check('observeOnly 标注透传', run(u('e_m', 'eo3'), [inScope], 'read').observeOnly === true)
+    check('审批人路由：沿链向上最近负责人（班组自身有负责人即命中；悬空则跳到上级）',
+      nearestLeaderOrg(idx, 'eo3')?.orgId === 'eo3' && nearestLeaderOrg(idx, 'eo4')?.orgId === 'eo2'
+      && nearestLeaderOrg(idx, 'eo1')?.orgId === 'eo1')
+
+    check('外部账号白名单只读',
+      run(u('e_ext', 'eo3', { accountType: 'external' }), ['/外部白名单/a'], 'read').decision === 'allow'
+      && run(u('e_ext', 'eo3', { accountType: 'external' }), ['/外部白名单/a'], 'write').decision === 'deny'
+      && run(u('e_ext', 'eo3', { accountType: 'external' }), ['/其他/a'], 'read').decision === 'deny')
+    check('可疑标记账号 deny 转人工', run(u('e_bad', 'eo3', { accountType: 'suspended-review' }), [inScope], 'read').decision === 'deny')
+  }
+
   section('NAS 资产纳管（plugin-nas + 文件网关 stub）')
 
   // 网关 stub 自身契约：错误 Bearer 被拒（证明平台调用确实携带网关令牌）
@@ -2457,6 +2570,263 @@ try {
   check('归档为终态', nas3Archive.ok && nas3Archive.data.status === 'archived', JSON.stringify(nas3Archive.error))
   const nas3Delete = await api('DELETE', `/api/nas/${nas3Id}`, { token: admin })
   check('归档后删除成功（含健康/工具缓存清理）', nas3Delete.ok && nas3Delete.data.deleted === true, JSON.stringify(nas3Delete.error))
+
+  // ================================================================ NAS 数据权限 API
+  section('NAS 数据权限 API（check/scope/rules/例外/审批闭环，dev-plan-nas-authz §2.3-§2.7）')
+  // 夹具：NAS 配 orgRoot + 组织负责人（P=admin / D=ops / T=heqw / M=linxm）
+  const nasRootPatch = await api('PATCH', `/api/nas/${nasId}`, { token: admin, body: { attrs: { orgRoot: '元冰可集团' } } })
+  check('NAS 配置接入组织锚点（orgRoot=元冰可集团）', nasRootPatch.ok)
+
+  const orgAll = (await api('GET', '/api/iam/orgs', { token: admin })).data ?? []
+  const orgByName = (name) => orgAll.find((org) => org.name === name)?.id
+  const orgRootId = orgByName('元冰可集团')
+  const orgTechId = orgByName('技术中心')
+  const orgAiId = orgByName('AI 平台部')
+  const orgProdId = orgByName('产品运营部')
+  const orgFeId = orgByName('前端部')
+  check('组织夹具就绪（根/技术中心/AI 平台部/产品运营部/前端部）', Boolean(orgRootId && orgTechId && orgAiId && orgProdId && orgFeId))
+
+  const userAll = (await api('GET', '/api/iam/users', { token: admin })).data?.users ?? []
+  const userByName = (username) => userAll.find((user) => user.username === username)?.id
+  const adminUid = userByName('admin')
+  const opsUid = userByName('ops')
+  const heqwUid = userByName('heqw')
+  const linxmUid = userByName('linxm')
+  const devUid = userByName('dev')
+  const yqzUid = userByName('yqz')
+  const auditUid = userByName('audit')
+  const suyqUid = userByName('suyq')
+  check('用户夹具就绪', Boolean(adminUid && opsUid && heqwUid && linxmUid && yqzUid && auditUid && suyqUid))
+
+  await api('PATCH', `/api/iam/orgs/${orgRootId}`, { token: admin, body: { leaderUserIds: [adminUid] } })
+  await api('PATCH', `/api/iam/orgs/${orgTechId}`, { token: admin, body: { leaderUserIds: [opsUid] } })
+  await api('PATCH', `/api/iam/orgs/${orgFeId}`, { token: admin, body: { leaderUserIds: [heqwUid] } })
+
+  const authzCheck = (userId, paths, op, extra = {}) => api('POST', '/api/nas/authz/check', {
+    token: admin,
+    body: { nasId: extra.nasId ?? nasId, userId, paths, op, ...(extra.override !== undefined ? { override: extra.override } : {}), ...(extra.headerUser ? {} : {}) },
+    ...(extra.headerUser ? {} : {}),
+  })
+
+  // —— 35 格矩阵（4 主角色 × 7 操作；C 叠加另测）——
+  const roleScope = {
+    P: { uid: adminUid, path: '/元冰可集团/技术中心/AI 平台部/季度报告.docx' },
+    D: { uid: opsUid, path: '/元冰可集团/技术中心/AI 平台部/季度报告.docx' },
+    T: { uid: heqwUid, path: '/元冰可集团/技术中心/前端部/页面原型.png' },
+    M: { uid: devUid, path: '/元冰可集团/技术中心/AI 平台部/季度报告.docx' },
+  }
+  const EXPECTED = {
+    P: { read: 1, download: 1, write: 1, modify: 1, delete: 1, share: 1, admin: 1 },
+    D: { read: 1, download: 1, write: 1, modify: 1, delete: 1, share: 1, admin: 0 },
+    T: { read: 1, download: 1, write: 1, modify: 1, delete: 0, share: 0, admin: 0 },
+    M: { read: 1, download: 1, write: 1, modify: 0, delete: 0, share: 0, admin: 0 },
+  }
+  let matrixOk = true
+  let matrixDetail = ''
+  for (const [role, cfg] of Object.entries(roleScope)) {
+    for (const op of ['read', 'download', 'write', 'modify', 'delete', 'share', 'admin']) {
+      const resp = await authzCheck(cfg.uid, [cfg.path], op)
+      const got = resp.data?.decision === 'allow' ? 1 : 0
+      if (!resp.ok || got !== EXPECTED[role][op] || !Array.isArray(resp.data?.reasons) || resp.data.reasons.length === 0 || resp.data?.role !== role) {
+        matrixOk = false
+        matrixDetail = `${role}×${op} 期望 ${EXPECTED[role][op]} 实得 ${got}（${JSON.stringify(resp.data?.reasons ?? resp.error)}）`
+      }
+    }
+  }
+  check('附件矩阵 35 格（P/D/T/M × 7 操作）判定一致且每格含 reasons', matrixOk, matrixDetail)
+
+  // scope 与 check 一致
+  const scopeM = await api('GET', `/api/nas/authz/scope?nasId=${nasId}&userId=${devUid}`, { token: admin })
+  const checkM = await authzCheck(devUid, ['/元冰可集团/技术中心/AI 平台部/a.txt'], 'read')
+  check('scope 返回角色/作用域并与 check 一致',
+    scopeM.ok && scopeM.data.role === 'M' && JSON.stringify(scopeM.data.scope) === JSON.stringify(checkM.data.scope)
+    && scopeM.data.matrix?.M?.read === true,
+    JSON.stringify({ scope: scopeM.data?.scope, role: scopeM.data?.role, checkScope: checkM.data?.scope }))
+
+  // 钉钉 userId 反查等价（linxm ↔ dd_u002，identityLinks 事实源）
+  const byPlatform = await authzCheck(linxmUid, ['/元冰可集团/技术中心/AI 平台部/a.txt'], 'read')
+  const byDingtalk = await authzCheck('dd_u002', ['/元冰可集团/技术中心/AI 平台部/a.txt'], 'read')
+  check('钉钉 userId 反查与平台 userId 等价（identityLinks）',
+    byDingtalk.ok && byPlatform.ok
+    && byDingtalk.data.decision === byPlatform.data.decision && byDingtalk.data.role === byPlatform.data.role
+    && JSON.stringify(byDingtalk.data.scope) === JSON.stringify(byPlatform.data.scope)
+    && byDingtalk.data.userName === '林小满',
+    JSON.stringify({ byPlatform: byPlatform.data, byDingtalk: byDingtalk.data }))
+
+  // 权限点：无角色 403 / 无 nas.authz.read 403
+  const authzMemberLogin = await api('POST', '/api/auth/login', { body: { username: 'yqz', password: 'Ybk@2026' } })
+  const authzMemberToken = authzMemberLogin.data?.token
+  const noPermCheck = await api('POST', '/api/nas/authz/check', { token: authzMemberToken, body: { nasId, userId: yqzUid, paths: ['/x'], op: 'read' } })
+  const noPermRules = await api('GET', '/api/nas/authz/rules', { token: authzMemberToken })
+  check('无 nas.authz.check 权限 403；无 nas.authz.read 403', noPermCheck.status === 403 && noPermRules.status === 403)
+
+  // 特殊账号：未落班组只读 / 挂根 deny / 外部白名单 / 可疑标记 / 兼任
+  const yqzRead = await authzCheck(yqzUid, ['/元冰可集团/产品运营部/计划.xlsx'], 'read')
+  const yqzWrite = await authzCheck(yqzUid, ['/元冰可集团/产品运营部/计划.xlsx'], 'write')
+  check('未落班组（部门根非负责人）→ 只读', yqzRead.data?.decision === 'allow' && yqzWrite.data?.decision === 'deny')
+  const auditCheck = await authzCheck(auditUid, ['/元冰可集团/任何/x'], 'read')
+  check('挂根组织非负责人 → deny 全部', auditCheck.data?.decision === 'deny' && auditCheck.data.reasons.some((r) => r.includes('root-no-role')))
+
+  const extUser = await api('POST', '/api/iam/users', { token: admin, body: { username: 'extguest', displayName: '外部顾问', orgId: orgAiId, password: 'Ybk@2026' } })
+  const extUid = extUser.data?.id
+  await api('PATCH', `/api/iam/users/${extUid}`, { token: admin, body: { accountType: 'external' } })
+  const rulesBeforeExt = await api('GET', '/api/nas/authz/rules', { token: admin })
+  const extPut = await api('PUT', '/api/nas/authz/rules', {
+    token: admin,
+    body: { ifVersion: rulesBeforeExt.data.version, externalReadPaths: [{ nasId, path: '/元冰可集团/技术中心/AI 平台部/公共' }] },
+  })
+  check('外部账号白名单只读（白名单内 read 放行/write 拒绝、白名单外 deny）',
+    extPut.ok
+    && (await authzCheck(extUid, ['/元冰可集团/技术中心/AI 平台部/公共/手册.pdf'], 'read')).data?.decision === 'allow'
+    && (await authzCheck(extUid, ['/元冰可集团/技术中心/AI 平台部/公共/手册.pdf'], 'write')).data?.decision === 'deny'
+    && (await authzCheck(extUid, ['/元冰可集团/技术中心/AI 平台部/私密.pdf'], 'read')).data?.decision === 'deny')
+
+  await api('PATCH', `/api/iam/users/${heqwUid}`, { token: admin, body: { accountType: 'suspended-review' } })
+  const suspended = await authzCheck(heqwUid, ['/元冰可集团/技术中心/前端部/x'], 'read')
+  await api('PATCH', `/api/iam/users/${heqwUid}`, { token: admin, body: { accountType: 'internal' } })
+  check('可疑标记账号 deny + 转人工留痕', suspended.data?.decision === 'deny' && suspended.data.reasons.some((r) => r.includes('suspended-review')))
+
+  // 兼任：suyq 主归属 AI 平台部（M），挂靠后端部 → 后端部子树只读
+  await api('PATCH', `/api/iam/users/${suyqUid}`, { token: admin, body: { primaryOrgId: orgAiId } })
+  const secWrite = await authzCheck(suyqUid, ['/元冰可集团/技术中心/后端部/接口.md'], 'write')
+  const secRead = await authzCheck(suyqUid, ['/元冰可集团/技术中心/后端部/接口.md'], 'read')
+  const priWrite = await authzCheck(suyqUid, ['/元冰可集团/技术中心/AI 平台部/模型.md'], 'write')
+  check('兼任账号：主归属正常写 + 兼任子树仅只读',
+    priWrite.data?.decision === 'allow' && secRead.data?.decision === 'allow' && secWrite.data?.decision === 'deny')
+  await api('PATCH', `/api/iam/users/${suyqUid}`, { token: admin, body: { primaryOrgId: '' } })
+
+  // —— rules 乐观锁 + 种子导入幂等 ——
+  const conflict = await api('PUT', '/api/nas/authz/rules', { token: admin, body: { ifVersion: 999, observeOnly: false } })
+  check('rules PUT ifVersion 乐观锁冲突 409', conflict.status === 409 && conflict.error?.code === 'VERSION_CONFLICT')
+  const rulesNow1 = await api('GET', '/api/nas/authz/rules', { token: admin })
+  const cGroupPut = await api('PUT', '/api/nas/authz/rules', { token: admin, body: { ifVersion: rulesNow1.data.version, cGroups: ['AI 平台部全员'] } })
+  check('rules PUT 携正确 ifVersion 成功且 version 递增', cGroupPut.ok && cGroupPut.data.version === rulesNow1.data.version + 1)
+
+  const importOnce = await api('POST', '/api/nas/authz/rules/import', { token: admin, body: NAS_AUTHZ_SEED })
+  const importTwice = await api('POST', '/api/nas/authz/rules/import', { token: admin, body: NAS_AUTHZ_SEED })
+  check('种子导入：首次变更（cGroups 清空为未解析组）+ 再次导入幂等',
+    importOnce.ok && importOnce.data.changed === true && importOnce.data.unresolvedGroups.includes('跨域协作者')
+    && importTwice.ok && importTwice.data.changed === false && importTwice.data.version === importOnce.data.version,
+    JSON.stringify({ once: importOnce.data, twice: importTwice.data, err: importOnce.error }))
+
+  // 恢复 C 组并断言组标记回写
+  const rulesNow2 = await api('GET', '/api/nas/authz/rules', { token: admin })
+  await api('PUT', '/api/nas/authz/rules', { token: admin, body: { ifVersion: rulesNow2.data.version, cGroups: ['AI 平台部全员'] } })
+  const aiGroups = (await api('GET', '/api/iam/groups', { token: admin })).data?.groups ?? []
+  const aiGroupMarked = aiGroups.find((group) => group.name === 'AI 平台部全员')
+  check('C 关联动态组标记回写（authzRoleC）', aiGroupMarked?.authzRoleC === true,
+    JSON.stringify({ groups: aiGroups.map((group) => ({ name: group.name, c: group.authzRoleC })) }))
+
+  // C 叠加（动态组）：跨域只读
+  const cRead = await authzCheck(linxmUid, ['/元冰可集团/产品运营部/大盘.xlsx'], 'read')
+  const cWrite = await authzCheck(linxmUid, ['/元冰可集团/产品运营部/大盘.xlsx'], 'write')
+  check('C 叠加：跨域 read 放行/write 拒绝', cRead.data?.decision === 'allow' && cWrite.data?.decision === 'deny' && cRead.data.cTag === true,
+    JSON.stringify({ read: cRead.data, write: cWrite.data }))
+
+  // override 破窗（须 nas.authz.write；admin 具备）+ 留痕
+  const overrideCheck = await api('POST', '/api/nas/authz/check', { token: admin, body: { nasId, userId: linxmUid, paths: ['/故障处置/任意'], op: 'delete', override: true } })
+  const decisionsOverride = (await api('GET', '/api/nas/authz/decisions?userId=' + linxmUid + '&limit=50', { token: admin })).data?.items ?? []
+  check('override 破窗放行并强制留痕',
+    overrideCheck.data?.decision === 'allow' && overrideCheck.data.override === true
+    && decisionsOverride.some((record) => record.override === true && record.highRisk === true))
+
+  // X-On-Behalf-User：平台 userId → 绑钉钉身份后透传三方 userId（网关 stub 已记录该头）
+  const headerBefore = nasGwCalls.find((call) => call.onBehalf === adminUid)
+  await api('POST', `/api/iam/users/${adminUid}/bindings`, { token: admin, body: { provider: 'dingtalk', unionId: 'dd_admin_x', displayName: '沈亦澜' } })
+  await api('GET', `/api/nas/${nasId}/fs?path=/`, { token: admin })
+  const lastCall = nasGwCalls[nasGwCalls.length - 1]
+  check('X-On-Behalf-User 头透传（平台 userId → 钉钉身份优先；身份零进工具参数）',
+    Boolean(headerBefore) && lastCall.onBehalf === 'dd_admin_x' && !('actorId' in (lastCall.args ?? {})) && !('actorName' in (lastCall.args ?? {})))
+
+  // fail-closed 告警：observeOnly=false 后高频 deny 触发告警规则
+  const alertRule = await api('POST', '/api/audit/alert-rules', { token: admin, body: { name: 'NAS 数据权限高频拒绝', metric: 'nas_authz_denied', threshold: 5, windowMinutes: 10, severity: 'warning' } })
+  const rulesNow3 = await api('GET', '/api/nas/authz/rules', { token: admin })
+  await api('PUT', '/api/nas/authz/rules', { token: admin, body: { ifVersion: rulesNow3.data.version, observeOnly: false } })
+  for (let i = 0; i < 12; i++) {
+    await authzCheck(linxmUid, ['/元冰可集团/市场部/超出作用域.txt'], 'write')
+  }
+  const denyAlerts = (await api('GET', '/api/audit/alerts', { token: admin })).data?.alerts ?? []
+  check('enforce（observeOnly=false）高频 deny → nas_authz_denied 告警触发',
+    alertRule.ok && denyAlerts.some((alert) => alert.title.includes('NAS 数据权限高频拒绝')),
+    JSON.stringify({ ruleOk: alertRule.ok, titles: denyAlerts.slice(0, 5).map((alert) => alert.title) }))
+  const rulesNow4 = await api('GET', '/api/nas/authz/rules', { token: admin })
+  await api('PUT', '/api/nas/authz/rules', { token: admin, body: { ifVersion: rulesNow4.data.version, observeOnly: true } })
+  const decisionsDeny = (await api('GET', `/api/nas/authz/decisions?decision=deny&nasId=${nasId}&limit=10`, { token: admin })).data
+  check('deny 判定留痕可查询（decisions 集合）', decisionsDeny.total >= 12)
+
+  // —— share 审批闭环（T/M share 默认 deny → 申请 → 审批人自动路由 → 通过 → 例外生效 → 到期自动拒绝）——
+  const shareDeny = await authzCheck(linxmUid, ['/元冰可集团/技术中心/AI 平台部/季度报告.docx'], 'share')
+  check('M share 默认 deny（提示走审批）', shareDeny.data?.decision === 'deny' && shareDeny.data.reasons.some((r) => r.includes('审批')))
+  const shareReq = await api('POST', '/api/nas/authz/exceptions', {
+    token: admin,
+    body: { status: 'pending', nasId, userId: linxmUid, path: '/元冰可集团/技术中心/AI 平台部/季度报告.docx', reason: '客户演示需要' },
+  })
+  check('share 申请 → 审批人自动路由（沿组织链向上最近负责人：AI 平台部自身的连接器同步负责人）',
+    shareReq.ok && shareReq.data.kind === 'approval' && shareReq.data.approverSuggestion?.orgName === 'AI 平台部'
+    && Array.isArray(shareReq.data.approverSuggestion?.leaderUserIds) && shareReq.data.approverSuggestion.leaderUserIds.includes(linxmUid)
+    && shareReq.data.escalated === false,
+    JSON.stringify(shareReq.data))
+  const shareApprove = await api('POST', `/api/approvals/${shareReq.data.approvalId}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意' } })
+  const shareAllow = await authzCheck(linxmUid, ['/元冰可集团/技术中心/AI 平台部/季度报告.docx'], 'share')
+  check('审批通过 → share 例外自动写入并放行（7 天有效期留痕）', shareApprove.ok && shareAllow.data?.decision === 'allow' && Boolean(shareAllow.data.ruleId))
+  const rulesNow5 = await api('GET', '/api/nas/authz/rules', { token: admin })
+  const expiredExceptions = rulesNow5.data.exceptions.map((exception) => (
+    exception.id === shareAllow.data.ruleId ? { ...exception, expiresAt: '2026-08-01T00:00:00Z' } : exception))
+  await api('PUT', '/api/nas/authz/rules', { token: admin, body: { ifVersion: rulesNow5.data.version, exceptions: expiredExceptions } })
+  const shareExpired = await authzCheck(linxmUid, ['/元冰可集团/技术中心/AI 平台部/季度报告.docx'], 'share')
+  check('share 例外到期自动拒绝（回落矩阵 deny）', shareExpired.data?.decision === 'deny')
+
+  // —— 负责人悬空 / 组织目录对账 ——
+  const vacantOrg = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '应急小组（无负责人）', parentId: orgRootId } })
+  await api('POST', '/api/iam/users', { token: admin, body: { username: 'vacantm', displayName: '悬空样本', orgId: vacantOrg.data.id, password: 'Ybk@2026' } })
+  const vacancy = await api('POST', '/api/nas/authz/leader-vacancy-scan', { token: admin })
+  const vacancyAlerts = (await api('GET', '/api/audit/alerts', { token: admin })).data?.alerts ?? []
+  check('负责人悬空扫描：新悬空组织被发现 + leaderVacant 告警',
+    vacancy.ok && (vacancy.data.vacant ?? []).some((org) => org.orgName === '应急小组（无负责人）')
+    && vacancyAlerts.some((alert) => alert.title.includes('负责人悬空')),
+    JSON.stringify({ vacant: vacancy.data?.vacant?.map((org) => org.orgName) }))
+
+  const reconcile = await api('POST', '/api/nas/authz/reconcile', { token: admin })
+  const reconcileReport = reconcile.data?.report ?? []
+  const reconcileFindings = reconcileReport.flatMap((row) => row.findings ?? [])
+  const reconcileAlerts = (await api('GET', '/api/audit/alerts', { token: admin })).data?.alerts ?? []
+  check('组织↔目录对账：目录无组织 + 组织无目录 双向发现并告警',
+    reconcile.ok && reconcileFindings.some((f) => f.kind === 'dir-without-org' && f.name === 'homes')
+    && reconcileFindings.some((f) => f.kind === 'org-without-dir' && f.name === '市场部')
+    && reconcileAlerts.some((alert) => alert.title.includes('组织目录对账')),
+    JSON.stringify({ report: reconcileReport, titles: reconcileAlerts.slice(0, 5).map((alert) => alert.title), err: reconcile.error }))
+
+  // —— 多 NAS：B 平台 NAS deny ——
+  const authzNas2Reg = await api('POST', '/api/nas', { token: admin, body: { name: '财务 NAS（数据权限对账）', attrs: { description: '多 NAS 作用域隔离自测', gatewayUrl: `http://127.0.0.1:${NAS_GW_PORT}/mcp`, accessToken: NAS_GW_TOKEN, nasIp: NAS_GW_IP, rootPath: '/', orgRoot: '市场部' } } })
+  const authzNas2Id = authzNas2Reg.data?.id
+  const crossNas = await authzCheck(linxmUid, ['/任何/x'], 'read', { nasId: authzNas2Id })
+  check('多 NAS：A 平台成员对 B 平台 NAS deny（orgRoot 不在其组织链）',
+    authzNas2Reg.ok && crossNas.data?.decision === 'deny' && crossNas.data.reasons.some((r) => r.includes('nas.no-scope')))
+
+  // —— 组织改名演练：orgPathOverrides 映射表优先，作用域不漂移 ——
+  await api('PATCH', `/api/nas/${nasId}`, { token: admin, body: { attrs: { orgPathOverrides: JSON.stringify({ [orgAiId]: '/研发' }) } } })
+  const overrideScope1 = await authzCheck(linxmUid, ['/研发/模型卡.md'], 'read')
+  await api('PATCH', `/api/iam/orgs/${orgAiId}`, { token: admin, body: { name: '创新部门' } })
+  const overrideScope2 = await api('GET', `/api/nas/authz/scope?nasId=${nasId}&userId=${linxmUid}`, { token: admin })
+  check('组织改名演练：映射表命中 → 改名前后作用域均为 /研发（不漂移）',
+    overrideScope1.data?.decision === 'allow' && JSON.stringify(overrideScope2.data.scope) === JSON.stringify(['/研发']))
+  await api('PATCH', `/api/iam/orgs/${orgAiId}`, { token: admin, body: { name: 'AI 平台部' } })
+  await api('PATCH', `/api/nas/${nasId}`, { token: admin, body: { attrs: { orgPathOverrides: '' } } })
+
+  // —— C 组漂移告警（R5）——
+  await api('POST', '/api/iam/groups/refresh-snapshots', { token: admin })
+  const driftUser = await api('POST', '/api/iam/users', { token: admin, body: { username: 'driftu', displayName: '漂移样本', orgId: orgFeId, password: 'Ybk@2026' } })
+  await api('PATCH', `/api/iam/users/${driftUser.data.id}`, { token: admin, body: { orgId: orgAiId } })
+  const driftRefresh = await api('POST', '/api/iam/groups/refresh-snapshots', { token: admin })
+  const authzDriftAlerts = (await api('GET', '/api/audit/alerts', { token: admin })).data?.alerts ?? []
+  check('C 组重算漂移 → cGroupDrift 告警（C 关联组任何漂移都告警）',
+    driftRefresh.ok && (driftRefresh.data.drifts ?? []).some((drift) => drift.groupName === 'AI 平台部全员' && drift.alerted)
+    && authzDriftAlerts.some((alert) => alert.title.includes('成员漂移')),
+    JSON.stringify({ drifts: driftRefresh.data?.drifts, titles: authzDriftAlerts.slice(0, 5).map((alert) => alert.title) }))
+
+  // deny 留痕保留策略：普通 deny 记录带 highRisk=false（高危 delete/share/admin 永久保留）
+  const shareDecisionRows = (await api('GET', `/api/nas/authz/decisions?decision=allow&nasId=${nasId}&limit=50`, { token: admin })).data?.items ?? []
+  check('高危 op（share）留痕 highRisk 标记（永久保留策略依据）', shareDecisionRows.some((record) => record.op === 'share' && record.highRisk === true))
 
   // ================================================================ Skill 包 NAS 存储
   section('Skill 包 NAS 存储（上架自动打包上传）')

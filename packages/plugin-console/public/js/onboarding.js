@@ -50,6 +50,20 @@ curl -s -X PATCH ${origin}/api/agents/${agent.id} \\
 经平台网关的调用已自动计量（MCP 网关经 mcp.invoked、模型网关 POST /api/modelgw/invoke 凭自身凭证可调，
 计量事件 subject=agent:<id> 自动回灌调用台账），禁止双计。
 
+【第 5 步 · NAS 文件能力与数据权限（需文件能力时必读）】
+NAS 文件操作经文件网关（MCP：url=<网关地址>/mcp + Authorization: Bearer <管理员签发的网关令牌>）统一执法，
+按组织位置 + 角色层级 RBAC 判定，全链 fail-closed：
+- 身份红线（P0-2）：真实用户身份一律经请求头 X-On-Behalf-User: <平台或钉钉 userId> 透传，禁止进工具参数；
+  令牌须由管理员标记 allowedOnBehalf 才允许携带该头，否则一律 403 FORGED_ON_BEHALF（伪造留痕）；
+  无用户上下文的机器调用可不带头，由令牌绑定身份判定。
+- 越权返回 JSON-RPC -32403「数据权限拒绝：<reasons>」，前缀可归因：path.out-of-scope（超作用域）/
+  matrix.deny（角色无权）/ org.* / account.* / degraded.*（平台不可达已降级）——原文透传给用户，不要变形重试。
+- share 被拒且提示"需走审批"时，代表用户发起申请：
+  POST ${origin}/api/nas/authz/exceptions  body {"status":"pending","nasId":"<资产ID>","userId":"<用户ID>","path":"<路径>","reason":"<事由>"}
+  → 审批单自动路由用户组织链最近负责人（兜底 resource_admin），通过后自动写 7 天例外，到期自动失效。
+- PDP 不可达时网关按「作用域快照只读 → 全局只读 → 拒绝」降级：收到 degraded.* 理由提示用户稍后重试，
+  不要连续重试。observeOnly 观察期越权放行但留痕告警，不代表越权合法。
+
 【注意】
 1. client_secret 等价口令：只在注册响应出现一次，平台不可再查询；丢失只能在「身份与凭证」轮换。
 2. 幂等：重名注册返回 400「已存在」时，按名称查列表复用既有资源，不得换名重复注册。
@@ -96,7 +110,10 @@ curl -s -X PATCH ${origin}/api/apps/${app.id} \\
 1. client_secret 等价口令：只在注册响应出现一次，平台不可再查询；丢失只能在「身份与凭证」轮换。
 2. 幂等：重名注册返回 400「已存在」时，按名称查列表复用既有资源。
 3. 上线走审批流且 web/h5 形态有 SSO 门禁（owner 在应用详情签发 OIDC 客户端），禁止绕过审批改状态。
-4. 失败锁定：换牌连续失败 5 次锁来源 IP 15 分钟，重试前先核对凭证。`
+4. 失败锁定：换牌连续失败 5 次锁来源 IP 15 分钟，重试前先核对凭证。
+5. 数据权限红线：应用代用户操作 NAS 文件等平台数据面接口时，用户身份一律经
+   X-On-Behalf-User 请求头透传（禁止进参数/路径）；越权响应（-32403 数据权限拒绝）原文透传给用户，
+   degraded.* 前缀表示平台短暂不可达已降级，提示稍后重试。`
 }
 
 /**

@@ -19,6 +19,7 @@ import { PlatformEvents, newId, type RecordBase } from '../../platform-core/src/
 import type { ResourceEntity } from '../../plugin-resource-core/src/index.ts'
 import { NasMcpClient, type McpToolInfo } from './client.ts'
 import { NAS_TYPE_SPEC } from './schema.ts'
+import { NasAuthzService } from './authz.ts'
 import * as nasTools from './tools.ts'
 
 // ---------------------------------------------------------------------------
@@ -397,9 +398,35 @@ export class NasRegistryService extends Service {
 
   private async fsCall(id: string, tool: string, args: Record<string, unknown>, meter?: { actor?: { id: string; name: string }; bytes?: number; timeoutMs?: number }): Promise<unknown> {
     const nas = this.requireOnline(id)
-    const raw = await this.clientFor(nas).call(tool, args, meter?.timeoutMs ? { timeoutMs: meter.timeoutMs } : undefined)
+    const onBehalf = this.onBehalfHeaders(meter?.actor)
+    const raw = await this.clientFor(nas).call(tool, args, {
+      ...(meter?.timeoutMs ? { timeoutMs: meter.timeoutMs } : {}),
+      ...(Object.keys(onBehalf).length > 0 ? { headers: onBehalf } : {}),
+    })
     this.meterFsUsage(nas, meter)
     return typeof raw === 'string' ? parseMaybeJson(raw) : raw
+  }
+
+  /**
+   * X-On-Behalf-User 解析（dev-plan-nas-authz §2.4 / P0-2 教训）：真实用户身份只经请求头
+   * 透传给网关，绝不进网关工具参数。优先钉钉 userId（identityLinks 事实源反查），否则平台 userId。
+   * 机器/工具自身调用（无真实用户或 actor 非账号标识，如内部系统中文名）不带该头——
+   * 网关以令牌绑定身份为准（防伪造），且 HTTP 头仅收 ByteString。
+   */
+  private onBehalfHeaders(actor?: { id: string; name: string }): Record<string, string> {
+    if (!actor?.id) return {}
+    const rawId = actor.id.startsWith('user:') ? actor.id.slice('user:'.length) : actor.id
+    if (rawId.startsWith('tool:') || rawId === 'platform' || rawId.includes(':')) return {}
+    try {
+      const user = this.ctx.iam?.users().get(rawId)
+      if (user) {
+        const link = this.ctx.iam.identityLinks().findOne((item) => item.userId === user.id && item.provider === 'dingtalk')
+        return { 'X-On-Behalf-User': link ? link.providerUserId : user.id }
+      }
+    } catch { /* IAM 不可用时不带身份头（fail-closed 由网关侧兜底） */ }
+    // 未落库的裸标识：仅 ASCII 可打印字符才可作头值（中文姓名等非账号标识一律不透传）
+    if (!/^[\x21-\x7e]+$/.test(rawId)) return {}
+    return { 'X-On-Behalf-User': rawId }
   }
 
   /** 计量管道（观测补齐）：全部文件操作进 usage 事件（nas:* 默认零费率，失败只告警不阻断）。 */
@@ -509,9 +536,10 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'nas'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit', 'usage']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit', 'usage', 'iam']
 
 export function apply(ctx: Context) {
   ctx.plugin(NasRegistryService)
+  ctx.plugin(NasAuthzService)
   ctx.plugin(nasTools)
 }

@@ -148,10 +148,16 @@ export function apply(ctx: Context) {
   }))
 }
 
-/** 文件类工具的操作人（计量 subject 与审计 actor 共用）：工具桥注入 caller 身份后可信，直连执行时缺省标注来源。 */
-function actorOf(args: Record<string, unknown>, exec: { callId: string }): { id: string; name: string } {
-  if (typeof args.actorId === 'string' && typeof args.actorName === 'string') return { id: args.actorId, name: args.actorName }
-  return { id: `tool:${exec.callId.slice(0, 8)}`, name: '运维工具调用' }
+/**
+ * 文件类工具的操作人（计量 subject 与审计 actor 共用）。
+ * P0-2 教训（dev-plan-nas-authz §2.3）：身份一律来自入口从令牌解析的 exec.principal，
+ * 禁止从 args 读取（schema 无身份参数）——缺失即 fail-closed，不降级到共享身份。
+ */
+function actorOf(args: Record<string, unknown>, exec: { callId: string; principal?: { userId?: string; principalId: string; name: string } }): { id: string; name: string } {
+  void args
+  const principal = exec.principal
+  if (!principal) throw new Error('缺少调用者身份（exec.principal），文件操作 fail-closed 拒绝执行')
+  return { id: principal.userId ?? principal.principalId, name: principal.name }
 }
 
 function mask(token: string): string {

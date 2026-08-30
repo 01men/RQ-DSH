@@ -52,15 +52,17 @@ export class NasMcpClient {
     return Array.isArray(payload?.result?.tools) ? payload.result.tools : []
   }
 
-  /** tools/call：返回 MCP content（文本块/数组或原样对象）；isError 时抛错。 */
-  async call(tool: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  /** tools/call：返回 MCP content（文本块/数组或原样对象）；isError 时抛错。
+   *  options.headers 支持逐调用附加头（X-On-Behalf-User 透传真实用户身份，dev-plan-nas-authz §2.4）。 */
+  async call(tool: string, args: Record<string, unknown> = {}, options?: { timeoutMs?: number; headers?: Record<string, string> }): Promise<unknown> {
+    const timeoutMs = options?.timeoutMs ?? CALL_TIMEOUT_MS
     const sessionId = await this.ensureSession().catch(() => undefined)
     const send = (sid?: string) => this.request({
       jsonrpc: '2.0',
       id: `nas-${Date.now()}`,
       method: 'tools/call',
       params: { name: tool, arguments: args },
-    }, CALL_TIMEOUT_MS, sid)
+    }, timeoutMs, sid, options?.headers)
     let { payload } = await send(sessionId)
     if (payload?.error && sessionId && /session|initialized/i.test(String(payload.error.message ?? ''))) {
       this.sessionId = undefined
@@ -101,7 +103,7 @@ export class NasMcpClient {
     return effective || undefined
   }
 
-  private async request(message: Record<string, unknown>, timeoutMs: number, sessionId?: string): Promise<{ payload: any; sessionId?: string }> {
+  private async request(message: Record<string, unknown>, timeoutMs: number, sessionId?: string, extraHeaders?: Record<string, string>): Promise<{ payload: any; sessionId?: string }> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
@@ -112,6 +114,7 @@ export class NasMcpClient {
           accept: 'application/json, text/event-stream',
           ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
           ...this.headers,
+          ...extraHeaders,
         },
         body: JSON.stringify(message),
         signal: controller.signal,

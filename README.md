@@ -368,6 +368,19 @@ SaaS 数据面网关（roadmap 第 9 步之二「连接器市场」执行缺口�
 - 文档：部署两拓扑 runbook/OAuth 自备 App/故障排查见 **docs/connector-integration.md**；设计全文与评审修正自查表见 **docs/dev-plan-connector.md**。
 - 验收：`npm run selftest` 新增 section 全绿（stub 覆盖 open-connector v1.4.0 全契约面，断言组 T-01~T-25/T-28/T-29 共 26 组）。
 
+## 三H、NAS 数据权限：组织位置 + 角色层级 RBAC（本迭代）
+
+对应开发计划 `dev-plan-nas-authz v1.1`（附件方案 + saas-permission-service 判定语义移植 + 网关强制点收敛）。实施说明全文见 **docs/nas-authz.md**。
+
+- **决策服务 `NasAuthzService`（plugin-nas，服务键 `nasAuthz`）**：判定引擎纯函数化（`src/authz/engine.ts`，无容器/无 IO，selftest 直接单测）——五步判定序：账号特殊规则（外部白名单只读/可疑标记 deny 转人工/挂根 deny/未落班组只读/**兼任子树只读**）→ 显式 deny（尾通配）→ 显式 allow（可过期）→ 角色矩阵 × 作用域边界 → 默认 deny，每步产出 reasons。
+- **角色推导零名单**：P/D/T = 组织链负责人（钉钉连接器同步 `dept_manager_userid_list` → `OrgRecord.leaderUserIds`，多负责人 co-leader 全推导），M = 班组成员；C 叠加 = 动态用户组（组重算快照 + cGroupDrift 告警）。作用域映射表 `orgPathOverrides` 优先（组织改名不漂移，R1）+ 每日组织↔目录对账（dirOrphan/leaderVacant 告警）。
+- **REST 全套**（`/api/nas/authz/*`）：check/scope/rules/import/exceptions/decisions + 权限点 `nas.authz.check|read|write`；rules `ifVersion` 乐观锁（冲突 409）；share 审批闭环（T/M 申请 → 审批人沿组织链自动路由、resource_admin 兜底 → 通过写 7 天例外 → 到期自动拒绝，全程留痕）；破窗 `override=true` 强制留痕。
+- **身份硬约束（P0-2）**：平台调网关一律 `X-On-Behalf-User` 头透传真实用户（优先钉钉 userId），`nas_fs_*` 工具身份改 `exec.principal`（schema 零身份参数，缺失 fail-closed）。
+- **强制点改造件（仅产出代码未部署）**：网关 `integrations/synology-filestation-mcp`（AuthzClient：读缓存 300s/写实判 + scope 快照→readonly→deny 三级降级 + 熔断 + on-behalf 防伪，authz-smoke 20/20）；hermes `integrations/hermes-patch`（guard hook 化 + hash 锚点 + 幂等备份 py_compile，--selftest 通过）。DSM 原生权限为粗粒度兜底层（运维配置，零代码）。
+- **灰度**：rules 单例 `observeOnly`（缺省 true，G0 双通道同步观察）/`degradeAllToReadonly`（G3）+ 网关 `AUTHZ_ENFORCE` 全局 kill-switch + 逐令牌 enforce；任一阶段秒级回退。
+- **控制台 `#/nas-authz`**：灰度开关 / 矩阵（含覆盖项）/ 例外列表（过期倒计时）/ C 关联组 / NAS 锚点映射编辑 / check 试算 / 判定留痕 / 对账与悬空扫描。CLI：`dshctl nas authz check|scope|rules|decisions`。
+- 验收：selftest 651/651（新增「NAS 数据权限引擎」与「NAS 数据权限 API」两分节，覆盖 35 格矩阵/兼任/改名不漂移/审批闭环/C 组漂移/伪造拒绝等 §四 全部用例）；lint:manifests 70/70。
+
 ## 三、目录结构（插件标准解剖）
 
 ```

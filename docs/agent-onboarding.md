@@ -2,8 +2,9 @@
 
 > 面向对象：以机器身份接入平台的企业 Agent（注册 → 机器凭证 → 接入验证 → 计量对齐）。
 > 适用版本：2026-08-26 接入加固落地后（Agent 凭证默认含 usage.write；计量键错误明确报 400 并给出期望键；
-> 凭证支持轮换；机器身份访问 Agent 台账记审计 agent.verify）。加固清单见 `docs/dev-plan-access-hardening.md`，
-> 平台未部署该批次前，第 4 步机器令牌推送计量将 403。
+> 凭证支持轮换；机器身份访问 Agent 台账记审计 agent.verify）。加固清单见 `docs/dev-plan-access-hardening.md`。
+> 2026-08-30 NAS 数据权限上线：新增 4.5 节（文件网关接入、X-On-Behalf-User 身份红线、
+> 越权/分享审批/降级语义），需文件能力的 Agent 必读。设计全文见 `docs/nas-authz.md`。
 > 本文档随服务发布，可直接访问 `http://<平台地址>/docs/agent-onboarding.md`。
 
 【任务】接入宿主平台 http://192.168.0.7:7300，完成 Agent 注册、机器身份打通与计量对齐。
@@ -66,6 +67,31 @@
      用错键会被 400 拒绝且错误信息直接给出期望键，按提示改键重报即可，不要编造计量键。
    - resource 无计价规则同样 400，届时向我报告，不要自行换 resource 或编造 meter。
    - 幂等键 <Agent名>:<业务单号>：同键同内容重放安全（返回原事件），同键不同内容会被拒绝，业务单号须稳定。
+
+4.5 NAS 文件能力与数据权限（Agent 需要文件读写能力时必读）：
+   NAS 文件操作全部经平台文件网关（MCP，synology-filestation-mcp 形态）统一执法，
+   平台侧按「组织位置 + 角色层级 RBAC（P/D/T/M + C 跨域只读叠加）+ 资源级例外」判定，全链 fail-closed。
+   - 接入：向管理员申请文件网关令牌（已绑定目标 NAS 与 DSM 账户，并确认 allowedOnBehalf 标记），
+     MCP 配置 url = http://<网关地址>/mcp，Authorization: Bearer <网关令牌>；
+     设备路由与 DSM 凭据由令牌绑定决定，不要自行传 X-NAS-* 凭据头。
+   - 身份红线（P0-2 教训）：真实用户身份一律经请求头 X-On-Behalf-User: <平台 userId 或钉钉 userId>
+     透传，禁止放进工具参数/arguments。令牌未被标记 allowedOnBehalf 时携带该头一律
+     403 FORGED_ON_BEHALF（防伪造，伪造行为留痕）。无用户上下文的纯机器调用可不带头，
+     由令牌绑定的默认身份判定。
+   - 越权语义：被拒操作返回 JSON-RPC error -32403「数据权限拒绝：<reasons>」。reasons 前缀可归因：
+     path.out-of-scope（超出授权作用域）/ matrix.deny（角色矩阵无此操作权限，share 类会提示走审批）/
+     org.*（组织位置异常，如挂根无负责人）/ account.*（账号特殊状态，如外部账号白名单只读）/
+     degraded.*（平台判定服务不可达，已降级）。把原文透传给用户，不要变形重试硬闯。
+   - 分享审批闭环：share 被拒且理由含「需走审批」时，代表用户发起申请：
+     POST /api/nas/authz/exceptions
+     body {"status":"pending","nasId":"<资产ID>","userId":"<用户ID>","path":"<路径>","reason":"<事由>"}
+     → 平台自动生成审批单，审批人沿用户组织链自动路由（最近非空负责人，找不到升级 resource_admin 兜底）；
+     通过后自动写入默认 7 天的 share 例外（到期自动失效，可先 POST /api/nas/authz/check 自查），全程留痕。
+   - 降级语义：平台判定不可达时，网关按「最后已知作用域快照（仅只读）→ 全局只读 → 一律拒绝」降级；
+     收到 degraded.* 前缀理由说明是平台短暂不可达而非用户越权——提示用户稍后重试即可，
+     不要连续重试（网关有熔断：连续 5 次超时进入降级态，平台恢复后自动退出并留痕）。
+   - 观察期语义：平台 observeOnly 灰度开关开启期间，越权操作仍放行但全部留痕并触发告警
+     （网关 OBSERVE-DENY 日志、平台判定留痕可查）——放行是灰度设计，不代表越权合法。
 
 5. 权限自检与护栏：接入完成后先试跑一次换牌（步骤2）和一次 usage record（步骤4）。
    403 = 缺权限点（响应体会指明缺哪个），向我报告，不要换账号或重试硬闯；

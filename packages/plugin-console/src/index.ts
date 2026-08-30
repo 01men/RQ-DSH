@@ -15,13 +15,14 @@ import type { HttpExchange } from '../../platform-core/src/index.ts'
 import { createPluginContext, newId, platformVersionInfo } from '../../platform-core/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import { AppRegistryService } from '../../plugin-app/src/index.ts'
+import { RulesVersionConflictError } from '../../plugin-nas/src/authz.ts'
 import { seedAll } from './seed.ts'
 
 export const name = 'console'
 export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'oidc', 'entryTickets', 'audit', 'usage', 'billing', 'market', 'modelGateway',
-  'mcpRegistry', 'nasRegistry', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
+  'mcpRegistry', 'nasRegistry', 'nasAuthz', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
   'connectorHub',
 ]
 
@@ -852,7 +853,7 @@ export function apply(ctx: Context) {
   })
 
   guarded('PATCH', '/api/iam/orgs/:id', 'iam.org.write', (exchange) => {
-    const input = body<{ name?: string; parentId?: string | null }>(exchange)
+    const input = body<{ name?: string; parentId?: string | null; leaderUserIds?: string[] }>(exchange)
     if (input.name !== undefined) {
       const org = ctx.iam.renameOrg(exchange.params['id']!, input.name)
       changeLog(exchange, 'iam.org.rename', 'org', org.id, org.name)
@@ -860,6 +861,10 @@ export function apply(ctx: Context) {
     if (input.parentId !== undefined) {
       ctx.iam.moveOrg(exchange.params['id']!, input.parentId)
       changeLog(exchange, 'iam.org.move', 'org', exchange.params['id']!, input.parentId)
+    }
+    if (Array.isArray(input.leaderUserIds)) {
+      const org = ctx.iam.setOrgLeaders(exchange.params['id']!, input.leaderUserIds)
+      changeLog(exchange, 'iam.org.leaders', 'org', org.id, org.name, `负责人：${input.leaderUserIds.join(',') || '（清空）'}`)
     }
     return ctx.iam.orgs().get(exchange.params['id']!)
   })
@@ -921,7 +926,7 @@ export function apply(ctx: Context) {
   })
 
   guarded('PATCH', '/api/iam/users/:id', 'iam.user.write', (exchange) => {
-    const input = body<{ displayName?: string; email?: string; phone?: string; title?: string; orgId?: string; roleIds?: string[] }>(exchange)
+    const input = body<{ displayName?: string; email?: string; phone?: string; title?: string; orgId?: string; roleIds?: string[]; accountType?: 'internal' | 'external' | 'suspended-review'; primaryOrgId?: string }>(exchange)
     const { roleIds, ...patch } = input
     const user = ctx.iam.updateUser(exchange.params['id']!, patch)
     if (roleIds) ctx.iam.assignRoles(user.id, roleIds)
@@ -1008,6 +1013,13 @@ export function apply(ctx: Context) {
     ctx.iam.deleteGroup(exchange.params['id']!)
     changeLog(exchange, 'iam.group.delete', 'user_group', exchange.params['id']!, '')
     return { deleted: true }
+  })
+
+  /** 动态用户组重算快照 + 漂移告警（dev-plan-nas-authz §2.2；连接器同步收尾亦自动执行）。 */
+  guarded('POST', '/api/iam/groups/refresh-snapshots', 'iam.user.write', (exchange) => {
+    const drifts = ctx.iam.refreshGroupSnapshots(caller(exchange).name)
+    changeLog(exchange, 'iam.group.refresh_snapshots', 'user_group', '', '', `漂移 ${drifts.length} 组`)
+    return { drifts }
   })
 
   // 三方连接器
@@ -2276,6 +2288,153 @@ export function apply(ctx: Context) {
     return result
   })
 
+  // -- NAS 数据权限（plugin-nas/nasAuthz，dev-plan-nas-authz §2.3）------------------------
+  // 判定/申请类端点的真实用户身份支持 X-On-Behalf-User 头（网关/hermes 透传），与 body.userId 等价；
+  // 身份永不进模型工具参数（P0-2 教训）。
+  const onBehalfUser = (exchange: HttpExchange): string | undefined => {
+    const header = exchange.headers['x-on-behalf-user']
+    const value = Array.isArray(header) ? header[0] : header
+    return value && String(value).trim() !== '' ? String(value).trim() : undefined
+  }
+
+  guarded('POST', '/api/nas/authz/check', 'nas.authz.check', async (exchange) => {
+    const input = body<{ nasId: string; userId?: string; paths: string[] | string; op: string; override?: boolean }>(exchange)
+    if (!input.nasId) throw new Error('缺少 nasId')
+    const userId = onBehalfUser(exchange) ?? input.userId
+    if (!userId) throw new Error('缺少 userId（或 X-On-Behalf-User 头）')
+    const info = caller(exchange)
+    if (input.override === true) {
+      // 破窗：仅持 nas.authz.write 的运维可强制 P 判定（强制留痕在 nasAuthz 内完成）
+      if (!requirePermission(exchange, 'nas.authz.write')) return
+    }
+    return ctx.nasAuthz.check({
+      nasId: String(input.nasId), userId: String(userId),
+      paths: Array.isArray(input.paths) ? input.paths : [String(input.paths ?? '')],
+      op: String(input.op) as never,
+      ...(input.override !== undefined ? { override: input.override === true } : {}),
+      caller: info.name,
+    })
+  })
+
+  guarded('GET', '/api/nas/authz/scope', 'nas.authz.check', (exchange) => {
+    const nasId = exchange.query.get('nasId')
+    const userId = onBehalfUser(exchange) ?? exchange.query.get('userId') ?? ''
+    if (!nasId || !userId) throw new Error('缺少 nasId 或 userId 查询参数')
+    return ctx.nasAuthz.scopeOf(nasId, userId)
+  })
+
+  guarded('GET', '/api/nas/authz/rules', 'nas.authz.read', () => ctx.nasAuthz.getRules())
+
+  http.register('PUT', '/api/nas/authz/rules', async (exchange) => {
+    if (!requirePermission(exchange, 'nas.authz.write')) return
+    const input = body<{ ifVersion: number; matrixOverrides?: Record<string, Record<string, boolean>>; exceptions?: unknown[]; cGroups?: string[]; externalReadPaths?: Array<{ nasId: string; path: string }>; observeOnly?: boolean; degradeAllToReadonly?: boolean }>(exchange)
+    try {
+      const saved = ctx.nasAuthz.updateRules({
+        ...(input.matrixOverrides !== undefined ? { matrixOverrides: input.matrixOverrides as never } : {}),
+        ...(input.exceptions !== undefined ? { exceptions: input.exceptions as never } : {}),
+        ...(input.cGroups !== undefined ? { cGroups: input.cGroups } : {}),
+        ...(input.externalReadPaths !== undefined ? { externalReadPaths: input.externalReadPaths } : {}),
+        ...(input.observeOnly !== undefined ? { observeOnly: input.observeOnly } : {}),
+        ...(input.degradeAllToReadonly !== undefined ? { degradeAllToReadonly: input.degradeAllToReadonly } : {}),
+      }, Number(input.ifVersion), caller(exchange).name)
+      changeLog(exchange, 'nas.authz.rules_update', 'nas_authz_rules', 'singleton', 'NAS 数据权限规则', `version → ${saved.version}`)
+      exchange.ok(saved)
+    } catch (error) {
+      if (error instanceof RulesVersionConflictError) {
+        exchange.fail(409, 'VERSION_CONFLICT', error.message, { currentVersion: error.currentVersion })
+        return
+      }
+      exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  guarded('POST', '/api/nas/authz/rules/import', 'nas.authz.write', (exchange) => {
+    const seed = body<Record<string, unknown>>(exchange)
+    const result = ctx.nasAuthz.importRules(seed as never, caller(exchange).name)
+    changeLog(exchange, 'nas.authz.rules_import', 'nas_authz_rules', 'singleton', 'NAS 数据权限规则',
+      `${result.changed ? `version → ${result.version}` : '内容一致（幂等跳过）'}${result.unresolvedGroups.length > 0 ? `；未解析组：${result.unresolvedGroups.join(',')}` : ''}`)
+    return result
+  })
+
+  guarded('GET', '/api/nas/authz/exceptions', 'nas.authz.read', () => ({ exceptions: ctx.nasAuthz.listExceptions() }))
+
+  /**
+   * 例外端点（双模式，dev-plan-nas-authz §2.3/§2.7）：
+   * - status='pending'：share 申请入口（hermes/成员，需 nas.authz.check）→ 自动生成审批单，审批人沿组织链自动路由；
+   * - effect='allow'/'deny'：运维直写资源级例外（需 nas.authz.write）。
+   */
+  http.register('POST', '/api/nas/authz/exceptions', async (exchange) => {
+    const input = body<{ status?: string; nasId?: string; userId?: string; path?: string; reason?: string; effect?: 'allow' | 'deny'; ops?: string[]; expiresAt?: string; note?: string }>(exchange)
+    if (input.status === 'pending') {
+      if (!requirePermission(exchange, 'nas.authz.check')) return
+      if (!input.nasId || !input.path) {
+        exchange.fail(400, 'BAD_REQUEST', 'share 申请缺少 nasId/path')
+        return
+      }
+      const userId = onBehalfUser(exchange) ?? input.userId
+      if (!userId) {
+        exchange.fail(400, 'BAD_REQUEST', '缺少 userId（或 X-On-Behalf-User 头）')
+        return
+      }
+      try {
+        const request = await ctx.nasAuthz.requestShareApproval({
+          nasId: String(input.nasId), userId: String(userId), path: String(input.path),
+          ...(input.reason !== undefined ? { reason: String(input.reason) } : {}),
+        })
+        changeLog(exchange, 'nas.authz.share_request', 'nas_authz_rules', request.approvalId, 'share 分享申请',
+          `审批人路由：${request.escalated ? 'resource_admin 兜底' : request.approverSuggestion.orgName ?? ''}`)
+        exchange.ok({ kind: 'approval', ...request })
+      } catch (error) {
+        exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+      }
+      return
+    }
+    if (!requirePermission(exchange, 'nas.authz.write')) return
+    if (!input.effect || !input.nasId || !input.path || !Array.isArray(input.ops)) {
+      exchange.fail(400, 'BAD_REQUEST', '例外直写需要 effect/nasId/path/ops')
+      return
+    }
+    try {
+      const exception = ctx.nasAuthz.addException({
+        effect: input.effect, nasId: String(input.nasId), path: String(input.path),
+        ops: input.ops as never[],
+        ...(input.userId ? { userIds: [String(input.userId)] } : {}),
+        ...(input.expiresAt ? { expiresAt: input.expiresAt } : {}),
+        ...(input.note ? { note: input.note } : {}),
+      }, caller(exchange).name)
+      changeLog(exchange, 'nas.authz.exception_add', 'nas_authz_rules', exception.id, 'NAS 数据权限例外', `${input.effect} ${input.path} [${input.ops.join(',')}]`)
+      exchange.ok(exception)
+    } catch (error) {
+      exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  guarded('GET', '/api/nas/authz/decisions', 'nas.authz.read', (exchange) => {
+    const limit = Math.min(500, Number(exchange.query.get('limit') ?? 100))
+    const decision = exchange.query.get('decision')
+    const nasId = exchange.query.get('nasId')
+    const userId = exchange.query.get('userId')
+    const items = ctx.nasAuthz.decisions().find((record) => {
+      if (decision && record.decision !== decision) return false
+      if (nasId && record.nasId !== nasId) return false
+      if (userId && record.userId !== userId) return false
+      return true
+    }).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    return { total: items.length, items: items.slice(0, limit) }
+  })
+
+  guarded('POST', '/api/nas/authz/reconcile', 'nas.authz.read', async (exchange) => {
+    const report = await ctx.nasAuthz.dailyReconcile()
+    changeLog(exchange, 'nas.authz.reconcile', 'nas_authz_rules', '', '组织目录对账', `${report.length} 台在线 NAS`)
+    return { report }
+  })
+
+  guarded('POST', '/api/nas/authz/leader-vacancy-scan', 'nas.authz.read', (exchange) => {
+    const vacant = ctx.nasAuthz.scanLeaderVacancy()
+    changeLog(exchange, 'nas.authz.leader_vacancy_scan', 'nas_authz_rules', '', '负责人悬空扫描', `悬空 ${vacant.length} 个组织`)
+    return { vacant }
+  })
+
   // -- Agent --------------------------------------------------------------
   /** 机器身份读台账审计：接入提示词以「带机器令牌 GET /api/agents」为接入验证话术，此处让其成为事实。
    *  只记机器身份（人类控制台读操作高频，全量记录成噪音；机器读台账低频且带治理含义）。 */
@@ -3143,11 +3302,8 @@ export function apply(ctx: Context) {
       args.actor = info.name
     } else if (name === 'agent_bind_user' || name === 'skill_install' || name === 'skill_publish') {
       args.actor = info.name
-    } else if (name.startsWith('nas_fs_')) {
-      // NAS 写类工具的操作人不可自填（读类工具无身份参数）
-      args.actorId = principalId
-      args.actorName = info.name
     }
+    // nas_fs_* 工具身份已改为经 exec.principal 传递（P0-2：身份不进工具参数，schema 无 actor* 参数）
     return args
   }
 
