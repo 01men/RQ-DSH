@@ -289,8 +289,10 @@ export interface RemoteDirectory {
     jobNumber: string
     title: string
     orgRemoteId: string
-    /** 一人多部门：orgRemoteId 为主归属（钉钉目录首个命中），其余部门记兼任挂靠（引擎 orgId 子树兼任只读）。 */
+    /** 一人多部门：orgRemoteId 为主归属（优先 deptRemoteIds[0]=钉钉主部门，缺省取目录首见），其余部门记兼任挂靠（引擎 orgId 子树兼任只读）。 */
     extraOrgRemoteIds?: string[]
+    /** 钉钉 dept_id_list 原序（首位=主部门），多部门时用于校正主归属。 */
+    deptRemoteIds?: string[]
     email: string
     active: boolean
   }>
@@ -428,13 +430,22 @@ export class RealDingTalkConnector implements OrgConnector {
       for (const member of members) {
         const existing = users.find((user) => user.remoteId === member.remoteId)
         if (existing) {
-          // 一人多部门（兼任语义数据源）：首个部门为主归属（orgRemoteId），其余部门记入 extraOrgRemoteIds
+          // 一人多部门（兼任语义数据源）：首见部门记入 extraOrgRemoteIds，收尾按 deptRemoteIds 校正主归属
           if (existing.orgRemoteId !== org.remoteId && !(existing.extraOrgRemoteIds ?? []).includes(org.remoteId)) {
             existing.extraOrgRemoteIds = [...(existing.extraOrgRemoteIds ?? []), org.remoteId]
           }
           continue
         }
         users.push({ ...member, orgRemoteId: org.remoteId })
+      }
+    }
+    // 主归属校正：钉钉 dept_id_list 首位=主部门（目录遍历序 ≠ 用户主部门序，首见可能误判）
+    for (const user of users) {
+      const deptIds = (user.deptRemoteIds ?? []).filter((id) => id === user.orgRemoteId || orgs.some((org) => org.remoteId === id))
+      if (deptIds.length > 0 && deptIds[0] !== user.orgRemoteId) {
+        const rest = [user.orgRemoteId, ...(user.extraOrgRemoteIds ?? [])].filter((id) => id !== deptIds[0])
+        user.orgRemoteId = deptIds[0]
+        user.extraOrgRemoteIds = [...new Set(rest)]
       }
     }
     return { orgs, users }
@@ -461,13 +472,14 @@ export class RealDingTalkConnector implements OrgConnector {
         result?: {
           has_more?: boolean
           next_cursor?: number
-          list?: Array<{ unionid?: string; userid?: string; name?: string; job_number?: string; title?: string; email?: string; org_email?: string; active?: boolean }>
+          list?: Array<{ unionid?: string; userid?: string; dept_id_list?: number[]; name?: string; job_number?: string; title?: string; email?: string; org_email?: string; active?: boolean }>
         }
       }>('/topapi/v2/user/list', { dept_id: Number(deptId), cursor, size: 100 })
       const result = payload.result ?? {}
       for (const item of result.list ?? []) {
         const remoteId = item.unionid ?? item.userid
         if (!remoteId) continue
+        const deptRemoteIds = (item.dept_id_list ?? []).map(String).filter(Boolean)
         users.push({
           remoteId,
           ...(item.userid && item.userid !== remoteId ? { remoteUserId: item.userid } : {}),
@@ -475,6 +487,7 @@ export class RealDingTalkConnector implements OrgConnector {
           jobNumber: item.job_number || remoteId,
           title: item.title ?? '',
           orgRemoteId: deptId,
+          ...(deptRemoteIds.length > 1 ? { deptRemoteIds } : {}),
           email: item.email || item.org_email || '',
           active: item.active ?? true,
         })
