@@ -463,56 +463,51 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
       return { path, decision: 'allow', reasons: [`exception.allow：命中显式授权规则 ${allowHit.id}${allowHit.expiresAt ? `（${allowHit.expiresAt} 到期）` : ''}${allowHit.note ? `（${allowHit.note}）` : ''}`], ruleId: allowHit.id }
     }
 
-    // ④ 角色矩阵 × 作用域边界（主作用域 / 兼任只读层 / C 跨域只读层）
+    // ④ 角色矩阵 × 作用域边界（主作用域 / 跨分支领导层 / 兼任只读层 / C 跨域只读层）
     if (input.override === true) {
       return { path, decision: 'allow', reasons: ['override：破窗放行（P 判定，强制留痕）'] }
     }
     const inPrimary = scope.prefixes.some((prefix) => pathWithin(path, prefix))
-    const inLed = leaderScopes.some((led) => led.prefixes.some((prefix) => pathWithin(path, prefix)))
-    const inSecondary = !inPrimary && !inLed && secondaryPrefixes.some((prefix) => pathWithin(path, prefix))
+    const ledHits = leaderScopes.filter((led) => led.prefixes.some((prefix) => pathWithin(path, prefix)))
+    const inSecondary = !inPrimary && ledHits.length === 0 && secondaryPrefixes.some((prefix) => pathWithin(path, prefix))
     const inCScope = cTag && pathWithin(path, ctx.nas!.rootPath)
-    if (!inPrimary && !inLed && !inSecondary && !inCScope) {
+    if (!inPrimary && ledHits.length === 0 && !inSecondary && !inCScope) {
       return { path, decision: 'deny', reasons: [`path.out-of-scope：超出作用域 ${[...scope.prefixes, ...leaderScopes.flatMap((led) => led.prefixes)].join('、')}`] }
+    }
+    // 有效角色 = 主作用域角色与跨分支所领导部门角色的最高档（多身份作用域重叠时取高不叠加）
+    const roleRank: Record<AuthzRole, number> = { P: 0, D: 1, T: 2 }
+    let effRole: AuthzRole | undefined = inPrimary ? primaryRole : undefined
+    let effFrom: string | undefined
+    for (const led of ledHits) {
+      if (!effRole || roleRank[led.role] < roleRank[effRole]) {
+        effRole = led.role
+        effFrom = led.orgName
+      }
+    }
+    if (effRole) {
+      const allowed = matrix[effRole][input.op]
+      const sourceTag = effFrom ? `（跨分支所领导部门「${effFrom}」）` : ''
+      const shareHint = input.op === 'share' && (effRole === 'T' || effRole === 'M') ? '（需走审批申请例外）' : ''
+      return allowed
+        ? { path, decision: 'allow', reasons: [`matrix.allow：角色 ${roleLabel(effRole)}${sourceTag} 在作用域内放行「${OP_LABEL[input.op]}」${!effFrom && coLeaderMarks.length > 0 ? `（${coLeaderMarks.join('、')}）` : ''}`] }
+        : { path, decision: 'deny', reasons: [`matrix.deny：角色 ${roleLabel(effRole)}${sourceTag} 对「${OP_LABEL[input.op]}」无权限${shareHint}`] }
     }
     if (deptRootReadonly) {
       return WRITE_OPS.has(input.op)
         ? { path, decision: 'deny', reasons: ['org.dept-root-readonly：未落班组，部门根目录只读'] }
         : { path, decision: 'allow', reasons: ['org.dept-root-readonly：部门根目录只读放行'] }
     }
-    // 跨分支领导层（全权限）：先于兼任只读层——所领导部门的合法管理权不被挂靠只读吞掉
-    const ledHit = leaderScopes.find((led) => led.prefixes.some((prefix) => pathWithin(path, prefix)))
-    if (ledHit) {
-      const ledAllowed = matrix[ledHit.role][input.op]
-      return ledAllowed
-        ? { path, decision: 'allow', reasons: [`matrix.allow：角色 ${roleLabel(ledHit.role)}（跨分支所领导部门「${ledHit.orgName}」）在作用域内放行「${OP_LABEL[input.op]}」`] }
-        : { path, decision: 'deny', reasons: [`matrix.deny：角色 ${roleLabel(ledHit.role)}（跨分支所领导部门「${ledHit.orgName}」）对「${OP_LABEL[input.op]}」无权限${input.op === 'share' && (ledHit.role === 'T' || ledHit.role === 'M') ? '（需走审批申请例外）' : ''}`] }
-    }
     if (inSecondary) {
       return WRITE_OPS.has(input.op)
         ? { path, decision: 'deny', reasons: ['org.secondary-readonly：兼任归属子树仅授只读（避免双写冲突）'] }
         : { path, decision: 'allow', reasons: ['org.secondary-readonly：兼任归属子树只读放行'] }
     }
-    if (!inPrimary && inCScope) {
+    if (inCScope) {
       return WRITE_OPS.has(input.op)
         ? { path, decision: 'deny', reasons: ['role.c-readonly：C 跨域叠加仅只读，白名单目录写需显式授权'] }
         : { path, decision: 'allow', reasons: ['role.c-readonly：C 动态用户组跨域只读放行'] }
     }
-    if (!primaryRole) {
-      return { path, decision: 'deny', reasons: ['role.none：无法推导主角色（组织挂载异常）'] }
-    }
-    const allowed = matrix[primaryRole][input.op]
-    if (!allowed) {
-      return {
-        path,
-        decision: 'deny',
-        reasons: [`matrix.deny：角色 ${roleLabel(primaryRole)} 对「${OP_LABEL[input.op]}」无权限${input.op === 'share' && (primaryRole === 'T' || primaryRole === 'M') ? '（需走审批申请例外）' : ''}`],
-      }
-    }
-    return {
-      path,
-      decision: 'allow',
-      reasons: [`matrix.allow：角色 ${roleLabel(primaryRole)} 在作用域内放行「${OP_LABEL[input.op]}」${coLeaderMarks.length > 0 ? `（${coLeaderMarks.join('、')}）` : ''}`],
-    }
+    return { path, decision: 'deny', reasons: ['role.none：无法推导主角色（组织挂载异常）'] }
   })
 
   base.perPath = verdicts
