@@ -281,7 +281,19 @@ export const CONNECTOR_ROLE_MIGRATION = BUILTIN_ROLE_MIGRATION
 
 export interface RemoteDirectory {
   orgs: Array<{ remoteId: string; name: string; parentRemoteId: string | null; /** 部门负责人三方 userId 列表（钉钉 dept_manager_userid_list），nasAuthz 角色推导依据。 */ managerRemoteIds?: string[] }>
-  users: Array<{ remoteId: string; name: string; jobNumber: string; title: string; orgRemoteId: string; email: string; active: boolean }>
+  users: Array<{
+    remoteId: string
+    /** 钉钉 userid（staffId）：hermes X-On-Behalf-User 身份头与 dept_manager_userid_list 的口径；与 remoteId(unionId) 并存为两条 identityLinks。 */
+    remoteUserId?: string
+    name: string
+    jobNumber: string
+    title: string
+    orgRemoteId: string
+    /** 一人多部门：orgRemoteId 为主归属（钉钉目录首个命中），其余部门记兼任挂靠（引擎 orgId 子树兼任只读）。 */
+    extraOrgRemoteIds?: string[]
+    email: string
+    active: boolean
+  }>
 }
 
 export interface OrgConnector {
@@ -298,25 +310,25 @@ export class DingTalkConnector implements OrgConnector {
 
   private directory: RemoteDirectory = {
     orgs: [
-      { remoteId: 'dd_root', name: '元冰可集团', parentRemoteId: null, managerRemoteIds: ['dd_u001'] },
-      { remoteId: 'dd_tech', name: '技术中心', parentRemoteId: 'dd_root', managerRemoteIds: ['dd_u001'] },
-      { remoteId: 'dd_ai', name: 'AI 平台部', parentRemoteId: 'dd_tech', managerRemoteIds: ['dd_u002'] },
-      { remoteId: 'dd_be', name: '后端部', parentRemoteId: 'dd_tech', managerRemoteIds: ['dd_u004'] },
-      { remoteId: 'dd_fe', name: '前端部', parentRemoteId: 'dd_tech', managerRemoteIds: ['dd_u005'] },
-      { remoteId: 'dd_prod', name: '产品运营部', parentRemoteId: 'dd_root', managerRemoteIds: ['dd_u006'] },
-      { remoteId: 'dd_mkt', name: '市场部', parentRemoteId: 'dd_root', managerRemoteIds: ['dd_u008'] },
+      { remoteId: 'dd_root', name: '元冰可集团', parentRemoteId: null, managerRemoteIds: ['staff_001'] },
+      { remoteId: 'dd_tech', name: '技术中心', parentRemoteId: 'dd_root', managerRemoteIds: ['staff_001'] },
+      { remoteId: 'dd_ai', name: 'AI 平台部', parentRemoteId: 'dd_tech', managerRemoteIds: ['staff_002'] },
+      { remoteId: 'dd_be', name: '后端部', parentRemoteId: 'dd_tech', managerRemoteIds: ['staff_004'] },
+      { remoteId: 'dd_fe', name: '前端部', parentRemoteId: 'dd_tech', managerRemoteIds: ['staff_005'] },
+      { remoteId: 'dd_prod', name: '产品运营部', parentRemoteId: 'dd_root', managerRemoteIds: ['staff_006'] },
+      { remoteId: 'dd_mkt', name: '市场部', parentRemoteId: 'dd_root', managerRemoteIds: ['staff_008'] },
     ],
     users: [
-      { remoteId: 'dd_u001', name: '陈远舟', jobNumber: 'DD0001', title: '技术总监', orgRemoteId: 'dd_tech', email: 'chenyz@yuanbingke.com', active: true },
-      { remoteId: 'dd_u002', name: '林小满', jobNumber: 'DD0002', title: '算法工程师', orgRemoteId: 'dd_ai', email: 'linxm@yuanbingke.com', active: true },
-      { remoteId: 'dd_u003', name: '周既白', jobNumber: 'DD0003', title: '算法工程师', orgRemoteId: 'dd_ai', email: 'zhoujb@yuanbingke.com', active: true },
-      { remoteId: 'dd_u004', name: '苏砚秋', jobNumber: 'DD0004', title: '后端工程师', orgRemoteId: 'dd_be', email: 'suyq@yuanbingke.com', active: true },
-      { remoteId: 'dd_u005', name: '何青梧', jobNumber: 'DD0005', title: '前端工程师', orgRemoteId: 'dd_fe', email: 'heqw@yuanbingke.com', active: true },
-      { remoteId: 'dd_u006', name: '顾星阑', jobNumber: 'DD0006', title: '产品经理', orgRemoteId: 'dd_prod', email: 'guxl@yuanbingke.com', active: true },
-      { remoteId: 'dd_u007', name: '叶栖迟', jobNumber: 'DD0007', title: '运营专员', orgRemoteId: 'dd_prod', email: 'yqz@yuanbingke.com', active: true },
-      { remoteId: 'dd_u008', name: '孟疏桐', jobNumber: 'DD0008', title: '市场专员', orgRemoteId: 'dd_mkt', email: 'mst@yuanbingke.com', active: true },
-      { remoteId: 'dd_u009', name: '周明澜', jobNumber: 'DD0009', title: '前端工程师', orgRemoteId: 'dd_fe', email: 'zhml@yuanbingke.com', active: true },
-      { remoteId: 'dd_u010', name: '姜叙白', jobNumber: 'DD0010', title: '数据工程师', orgRemoteId: 'dd_be', email: 'jxb@yuanbingke.com', active: false },
+      { remoteId: 'dd_u001', remoteUserId: 'staff_001', name: '陈远舟', jobNumber: 'DD0001', title: '技术总监', orgRemoteId: 'dd_tech', email: 'chenyz@yuanbingke.com', active: true },
+      { remoteId: 'dd_u002', remoteUserId: 'staff_002', name: '林小满', jobNumber: 'DD0002', title: '算法工程师', orgRemoteId: 'dd_ai', email: 'linxm@yuanbingke.com', active: true },
+      { remoteId: 'dd_u003', remoteUserId: 'staff_003', name: '周既白', jobNumber: 'DD0003', title: '算法工程师', orgRemoteId: 'dd_ai', email: 'zhoujb@yuanbingke.com', active: true },
+      { remoteId: 'dd_u004', remoteUserId: 'staff_004', name: '苏砚秋', jobNumber: 'DD0004', title: '后端工程师', orgRemoteId: 'dd_be', email: 'suyq@yuanbingke.com', active: true },
+      { remoteId: 'dd_u005', remoteUserId: 'staff_005', name: '何青梧', jobNumber: 'DD0005', title: '前端工程师', orgRemoteId: 'dd_fe', email: 'heqw@yuanbingke.com', active: true },
+      { remoteId: 'dd_u006', remoteUserId: 'staff_006', name: '顾星阑', jobNumber: 'DD0006', title: '产品经理', orgRemoteId: 'dd_prod', email: 'guxl@yuanbingke.com', active: true },
+      { remoteId: 'dd_u007', remoteUserId: 'staff_007', name: '叶栖迟', jobNumber: 'DD0007', title: '运营专员', orgRemoteId: 'dd_prod', email: 'yqz@yuanbingke.com', active: true },
+      { remoteId: 'dd_u008', remoteUserId: 'staff_008', name: '孟疏桐', jobNumber: 'DD0008', title: '市场专员', orgRemoteId: 'dd_mkt', email: 'mst@yuanbingke.com', active: true },
+      { remoteId: 'dd_u009', remoteUserId: 'staff_009', name: '周明澜', jobNumber: 'DD0009', title: '前端工程师', orgRemoteId: 'dd_fe', extraOrgRemoteIds: ['dd_be'], email: 'zhml@yuanbingke.com', active: true },
+      { remoteId: 'dd_u010', remoteUserId: 'staff_010', name: '姜叙白', jobNumber: 'DD0010', title: '数据工程师', orgRemoteId: 'dd_be', email: 'jxb@yuanbingke.com', active: false },
     ],
   }
 
@@ -414,7 +426,14 @@ export class RealDingTalkConnector implements OrgConnector {
     for (const org of orgs) {
       const members = await this.listUsers(org.remoteId)
       for (const member of members) {
-        if (users.some((user) => user.remoteId === member.remoteId)) continue
+        const existing = users.find((user) => user.remoteId === member.remoteId)
+        if (existing) {
+          // 一人多部门（兼任语义数据源）：首个部门为主归属（orgRemoteId），其余部门记入 extraOrgRemoteIds
+          if (existing.orgRemoteId !== org.remoteId && !(existing.extraOrgRemoteIds ?? []).includes(org.remoteId)) {
+            existing.extraOrgRemoteIds = [...(existing.extraOrgRemoteIds ?? []), org.remoteId]
+          }
+          continue
+        }
         users.push({ ...member, orgRemoteId: org.remoteId })
       }
     }
@@ -451,6 +470,7 @@ export class RealDingTalkConnector implements OrgConnector {
         if (!remoteId) continue
         users.push({
           remoteId,
+          ...(item.userid && item.userid !== remoteId ? { remoteUserId: item.userid } : {}),
           name: item.name ?? remoteId,
           jobNumber: item.job_number || remoteId,
           title: item.title ?? '',
@@ -1430,25 +1450,14 @@ export class IamService extends Service {
     let conflicts = 0
     let frozen = 0
 
-    // 负责人同步（dev-plan-nas-authz 步骤 1）：dept_manager_userid_list → 平台 userId（identityLinks 反查）。
-    // 远端显式给空列表=清空负责人；字段缺省=不动本地（兼容旧目录源）。映射不上的远端负责人被丢弃（不落悬空 ID）。
-    let leaderSynced = 0
-    for (const remoteOrg of directory.orgs) {
-      if (!Array.isArray(remoteOrg.managerRemoteIds)) continue
-      const localOrgId = remoteOrgToId.get(remoteOrg.remoteId)
-      if (!localOrgId) continue
-      const leaderUserIds = remoteOrg.managerRemoteIds
-        .map((remoteUserId) => this.identityLinks().findOne((link) => link.provider === provider && link.providerUserId === remoteUserId && (link.corpId ?? '') === config.corpId)?.userId)
-        .filter((id): id is string => Boolean(id))
-      this.orgs().update(localOrgId, { leaderUserIds })
-      leaderSynced++
-    }
-
     for (const remoteUser of directory.users) {
       const orgId = remoteOrgToId.get(remoteUser.orgRemoteId)
       if (!orgId) continue
+      // 一人多部门（兼任语义，dev-plan-nas-authz §2.1）：主归属=orgId（首个部门），挂靠=extraOrgRemoteIds 首个命中。
+      // 引擎侧 primaryOrgId=主归属锚点，orgId 子树按兼任只读——双身份权限并存不冲突。
+      const secondaryOrgId = (remoteUser.extraOrgRemoteIds ?? []).map((remoteOrgId) => remoteOrgToId.get(remoteOrgId)).find(Boolean)
       // 多主体：bindings 按 provider+corpId 匹配（binding.corpId 为空串/undefined 时只匹配同空）
-      const local = this.users().findOne((user) => user.bindings.some((binding) => binding.provider === provider && binding.unionId === remoteUser.remoteId && (binding.corpId ?? '') === config.corpId))
+      let local = this.users().findOne((user) => user.bindings.some((binding) => binding.provider === provider && binding.unionId === remoteUser.remoteId && (binding.corpId ?? '') === config.corpId))
         ?? this.users().findOne((user) => user.jobNumber === remoteUser.jobNumber)
       if (!local) {
         const { user: record } = this.createUser({
@@ -1459,7 +1468,7 @@ export class IamService extends Service {
           email: remoteUser.email,
           jobNumber: remoteUser.jobNumber,
         })
-        this.users().update(record.id, { status: 'active' })
+        this.users().update(record.id, secondaryOrgId ? { status: 'active', primaryOrgId: orgId, orgId: secondaryOrgId } : { status: 'active' })
         this.linkIdentity(record.id, { provider, providerUserId: remoteUser.remoteId, corpId: config.corpId, displayName: remoteUser.name }, 'connector-sync')
         created++
         continue
@@ -1471,6 +1480,21 @@ export class IamService extends Service {
           // 唯一约束冲突：该三方身份已绑定其他账号（一人一号），跳过并保留冲突语义
         }
       }
+      // 运营身份链（nasAuthz P0）：unionId 供 SSO 登录匹配，userid 供 nasAuthz 身份反查
+      // （hermes X-On-Behalf-User 上报 userid 口径）与 dept_manager_userid_list 负责人映射——两链并存互不覆盖。
+      if (remoteUser.remoteUserId && !this.identityLinks().findOne((link) => link.provider === provider && link.providerUserId === remoteUser.remoteUserId && (link.corpId ?? '') === config.corpId)) {
+        try {
+          this.linkIdentity(local.id, { provider, providerUserId: remoteUser.remoteUserId, corpId: config.corpId, displayName: remoteUser.name }, 'connector-sync')
+        } catch {
+          // 唯一约束冲突：该 userid 已绑定其他账号，跳过（沿用 unionId 链语义）
+        }
+      }
+      // 兼任归属是组织架构事实（钉钉多部门），不进属性冲突机制，直接落库收敛：
+      // primaryOrgId 锚定主归属，orgId 切到兼任挂靠（引擎对其子树授只读）
+      if (secondaryOrgId && (local.primaryOrgId !== orgId || local.orgId !== secondaryOrgId)) {
+        this.users().update(local.id, { primaryOrgId: orgId, orgId: secondaryOrgId })
+        local = this.users().get(local.id) ?? local
+      }
       if (!remoteUser.active) {
         if (local.status === 'active' || local.status === 'pending') {
           this.freezeUser(local.id, `三方同步：${provider} 通讯录已离职`)
@@ -1478,10 +1502,10 @@ export class IamService extends Service {
         }
         continue
       }
-      const attrDiffers = local.displayName !== remoteUser.name || local.title !== remoteUser.title || local.orgId !== orgId
+      const attrDiffers = local.displayName !== remoteUser.name || local.title !== remoteUser.title || local.orgId !== (secondaryOrgId ?? orgId)
       if (attrDiffers) {
         if (config.conflictStrategy === 'third_party_wins') {
-          this.users().update(local.id, { displayName: remoteUser.name, title: remoteUser.title, orgId })
+          this.users().update(local.id, { displayName: remoteUser.name, title: remoteUser.title, orgId: secondaryOrgId ?? orgId })
           updated++
         } else if (config.conflictStrategy === 'platform_wins') {
           updated++
@@ -1497,6 +1521,21 @@ export class IamService extends Service {
           conflicts++
         }
       }
+    }
+
+    // 负责人同步（dev-plan-nas-authz 步骤 1）：dept_manager_userid_list → 平台 userId（identityLinks 反查）。
+    // 置于用户循环之后：userid 身份链在同一轮先落库，负责人才映射得上（钉钉负责人列表是 userid 口径）。
+    // 远端显式给空列表=清空负责人；字段缺省=不动本地（兼容旧目录源）。映射不上的远端负责人被丢弃（不落悬空 ID）。
+    let leaderSynced = 0
+    for (const remoteOrg of directory.orgs) {
+      if (!Array.isArray(remoteOrg.managerRemoteIds)) continue
+      const localOrgId = remoteOrgToId.get(remoteOrg.remoteId)
+      if (!localOrgId) continue
+      const leaderUserIds = remoteOrg.managerRemoteIds
+        .map((remoteUserId) => this.identityLinks().findOne((link) => link.provider === provider && link.providerUserId === remoteUserId && (link.corpId ?? '') === config.corpId)?.userId)
+        .filter((id): id is string => Boolean(id))
+      this.orgs().update(localOrgId, { leaderUserIds })
+      leaderSynced++
     }
 
     // 动态用户组重算快照 + 漂移告警（dev-plan-nas-authz §2.2）：HR 调整 title/org 后

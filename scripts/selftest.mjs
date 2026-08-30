@@ -2653,6 +2653,38 @@ try {
     && byDingtalk.data.userName === '林小满',
     JSON.stringify({ byPlatform: byPlatform.data, byDingtalk: byDingtalk.data }))
 
+  // userid 口径反查（hermes X-On-Behalf-User 与 dept_manager_userid_list 的口径）：unionId+userid 双链并存
+  const byStaffId = await authzCheck('staff_002', ['/元冰可集团/技术中心/AI 平台部/a.txt'], 'read')
+  check('钉钉 userid 口径反查与平台 userId 等价（双身份链：unionId 供登录、userid 供运营反查）',
+    byStaffId.ok && byStaffId.data.userName === '林小满'
+    && JSON.stringify(byStaffId.data.scope) === JSON.stringify(byPlatform.data.scope),
+    JSON.stringify(byStaffId.data))
+
+  // 负责人映射走 userid 口径（钉钉 dept_manager_userid_list 是 userid，经 userid 链反查平台 userId）
+  const orgsForLeaders = (await api('GET', '/api/iam/orgs', { token: admin })).data
+  check('部门负责人随同步映射（managerRemoteIds userid 口径 → identityLinks 反查）',
+    orgsForLeaders.some((org) => org.name === 'AI 平台部' && (org.leaderUserIds ?? []).includes(linxmUid)),
+    JSON.stringify(orgsForLeaders.filter((org) => org.name === 'AI 平台部').map((org) => ({ leaders: org.leaderUserIds }))))
+
+  // 一人多部门兼任（同步落库）：primaryOrgId=主归属锚，orgId=挂靠；引擎兼任子树只读，双身份权限不冲突
+  const zhmlCandidates = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('周明澜'), { token: admin })).data.users
+    .filter((user) => user.primaryOrgId && user.orgId && user.primaryOrgId !== user.orgId)
+  const zhmlHit = { rec: undefined, secWrite: undefined }
+  for (const cand of zhmlCandidates) {
+    const primaryWrite = await authzCheck(cand.id, ['/元冰可集团/技术中心/前端部/主归属.txt'], 'write')
+    const secRead = await authzCheck(cand.id, ['/元冰可集团/技术中心/后端部/兼任目录.txt'], 'read')
+    const secWrite = await authzCheck(cand.id, ['/元冰可集团/技术中心/后端部/兼任目录.txt'], 'write')
+    if (primaryWrite.data?.decision === 'allow' && secRead.data?.decision === 'allow' && secWrite.data?.decision === 'deny') {
+      Object.assign(zhmlHit, { rec: cand, secWrite })
+      break
+    }
+  }
+  check('多部门成员兼任落库（primaryOrgId=主部门，orgId=挂靠部门）', Boolean(zhmlHit.rec),
+    JSON.stringify(zhmlCandidates.map((user) => ({ primaryOrgId: user.primaryOrgId, orgId: user.orgId }))))
+  check('兼任权限不冲突：主归属可写、兼任子树只读（secondary-readonly）',
+    Boolean(zhmlHit.rec) && zhmlHit.secWrite.data.reasons.some((r) => r.includes('secondary-readonly')),
+    JSON.stringify(zhmlHit.secWrite.data))
+
   // 权限点：无角色 403 / 无 nas.authz.read 403
   const authzMemberLogin = await api('POST', '/api/auth/login', { body: { username: 'yqz', password: 'Ybk@2026' } })
   const authzMemberToken = authzMemberLogin.data?.token
