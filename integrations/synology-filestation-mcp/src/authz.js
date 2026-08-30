@@ -164,10 +164,7 @@ export class AuthzClient {
     }
 
     let verdict
-    if (!this.isEnforced(tokenEntry)) {
-      // 观察模式直通（enforce=false 且无 on-behalf 头的既有调用零破坏）
-      verdict = { decision: 'allow', reasons: ['observe：该令牌未开启 enforce，判定直通（deny 仅告警不拦截）'], observeOnly: true }
-    } else if (this.breakerOpen) {
+    if (this.breakerOpen && this.isEnforced(tokenEntry)) {
       verdict = this.degradedVerdict({ op, paths, nasIp, userId, note: 'breaker-open' })
     } else {
       try {
@@ -180,7 +177,18 @@ export class AuthzClient {
           this.breakerOpenedAt = Date.now()
           this.metrics.breakerOpened += 1
         }
-        verdict = this.degradedVerdict({ op, paths, nasIp, userId, note: error.message })
+        if (!this.isEnforced(tokenEntry)) {
+          // G0 观察：PDP 不可达时零破坏直通（观察模式不引入新的失败面）
+          verdict = { decision: 'allow', reasons: [`observe：PDP 不可达（${error.message}），该令牌未开启 enforce，直通`], observeOnly: true }
+        } else {
+          verdict = this.degradedVerdict({ op, paths, nasIp, userId, note: error.message })
+        }
+      }
+      if (!this.isEnforced(tokenEntry)) {
+        // G0 观察模式核心：未开 enforce 的令牌照常过 PDP 采集真实判定数据（灰度退出依据），
+        // 全部标注 observeOnly → http.js 对 deny 记 OBSERVE-DENY 后放行，不拦截业务；观察判定不进缓存
+        verdict = { ...verdict, observeOnly: true }
+        if (verdict.decision === 'allow') verdict.reasons = [...verdict.reasons, 'observe：该令牌未开启 enforce（判定留痕，不拦截）']
       }
     }
     if (verdict.decision === 'allow') this.metrics.allows += 1

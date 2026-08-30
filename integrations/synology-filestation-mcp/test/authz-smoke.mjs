@@ -121,9 +121,11 @@ await client.evaluate({ tool: 'fs_delete', args: { path: ['/vivo'] }, tokenEntry
 await client.evaluate({ tool: 'fs_delete', args: { path: ['/vivo'] }, tokenEntry: trusted, onBehalfHeader: 'u_read', nasIp: '192.168.0.196' })
 check('读缓存命中（第二次不再调 PDP）、写不缓存（每次实判）', cachedReadCalls === 1 && checkCalls === 2, `read=${cachedReadCalls} write=${checkCalls}`)
 
-// 4) enforce=false 直通（既有调用零破坏）
-const passthrough = await client.evaluate({ tool: 'fs_delete', args: { path: ['/anything'] }, tokenEntry: observer, nasIp: '192.168.0.196' })
-check('enforce=false 直通（观察模式标注）', passthrough.decision === 'allow' && passthrough.observeOnly === true)
+// 4) enforce=false 观察模式：照常过 PDP 留痕（deny 采集 G0 数据），但不拦截（换未缓存 key）
+const observeAllow = await client.evaluate({ tool: 'fs_list', args: { folder_path: '/vivo/观察读' }, tokenEntry: observer, onBehalfHeader: 'u_read', nasIp: '192.168.0.196' })
+check('enforce=false 观察模式：PDP allow 原样放行（observeOnly 标注）', observeAllow.decision === 'allow' && observeAllow.observeOnly === true)
+const observeDeny = await client.evaluate({ tool: 'fs_delete', args: { path: ['/观察外'] }, tokenEntry: observer, onBehalfHeader: 'u_read', nasIp: '10.1.0.196' })
+check('enforce=false 观察模式：PDP deny 留痕但不拦截（observeOnly 标注）', observeDeny.decision === 'deny' && observeDeny.observeOnly === true)
 
 // 5) 非授信令牌伪造 on-behalf 被拒
 const forged = await client.evaluate({ tool: 'fs_list', args: { folder_path: '/vivo' }, tokenEntry: untrusted, onBehalfHeader: 'u_full', nasIp: '192.168.0.196' })

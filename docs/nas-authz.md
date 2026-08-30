@@ -85,4 +85,4 @@ dshctl nas authz decisions [--decision=deny] [--limit=50]
 
 - `npm run selftest`：658 项断言全绿，其中 NAS 数据权限两分节（引擎纯函数 + API/审批闭环/对账 40+ 项）覆盖 §四 全部用例（35 格矩阵、co-leader、兼任、跨分支领导、负责人悬空、例外过期、C 叠加、改名不漂移、多 NAS 隔离、乐观锁 409、导入幂等、share 审批闭环含到期拒绝、C 组漂移告警、X-On-Behalf-User 透传与防伪）；
 - `npm run lint:manifests`：70/70 通过；
-- 网关 authz-smoke：23/23；hermes 补丁 `--selftest`：通过。
+- 网关 authz-smoke：24/24；hermes 补丁 `--selftest`：通过。
