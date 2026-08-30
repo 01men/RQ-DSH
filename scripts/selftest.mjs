@@ -2317,7 +2317,9 @@ try {
       { id: 'eo2', name: '生产部', parentId: 'eo1', leaderUserIds: ['e_d'] },
       { id: 'eo3', name: '总装12线', parentId: 'eo2', leaderUserIds: ['e_t'] },
       { id: 'eo4', name: '质检线', parentId: 'eo2', leaderUserIds: [] },
-      { id: 'eo5', name: '品质部', parentId: 'eo1', leaderUserIds: ['e_x'] },
+      { id: 'eo5', name: '品质部', parentId: 'eo1', leaderUserIds: ['e_x', 'e_y'] },
+      { id: 'eo6', name: '外贸平台', parentId: null, leaderUserIds: [] },
+      { id: 'eo7', name: '外贸一部', parentId: 'eo6', leaderUserIds: [] },
     ]
     const idx = buildOrgIndex(eo)
     const nas1 = { id: 'en1', rootPath: '/', orgRoot: '智造平台' }
@@ -2359,6 +2361,10 @@ try {
       && run(u('e_x', 'eo3'), ['/智造平台/品质部/管理.xlsx'], 'admin').decision === 'deny'
       && run(u('e_x', 'eo3'), [inScope], 'modify').decision === 'deny',
       JSON.stringify(run(u('e_x', 'eo3'), ['/智造平台/品质部/检验标准.xlsx'], 'write')))
+    check('跨分支领导救回作用域：主部门不在锚点链（原 no-scope 早退）不吞所领导部门权限',
+      run(u('e_y', 'eo7'), ['/智造平台/品质部/检验标准.xlsx'], 'write').decision === 'allow'
+      && run(u('e_y', 'eo7'), ['/外贸平台/合同.xlsx'], 'read').decision === 'deny',
+      JSON.stringify(run(u('e_y', 'eo7'), ['/智造平台/品质部/检验标准.xlsx'], 'write')))
     check('负责人悬空检测：质检线在列', findVacantLeaderOrgs(idx, { withUserOrgIds: new Set(['eo3', 'eo4']) }).some((o) => o.id === 'eo4'))
 
     // 判定序：显式 deny > 显式 allow > 角色矩阵 > 默认 deny

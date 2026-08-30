@@ -413,11 +413,6 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
   }
 
   const scope = deriveScope(user, ctx.nas, ctx.orgIndex)
-  base.scope = scope.prefixes
-  if (scope.via === 'none') {
-    return denyAll([`nas.no-scope：未命中该 NAS 的接入组织锚点（${scope.reason}）`])
-  }
-
   // 未落班组：部门根只读（read/download 放行于部门子树，写类拒绝）
   const deptRootReadonly = derived.special === 'dept-root-readonly'
 
@@ -430,6 +425,11 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
     ...led,
     prefixes: deriveScope({ ...user, primaryOrgId: led.orgId }, ctx.nas, ctx.orgIndex).prefixes,
   })).filter((led) => led.prefixes.length > 0)
+  // 主作用域未命中锚点不提前拒绝：跨分支领导作用域仍可能命中（反之才全 deny）
+  if (scope.via === 'none' && leaderScopes.length === 0) {
+    return denyAll([`nas.no-scope：未命中该 NAS 的接入组织锚点（${scope.reason}）`])
+  }
+  base.scope = scope.via === 'none' ? [] : [...scope.prefixes]
   for (const led of leaderScopes) {
     if (!base.scope.some((prefix) => led.prefixes.includes(prefix))) base.scope = [...base.scope, ...led.prefixes]
   }
