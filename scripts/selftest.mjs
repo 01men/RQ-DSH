@@ -2317,6 +2317,7 @@ try {
       { id: 'eo2', name: '生产部', parentId: 'eo1', leaderUserIds: ['e_d'] },
       { id: 'eo3', name: '总装12线', parentId: 'eo2', leaderUserIds: ['e_t'] },
       { id: 'eo4', name: '质检线', parentId: 'eo2', leaderUserIds: [] },
+      { id: 'eo5', name: '品质部', parentId: 'eo1', leaderUserIds: ['e_x'] },
     ]
     const idx = buildOrgIndex(eo)
     const nas1 = { id: 'en1', rootPath: '/', orgRoot: '智造平台' }
@@ -2350,6 +2351,14 @@ try {
       && run(u('e_d', 'eo3'), ['/智造平台/生产部/生产计划.xlsx'], 'write').scope.includes('/智造平台/生产部')
       && deriveRole(u('e_d', 'eo3'), idx).role === 'D',
       JSON.stringify(run(u('e_d', 'eo3'), ['/智造平台/生产部/生产计划.xlsx'], 'write').scope))
+    check('跨分支领导（一人多角色）：主归属矩阵不抬档，所领导部门子树按该部门角色全权限生效',
+      deriveRole(u('e_x', 'eo3'), idx).role === 'M'
+      && deriveRole(u('e_x', 'eo3'), idx).leaderOfElsewhere.map((led) => led.orgId).includes('eo5')
+      && run(u('e_x', 'eo3'), ['/智造平台/品质部/检验标准.xlsx'], 'write').decision === 'allow'
+      && run(u('e_x', 'eo3'), ['/智造平台/品质部/旧标准.xlsx'], 'delete').decision === 'allow'
+      && run(u('e_x', 'eo3'), ['/智造平台/品质部/管理.xlsx'], 'admin').decision === 'deny'
+      && run(u('e_x', 'eo3'), [inScope], 'modify').decision === 'deny',
+      JSON.stringify(run(u('e_x', 'eo3'), ['/智造平台/品质部/检验标准.xlsx'], 'write')))
     check('负责人悬空检测：质检线在列', findVacantLeaderOrgs(idx, { withUserOrgIds: new Set(['eo3', 'eo4']) }).some((o) => o.id === 'eo4'))
 
     // 判定序：显式 deny > 显式 allow > 角色矩阵 > 默认 deny

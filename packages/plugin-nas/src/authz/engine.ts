@@ -225,8 +225,10 @@ export function orgChain(orgIndex: OrgIndex, orgId: string): EngineOrgNode[] {
 
 export interface DerivedRole {
   role?: AuthzRole
-  /** 全部负责人身份（多负责人 co-leader 语义：一人可同时是 D + 子树 T，取最高为主角色）。 */
+  /** 主归属链上的负责人身份（多负责人 co-leader 语义：一人可同时是 D + 子树 T，取最高为主角色）。 */
   leaderOf: Array<{ orgId: string; depth: number; role: AuthzRole; coLeader: boolean }>
+  /** 跨分支负责人身份（一人多角色）：主归属链之外的部门负责人，作用域与矩阵按所领导部门子树独立生效（leaderScopes）。 */
+  leaderOfElsewhere: Array<{ orgId: string; orgName: string; depth: number; role: AuthzRole; coLeader: boolean }>
   /** 主归属组织（兼任语义锚点）。 */
   primaryOrg?: EngineOrgNode
   /** 挂靠组织（orgId；与主归属不同即为兼任）。 */
@@ -245,7 +247,7 @@ export interface DerivedRole {
  * - 主归属缺省取组织链最深者（orgId 与 primaryOrgId 不一致即为兼任）。
  */
 export function deriveRole(user: EngineUser, orgIndex: OrgIndex): DerivedRole {
-  const result: DerivedRole = { leaderOf: [], secondaryAffiliation: false }
+  const result: DerivedRole = { leaderOf: [], leaderOfElsewhere: [], secondaryAffiliation: false }
   if (user.accountType === 'external') result.special = 'external'
   if (user.accountType === 'suspended-review') result.special = 'suspended-review'
   const attached = orgIndex.get(user.orgId)
@@ -255,13 +257,22 @@ export function deriveRole(user: EngineUser, orgIndex: OrgIndex): DerivedRole {
   result.primaryOrg = primary
   result.secondaryAffiliation = attached.id !== primary.id
 
+  const primaryChain = orgChain(orgIndex, primary.id)
   // 主归属链上的负责人身份（含链上所有层级，多负责人全部推导）
-  for (const node of orgChain(orgIndex, primary.id)) {
+  for (const node of primaryChain) {
     const coLeader = node.leaderUserIds.length > 1 && node.leaderUserIds.includes(user.id)
     if (node.leaderUserIds.includes(user.id)) {
       const role: AuthzRole = node.depth === 1 ? 'P' : node.depth === 2 ? 'D' : 'T'
       result.leaderOf.push({ orgId: node.id, depth: node.depth, role, coLeader })
     }
+  }
+  // 跨分支负责人身份（一人多角色，多主体兼任管理）：不并入主角色推导（避免抬高主归属矩阵档位），
+  // 由 check 的 leaderScopes 按所领导部门子树独立套用矩阵——多身份权限并存不冲突。
+  for (const node of orgIndex.values()) {
+    if (!node.leaderUserIds.includes(user.id)) continue
+    if (primaryChain.some((onChain) => onChain.id === node.id)) continue
+    const role: AuthzRole = node.depth === 1 ? 'P' : node.depth === 2 ? 'D' : 'T'
+    result.leaderOfElsewhere.push({ orgId: node.id, orgName: node.name, depth: node.depth, role, coLeader: node.leaderUserIds.length > 1 })
   }
   // 主角色取链上最高负责人角色；无负责人身份按挂载深度推导
   if (result.leaderOf.length > 0) {
@@ -413,6 +424,15 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
   const matrix = effectiveMatrix(ctx.rules)
   const primaryRole = derived.role
   const coLeaderMarks = derived.leaderOf.filter((item) => item.coLeader).map((item) => `co-leader@${item.orgId}`)
+  // 跨分支领导作用域（一人多角色）：所领导部门子树按该部门角色独立套用矩阵（全权限，非只读层），
+  // 与主归属权限并存；所领导部门未命中该 NAS 锚点时不产生作用域（跨 NAS 隔离不变）。
+  const leaderScopes = derived.leaderOfElsewhere.map((led) => ({
+    ...led,
+    prefixes: deriveScope({ ...user, primaryOrgId: led.orgId }, ctx.nas, ctx.orgIndex).prefixes,
+  })).filter((led) => led.prefixes.length > 0)
+  for (const led of leaderScopes) {
+    if (!base.scope.some((prefix) => led.prefixes.includes(prefix))) base.scope = [...base.scope, ...led.prefixes]
+  }
   // 兼任归属作用域（仅只读层）：锚点切到挂靠组织再推导一次
   const secondaryScope = derived.secondaryAffiliation
     ? deriveScope({ ...user, primaryOrgId: user.orgId }, ctx.nas, ctx.orgIndex)
@@ -448,15 +468,24 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
       return { path, decision: 'allow', reasons: ['override：破窗放行（P 判定，强制留痕）'] }
     }
     const inPrimary = scope.prefixes.some((prefix) => pathWithin(path, prefix))
-    const inSecondary = !inPrimary && secondaryPrefixes.some((prefix) => pathWithin(path, prefix))
+    const inLed = leaderScopes.some((led) => led.prefixes.some((prefix) => pathWithin(path, prefix)))
+    const inSecondary = !inPrimary && !inLed && secondaryPrefixes.some((prefix) => pathWithin(path, prefix))
     const inCScope = cTag && pathWithin(path, ctx.nas!.rootPath)
-    if (!inPrimary && !inSecondary && !inCScope) {
-      return { path, decision: 'deny', reasons: [`path.out-of-scope：超出作用域 ${scope.prefixes.join('、')}`] }
+    if (!inPrimary && !inLed && !inSecondary && !inCScope) {
+      return { path, decision: 'deny', reasons: [`path.out-of-scope：超出作用域 ${[...scope.prefixes, ...leaderScopes.flatMap((led) => led.prefixes)].join('、')}`] }
     }
     if (deptRootReadonly) {
       return WRITE_OPS.has(input.op)
         ? { path, decision: 'deny', reasons: ['org.dept-root-readonly：未落班组，部门根目录只读'] }
         : { path, decision: 'allow', reasons: ['org.dept-root-readonly：部门根目录只读放行'] }
+    }
+    // 跨分支领导层（全权限）：先于兼任只读层——所领导部门的合法管理权不被挂靠只读吞掉
+    const ledHit = leaderScopes.find((led) => led.prefixes.some((prefix) => pathWithin(path, prefix)))
+    if (ledHit) {
+      const ledAllowed = matrix[ledHit.role][input.op]
+      return ledAllowed
+        ? { path, decision: 'allow', reasons: [`matrix.allow：角色 ${roleLabel(ledHit.role)}（跨分支所领导部门「${ledHit.orgName}」）在作用域内放行「${OP_LABEL[input.op]}」`] }
+        : { path, decision: 'deny', reasons: [`matrix.deny：角色 ${roleLabel(ledHit.role)}（跨分支所领导部门「${ledHit.orgName}」）对「${OP_LABEL[input.op]}」无权限${input.op === 'share' && (ledHit.role === 'T' || ledHit.role === 'M') ? '（需走审批申请例外）' : ''}`] }
     }
     if (inSecondary) {
       return WRITE_OPS.has(input.op)
