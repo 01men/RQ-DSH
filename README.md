@@ -376,7 +376,7 @@ SaaS 数据面网关（roadmap 第 9 步之二「连接器市场」执行缺口�
 - **角色推导零名单**：P/D/T = 组织链负责人（钉钉连接器同步 `dept_manager_userid_list` → `OrgRecord.leaderUserIds`，多负责人 co-leader 全推导），M = 班组成员；C 叠加 = 动态用户组（组重算快照 + cGroupDrift 告警）。作用域映射表 `orgPathOverrides` 优先（组织改名不漂移，R1）+ 每日组织↔目录对账（dirOrphan/leaderVacant 告警）。
 - **REST 全套**（`/api/nas/authz/*`）：check/scope/rules/import/exceptions/decisions + 权限点 `nas.authz.check|read|write`；rules `ifVersion` 乐观锁（冲突 409）；share 审批闭环（T/M 申请 → 审批人沿组织链自动路由、resource_admin 兜底 → 通过写 7 天例外 → 到期自动拒绝，全程留痕）；破窗 `override=true` 强制留痕。
 - **身份硬约束（P0-2）**：平台调网关一律 `X-On-Behalf-User` 头透传真实用户（优先钉钉 userId），`nas_fs_*` 工具身份改 `exec.principal`（schema 零身份参数，缺失 fail-closed）。
-- **强制点改造件（仅产出代码未部署）**：网关 `integrations/synology-filestation-mcp`（AuthzClient：读缓存 300s/写实判 + scope 快照→readonly→deny 三级降级 + 熔断 + on-behalf 防伪，authz-smoke 20/20）；hermes `integrations/hermes-patch`（guard hook 化 + hash 锚点 + 幂等备份 py_compile，--selftest 通过）。DSM 原生权限为粗粒度兜底层（运维配置，零代码）。
+- **强制点改造件（仅产出代码未部署）**：网关 `integrations/synology-filestation-mcp`（AuthzClient：读缓存 300s/写实判 + scope 快照→readonly→deny 三级降级 + 熔断 + on-behalf 防伪，authz-smoke 23/23）；hermes `integrations/hermes-patch`（guard hook 化 + hash 锚点 + 幂等备份 py_compile，--selftest 通过）。DSM 原生权限为粗粒度兜底层（运维配置，零代码）。
 - **灰度**：rules 单例 `observeOnly`（缺省 true，G0 双通道同步观察）/`degradeAllToReadonly`（G3）+ 网关 `AUTHZ_ENFORCE` 全局 kill-switch + 逐令牌 enforce；任一阶段秒级回退。
 - **控制台 `#/nas-authz`**：灰度开关 / 矩阵（含覆盖项）/ 例外列表（过期倒计时）/ C 关联组 / NAS 锚点映射编辑 / check 试算 / 判定留痕 / 对账与悬空扫描。CLI：`dshctl nas authz check|scope|rules|decisions`。
 - 验收：selftest 651/651（新增「NAS 数据权限引擎」与「NAS 数据权限 API」两分节，覆盖 35 格矩阵/兼任/改名不漂移/审批闭环/C 组漂移/伪造拒绝等 §四 全部用例）；lint:manifests 70/70。

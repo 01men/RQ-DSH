@@ -4,12 +4,12 @@
  * 进程内 stub 平台 PDP（无需真实平台/NAS），覆盖：
  * 矩阵正/负向、路径提取（folder_path/path[]/dest_path 三形态）、读缓存/写不缓存、
  * PDP 不可达三级降级（快照→readonly→deny）、熔断进入/恢复、enforce=false 直通、
- * on-behalf 传递正确性、非授信令牌伪造 on-behalf 被拒。
+ * on-behalf 传递正确性、非授信令牌伪造 on-behalf 被拒、工具面 ↔ 操作映射双向一致。
  * 用法：node integrations/synology-filestation-mcp/test/authz-smoke.mjs
  */
 import { createServer } from 'node:http'
 import { rm, mkdir } from 'node:fs/promises'
-import { AuthzClient, opForTool, extractPaths, localScopeCheck } from '../src/authz.js'
+import { AuthzClient, opForTool, extractPaths, localScopeCheck, TOOL_OP_MAP } from '../src/authz.js'
 
 const PORT = 7393
 const BASE = `http://127.0.0.1:${PORT}`
@@ -95,6 +95,21 @@ check('操作映射：七类全覆盖 + 未知工具恒 deny',
   opForTool('fs_search') === 'read' && opForTool('fs_extract') === 'modify' && opForTool('fs_upload') === 'write' && opForTool('fs_share_link') === null)
 const unknownTool = await client.evaluate({ tool: 'fs_share_link', args: { path: '/x' }, tokenEntry: trusted, onBehalfHeader: 'u_full', nasIp: '192.168.0.196' })
 check('share/admin 类工具网关侧恒 deny（工具面不存在）', unknownTool.decision === 'deny')
+
+// 2b) 工具面 ↔ 操作映射双向一致（G0 教训：映射面外工具在 observeOnly 下也被 op.unsupported 硬拒）
+const GATEWAY_TOOLS = [
+  'fs_list', 'fs_list_shares', 'fs_get_info', 'fs_search', 'fs_download',
+  'fs_create_folder', 'fs_upload', 'fs_rename', 'fs_copy_move',
+  'fs_compress', 'fs_extract', 'fs_delete',
+  // 异步任务面：compress/extract/download 落任务后的状态查询与清理（G0 实测漏映射被硬拒后补齐）
+  'fs_task_status', 'fs_task_clear',
+]
+check('工具面一致性：TOOL_OP_MAP 与网关 fs_* 工具清单双向一致（新增工具漏映射即硬拒面）',
+  JSON.stringify(Object.keys(TOOL_OP_MAP).sort()) === JSON.stringify([...GATEWAY_TOOLS].sort()),
+  `映射表=${Object.keys(TOOL_OP_MAP).sort().join(',')} 清单=${[...GATEWAY_TOOLS].sort().join(',')}`)
+check('映射值域合法：全部落在七类操作内；异步任务工具 fs_task_status=read / fs_task_clear=delete',
+  Object.values(TOOL_OP_MAP).every((op) => ['read', 'download', 'write', 'modify', 'delete', 'share', 'admin'].includes(op))
+    && opForTool('fs_task_status') === 'read' && opForTool('fs_task_clear') === 'delete')
 
 // 3) 读缓存 / 写不缓存
 checkCalls = 0

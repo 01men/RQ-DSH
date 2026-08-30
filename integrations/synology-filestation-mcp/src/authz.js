@@ -13,8 +13,11 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-// §2.1 操作映射：七类操作 → 网关工具面（share/admin 工具面不存在 → 网关侧恒 deny）
-const TOOL_OP_MAP = {
+// §2.1 操作映射：七类操作 → 网关工具面（share/admin 工具面不存在 → 网关侧恒 deny）。
+// G0 实测教训：映射面外工具在 evaluate() 里先于 observe 直通被硬拒（op.unsupported），
+// 网关新增工具漏映射即线上拒绝——authz-smoke 以「工具面 ↔ 映射表双向一致」断言兜底，
+// 网关工具面扩张时必须同步补此表与 test 里的 GATEWAY_TOOLS 钉住清单。
+export const TOOL_OP_MAP = {
   fs_list: 'read',
   fs_list_shares: 'read',
   fs_get_info: 'read',
@@ -27,6 +30,8 @@ const TOOL_OP_MAP = {
   fs_compress: 'modify',
   fs_extract: 'modify',
   fs_delete: 'delete',
+  fs_task_status: 'read',
+  fs_task_clear: 'delete',
 }
 
 const READ_LIKE = new Set(['read', 'download'])

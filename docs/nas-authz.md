@@ -51,7 +51,7 @@
 ## 四、强制点与身份约束
 
 - **身份一律走 `X-On-Behalf-User` 请求头，禁止进工具参数**（P0-2 教训）：平台 plugin-nas 调网关时经 `onBehalfHeaders` 注入（优先钉钉 userId）；nas_fs_* 工具身份改由 `exec.principal` 传递（schema 无身份参数，缺失 fail-closed）；网关/hermes 对非授信令牌携带该头直接拒绝（防伪造）。
-- 网关三级降级：scope 快照（仅快照内读）→ readonly（灰度可配）→ deny（默认 fail-closed）；check 超时 ≤2s、连续 5 次超时熔断、恢复自动退出（`integrations/synology-filestation-mcp/test/authz-smoke.mjs` 20/20）。
+- 网关三级降级：scope 快照（仅快照内读）→ readonly（灰度可配）→ deny（默认 fail-closed）；check 超时 ≤2s、连续 5 次超时熔断、恢复自动退出（`integrations/synology-filestation-mcp/test/authz-smoke.mjs` 23/23）。异步任务工具映射：`fs_task_status=read`、`fs_task_clear=delete`（G0 实测映射面外工具在 observeOnly 下也被 `op.unsupported` 硬拒后补齐，工具面 ↔ 映射表双向一致性已入 smoke 断言）。
 - hermes guard hook 化 + hash 锚点校验（`integrations/hermes-patch`）。
 
 ## 五、事件与告警
@@ -77,4 +77,4 @@ dshctl nas authz decisions [--decision=deny] [--limit=50]
 
 - `npm run selftest`：651 项断言全绿，其中 NAS 数据权限两分节（引擎纯函数 21 项 + API/审批闭环/对账 40+ 项）覆盖 §四 全部用例（35 格矩阵、co-leader、兼任、负责人悬空、例外过期、C 叠加、改名不漂移、多 NAS 隔离、乐观锁 409、导入幂等、share 审批闭环含到期拒绝、C 组漂移告警、X-On-Behalf-User 透传与防伪）；
 - `npm run lint:manifests`：70/70 通过；
-- 网关 authz-smoke：20/20；hermes 补丁 `--selftest`：通过。
+- 网关 authz-smoke：23/23；hermes 补丁 `--selftest`：通过。

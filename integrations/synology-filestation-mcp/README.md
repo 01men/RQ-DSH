@@ -8,7 +8,7 @@
 | 文件 | 说明 |
 |---|---|
 | `src/authz.js` | `AuthzClient`（check 调用 + 读缓存 + scope 快照 + 三级降级 + 熔断）与 `opForTool` / `extractPaths` / `localScopeCheck` 纯函数 |
-| `test/authz-smoke.mjs` | 进程内 stub PDP 自测，20 项断言（`node test/authz-smoke.mjs`，当前 20/20 通过） |
+| `test/authz-smoke.mjs` | 进程内 stub PDP 自测，23 项断言（`node test/authz-smoke.mjs`，当前 23/23 通过；含工具面 ↔ 操作映射双向一致性断言，网关新增工具漏映射会被拦下） |
 
 ## 集成步骤（联调窗口执行）
 
