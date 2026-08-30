@@ -79,7 +79,7 @@ const client = new AuthzClient({
 
 const trusted = { enforce: true, allowedOnBehalf: true, name: 'hermes-0195' }
 const untrusted = { enforce: true, allowedOnBehalf: false, name: 'plain-client' }
-const observer = { enforce: false, name: 'legacy-client' }
+const observer = { enforce: false, allowedOnBehalf: true, name: 'legacy-client' }
 
 // 1) 矩阵正/负向 + on-behalf 传递
 const allowRead = await client.evaluate({ tool: 'fs_list', args: { folder_path: '/vivo/视频' }, tokenEntry: trusted, onBehalfHeader: 'u_read', nasIp: '192.168.0.196' })
