@@ -298,8 +298,16 @@ export interface DerivedScope {
  */
 export function deriveScope(user: EngineUser, nas: EngineNas, orgIndex: OrgIndex): DerivedScope {
   const root = normalizePath(nas.rootPath || '/')
-  const anchor = orgIndex.get(user.primaryOrgId ?? user.orgId) ?? orgIndex.get(user.orgId)
-  if (!anchor) return { prefixes: [], via: 'none', reason: 'user-org-not-found' }
+  const primary = orgIndex.get(user.primaryOrgId ?? user.orgId) ?? orgIndex.get(user.orgId)
+  if (!primary) return { prefixes: [], via: 'none', reason: 'user-org-not-found' }
+  // 角色与作用域对齐：主归属链上若领导某个（更浅层的）部门——负责人主部门挂在下属班组是常态
+  // （钉钉 dept_id_list[0] 为主部门，管理职务在上级部门）——作用域锚提升到所领导的最高部门，
+  // 否则 D/P 角色会落进更窄的下属作用域，矩阵放行形同虚设。
+  const primaryChain = orgChain(orgIndex, primary.id)
+  const ledAnchor = primaryChain
+    .filter((node) => node.leaderUserIds.includes(user.id))
+    .reduce<EngineOrgNode | undefined>((best, node) => (!best || node.depth < best.depth ? node : best), undefined)
+  const anchor = ledAnchor ?? primary
   const chain = orgChain(orgIndex, anchor.id)
   const overrides = nas.orgPathOverrides ?? {}
   // ① 映射表优先：从锚点向根找第一个显式映射（锚点自身映射优先级最高）

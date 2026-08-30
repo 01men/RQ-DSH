@@ -2345,6 +2345,11 @@ try {
       run(u('e_m2', 'eo4', { primaryOrgId: 'eo3' }), [inScope], 'write').decision === 'allow'
       && run(u('e_m2', 'eo4', { primaryOrgId: 'eo3' }), ['/智造平台/生产部/质检线/a.txt'], 'write').decision === 'deny'
       && run(u('e_m2', 'eo4', { primaryOrgId: 'eo3' }), ['/智造平台/生产部/质检线/a.txt'], 'read').decision === 'allow')
+    check('作用域锚对齐：部门负责人主部门挂在下属班组，作用域提升到所领导部门（角色与作用域一致）',
+      run(u('e_d', 'eo3'), ['/智造平台/生产部/生产计划.xlsx'], 'write').decision === 'allow'
+      && run(u('e_d', 'eo3'), ['/智造平台/生产部/生产计划.xlsx'], 'write').scope.includes('/智造平台/生产部')
+      && deriveRole(u('e_d', 'eo3'), idx).role === 'D',
+      JSON.stringify(run(u('e_d', 'eo3'), ['/智造平台/生产部/生产计划.xlsx'], 'write').scope))
     check('负责人悬空检测：质检线在列', findVacantLeaderOrgs(idx, { withUserOrgIds: new Set(['eo3', 'eo4']) }).some((o) => o.id === 'eo4'))
 
     // 判定序：显式 deny > 显式 allow > 角色矩阵 > 默认 deny
