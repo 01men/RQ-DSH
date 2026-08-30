@@ -34,6 +34,14 @@
 
 角色推导（无人员名单配置）：P/D/T = 组织链上负责人（深度 1/2/≥3），**多负责人全部推导（co-leader）**；M = 深度≥3 非负责人成员。负责人事实源 = `OrgRecord.leaderUserIds`（钉钉连接器同步 `dept_manager_userid_list`）。
 
+**一人多身份（多主体/多部门/跨分支任职，2026-08-30 落地）**：
+
+- **多主体**：同一人在聚杰/榕器创两个钉钉主体各有一条平台记录与身份链，互不合并、互不覆盖——hermes 按消息所属主体上报 userid，天然路由到对应身份；
+- **双身份链**：同步为每人并存 unionId（SSO 登录匹配）与 userid（nasAuthz 身份反查、`dept_manager_userid_list` 负责人映射）两条 identityLinks；
+- **主部门**：多部门用户主归属取钉钉 `dept_id_list[0]`（主部门），其余部门记挂靠（兼任子树只读，避免双写冲突）；
+- **跨分支领导**：主归属链之外兼任的部门负责人身份独立保留（`leaderOfElsewhere`），按所领导部门子树套用该部门角色矩阵（全权限层）；主部门挂在下属班组的负责人，作用域锚提升到所领导的最高部门（角色与作用域对齐）；多身份作用域重叠时按 P>D>T 取最高档；主作用域未命中 NAS 锚点不提前拒绝（所领导部门在链上即放行）；
+- 已知限制：引擎承载「主归属 + 1 挂靠 + N 跨分支领导」；同一部门内的双负责人用 co-leader 表达。
+
 ## 三、REST 端点（plugin-console，权限点见括号）
 
 | 端点 | 说明 |
@@ -75,6 +83,6 @@ dshctl nas authz decisions [--decision=deny] [--limit=50]
 
 ## 八、测试
 
-- `npm run selftest`：651 项断言全绿，其中 NAS 数据权限两分节（引擎纯函数 21 项 + API/审批闭环/对账 40+ 项）覆盖 §四 全部用例（35 格矩阵、co-leader、兼任、负责人悬空、例外过期、C 叠加、改名不漂移、多 NAS 隔离、乐观锁 409、导入幂等、share 审批闭环含到期拒绝、C 组漂移告警、X-On-Behalf-User 透传与防伪）；
+- `npm run selftest`：658 项断言全绿，其中 NAS 数据权限两分节（引擎纯函数 + API/审批闭环/对账 40+ 项）覆盖 §四 全部用例（35 格矩阵、co-leader、兼任、跨分支领导、负责人悬空、例外过期、C 叠加、改名不漂移、多 NAS 隔离、乐观锁 409、导入幂等、share 审批闭环含到期拒绝、C 组漂移告警、X-On-Behalf-User 透传与防伪）；
 - `npm run lint:manifests`：70/70 通过；
 - 网关 authz-smoke：23/23；hermes 补丁 `--selftest`：通过。
