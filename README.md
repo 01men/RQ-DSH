@@ -1,6 +1,6 @@
-# 榕器 · 企业AI资源治理平台
+# 榕器 · 企业AI资源管理平台
 
-基于 **DeepSeek Harness（dsh）「一切皆插件」** 架构实现的企业级 AI 资源纳管与治理平台。
+基于 **DeepSeek Harness（dsh）「一切皆插件」** 架构实现的企业级 AI 资源管理平台。
 对应设计方案：《企业服务资源统一管理方案 V1.0》与《技术实现规划》；生态平台演进设计见
 [docs/ecosystem-design-v1.2.md](docs/ecosystem-design-v1.2.md)，后续路线见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)。
 

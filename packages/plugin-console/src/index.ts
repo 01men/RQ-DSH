@@ -3261,7 +3261,7 @@ export function apply(ctx: Context) {
       'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'nas', 'skillhub', 'agent', 'app', 'connect', 'update', 'console',
     ]
     return {
-      name: '榕器|企业AI资源治理平台',
+      name: '榕器|企业AI资源管理平台',
       version: versionInfo.version,
       installMode: versionInfo.installMode,
       runtime: 'standalone-cordis（dsh 插件兼容）',
@@ -3399,8 +3399,8 @@ export function apply(ctx: Context) {
           {
             protocolVersion: '2025-03-26',
             capabilities: { tools: {} },
-            serverInfo: { name: 'dsh-ops-platform', title: '榕器|企业AI资源治理平台 · MCP 网关', version: platformVersionInfo().version },
-            instructions: '榕器|企业AI资源治理平台（IAM/MCP/Skill/Agent/应用/NAS/计量计费/审计）。工具权限与控制台账号一致：先用 nas_list / mcp_service_list / skill_search 等盘点资产，再按需调用写类工具。',
+            serverInfo: { name: 'dsh-ops-platform', title: '榕器|企业AI资源管理平台 · MCP 网关', version: platformVersionInfo().version },
+            instructions: '榕器|企业AI资源管理平台（IAM/MCP/Skill/Agent/应用/NAS/计量计费/审计）。工具权限与控制台账号一致：先用 nas_list / mcp_service_list / skill_search 等盘点资产，再按需调用写类工具。',
           },
           { 'mcp-session-id': `dshmcp-${Date.now().toString(36)}` },
         )
