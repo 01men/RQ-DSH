@@ -5,7 +5,7 @@
  * 矩阵正/负向、路径提取（folder_path/path[]/dest_path 三形态）、读缓存/写不缓存、
  * PDP 不可达三级降级（快照→readonly→deny）、熔断进入/恢复、enforce=false 直通、
  * on-behalf 传递正确性、非授信令牌伪造 on-behalf 被拒、工具面 ↔ 操作映射双向一致。
- * 用法：node integrations/synology-filestation-mcp/test/authz-smoke.mjs
+ * 用法：node docs/integrations/synology-filestation-mcp/test/authz-smoke.mjs
  */
 import { createServer } from 'node:http'
 import { rm, mkdir } from 'node:fs/promises'

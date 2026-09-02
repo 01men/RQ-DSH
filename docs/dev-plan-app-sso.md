@@ -63,7 +63,7 @@
 | app↔客户端生命周期联动走事件总线（authn 已监听 `AppOfflined`，同模式扩展） | `plugin-authn/src/index.ts:159-170` |
 | 上线门禁挂在 `requestOnline` 校验链（`validateAttrs(...,'online')` 之后） | `plugin-app/src/index.ts:100-112`、`resource-core/src/index.ts:321-324` |
 | 一次性 secret 展示、表单 modal、Drawer tab 均有现成 UI 惯例 | `connect.js:210-240`、`apps.js:68-197` |
-| 测试进 selftest（HTTP 级断言 302/JSON，不依赖真浏览器） | `scripts/selftest.mjs:512-556` OIDC 段 |
+| 测试进 selftest（HTTP 级断言 302/JSON，不依赖真浏览器） | `tests/selftest.mjs:512-556` OIDC 段 |
 
 ### 1.3 关键决策记录（ADR）
 

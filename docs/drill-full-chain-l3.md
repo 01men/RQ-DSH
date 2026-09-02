@@ -3,8 +3,8 @@
 > 版本：v1.0（2026-09-02）· 分支：`custom/dsh-rq` · 执行：WP-08 全链路演练
 > 依据：`docs/action-plan-dsh-frontend.md` §三 泳道 E · WP-08 DoD——四类资产各 ≥1 真实资产走完全链路；
 > 演练记录入 `docs/`，每步引用真实 API 调用与 usage 事件 ID；L3 登记→上架当日完成。
-> 脚本：`scripts/full-chain-drill.mjs`（可重复执行，任一步 FAIL 退出码 1）；
-> API 形状全部照 `scripts/selftest.mjs` 既有真实调用序列，未新增/修改任何平台代码。
+> 脚本：`tests/full-chain-drill.mjs`（可重复执行，任一步 FAIL 退出码 1）；
+> API 形状全部照 `tests/selftest.mjs` 既有真实调用序列，未新增/修改任何平台代码。
 > 本次归档对应真实运行：2026-09-02，27 步全 PASS（`steps=27 pass=27 fail=0`，总耗时 3.4s，退出码 0）。
 
 ---
@@ -29,7 +29,7 @@
 | 数据目录 | `data-drill`（演练结束 finally 自动删除，不触碰生产 `data/`） |
 | 演练账号 | admin / dev / ops / audit（口令统一 `Ybk@2026`，演示种子内置） |
 | 外部依赖 | 无。MCP real 后端与 NAS 文件网关均为脚本进程内 stub（动态端口，复刻真实契约，照 selftest 同款） |
-| 复现命令 | `node scripts/full-chain-drill.mjs`（或 `DRILL_BASE=http://127.0.0.1:<port>` 指向已运行实例） |
+| 复现命令 | `node tests/full-chain-drill.mjs`（或 `DRILL_BASE=http://127.0.0.1:<port>` 指向已运行实例） |
 
 夹具（真实 API 创建，随实例销毁）：演练租户 `t_mtkb7a7h2qgpppsm`、演练组织 `org_mtkb7a7i2qgr4ect`（usage principal 归属）；安装目标 Agent（演示种子）`agt_mtkb79sz2p9gh11y`（slug `dev-coder`）。
 
@@ -119,4 +119,4 @@ real 执行层 + 进程内真实 JSON-RPC stub 后端（`tools/call` 返回 usag
 
 ---
 
-*演练脚本与记录归档于 `custom/dsh-rq` 分支；重跑 `node scripts/full-chain-drill.mjs` 可复验（ID 随实例重建而不同，判定逻辑与链路不变）。*
+*演练脚本与记录归档于 `custom/dsh-rq` 分支；重跑 `node tests/full-chain-drill.mjs` 可复验（ID 随实例重建而不同，判定逻辑与链路不变）。*

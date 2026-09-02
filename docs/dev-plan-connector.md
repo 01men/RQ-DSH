@@ -230,7 +230,7 @@ interface ProviderPolicy {
 
 ### 2.10 CLI（dshctl）
 
-`cli/dshctl.mjs` 的 `COMMANDS` 加 `connector` 组（先例 nas 组：`run: async () => { const action = argv[0]; … }`，全局约定 `--output json|table`、`--yes`、`--url`，help.run() 用法文本加一段）：
+`examples/dshctl.mjs` 的 `COMMANDS` 加 `connector` 组（先例 nas 组：`run: async () => { const action = argv[0]; … }`，全局约定 `--output json|table`、`--yes`、`--url`，help.run() 用法文本加一段）：
 
 ```
 connector gateway get | gateway set --base-url= --admin-token-env=OOMOL_CONNECT_ADMIN_TOKEN | gateway health
@@ -282,7 +282,7 @@ connector gateway get | gateway set --base-url= --admin-token-env=OOMOL_CONNECT_
 | 6 | M1 | 接线：boot-all 挂载 + cordis.yml/patch + gen-manifests + PermissionCatalog/BuiltinRoles + 角色一次性迁移 + PlatformEvents 常量 + **api.yaml 摘要补登** | `src/boot-all.ts`（L28-53 挂载序列按依赖序 insert）；`cordis.yml`（`- insert: { id: ops-connector, name: '<PROJECT_ROOT>/packages/plugin-connector/src/index.ts' }`）；`cordis.patch.yml`（name 必须 `dsh-enterprise-ops/packages/plugin-connector/src/index.ts` 模块说明符）；`scripts/gen-manifests.mjs` PLUGINS 数组；plugin-iam/src/index.ts PermissionCatalog L147-204 + BuiltinRoles L206-213 + 幂等迁移（先例 v1.6 `agent-scopes-usage-write-v1`）；platform-core/src/bus.ts L27-69；plugin-mcp `manifest/api.yaml` 补登 `POST /api/mcp/import`、`POST .../sync-tools`、`DELETE .../:id`、`DELETE perm-groups/:id` | #2（插件骨架） | `npm run manifests` + `npm run lint:manifests` 通过；T-08（RBAC 面） | 轨道 0 后续 |
 | 8 | M1 | REST + 工具三端：connector 段 guarded 路由全量（gateway/catalog/connections/execute/perm-groups/runs）+ `connector_*` 工具（connector_catalog_search / connector_connection_list / connector_execute / connector_perm_group_list 等，defineTool 带 permission）经 ctx.tools 三端自动暴露 | `packages/plugin-console/src/index.ts`（guarded 路由区）；`packages/plugin-connector/src/tools.ts`（对齐 plugin-mcp tools.ts 128 行先例）；身份注入点 `injectToolIdentity`（console L2522-2545）如需加 connector_execute 身份注入 | #4、#5 | T-08~T-17 经 REST/工具桥/`POST /mcp` 三端各验一遍 | 轨道 2/3 汇合 |
 | 9 | M1 | 控制台 `#/connectors`（M1 分期：目录只读 + 连接卡片墙 + 连接向导 + 运行日志抽屉 + 网关设置；M0 桥接打标） | `packages/plugin-console/public/js/pages/connectors.js`（新建，仿 pages/nas.js 738 行先例）；`public/js/app.js`（import L11-12 区、NAV L32-33 区、builders 路由表 L82-83 区）；`manifest/ui.yaml`（gen-manifests） | #8 | 页面手测 + T-20（org 隔离 UI 过滤）；桥接徽章可见 | 轨道 4 |
-| 10 | M1 | CLI connector 命令组（§2.10 全树） | `cli/dshctl.mjs` COMMANDS 加 `connector` 项 + help.run() 用法段 | #8 | `dshctl connector catalog providers`、`connector execute --action=hackernews.get_top_stories --dry-run` 等冒烟 | 轨道 5（与 #9 并行） |
+| 10 | M1 | CLI connector 命令组（§2.10 全树） | `examples/dshctl.mjs` COMMANDS 加 `connector` 项 + help.run() 用法段 | #8 | `dshctl connector catalog providers`、`connector execute --action=hackernews.get_top_stories --dry-run` 等冒烟 | 轨道 5（与 #9 并行） |
 
 **M1 DoD**：三层（REST/工具桥/`POST /mcp`）调用同一 `connector_execute` 契约全通；T-01~T-10、T-14~T-20、T-22、T-25、T-28 全绿；凭证零进平台（T-24）；`lint:manifests` 通过；控制台 M1 分期可用。
 
@@ -307,7 +307,7 @@ connector gateway get | gateway set --base-url= --admin-token-env=OOMOL_CONNECT_
 
 | # | 里程碑 | 工作单 | 落点（具体文件） | 依赖 | 验收标准 | 并行轨道 |
 |---|---|---|---|---|---|---|
-| 13 | M2 后 | 演示种子 + selftest 新 section（§四 全量断言） | `packages/plugin-console/src/seed.ts`（连接/权限组演示种子，先例 L206-228）；`scripts/selftest.mjs`（新 section + 进程内 open-connector stub） | #1–#11（业务触发的 M3 #12 不阻塞收尾） | §四 T-01~T-25、T-28、T-29 全绿（T-26/27 由 #12 自身验收与 M3 DoD 兜住） | — |
+| 13 | M2 后 | 演示种子 + selftest 新 section（§四 全量断言） | `packages/plugin-console/src/seed.ts`（连接/权限组演示种子，先例 L206-228）；`tests/selftest.mjs`（新 section + 进程内 open-connector stub） | #1–#11（业务触发的 M3 #12 不阻塞收尾） | §四 T-01~T-25、T-28、T-29 全绿（T-26/27 由 #12 自身验收与 M3 DoD 兜住） | — |
 | 14 | 收尾 | 文档：README 连接器段、集成指南完稿、skills/dsh-ops-connector、本文档定稿 | `README.md`、`docs/connector-integration.md`、`skills/dsh-ops-connector/SKILL.md`（结构对齐现有 8 个：何时使用/工具映射/操作手册/护栏）、`docs/dev-plan-connector.md` | #13 | `npm run lint:manifests` + `npm run selftest` 全绿（总门禁） | — |
 
 **依赖无环自查**：#1∥#2 起步；#3/#4←#2；#5←#2,#3；#6←#2；#8←#4,#5；#9∥#10←#8；#7←#4,#5；#11←#5,#7；#12←#7,#11；#13←#1–#11；#14←#13。无回边，无环。
@@ -318,7 +318,7 @@ connector gateway get | gateway set --base-url= --admin-token-env=OOMOL_CONNECT_
 
 ## 四、测试计划
 
-### 4.1 selftest 新增分节（`scripts/selftest.mjs` 新 `section('连接器纳管（open-connector 融合）')`）
+### 4.1 selftest 新增分节（`tests/selftest.mjs` 新 `section('连接器纳管（open-connector 融合）')`）
 
 **stub 方法**（先例 NAS_GW stub，selftest.mjs L98-157：进程内真实 HTTP 服务 + 强制鉴权头校验 + 调用记录供断言；DEMO_SEED 隔离实例 L163-210）：进程内 HTTP stub 复刻 open-connector v1.4.0 契约——`/v1/health`、`/v1/providers`、`/v1/actions[?service=]`、`/v1/actions/:id`、`POST /v1/actions/:id`（校验 Bearer oct_ 的 `allowedActions`/`allowedConnections` 策略与平台权限组快照一致，不符 → `403 connection_not_allowed`；识别 `Idempotency-Key` 与 `x-oo-connector-alias`；回 `meta.executionId/auditPersisted`）、`/api/connections`（PUT/GET/DELETE）、`/api/oauth/authorizations`（回 `{authorizationUrl, state}`；缺 client 配置回 `400 oauth_client_config_required`）、`/api/runtime-tokens`（POST 值仅返回一次/GET 无值/PUT 校验四数组全发/DELETE）、`/api/runs`（cursor 分页 + runtimeTokenId 过滤）、`POST /mcp`（5 工具集）、`/api/actions/:actionId/agent.md`。
 

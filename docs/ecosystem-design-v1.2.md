@@ -272,4 +272,4 @@ third-party-plugin/
 | 9 | KBaaS / 连接器市场 / 合规门户 | 📐 设计完成 | docs/roadmap-9-10.md |
 | 10 | L1 有码 JS 沙箱（模块加载器） | 📐 设计完成 + 预研 PoC 说明 | docs/roadmap-9-10.md |
 
-> 验收原则：每步断言进入 `scripts/selftest.mjs`（E2E 黑盒，隔离实例 + 真实 HTTP），`npm run selftest` 全绿 = 交付门槛。
+> 验收原则：每步断言进入 `tests/selftest.mjs`（E2E 黑盒，隔离实例 + 真实 HTTP），`npm run selftest` 全绿 = 交付门槛。

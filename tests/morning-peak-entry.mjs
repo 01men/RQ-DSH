@@ -3,9 +3,9 @@
  * N 路并发「领票 → 票据兑换控制台会话 → 会话可用性验证」全链路，零失败为过。
  *
  * 用法（可重复执行）：
- *   node scripts/morning-peak-entry.mjs                       # 自起隔离实例（端口 7321，数据目录 data-morning-peak）
- *   MORNING_PEAK_BASE=http://127.0.0.1:7300 node scripts/morning-peak-entry.mjs   # 压测已运行实例
- *   MORNING_PEAK_CONCURRENCY=100 node scripts/morning-peak-entry.mjs              # 调大并发
+ *   node tests/morning-peak-entry.mjs                       # 自起隔离实例（端口 7321，数据目录 data-morning-peak）
+ *   MORNING_PEAK_BASE=http://127.0.0.1:7300 node tests/morning-peak-entry.mjs   # 压测已运行实例
+ *   MORNING_PEAK_CONCURRENCY=100 node tests/morning-peak-entry.mjs              # 调大并发
  */
 import { spawn } from 'node:child_process'
 import { rm, mkdir } from 'node:fs/promises'

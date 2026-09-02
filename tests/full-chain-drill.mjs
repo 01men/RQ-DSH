@@ -8,8 +8,8 @@
  *   4. NAS     注册草稿 → 数据权限规则基线确认(审批把关) → 上线 → nas-authz 授权作用域 → allow/deny 判定+文件网关调用 → 断言 nas:<id> 事件
  *
  * 用法：
- *   node scripts/full-chain-drill.mjs                 # 自起隔离实例（端口 7322，数据目录 data-drill，DEMO_SEED=1）
- *   DRILL_BASE=http://127.0.0.1:7300 node scripts/full-chain-drill.mjs   # 演练已运行实例
+ *   node tests/full-chain-drill.mjs                 # 自起隔离实例（端口 7322，数据目录 data-drill，DEMO_SEED=1）
+ *   DRILL_BASE=http://127.0.0.1:7300 node tests/full-chain-drill.mjs   # 演练已运行实例
  *
  * 输出统一前缀 `[drill]`，结尾打印六步×四资产矩阵，任一 FAIL 退出码 1。
  */

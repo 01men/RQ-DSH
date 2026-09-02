@@ -90,7 +90,7 @@ credential = this.ctx.authn.createMachineCredential({
 
 3. **文档同步**：`skills/dsh-ops-agent/SKILL.md` 若述及机器凭证权限范围，补 `usage.write` 说明（实施时 grep 确认，无则跳过）。
 
-### 1.4 自测用例（`scripts/selftest.mjs`「Agent 本体生命周期」节，约 :1249 追加）
+### 1.4 自测用例（`tests/selftest.mjs`「Agent 本体生命周期」节，约 :1249 追加）
 
 1. 注册新 Agent → 用响应中 credential 调 `POST /api/auth/client-credentials` 换牌 → `data.principal.scopes` 含 `usage.write`（换牌响应结构见 `plugin-console/src/index.ts:450`，已含 scopes）。
 2. 用该机器令牌 `POST /api/usage/record`（`resource: 'mcp:real-backend'`、`meters: [{key:'tokens', value:100, unit:'token'}]`，价格簿默认 `mcp:*` → tokens）→ 200（与 WS2 的拒绝用例形成正反对照）。
@@ -271,7 +271,7 @@ meters 中无价格簿 `meter_key` 时不报错，按 value=0 计价入库。真
    - principals 列表补 scopes 列（mono 小字，超长折叠 title 提示）。
    - 权限判断沿用页面现有 `authn.principal.write` 开关变量（自查页面头部 canWrite 逻辑）。
 
-4. **CLI `cli/dshctl.mjs`** `credential` 组扩展（:446-458）：
+4. **CLI `examples/dshctl.mjs`** `credential` 组扩展（:446-458）：
 
    ```
    credential list                                        列出机器凭证（principalId/clientId/名称/refType/scopes/状态/活跃令牌）

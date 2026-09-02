@@ -39,7 +39,7 @@
 ### WP-01 dsh.client 注入能力边界 spike 【阻塞 WP-06】
 
 - **目标**：定刻会话侧定制的实现档次。范本（`packages/client/ui-auth`、`packages/client/modules/src/index.ts`）位于 dsh harness checkout，本仓库不可核对，必须实测。
-- **步骤**：定位 harness checkout（部署文档/运维路径/`integrations/` 线索；两轮探索找不到则向运营者请求路径，此为唯一允许的外部求助点）→ 实测三类注入点 → 写判定报告。
+- **步骤**：定位 harness checkout（部署文档/运维路径/`docs/integrations/` 线索；两轮探索找不到则向运营者请求路径，此为唯一允许的外部求助点）→ 实测三类注入点 → 写判定报告。
 - **三档判据（可测）**：
   - **档次 A**：消息级挂载点存在——能在会话消息流注入 DOM 节点且在一轮流式更新后仍存活，且能订阅工具调用生命周期事件 → WP-06 实现会话内完整执行卡片+四态+反馈条；
   - **档次 B**：仅启动图/侧栏级挂载 → 会话内最小注入集（反馈条 + 结果卡片外链），四态完整版放工作台/资产页；
@@ -137,9 +137,9 @@
 
 | 门禁 | 结果 | 证据 |
 |---|---|---|
-| ① 全链路闭环演练 | ✅ 27/27 步 PASS（skill/app/mcp/nas 四资产 × 六步） | `node scripts/full-chain-drill.mjs`（可重复执行），真实 usage 事件 ID 归档于 `docs/drill-full-chain-l3.md`；L3 登记→上架秒级达成 |
-| ② 免登 ≤2 步、零二次登录 | ✅ 票据兑换直建控制台会话（1 步）；早高峰 50 并发零失败 | `scripts/morning-peak-entry.mjs`（领票 50/50 · 兑换 50/50 · 会话可用 50/50，165ms）；selftest「console ticket redeem」节 |
-| ③ 卡片包在用、核心路径 ≤3 步 | ✅ rd/quality 试点包过 lint 且存活过滤生效；走查 6/6 | `scripts/walkthrough.mjs`（认证 1 + 进工作台 1 + 进功能 1 = 3 步达标）；`npm run lint:manifests`（清单 75/75 + 卡片包 2/2） |
+| ① 全链路闭环演练 | ✅ 27/27 步 PASS（skill/app/mcp/nas 四资产 × 六步） | `node tests/full-chain-drill.mjs`（可重复执行），真实 usage 事件 ID 归档于 `docs/drill-full-chain-l3.md`；L3 登记→上架秒级达成 |
+| ② 免登 ≤2 步、零二次登录 | ✅ 票据兑换直建控制台会话（1 步）；早高峰 50 并发零失败 | `tests/morning-peak-entry.mjs`（领票 50/50 · 兑换 50/50 · 会话可用 50/50，165ms）；selftest「console ticket redeem」节 |
+| ③ 卡片包在用、核心路径 ≤3 步 | ✅ rd/quality 试点包过 lint 且存活过滤生效；走查 6/6 | `tests/walkthrough.mjs`（认证 1 + 进工作台 1 + 进功能 1 = 3 步达标）；`npm run lint:manifests`（清单 75/75 + 卡片包 2/2） |
 | ④ selftest + lint 全绿 | ✅ selftest 801/801（基线 737 → +64 项随包断言） | `npm run selftest`；新增节：console ticket redeem / usage 值域 / 零价快照 / behavior 管道 / 卡片包与主题 / rbac endpoint matrix（212 越权探针 100% 被拒）/ usage 最近调用 / feedback 回传 / 错误文案映射完整性 / 四态状态源映射 / dsh 宿主挂载（behavior+cardpacks 进程内直测） |
 
 ---

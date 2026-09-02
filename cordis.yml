@@ -8,7 +8,7 @@
 #
 # 说明：
 #   - <PROJECT_ROOT> 需替换为 file:// URL 形式的绝对路径（Windows 下裸盘符路径会被
-#     ESM 判为 ERR_UNSUPPORTED_ESM_URL_SCHEME），例如 file:///D:/mycode/ybkk-AIOS
+#     ESM 判为 ERR_UNSUPPORTED_ESM_URL_SCHEME），例如 file:///D:/mycode/RQ-DSH
 #     （路径含中文等非 ASCII 字符时用百分号编码）
 #   - provideToolRuntime=false：完整 dsh 自带 ToolRuntime（ctx.tools），
 #     平台插件注册的全部运维工具将直接对模型可见、可被调用

@@ -4,21 +4,39 @@
   "private": true,
   "type": "module",
   "description": "企业 AI 资源统一管理平台 —— 基于 DeepSeek Harness「一切皆插件」架构",
+  "license": "MIT",
   "workspaces": [
     "packages/*"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/01men/ybkk-AIOS.git"
+    "url": "https://github.com/01men/RQ-DSH.git"
   },
+  "files": [
+    "cordis.patch.yml",
+    "cordis.yml",
+    "packages",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "dsh": ">=0.1.0-rc.7 <0.2.0",
+      "dshReleases": {
+        "0.1.0-rc.7": "compatible"
+      },
+      "profiles": [
+        "web"
+      ]
     }
   },
   "scripts": {
     "start": "node src/main.ts",
-    "selftest": "node scripts/selftest.mjs",
+    "selftest": "node tests/selftest.mjs",
     "lint:manifests": "node scripts/lint-manifests.mjs",
     "manifests": "node scripts/gen-manifests.mjs"
   },

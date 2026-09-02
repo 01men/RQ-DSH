@@ -7,8 +7,8 @@
  *   ③ createEventStream 对 404 SSE 端点自动降级轮询（onMessage 收到 + onDowngrade 恰好一次）；
  *   ④ 对 /api/overview（管理账号）轮询 2 次收到数据，close() 后停轮。
  *
- * 用法（可重复执行）：node scripts/dingtalk-h5-smoke.mjs
- *   或指向已运行实例：DT_BASE=http://127.0.0.1:7323 node scripts/dingtalk-h5-smoke.mjs
+ * 用法（可重复执行）：node tests/dingtalk-h5-smoke.mjs
+ *   或指向已运行实例：DT_BASE=http://127.0.0.1:7323 node tests/dingtalk-h5-smoke.mjs
  */
 import { JSDOM } from 'jsdom'
 import { join } from 'node:path'

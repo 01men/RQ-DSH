@@ -2,8 +2,8 @@
  * 全员工作台核心路径走查（WP-04/A3 DoD）：jsdom + 真实前端模块 + 真实服务。
  * 断言「登录 → 工作台 → 进入任意核心功能」核心路径 ≤3 步，四区齐备，主题生效。
  *
- * 用法（可重复执行）：node scripts/walkthrough.mjs
- *   或指向已运行实例：WALK_BASE=http://127.0.0.1:7302 node scripts/walkthrough.mjs
+ * 用法（可重复执行）：node tests/walkthrough.mjs
+ *   或指向已运行实例：WALK_BASE=http://127.0.0.1:7302 node tests/walkthrough.mjs
  */
 import { JSDOM, VirtualConsole } from 'jsdom'
 import { join } from 'node:path'

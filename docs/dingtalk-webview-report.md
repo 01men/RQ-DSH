@@ -87,7 +87,7 @@ Set-Cookie: rq_sid=<token>; Path=/; HttpOnly; SameSite=Lax; Max-Age=<24h>
 钉钉 webview UA `…DingTalk/7.6.0 wb_dingtalk`。**全部通过，退出码 0**：
 
 ```bash
-node scripts/dingtalk-h5-smoke.mjs
+node tests/dingtalk-h5-smoke.mjs
 # ━━ 钉钉微应用 H5 + SSE 降级冒烟（WP-11） ━━
 #   ✔ ① UA 探测：钉钉 webview 且无记忆平台 → 写 heng_ops_dingtalk=1 + 入口态标记，不动 data-platform
 #   ✔ ① 探测边界：钉钉 UA 但有记忆平台 → 探测不生效，记忆平台优先
@@ -102,7 +102,7 @@ node scripts/dingtalk-h5-smoke.mjs
 
 ```bash
 npm run lint:manifests      # 清单校验 75/75 通过；卡片包 5/5 通过（WP-09 五平台全量）
-node scripts/walkthrough.mjs # 走查结果：6/6 通过；核心路径实测 3 步（达标线 ≤3）
+node tests/walkthrough.mjs # 走查结果：6/6 通过；核心路径实测 3 步（达标线 ≤3）
 ```
 
 ## 六、P3 路径：钉钉 → 工作台 ≤2 步入口链
@@ -115,5 +115,5 @@ node scripts/walkthrough.mjs # 走查结果：6/6 通过；核心路径实测 3 
           └→ 点「对话入口」直达 dsh 对话面（同源，无跳转无二次登录）
 ```
 
-判据与既有基线一致：`node scripts/walkthrough.mjs` 断言「认证 1 + 进工作台 1 + 进功能 1
+判据与既有基线一致：`node tests/walkthrough.mjs` 断言「认证 1 + 进工作台 1 + 进功能 1
 = 3 步」，钉钉侧入口链不增加步数（微应用主页即控制台）；真实客户端两点（C7）现场勾验。

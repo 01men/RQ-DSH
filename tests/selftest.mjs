@@ -1266,7 +1266,7 @@ try {
   // dshctl plugin init 脚手架（真实生成文件）
   const { execFile } = await import('node:child_process')
   const scaffoldDir = join(DATA_DIR, 'scaffold-plugin')
-  await new Promise((resolve) => execFile(process.execPath, ['cli/dshctl.mjs', 'plugin', 'init', '--id=com.selftest.scaffold', `--dir=${scaffoldDir}`], { cwd: process.cwd() }, (error) => { void error; resolve() }))
+  await new Promise((resolve) => execFile(process.execPath, ['examples/dshctl.mjs', 'plugin', 'init', '--id=com.selftest.scaffold', `--dir=${scaffoldDir}`], { cwd: process.cwd() }, (error) => { void error; resolve() }))
   // 注意：局部命名避免遮蔽模块级 readFileSync（const TDZ 会波及同块早前引用）
   const { existsSync: existsFile, readFileSync: scaffoldRead } = await import('node:fs')
   const SCAFFOLD_FILES = ['plugin.yaml', 'manifest/permissions.yaml', 'manifest/api.yaml', 'manifest/events.yaml', 'manifest/billing.yaml']

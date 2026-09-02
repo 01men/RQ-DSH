@@ -2,7 +2,7 @@
  * DOM 级前端集成冒烟测试：真实服务 + 真实前端模块 + jsdom 事件模拟。
  * 覆盖 2026-08-23 控制台弹窗系统性缺陷的全部回归场景（modal foot 按钮绑定 / TDZ / 双重导航）。
  * 用法：先启动隔离实例（DEMO_SEED=1 node src/main.ts --port 7301 --data data-guitest），
- *       再 SMOKE_BASE=http://127.0.0.1:7301 node scripts/dom-smoke.mjs
+ *       再 SMOKE_BASE=http://127.0.0.1:7301 node tests/dom-smoke.mjs
  */
 import { JSDOM, VirtualConsole } from 'jsdom'
 import { join } from 'node:path'

@@ -1,4 +1,4 @@
-# cordis.patch.yml —— dsh.bundle 安装补丁（dsh plugin add github:01men/ybkk-AIOS）。
+# cordis.patch.yml —— dsh.bundle 安装补丁（dsh plugin add github:01men/RQ-DSH）。
 #
 # 与 cordis.yml 的区别：
 #   - cordis.yml       面向本仓库源码检出，name 为替换 <PROJECT_ROOT> 后的 file:// 绝对路径（--patch overlay）

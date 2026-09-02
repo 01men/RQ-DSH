@@ -2,7 +2,7 @@
 
 > 版本：v0.2（2026-08-27）· 工作单：#1（M0 桥接验证 + 集成指南初稿）
 > 关联：`docs/dev-plan-connector.md` v1.0（设计全文）· 落点插件 `packages/plugin-connector`
-> 依据与代码基线：平台端点与参数已对照真实代码核验（console/src/index.ts、plugin-mcp/src/index.ts、plugin-connector/src/index.ts、cli/dshctl.mjs，行号见文内标注）。
+> 依据与代码基线：平台端点与参数已对照真实代码核验（console/src/index.ts、plugin-mcp/src/index.ts、plugin-connector/src/index.ts、examples/dshctl.mjs，行号见文内标注）。
 > 适用对象：平台运维 / 集成工程师。§二~§六为 M0 桥接（零代码）所需；§七为 M1+ 原生纳管速览。
 > **本环境无 docker/sidecar 运行时**：本指南交付部署拓扑、compose 内容与操作步骤；真实桥接联调留给生产环境执行（§八 验证清单）。
 
@@ -419,7 +419,7 @@ curl -s -X DELETE http://127.0.0.1:3000/api/runtime-tokens/<oct_token_id> \
 
 ## 七、M1+ 原生纳管操作速览（CLI）
 
-> 以下命令与路由均已对照代码核验存在（console `/api/connector/*` L1470-1704；cli/dshctl.mjs L743+）。
+> 以下命令与路由均已对照代码核验存在（console `/api/connector/*` L1470-1704；examples/dshctl.mjs L743+）。
 
 ```bash
 # 网关与目录

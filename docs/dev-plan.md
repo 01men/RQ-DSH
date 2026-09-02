@@ -68,7 +68,7 @@
 | 轻量代理 ctx（事件源鉴别 + 能力裁剪，非模块沙箱） | `packages/platform-core/src/plugin-ctx.ts`（createPluginContext） |
 | 第三方市场：契约五面解析/Ed25519 验签/内容扫描/L1-only 门禁/审批/安装（approved ⊆ requested、能力固化、价格簿登记）/L0 提示词运行时/计量 | `packages/plugin-market/`（新插件，provide `market`） |
 | 开发者独立身份域（注册/登录/公钥/收款登记，与 iam 员工域分离） | `plugin-market/src/index.ts`（DeveloperService 逻辑内嵌） |
-| dshctl plugin init/sign/submit/list/install | `cli/dshctl.mjs` |
+| dshctl plugin init/sign/submit/list/install | `examples/dshctl.mjs` |
 | 沙箱自检端点（真实跑代理 ctx 与总线校验代码路径） | console `/api/market/sandbox-check` |
 
 ### 第 5/6/7/8 步（代码完成，待回归）
@@ -109,7 +109,7 @@
 3. **新增 packages/\* 包后必须 `npm install`**（workspace 链接），否则 ERR_MODULE_NOT_FOUND。
 4. **selftest.mjs 是单文件顶层作用域**：新增段落先 grep 变量名（已踩 3 次重名）。
 5. 金额一律**整数分**；计量幂等键唯一索引在 SQLite；demo 数据不计费不计 SLO。
-6. 常用命令：`npm run selftest`（全量回归）/ `npm run lint:manifests` / `npm start`（默认 7300，admin/Ybk@2026）/ `node cli/dshctl.mjs help`。
+6. 常用命令：`npm run selftest`（全量回归）/ `npm run lint:manifests` / `npm start`（默认 7300，admin/Ybk@2026）/ `node examples/dshctl.mjs help`。
 7. 测试内 stub 均为进程内真实 HTTP 服务（MCP JSON-RPC、钉钉 OpenAPI 形状、OpenAI 兼容）——「真实验证」口径不要降级为 mock。
 
 ## 六、完成定义（本次交付收官清单）

@@ -10,7 +10,7 @@
 | 调用方式 | 现状 | 结论 |
 |---|---|---|
 | **dsh 插件调用** | 已实现：全部运维工具注册进 `ctx.tools`（独立宿主 ToolRuntime-lite / 完整 dsh 原生 ToolRuntime 双宿主） | ✅ 已有，保持 |
-| **CLI 调用** | 已有骨架 `cli/dshctl.mjs`（REST 工具桥 + 账号自动登录） | ✅ 可行，本次扩展 `nas` 命令组、`skill submit --package`、`skill storage` |
+| **CLI 调用** | 已有骨架 `examples/dshctl.mjs`（REST 工具桥 + 账号自动登录） | ✅ 可行，本次扩展 `nas` 命令组、`skill submit --package`、`skill storage` |
 | **API 调用** | 已有 REST 网关（console 插件统一 Bearer 鉴权 + RBAC 权限点） | ✅ 可行，本次新增 `/api/nas/*`、`/api/skill-storage` 端点 |
 | **MCP 调用** | 平台只做过 MCP **客户端**（plugin-mcp 真实 JSON-RPC 传输层）；作为 MCP **服务端**对外暴露尚不存在 | ✅ 可行，本次新增 `POST /mcp` Streamable HTTP 端点：`initialize` / `tools/list` / `tools/call`，把平台全部运维工具（40+）以标准 MCP 协议暴露给任意 MCP 客户端（ZCode / Claude / Cursor 等），复用同一套 Bearer 令牌与工具级权限点 |
 
@@ -112,7 +112,7 @@ skill   submit … [--package=<skill.zip>]             （随提交上传包内�
 | 5 | skillhub 包支持与上架上传 | plugin-skillhub |
 | 6 | REST 网关扩展 | plugin-console（/api/nas、/api/skill-storage、/mcp、台账/巡检） |
 | 7 | 控制台页面 | public/js（nas.js、app.js、assets.js、skills.js） |
-| 8 | CLI 扩展 | cli/dshctl.mjs |
+| 8 | CLI 扩展 | examples/dshctl.mjs |
 | 9 | 演示种子 + 自测 | seed.ts、selftest.mjs（进程内真实 MCP stub 复刻 synology-filestation 契约） |
 | 10 | 文档与验收 | README、本文档、lint:manifests、selftest 全绿 |
 

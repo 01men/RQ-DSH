@@ -1,7 +1,7 @@
 # NAS 数据权限（组织位置 + 角色层级 RBAC）实施说明
 
 > 落地版本：dev-plan-nas-authz v1.1（2026-08-29）· 判定引擎纯函数化 · 全链 fail-closed
-> 本文是平台侧（ybkk-AIOS 仓库）的实施说明；网关/hermes 改造件见 `integrations/`。
+> 本文是平台侧（ybkk-AIOS 仓库）的实施说明；网关/hermes 改造件见 `docs/integrations/`。
 
 ## 一、架构落点
 
@@ -9,8 +9,8 @@
 决策点 PDP：plugin-nas/src/authz.ts（NasAuthzService，服务键 nasAuthz）
 判定引擎  ：plugin-nas/src/authz/engine.ts（纯函数，无容器/无 IO，selftest 直接单测）
 数据源    ：IAM 组织树/负责人（leaderUserIds）/三方身份映射 identityLinks（单一事实源）
-强制点①  ：网关 synology-filestation-mcp（integrations/synology-filestation-mcp，仅代码）
-强制点②  ：hermes 本地直读 guard（integrations/hermes-patch，仅代码）
+强制点①  ：网关 synology-filestation-mcp（docs/integrations/synology-filestation-mcp，仅代码）
+强制点②  ：hermes 本地直读 guard（docs/integrations/hermes-patch，仅代码）
 兜底层    ：DSM 原生权限（令牌绑定 NAS 账户，零代码，运维配置）
 ```
 
@@ -59,8 +59,8 @@
 ## 四、强制点与身份约束
 
 - **身份一律走 `X-On-Behalf-User` 请求头，禁止进工具参数**（P0-2 教训）：平台 plugin-nas 调网关时经 `onBehalfHeaders` 注入（优先钉钉 userId）；nas_fs_* 工具身份改由 `exec.principal` 传递（schema 无身份参数，缺失 fail-closed）；网关/hermes 对非授信令牌携带该头直接拒绝（防伪造）。
-- 网关三级降级：scope 快照（仅快照内读）→ readonly（灰度可配）→ deny（默认 fail-closed）；check 超时 ≤2s、连续 5 次超时熔断、恢复自动退出（`integrations/synology-filestation-mcp/test/authz-smoke.mjs` 23/23）。异步任务工具映射：`fs_task_status=read`、`fs_task_clear=delete`（G0 实测映射面外工具在 observeOnly 下也被 `op.unsupported` 硬拒后补齐，工具面 ↔ 映射表双向一致性已入 smoke 断言）。
-- hermes guard hook 化 + hash 锚点校验（`integrations/hermes-patch`）。
+- 网关三级降级：scope 快照（仅快照内读）→ readonly（灰度可配）→ deny（默认 fail-closed）；check 超时 ≤2s、连续 5 次超时熔断、恢复自动退出（`docs/integrations/synology-filestation-mcp/test/authz-smoke.mjs` 23/23）。异步任务工具映射：`fs_task_status=read`、`fs_task_clear=delete`（G0 实测映射面外工具在 observeOnly 下也被 `op.unsupported` 硬拒后补齐，工具面 ↔ 映射表双向一致性已入 smoke 断言）。
+- hermes guard hook 化 + hash 锚点校验（`docs/integrations/hermes-patch`）。
 
 ## 五、事件与告警
 

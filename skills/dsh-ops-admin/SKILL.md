@@ -6,7 +6,7 @@
 ## 调用方式（工具优先）
 平台插件安装进 dsh 后，运维能力已注册为 dsh 工具（iam_* / authn_* / mcp_* / skill_* / agent_* / app_* / usage_* / audit_* / market_* / billing_* / connect_* / update_*）。
 **任何现状问题（查询/盘点/健康/成本）先直接调用对应工具获取真实数据，禁止凭记忆回答。**
-工具不可用（独立部署且插件未挂载）时才走 CLI 备选：`DSHCTL_TOKEN`（或 `DSHCTL_USER/DSHCTL_PASS`）+ `node cli/dshctl.mjs <resource> <action>`（输出可 `--output json`）。
+工具不可用（独立部署且插件未挂载）时才走 CLI 备选：`DSHCTL_TOKEN`（或 `DSHCTL_USER/DSHCTL_PASS`）+ `node examples/dshctl.mjs <resource> <action>`（输出可 `--output json`）。
 
 ## 领域 Skill 索引
 | 领域 Skill | 覆盖范围 | 关键命令前缀 |
@@ -26,7 +26,7 @@
 - 升级（仅 source 安装形态）：先 `update_apply { dryRun: true }` 预演，向使用者确认后
   `update_apply { reason: "<升级原因>" }`（git pull --ff-only + npm install），**完成后提醒使用者重启平台进程**；
   本地有未提交修改会安全失败，请使用者人工处理后再试。
-- bundle 安装形态：工具会返回宿主侧指引（`dsh plugin update github:01men/ybkk-AIOS`），按指引转述即可。
+- bundle 安装形态：工具会返回宿主侧指引（`dsh plugin update github:01men/RQ-DSH`），按指引转述即可。
 - 升级是管理员权限（platform.update.apply）；检查/查看为 platform.update.read。
 
 ## 远程 dsh 接入（本机未配置宿主时第一步）

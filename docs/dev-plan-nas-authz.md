@@ -202,12 +202,12 @@ hermes 容器（NAS 上）直接读本地文件的通道不经过网关，需单
 | 2 | 决策服务 NasAuthzService（推导/判定序/例外/事件/种子导入） | packages/plugin-nas/src/authz.ts + index.ts 导出 + inject 增 'iam' | ybkk-AIOS |
 | 3 | NAS 资产 orgRoot 接入组属性（schema access 组） | packages/plugin-nas/src/schema.ts | ybkk-AIOS |
 | 4 | REST：check/scope/rules/import/exceptions + 权限点/内置角色 | packages/plugin-console + plugin-iam | ybkk-AIOS |
-| 5 | selftest 引擎用例（见 §四）+ rules 种子文件入库 | scripts/selftest.mjs、seed | ybkk-AIOS |
+| 5 | selftest 引擎用例（见 §四）+ rules 种子文件入库 | tests/selftest.mjs、seed | ybkk-AIOS |
 | 6 | 网关 authz.js 钩子 + enforce 令牌字段 + authz-smoke 测试 | src/authz.js、src/http.js、src/tokens.js、test/ | synology-filestation-mcp |
 | 7 | 平台侧调用方接线：plugin-nas 客户端透传 X-On-Behalf-User；控制台 fs 端点带当前用户 | packages/plugin-nas/src/client.ts、plugin-console fs 路由 | ybkk-AIOS |
 | 8 | hermes apply_patch6 本地 guard | NAS 持久卷 /opt/data/hermes-dingtalk-patch/ | hermes 部署侧 |
 | 9 | share 审批闭环（exceptions + 审批单联动） | plugin-nas + plugin-audit | ybkk-AIOS |
-| 10 | 控制台「数据权限」页 + CLI 扩展 + 文档（README/本文档） | public/js、cli/dshctl.mjs | ybkk-AIOS |
+| 10 | 控制台「数据权限」页 + CLI 扩展 + 文档（README/本文档） | public/js、examples/dshctl.mjs | ybkk-AIOS |
 
 依赖关系：2 依赖 1；4 依赖 2/3；6 依赖 4（联调）；8 依赖 4；9 依赖 4。步骤 0 与 1 可并行先行。
 
