@@ -13,6 +13,8 @@ import {
   PlatformEvents, newId,
   type Collection, type RecordBase, type ResourceTypeSpec,
 } from '../../platform-core/src/index.ts'
+import { AppRegistryService } from '../../plugin-app/src/index.ts'
+import { OidcService } from '../../plugin-authn/src/oidc.ts'
 import * as agentTools from './tools.ts'
 import { AGENT_TYPE_SPEC } from './schema.ts'
 
@@ -202,17 +204,117 @@ export class AgentRegistryService extends Service {
     return { token, actChain: record.actChain }
   }
 
+  // -- SSO 客户端（Agent ↔ 平台身份源打通；owner 自助签发，dev-plan-agent-host-unification M2） --
+
+  /**
+   * 上线门禁模式（AGENT_SSO_ENFORCE）：
+   *   '1'（默认）= 未纳管拒审——须有关联 OIDC 客户端，或登记 entryUrl 免登通道；
+   *   'oidc'    = 必须签发关联 OIDC 客户端（最严）；
+   *   '0'       = 关闭门禁（仅建议开发环境）。
+   */
+  static ssoEnforceMode(): '1' | 'oidc' | '0' {
+    const raw = String(process.env.AGENT_SSO_ENFORCE ?? '1').trim().toLowerCase()
+    if (raw === 'oidc') return 'oidc'
+    if (raw === '0' || raw === '' || raw === 'false' || raw === 'off') return '0'
+    return '1'
+  }
+
+  /** owner-based 授权（对齐 app 侧）：human 且 agent.ownerId === userId，或持 authn.oidc.write；机器一律 403。 */
+  assertSsoManage(agent: { id: string; name: string; ownerId: string }, caller: { kind: string; userId?: string; permissions: string[] }): void {
+    if (caller.kind !== 'human' || !caller.userId) {
+      throw new Error('SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作')
+    }
+    const isOwner = agent.ownerId === caller.userId
+    const hasAdmin = caller.permissions.includes('*') || caller.permissions.includes('authn.oidc.write')
+    if (!isOwner && !hasAdmin) {
+      throw new Error(`仅 Agent owner 或持有 authn.oidc.write 的管理员可管理「${agent.name}」的 SSO 客户端`)
+    }
+  }
+
+  activeSsoClient(agentId: string) {
+    return this.ctx.oidc.clientsForAgent(agentId).find((client) => OidcService.isClientActive(client))
+  }
+
+  /** 签发 Agent 关联 OIDC 客户端（name=Agent 名，回填 refType='agent'/refId）；secret 仅本次返回。 */
+  createSsoClient(agentId: string, input: {
+    redirectUris: string[]
+    clientType?: 'confidential' | 'public'
+    consentRequired?: boolean
+    postLogoutUris?: string[]
+    description?: string
+  }): { client: ReturnType<OidcService['clientsForAgent']>[number]; clientSecret: string } {
+    const agent = this.ctx.resourceCore.get('agent', agentId)
+    if (!agent) throw new Error(`Agent 不存在：${agentId}`)
+    AppRegistryService.assertRedirectUris(input.redirectUris)
+    const existing = this.ctx.oidc.clientsForAgent(agentId)
+    if (existing.length > 0) throw new Error(`该 Agent 已签发 SSO 客户端（${existing[0]!.clientId}），请直接管理或先禁用后重新签发`)
+    const created = this.ctx.oidc.createClient({
+      name: agent.name,
+      redirectUris: input.redirectUris,
+      ...(input.clientType !== undefined ? { clientType: input.clientType } : {}),
+      ...(input.consentRequired !== undefined ? { consentRequired: input.consentRequired } : {}),
+      ...(input.postLogoutUris !== undefined ? { postLogoutUris: input.postLogoutUris } : {}),
+      ...(input.description !== undefined ? { description: input.description } : {}),
+      refType: 'agent',
+      refId: agentId,
+    })
+    return created
+  }
+
+  updateSsoClient(agentId: string, patch: { redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }) {
+    if (patch.redirectUris !== undefined) AppRegistryService.assertRedirectUris(patch.redirectUris)
+    return this.ctx.oidc.updateClient(this.requireSsoClient(agentId).id, patch)
+  }
+
+  rotateSsoSecret(agentId: string) {
+    return this.ctx.oidc.rotateSecret(this.requireSsoClient(agentId).id)
+  }
+
+  disableSsoClient(agentId: string, reason: string) {
+    return this.ctx.oidc.disableClient(this.requireSsoClient(agentId).id, reason)
+  }
+
+  enableSsoClient(agentId: string) {
+    return this.ctx.oidc.enableClient(this.requireSsoClient(agentId).id)
+  }
+
+  private requireSsoClient(agentId: string) {
+    const clients = this.ctx.oidc.clientsForAgent(agentId)
+    if (clients.length === 0) throw new Error('该 Agent 尚未签发 SSO 客户端')
+    return clients[0]!
+  }
+
   // -- 生命周期（L4 审批流）----------------------------------------------
+
+  /**
+   * SSO 门禁校验（上线前身份纳管）：返回 active 客户端 clientId（供审批单快照），违规抛错并指路。
+   * 入口点（requestOnline 挂单时）+ 执行点（审批执行器）双重复核，对齐 app 侧门禁语义。
+   */
+  assertOnlineGate(agent: { id: string; name: string; attrs: Record<string, unknown> }): string | undefined {
+    const mode = AgentRegistryService.ssoEnforceMode()
+    if (mode === '0') return this.activeSsoClient(agent.id)?.clientId
+    const active = this.activeSsoClient(agent.id)
+    if (active) return active.clientId
+    if (mode === 'oidc') {
+      throw new Error(`上线门禁：Agent 上线前必须完成身份纳管——请在「Agent 本体 → 详情 → SSO 配置」签发 OIDC 客户端（当前 AGENT_SSO_ENFORCE=oidc）`)
+    }
+    const entryUrl = String(agent.attrs['entryUrl'] ?? '').trim()
+    if (!entryUrl) {
+      throw new Error('上线门禁：Agent 上线前必须完成身份纳管——签发 OIDC 客户端，或登记交互界面地址 entryUrl（免登通道）后重试')
+    }
+    return undefined
+  }
 
   requestOnline(agentId: string, requester: { id: string; name: string }) {
     const agent = this.ctx.resourceCore.get('agent', agentId)
     if (!agent) throw new Error(`Agent 不存在：${agentId}`)
     const errors = this.ctx.resourceCore.validateAttrs('agent', agent.attrs, 'online')
     if (errors.length > 0) throw new Error(`上线条件不满足：${errors.join('；')}`)
+    const ssoClientId = this.assertOnlineGate(agent)
     return this.ctx.audit.createApproval({
       kind: 'agent.online',
       title: `Agent 上线：${agent.name}`,
-      payload: { agentId, requesterId: requester.id },
+      payload: { agentId, requesterId: requester.id, ...(ssoClientId ? { ssoClientId } : {}) },
       requesterId: requester.id,
       requesterName: requester.name,
     })
@@ -415,13 +517,17 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'agent'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'iam', 'audit', 'usage']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'oidc', 'iam', 'audit', 'usage']
 
 export function apply(ctx: Context) {
   const registry = new AgentRegistryService(ctx)
   ctx.plugin(agentTools)
   // L4 审批执行器（闭包直持实例，避免插件注入自身服务的循环等待）
   ctx.effect(() => ctx.audit.registerExecutor('agent.online', async (payload) => {
+    // 上线门禁执行期复核：审批挂单期间 SSO 客户端可能被禁用/entryUrl 可能被清——
+    // 重跑完整门禁，失效则执行失败留痕（对齐 app 侧点 2 兜底语义）
+    const agent = ctx.resourceCore.get('agent', String(payload.agentId))
+    if (agent) registry.assertOnlineGate(agent)
     return registry.online(String(payload.agentId), 'approval-center')
   }))
   ctx.effect(() => ctx.audit.registerExecutor('agent.offline', async (payload) => {

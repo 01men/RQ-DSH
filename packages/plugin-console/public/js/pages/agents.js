@@ -318,45 +318,7 @@ token:    ${esc(result.token)}</div>`,
         }
       }
     }
-    if (tab === 'sso') {
-      const entryUrl = agent.attrs['entryUrl']
-      if (!entryUrl) {
-        tabBody.innerHTML = `
-          <div class="card card-pad">
-            <div class="card-title mb-8">${icon('key', 14)} 平台授权直达（entry-ticket）</div>
-            <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>该 Agent 尚未提报交互界面地址——提报 <code class="mono">attrs.entryUrl</code> 后本页即可配置平台身份直达。</span></div>
-            <div class="form-hint">需要平台身份直达时由 Agent 凭自身凭证提报：PATCH /api/agents/:id {"attrs":{"entryUrl":"https://…"}}（首次接入指引不强制，接入后随时可补报）。</div>
-          </div>`
-        return
-      }
-      tabBody.innerHTML = `
-        <div class="card card-pad mb-14">
-          <div class="flex-between mb-8">
-            <div class="card-title">${icon('key', 14)} 平台授权直达（entry-ticket）</div>
-            <span class="badge badge-ok no-dot">已启用</span>
-          </div>
-          <div class="desc-grid mb-14">
-            <div class="desc-item"><span class="k">交互界面</span><span class="v mono">${esc(entryUrl)}</span></div>
-            <div class="desc-item"><span class="k">兑换端点</span><span class="v mono">POST /api/authn/entry-tickets/redeem</span></div>
-            <div class="desc-item"><span class="k">票据时效</span><span class="v">一次性 · 短时（默认 120s，ENTRY_TICKET_TTL_SECONDS 可调）</span></div>
-            <div class="desc-item"><span class="k">使用授权</span><span class="v">负责人 / 绑定用户 / 管理员（使用即授权留痕）</span></div>
-          </div>
-          <div class="flex" style="gap:8px">
-            <button class="btn btn-primary" id="ag-sso-open">${icon('external', 14)}带平台身份打开交互界面</button>
-          </div>
-          <div class="form-hint mt-8">与 AI 应用「SSO 配置」同一管理模式：标准 OIDC 接入走 /oauth/authorize（授权码 + PKCE S256）；任意 entryUrl 零改造直达走 entry-ticket。</div>
-        </div>
-        <div class="card card-pad">
-          <div class="card-title mb-8">${icon('plug', 14)} 交互界面接入（前端三步）</div>
-          <div class="muted-box mb-8" style="font-size:12.5px;line-height:2">
-            ① 控制台「带平台身份打开」→ 签发一次性票据并以 <code class="mono">#entry_ticket=&lt;ticket&gt;</code> 片段跳转交互界面<br>
-            ② 交互界面读取 URL fragment，调 <code class="mono">POST /api/authn/entry-tickets/redeem</code> body {"ticket":"…"}<br>
-            ③ 兑换响应返回平台身份 <code class="mono">identity</code>（sub / username / name / org / roles / tenant），业务权限界面内自理
-          </div>
-          <div class="form-hint">票据重放被拒、过期即焚、兑换时实时校验账号状态；签发与兑换均入审计（agent.entry.ticket.*）。</div>
-        </div>`
-      tabBody.querySelector('#ag-sso-open').onclick = () => void openAgentEntry(agent)
-    }
+    if (tab === 'sso') renderAgentSsoTab(tabBody, agent, ctx, () => openAgentDetail(id, ctx))
     if (tab === 'deps') {
       const topo = agent.topology
       tabBody.innerHTML = `
@@ -636,4 +598,198 @@ export function barChartSafe(items, width, height) {
 function debounce(fn, ms) {
   let timer
   return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms) }
+}
+
+/** Agent「SSO 配置」tab：OIDC 客户端管理（owner 自助）+ entry-ticket 平台直达互补。
+ *  门禁语义（AGENT_SSO_ENFORCE）：'1'=未纳管拒审（OIDC 客户端或 entryUrl 二选一）；'oidc'=必须签发；'0'=关闭。 */
+function renderAgentSsoTab(holder, agent, ctx, refresh) {
+  const sso = agent.sso
+  const mode = agent.ssoEnforceMode ?? '1'
+  const modeBadge = mode === 'oidc'
+    ? '<span class="badge badge-warn no-dot">门禁：必须签发 OIDC 客户端</span>'
+    : mode === '1'
+      ? '<span class="badge badge-muted no-dot">门禁：OIDC 客户端或 entryUrl 免登二选一</span>'
+      : ''
+  const enforced = mode !== '0'
+  const entryUrl = agent.attrs['entryUrl']
+  const entryCard = `
+    <div class="card card-pad mt-14">
+      <div class="flex-between mb-8">
+        <div class="card-title">${icon('external', 14)} 平台授权直达（entry-ticket，零改造）</div>
+        ${entryUrl ? '<span class="badge badge-ok no-dot">已启用</span>' : '<span class="badge badge-muted no-dot">未提报交互界面</span>'}
+      </div>
+      ${entryUrl ? `
+        <div class="desc-grid mb-14">
+          <div class="desc-item"><span class="k">交互界面</span><span class="v mono">${esc(entryUrl)}</span></div>
+          <div class="desc-item"><span class="k">兑换端点</span><span class="v mono">POST /api/authn/entry-tickets/redeem</span></div>
+          <div class="desc-item"><span class="k">票据时效</span><span class="v">一次性 · 短时（默认 120s，ENTRY_TICKET_TTL_SECONDS 可调）</span></div>
+          <div class="desc-item"><span class="k">使用授权</span><span class="v">负责人 / 绑定用户 / 管理员（使用即授权留痕）</span></div>
+        </div>
+        <div class="flex" style="gap:8px">
+          <button class="btn btn-primary" id="ag-sso-open">${icon('external', 14)}带平台身份打开交互界面</button>
+        </div>
+        <div class="form-hint mt-8">交互界面接入（前端三步）：① 控制台「带平台身份打开」→ 一次性票据以 <code class="mono">#entry_ticket=&lt;ticket&gt;</code> 片段跳转；② 界面读 URL fragment 调兑换端点；③ 响应返回平台身份 identity（sub / org / roles / tenant）。票据重放被拒、过期即焚、兑换实时校验账号状态（agent.entry.ticket.* 全程审计）。</div>`
+        : `<div class="form-hint">由 Agent 凭自身凭证提报：PATCH /api/agents/:id {"attrs":{"entryUrl":"https://…"}}。登记后控制台即可带平台身份直达。</div>`}
+    </div>`
+  if (!sso) {
+    holder.innerHTML = `
+      <div class="card card-pad">
+        <div class="flex-between mb-8">
+          <div class="card-title">${icon('key', 14)} Agent 身份纳管（SSO）</div>
+          ${modeBadge}
+        </div>
+        <div class="fs-13 text-2 mb-8" style="line-height:1.9">
+          签发 OIDC 客户端后，Agent 交互界面即可按标准协议接入平台统一账号与权限：
+          <div class="muted-box mt-8" style="font-size:12.5px">
+            ① 授权码模式跳转 <code class="mono">/oauth/authorize</code>（强制 PKCE S256）<br>
+            ② <code class="mono">code</code> 换 <code class="mono">id_token / access_token</code>（Basic 或 Post 认证）<br>
+            ③ <code class="mono">access_token</code> 调 <code class="mono">/oauth/userinfo</code> 取用户身份（sub / org / roles / tenant）
+          </div>
+        </div>
+        ${enforced ? `<div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--warn-border);background:var(--warn-bg)">${icon('alert', 15)}<span><b>Agent 上线门禁</b>：${mode === 'oidc' ? '未完成 SSO 签发前，上线审批将被拒绝。' : '既无 SSO 客户端也未登记 entryUrl 时，上线审批将被拒绝。'}</span></div>` : ''}
+        <button class="btn btn-primary" id="ag-sso-issue">${icon('key', 14)}签发 SSO 客户端</button>
+      </div>
+      ${entryCard}`
+    holder.querySelector('#ag-sso-issue').onclick = () => openAgentIssueSsoModal(agent, refresh)
+    const openBtn = holder.querySelector('#ag-sso-open')
+    if (openBtn) openBtn.onclick = () => void openAgentEntry(agent)
+    return
+  }
+  const active = sso.status === 'active'
+  holder.innerHTML = `
+    <div class="card card-pad mb-14">
+      <div class="flex-between mb-8">
+        <div class="card-title">${icon('key', 14)} 已签发客户端 ${statusBadge(active ? 'active' : 'frozen', active ? '使用中' : '已禁用')}</div>
+        <div class="flex" style="gap:8px;align-items:center">
+          ${modeBadge}
+          <span class="badge ${sso.clientType === 'public' ? 'badge-purple' : 'badge-info'} no-dot">${sso.clientType === 'public' ? 'public（免 secret · 强制 PKCE）' : 'confidential'}</span>
+        </div>
+      </div>
+      <div class="desc-grid mb-14">
+        <div class="desc-item"><span class="k">client_id</span><span class="v mono">${esc(sso.clientId)} <button class="btn btn-ghost btn-sm" id="ag-sso-copy-id">复制</button></span></div>
+        <div class="desc-item"><span class="k">关联 Agent</span><span class="v">${esc(sso.refAgentName ?? agent.name)}</span></div>
+        <div class="desc-item"><span class="k">签发时间</span><span class="v">${fmtTime(sso.createdAt)}</span></div>
+      </div>
+      <div class="form-item">
+        <label class="form-label">回调地址（redirect_uris，每行一个；https://，或 http:// 内网/本机地址）</label>
+        <textarea class="form-control mono" id="ag-sso-redirects" rows="2">${esc(sso.redirectUris.join('\n'))}</textarea>
+      </div>
+      <div class="form-item">
+        <label class="form-label">登出回跳白名单（post_logout_redirect_uris，每行一个，可空）</label>
+        <textarea class="form-control mono" id="ag-sso-postlogouts" rows="2">${esc((sso.postLogoutUris ?? []).join('\n'))}</textarea>
+      </div>
+      <label class="flex" style="gap:8px;font-size:13px;margin:6px 0 12px;cursor:pointer">
+        <input type="checkbox" id="ag-sso-consent" ${sso.consentRequired ? 'checked' : ''} style="accent-color:var(--brand-500)">
+        <span>授权页要求用户显式勾选同意（对外部界面建议开启）</span>
+      </label>
+      <div class="flex" style="gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" id="ag-sso-save">${icon('check', 14)}保存配置</button>
+        ${sso.clientType !== 'public' ? '<button class="btn btn-default" id="ag-sso-rotate">轮换 secret</button>' : ''}
+        ${active
+          ? '<button class="btn btn-danger-ghost" id="ag-sso-disable">禁用客户端</button>'
+          : '<button class="btn btn-primary" id="ag-sso-enable">启用客户端</button>'}
+      </div>
+      ${!active && mode === 'oidc' ? `<div class="muted-box mt-8" style="display:flex;gap:8px;border-color:var(--warn-border);background:var(--warn-bg)">${icon('alert', 15)}<span>客户端处于禁用状态：AGENT_SSO_ENFORCE=oidc 门禁将阻断上线审批。</span></div>` : ''}
+    </div>
+    <div class="card card-pad mb-14">
+      <div class="card-title mb-8">${icon('plug', 14)} 接入端点（discovery）</div>
+      <div class="desc-grid">
+        <div class="desc-item"><span class="k">issuer</span><span class="v mono">${esc(sso.discovery.issuer)}</span></div>
+        <div class="desc-item"><span class="k">authorize</span><span class="v mono">${esc(sso.discovery.authorization_endpoint)}</span></div>
+        <div class="desc-item"><span class="k">token</span><span class="v mono">${esc(sso.discovery.token_endpoint)}</span></div>
+        <div class="desc-item"><span class="k">userinfo</span><span class="v mono">${esc(sso.discovery.userinfo_endpoint)}</span></div>
+      </div>
+      <div class="flex mt-8" style="gap:8px">
+        <button class="btn btn-default btn-sm" id="ag-sso-copy-discovery">复制 discovery 地址</button>
+      </div>
+      <div class="form-hint mt-8">id_token 验签公钥见 JWKS：<code class="mono">${esc(sso.discovery.issuer)}/.well-known/jwks.json</code></div>
+    </div>
+    ${entryCard}`
+  holder.querySelector('#ag-sso-copy-id').onclick = () => void copyText(sso.clientId)
+  holder.querySelector('#ag-sso-copy-discovery').onclick = () => void copyText(`${sso.discovery.issuer}/.well-known/openid-configuration`)
+  const openBtn = holder.querySelector('#ag-sso-open')
+  if (openBtn) openBtn.onclick = () => void openAgentEntry(agent)
+  holder.querySelector('#ag-sso-save').onclick = async () => {
+    const redirectUris = holder.querySelector('#ag-sso-redirects').value.split('\n').map((x) => x.trim()).filter(Boolean)
+    const postLogoutUris = holder.querySelector('#ag-sso-postlogouts').value.split('\n').map((x) => x.trim()).filter(Boolean)
+    try {
+      await api.patch(`/api/agents/${agent.id}/sso-client`, { redirectUris, postLogoutUris, consentRequired: holder.querySelector('#ag-sso-consent').checked })
+      toast('SSO 配置已保存'); refresh()
+    } catch (error) { toast(error.message, 'error') }
+  }
+  const rotateBtn = holder.querySelector('#ag-sso-rotate')
+  if (rotateBtn) rotateBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: '轮换 client_secret', danger: true, confirmText: '确认轮换',
+      message: '旧 secret <b>立即失效</b>，界面侧需同步更新。新 secret 仅展示一次。',
+    })
+    if (!result) return
+    try {
+      const rotated = await api.post(`/api/agents/${agent.id}/sso-client/rotate`)
+      showAgentSsoSecret(rotated)
+    } catch (error) { toast(error.message, 'error') }
+  }
+  const disableBtn = holder.querySelector('#ag-sso-disable')
+  if (disableBtn) disableBtn.onclick = async () => {
+    const result = await confirmDialog({
+      title: '禁用 SSO 客户端', requireReason: true, danger: true, confirmText: '立即禁用',
+      message: '禁用后该 Agent 的登录跳转与令牌刷新立即失败（refresh 链一并吊销）。',
+    })
+    if (!result) return
+    try {
+      await api.post(`/api/agents/${agent.id}/sso-client/disable`, { reason: result.reason })
+      toast('客户端已禁用'); refresh()
+    } catch (error) { toast(error.message, 'error') }
+  }
+  const enableBtn = holder.querySelector('#ag-sso-enable')
+  if (enableBtn) enableBtn.onclick = async () => {
+    try {
+      await api.post(`/api/agents/${agent.id}/sso-client/enable`)
+      toast('客户端已启用'); refresh()
+    } catch (error) { toast(error.message, 'error') }
+  }
+}
+
+/** 签发弹窗（redirect_uris 必填；dsh 单入口形态建议填 <dsh地址>/auth/oidc/callback）。 */
+function openAgentIssueSsoModal(agent, refresh) {
+  const modal = openModal({
+    title: `签发 SSO 客户端：${agent.name}`,
+    body: `
+      <div class="form-item">
+        <label class="form-label">回调地址（redirect_uris，每行一个；https://，或 http:// 内网/本机地址）</label>
+        <textarea class="form-control mono" id="ag-sso-new-redirects" rows="3" placeholder="http://192.168.0.7:3080/auth/oidc/callback"></textarea>
+      </div>
+      <label class="flex" style="gap:8px;font-size:13px;margin:8px 0;cursor:pointer">
+        <input type="checkbox" id="ag-sso-new-public" style="accent-color:var(--brand-500)">
+        <span>public 客户端（纯前端界面：免 secret、强制 PKCE、不发 refresh token）</span>
+      </label>
+      <div class="form-hint">clientSecret 仅签发时展示一次；丢失走「轮换 secret」，不要重复签发。</div>`,
+    foot: `<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" id="ag-sso-new-ok">${icon('key', 13)}签发</button>`,
+  })
+  modal.el.querySelector('#ag-sso-new-ok').onclick = async () => {
+    const redirectUris = modal.el.querySelector('#ag-sso-new-redirects').value.split('\n').map((x) => x.trim()).filter(Boolean)
+    if (redirectUris.length === 0) { toast('至少填写一个回调地址', 'error'); return }
+    try {
+      const created = await api.post(`/api/agents/${agent.id}/sso-client`, {
+        redirectUris,
+        clientType: modal.el.querySelector('#ag-sso-new-public').checked ? 'public' : 'confidential',
+      })
+      modal.close()
+      showAgentSsoSecret(created)
+      refresh()
+    } catch (error) { toast(error.message, 'error') }
+  }
+}
+
+/** secret 一次性展示弹窗。 */
+function showAgentSsoSecret(created) {
+  const modal = openModal({
+    title: '客户端凭证（仅本次展示）',
+    body: `
+      <div class="form-hint" style="margin-bottom:10px">请立即复制保存；关闭后不再展示，丢失请走「轮换 secret」。</div>
+      <div class="code-block" style="white-space:pre-wrap;word-break:break-all">client_id:     ${esc(created.clientId)}
+client_secret: ${esc(created.clientSecret ?? '（public 客户端无 secret）')}</div>`,
+    foot: `<button class="btn btn-default" id="ag-sso-secret-copy">${icon('copy', 13)}复制</button><button class="btn btn-primary" data-ok>我已保存</button>`,
+  })
+  modal.el.querySelector('#ag-sso-secret-copy').onclick = () => void copyText(`client_id: ${created.clientId}\nclient_secret: ${created.clientSecret ?? ''}`)
 }

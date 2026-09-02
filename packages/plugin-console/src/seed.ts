@@ -363,6 +363,8 @@ async function seedDemo(ctx: Context): Promise<void> {
       description: '跨境结算打款指令试点（灰度验证）。',
       avatar: '💱', tags: ['财务', '灰度'],
       model: 'deepseek-chat', systemPromptVersion: 'prompt-fx-v0.3',
+      // 身份纳管（AGENT_SSO_ENFORCE=1）：entryUrl 免登通道即满足上线门禁
+      entryUrl: 'https://fx-pilot.example.com/chat',
       skills: [], mcpPermGroupIds: [], env: 'sandbox',
       riskLevel: 'high', dataClass: 'confidential', trialGroups: ['灰度试点组'],
     },

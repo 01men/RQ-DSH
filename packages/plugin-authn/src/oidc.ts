@@ -45,8 +45,8 @@ export interface OidcClientRecord extends RecordBase {
   clientId: string
   clientSecretHash: string
   redirectUris: string[]
-  /** 关联 AI 应用（应用详情页 owner 自助签发时回填）。 */
-  refType?: 'app'
+  /** 关联资源（'app'=AI 应用 / 'agent'=Agent 本体；详情页 owner 自助签发时回填）。 */
+  refType?: 'app' | 'agent'
   refId?: string
   /** 缺省 active（旧数据零迁移）。 */
   status?: 'active' | 'disabled'
@@ -167,6 +167,15 @@ export class OidcService extends Service {
       const { id, name } = payload as { id: string; name: string }
       for (const client of this.clientsForApp(id)) this.updateClient(client.id, { name })
     })
+    // Agent 下线 → 关联客户端禁用（refresh 链一并吊销）；上线/恢复 → 重新启用（OIDC-agent 关联）
+    ctx.platformBus.on(PlatformEvents.AgentOfflined, (payload) => {
+      const { id } = payload as { id: string }
+      for (const client of this.clientsForAgent(id)) this.disableClient(client.id, 'Agent 下线联动')
+    })
+    ctx.platformBus.on(PlatformEvents.AgentOnlined, (payload) => {
+      const { id } = payload as { id: string }
+      for (const client of this.clientsForAgent(id)) this.enableClient(client.id)
+    })
     // 账号冻结/注销 → 该用户全部 OIDC refresh 链即时失效（无需等过期）
     ctx.platformBus.on(PlatformEvents.UserFrozen, (payload) => {
       const { userId, reason } = payload as { userId: string; reason: string }
@@ -211,6 +220,10 @@ export class OidcService extends Service {
     return this.clients().findOne((item) => item.clientId === clientId)
   }
 
+  clientsForAgent(agentId: string): OidcClientRecord[] {
+    return this.clients().find((item) => item.refType === 'agent' && item.refId === agentId)
+  }
+
   clientsForApp(appId: string): OidcClientRecord[] {
     return this.clients().find((item) => item.refType === 'app' && item.refId === appId)
   }
@@ -228,7 +241,7 @@ export class OidcService extends Service {
     consentRequired?: boolean
     postLogoutUris?: string[]
     clientType?: 'confidential' | 'public'
-    refType?: 'app'
+    refType?: 'app' | 'agent'
     refId?: string
   }): { client: OidcClientRecord; clientSecret: string } {
     const clientType = input.clientType ?? 'confidential'
@@ -256,6 +269,9 @@ export class OidcService extends Service {
       ...client,
       ...(client.refType === 'app' && client.refId
         ? { refAppName: this.ctx.resourceCore?.get('app', client.refId)?.name ?? client.refId }
+        : {}),
+      ...(client.refType === 'agent' && client.refId
+        ? { refAgentName: this.ctx.resourceCore?.get('agent', client.refId)?.name ?? client.refId }
         : {}),
     }))
   }

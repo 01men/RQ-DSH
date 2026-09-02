@@ -15,6 +15,7 @@ import type { HttpExchange } from '../../platform-core/src/index.ts'
 import { createPluginContext, newId, platformVersionInfo } from '../../platform-core/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import { AppRegistryService } from '../../plugin-app/src/index.ts'
+import { AgentRegistryService } from '../../plugin-agent/src/index.ts'
 import { RulesVersionConflictError } from '../../plugin-nas/src/authz.ts'
 import { seedAll } from './seed.ts'
 
@@ -2467,6 +2468,26 @@ export function apply(ctx: Context) {
     }
   })
 
+  /** Agent 详情页 SSO 配置块（不含 secret；含 discovery，供前端与 dsh 免登接入使用）。 */
+  const agentSsoView = (agentId: string) => {
+    const ssoClient = ctx.oidc.clientsForAgent(agentId)[0]
+    if (!ssoClient) return null
+    const { clientSecretHash: _hash, ...ssoSafe } = ssoClient
+    void _hash
+    return {
+      ...ssoSafe,
+      status: ssoSafe.status ?? 'active',
+      clientType: ssoSafe.clientType ?? 'confidential',
+      refAgentName: ctx.resourceCore.get('agent', ssoSafe.refId ?? '')?.name ?? undefined,
+      discovery: {
+        issuer: ctx.oidc.issuer(),
+        authorization_endpoint: `${ctx.oidc.issuer()}/oauth/authorize`,
+        token_endpoint: `${ctx.oidc.issuer()}/oauth/token`,
+        userinfo_endpoint: `${ctx.oidc.issuer()}/oauth/userinfo`,
+      },
+    }
+  }
+
   guarded('GET', '/api/agents/:id', 'agent.read', (exchange) => {
     const id = exchange.params['id']!
     const agent = ctx.resourceCore.get('agent', id)
@@ -2482,6 +2503,8 @@ export function apply(ctx: Context) {
       topology: enrichTopology(ctx.resourceCore.topology('agent', id, 2)),
       impact: ctx.resourceCore.impact('agent', id),
       audit: ctx.audit.query({ resourceType: 'agent', resourceId: id, limit: 30 }).items,
+      sso: agentSsoView(id),
+      ssoEnforceMode: AgentRegistryService.ssoEnforceMode(),
     }
   })
 
@@ -2826,6 +2849,78 @@ export function apply(ctx: Context) {
         ? ctx.appRegistry.disableSsoClient(app.id, reason ?? `owner 手动禁用`)
         : ctx.appRegistry.enableSsoClient(app.id)
       changeLog(exchange, `app.sso.${action}`, 'oidc_client', client.id, client.name, reason ?? '')
+      return client
+    })
+  }
+
+  // -- Agent SSO 客户端（OIDC-agent 关联；owner 自助，对齐 app 侧） ----------------
+  const ssoAgent = (exchange: HttpExchange): { id: string; name: string; ownerId: string } => {
+    const agent = ctx.resourceCore.get('agent', exchange.params['id']!)
+    if (!agent) throw new Error(`Agent 不存在：${exchange.params['id']}`)
+    return { id: agent.id, name: agent.name, ownerId: agent.ownerId }
+  }
+
+  /** owner 校验（human 且 agent.ownerId === userId，或持 authn.oidc.write）；机器一律 403。 */
+  const requireAgentSsoOwner = (exchange: HttpExchange): boolean => {
+    const agent = ssoAgent(exchange)
+    const info = caller(exchange)
+    const isOwner = info.kind === 'human' && Boolean(info.userId) && agent.ownerId === info.userId
+    const isAdmin = info.permissions.includes('*') || info.permissions.includes('authn.oidc.write')
+    if (info.kind !== 'human' || (!isOwner && !isAdmin)) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId ?? info.principalId,
+        actorName: info.name,
+        point: `agent.sso(owner:${agent.id})`,
+        path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', info.kind !== 'human'
+        ? 'SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作'
+        : `仅 Agent owner 或持有 authn.oidc.write 的管理员可管理「${agent.name}」的 SSO 客户端`)
+      return false
+    }
+    return true
+  }
+
+  guarded('POST', '/api/agents/:id/sso-client', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const input = body<{ redirectUris: string[]; clientType?: 'confidential' | 'public'; consentRequired?: boolean; postLogoutUris?: string[]; description?: string }>(exchange)
+    const created = ctx.agentRegistry.createSsoClient(agent.id, input)
+    changeLog(exchange, 'agent.sso.create', 'oidc_client', created.client.id, created.client.name, `Agent ${agent.name} 签发（${input.clientType ?? 'confidential'}）`)
+    return {
+      clientId: created.client.clientId,
+      clientSecret: created.clientSecret,
+      redirectUris: created.client.redirectUris,
+      note: created.client.clientType === 'public' ? 'public 客户端无 secret（强制 PKCE、不发 refresh）' : 'clientSecret 仅此一次返回',
+    }
+  })
+
+  guarded('PATCH', '/api/agents/:id/sso-client', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const input = body<{ redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    const updated = ctx.agentRegistry.updateSsoClient(agent.id, input)
+    changeLog(exchange, 'agent.sso.update', 'oidc_client', updated.id, updated.name)
+    return updated
+  })
+
+  guarded('POST', '/api/agents/:id/sso-client/rotate', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const rotated = ctx.agentRegistry.rotateSsoSecret(agent.id)
+    changeLog(exchange, 'agent.sso.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
+    return { clientId: rotated.client.clientId, clientSecret: rotated.clientSecret, note: '新 clientSecret 仅此一次返回，旧值立即失效' }
+  })
+
+  for (const action of ['disable', 'enable'] as const) {
+    guarded('POST', `/api/agents/:id/sso-client/${action}`, 'agent.write', (exchange) => {
+      if (!requireAgentSsoOwner(exchange)) return
+      const agent = ssoAgent(exchange)
+      const { reason } = body<{ reason?: string }>(exchange)
+      const client = action === 'disable'
+        ? ctx.agentRegistry.disableSsoClient(agent.id, reason ?? 'owner 手动禁用')
+        : ctx.agentRegistry.enableSsoClient(agent.id)
+      changeLog(exchange, `agent.sso.${action}`, 'oidc_client', client.id, client.name, reason ?? '')
       return client
     })
   }

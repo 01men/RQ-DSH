@@ -1915,6 +1915,52 @@ try {
   check('下线后状态与凭证联动禁用', agentOffline.data.status === 'offline' && agentOffline.data.credential.status === 'disabled')
   void credBefore
 
+  // ================================================================ Agent ↔ SSO 打通（OIDC-agent 关联 / 门禁 / 生命周期联动）
+  section('Agent ↔ SSO 打通（OIDC-agent 关联，dev-plan-agent-host-unification M2）')
+  const oidcAgentCreate = await api('POST', '/api/agents', { token: ops, body: { name: 'SSO 自测机器人', attrs: { description: 'OIDC-agent 关联自测', model: 'deepseek-chat', riskLevel: 'low', avatar: '🔑' } } })
+  check('注册 SSO 自测 Agent（owner=资源管理员）', oidcAgentCreate.ok, JSON.stringify(oidcAgentCreate.error))
+  const oidcAgentId = oidcAgentCreate.data.agent.id
+  await api('PATCH', `/api/agents/${oidcAgentId}`, { token: ops, body: { attrs: { systemPromptVersion: 'v1', dataClass: 'internal' } } })
+  const oidcGateNone = await api('POST', `/api/agents/${oidcAgentId}/transition`, { token: ops, body: { action: 'online' } })
+  check('Agent 上线门禁：无 OIDC 客户端且无 entryUrl 被拒并指路', !oidcGateNone.ok && JSON.stringify(oidcGateNone.error).includes('身份纳管'), JSON.stringify(oidcGateNone.error))
+  const oidcIssue = await api('POST', `/api/agents/${oidcAgentId}/sso-client`, { token: ops, body: { redirectUris: ['http://127.0.0.1:3080/auth/oidc/callback'] } })
+  check('Agent SSO 签发 200（owner 自助，refType=agent，secret 一次性返回）',
+    oidcIssue.ok && oidcIssue.data.clientId?.startsWith('oc-') && Boolean(oidcIssue.data.clientSecret), JSON.stringify(oidcIssue.error))
+  const oidcIssueDup = await api('POST', `/api/agents/${oidcAgentId}/sso-client`, { token: ops, body: { redirectUris: ['http://127.0.0.1:3080/auth/oidc/callback'] } })
+  check('重复签发被拒（先禁用后重签）', !oidcIssueDup.ok)
+  const oidcAgentCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: oidcAgentCreate.data.credential.clientId, clientSecret: oidcAgentCreate.data.credential.clientSecret } })
+  const oidcMachineRotate = await api('POST', `/api/agents/${oidcAgentId}/sso-client/rotate`, { token: oidcAgentCc.data.token, body: {} })
+  check('机器身份管理 SSO 被拒 403（human-only）', oidcMachineRotate.status === 403, JSON.stringify(oidcMachineRotate))
+  const oidcBadUri = await api('POST', `/api/agents/${oidcAgentId}/sso-client`, { token: ops, body: { redirectUris: [] } })
+  check('签发校验：redirectUris 为空被拒（客户端已存在先拒）', !oidcBadUri.ok)
+  const oidcAgentDetail = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
+  check('Agent 详情含 SSO 配置块（discovery / refAgentName / 门禁模式）',
+    oidcAgentDetail.ok && oidcAgentDetail.data.sso?.clientId && oidcAgentDetail.data.sso?.discovery?.authorization_endpoint
+    && oidcAgentDetail.data.sso?.refAgentName === 'SSO 自测机器人' && oidcAgentDetail.data.ssoEnforceMode === '1',
+    JSON.stringify(oidcAgentDetail.data?.sso))
+  const oidcGatePass = await api('POST', `/api/agents/${oidcAgentId}/transition`, { token: ops, body: { action: 'online' } })
+  check('上线门禁（点1）：已签发客户端后放行并快照 clientId', oidcGatePass.ok && oidcGatePass.data.approval?.payload?.ssoClientId, JSON.stringify(oidcGatePass.error))
+  const oidcDisable = await api('POST', `/api/agents/${oidcAgentId}/sso-client/disable`, { token: admin, body: { reason: '执行期复核测试' } })
+  check('管理员禁用客户端 200', oidcDisable.ok)
+  const oidcApproveFail = await api('POST', `/api/approvals/${oidcGatePass.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '复核应失败' } })
+  const oidcAfterFail = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
+  check('上线门禁（点2）：审批期间禁用 → 执行期复核失败留痕',
+    oidcApproveFail.ok && oidcApproveFail.data.status === 'failed' && String(oidcApproveFail.data.execution?.error ?? '').includes('身份纳管'), JSON.stringify(oidcApproveFail.data))
+  check('复核失败状态未上线', oidcAfterFail.data.status !== 'online')
+  const oidcEnable = await api('POST', `/api/agents/${oidcAgentId}/sso-client/enable`, { token: ops, body: {} })
+  check('owner 重新启用客户端 200', oidcEnable.ok && oidcEnable.data.status === 'active')
+  const oidcGatePass2 = await api('POST', `/api/agents/${oidcAgentId}/transition`, { token: ops, body: { action: 'online' } })
+  const oidcApproveOk = await api('POST', `/api/approvals/${oidcGatePass2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '复核通过' } })
+  const oidcAfterOnline = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
+  check('重新发起上线 → 审批执行成功（状态 online）', oidcApproveOk.ok && oidcApproveOk.data.status === 'executed' && oidcAfterOnline.data.status === 'online', JSON.stringify(oidcApproveFail.data))
+  const oidcRotate = await api('POST', `/api/agents/${oidcAgentId}/sso-client/rotate`, { token: ops, body: {} })
+  check('owner 轮换 secret 200（旧值立即失效）', oidcRotate.ok && Boolean(oidcRotate.data.clientSecret))
+  const oidcOfflineReq = await api('POST', `/api/agents/${oidcAgentId}/transition`, { token: ops, body: { action: 'offline', note: '联动测试' } })
+  const oidcOfflineOk = await api('POST', `/api/approvals/${oidcOfflineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '下线' } })
+  const oidcAfterOffline = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
+  check('Agent 下线联动：关联 OIDC 客户端自动禁用（refresh 链一并吊销）',
+    oidcOfflineOk.ok && oidcAfterOffline.data.status === 'offline' && oidcAfterOffline.data.sso?.status === 'disabled', JSON.stringify(oidcAfterOffline.data?.sso))
+
   // ================================================================ AI 应用 ↔ SSO 打通（MVP 闭环）
   section('AI 应用 ↔ SSO 打通（注册 → 签发 → 门禁双点 → 跳转登录）')
   const ssoAppCreate = await api('POST', '/api/apps', { token: ops, body: { name: 'SSO 自测应用', attrs: { description: 'MVP 闭环：注册 → 签发 → 门禁 → 浏览器授权流', appType: 'web', icon: '🔐', url: 'https://sso-app.example.com', riskLevel: 'low', dataClass: 'internal', agentIds: [targetAgent.id] }, agentIds: [targetAgent.id] } })
