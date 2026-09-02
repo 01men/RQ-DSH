@@ -9,20 +9,21 @@
 |---|---|
 | 工作区 | `D:\DSH-RQ`（即本仓库检出根目录） |
 | 源仓库（fetch/pull） | `https://github.com/01men/ybkk-AIOS.git`（remote `origin` fetch） |
-| 备份推送仓库（push） | `https://github.com/01men/RQ-DSH.git`（remote `origin` push） |
+| 备份推送仓库（push） | `https://github.com/01men/RQ-DSH.git`（remote `origin` push，仅 `main` 一个分支） |
 | 定制化子分支 | `custom/dsh-rq`（基于 `main` 创建，只在本分支开发，不合并回 `main`） |
 
-远程配置方式（push 地址与 fetch 地址分离）：
+远程配置方式（push 地址与 fetch 地址分离 + 默认推送目标映射到备份仓库 main）：
 
 ```bash
 git remote set-url --push origin https://github.com/01men/RQ-DSH.git
+git config remote.origin.push refs/heads/custom/dsh-rq:refs/heads/main
 ```
 
 日常操作约定：
 
 - 同步上游：`git pull origin main`（仅用于拉取上游更新，定制改动始终留在 `custom/dsh-rq`）
-- 备份推送：`git push origin custom/dsh-rq`（实际推送到 01men/RQ-DSH）
-- 禁止将 `custom/dsh-rq` 合并/推送到 ybkk-AIOS 的 `main`
+- 备份推送：直接 `git push`（自动把本地 `custom/dsh-rq` 推到 01men/RQ-DSH 的 `main`）
+- RQ-DSH 原有主分支已于 2026-09-02 删除，其 `main` 即本分支的完整备份，无需合并回 ybkk-AIOS
 
 ## 网络说明
 
