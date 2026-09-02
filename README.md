@@ -40,8 +40,8 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）591 项端到端断言
-npm run lint:manifests  # 插件清单五面 YAML 校验（70 项）
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）700 项端到端断言
+npm run lint:manifests  # 插件清单五面 YAML 校验（75 项）
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
 
@@ -382,6 +382,29 @@ SaaS 数据面网关（roadmap 第 9 步之二「连接器市场」执行缺口�
 - **控制台 `#/nas-authz`**：灰度开关 / 矩阵（含覆盖项）/ 例外列表（过期倒计时）/ C 关联组 / NAS 锚点映射编辑 / check 试算 / 判定留痕 / 对账与悬空扫描。CLI：`dshctl nas authz check|scope|rules|decisions`。
 - 验收：selftest 658/658（新增「NAS 数据权限引擎」与「NAS 数据权限 API」两分节，覆盖 35 格矩阵/兼任/跨分支领导/改名不漂移/审批闭环/C 组漂移/伪造拒绝等 §四 全部用例）；lint:manifests 70/70。
 
+## 三I、连接器定时自动同步 + 全员名册组织数据通道（本迭代，v1.7）
+
+> 面向「企业 AI 应用接入宿主平台」场景（如人事绩效填报：全员工身份纳管 + 组织名册铺任务）：
+> 组织同步不再依赖人工点按钮，接入应用有了合规的全员名册拉取通道。
+
+- **连接器定时自动同步（intervalMinutes 落地）**：控制台「同步频率」此前只存不跑——现在 `IamService`
+  构造期启动巡检定时器（每分钟 tick，启动 15s 后首跑补同步超期配置），已启用配置按各自
+  `intervalMinutes`（下限 5 分钟防误配拖垮钉钉配额；**0=仅手动**）到期即全量同步；
+  actor 记 `auto-sync` 与手动区分，单配置失败不阻断其余（失败照常落 `lastSyncResult`）。
+  `IAM_CONNECTOR_AUTO_SYNC=off` 一键停用定时器（对齐 PORTAL_SYNC 惯例，可改由外部调度调
+  `POST /api/iam/connectors/auto-sync` 手动触发口，`iam.connector.write`）。控制台接入卡片
+  同步频率区分「自动/仅手动」，编辑表单提示 0 值语义。
+- **全员名册 `GET /api/iam/roster`（组织数据通道，权限点 `iam.roster.read`）**：已接入应用
+  （人事/绩效等）以机器凭证一次性拉取在职账号 + 组织树，铺排填报任务与 sub → 业务角色映射。
+  契约：users[]（`id`=userinfo 的 sub 稳定关联键/username/displayName/email/jobNumber/title/
+  orgId/orgName/primaryOrgId/status/accountType）+ orgs[]（id/name/parentId/status/
+  **leaderUserIds**——钉钉 dept_manager_userid_list 同步链，应用可直接识别部门汇总审批人）。
+  PII 最小化：不含手机号；已注销账号不出名册；每次拉取记 invoke 审计（谁在何时拉了多少）。
+  授权：org_admin 经 `iam.*` 通配自带；应用注册凭证经「统一认证中心」追加 scope 授权。
+  接入示例见 docs/app-sso-integration.md §十。
+- 验收：selftest 700/700（新增「连接器自动同步与全员名册」分节 16 项：到期判定/0=仅手动不巡检/
+  不重复处理/名册契约/负责人链/PII 最小化/401/403/机器凭证拉取/审计留痕）；lint:manifests 75/75。
+
 ## 三、目录结构（插件标准解剖）
 
 ```
@@ -414,7 +437,8 @@ cordis.patch.yml            dsh.bundle 安装补丁（dsh plugin add）
 | 方案条目 | 实现 |
 |---|---|
 | 组织/账号/角色/用户组（§2） | 多级组织树、批量导入、账号状态机、动态/静态用户组、权限点矩阵 |
-| 三方同步与冲突（§2.1/2.3） | OrgConnector 接口 + 钉钉模拟连接器、全量同步、三种冲突策略、对比式冲突工单 |
+| 三方同步与冲突（§2.1/2.3） | OrgConnector 接口 + 钉钉模拟连接器、全量同步、三种冲突策略、对比式冲突工单；**intervalMinutes 定时自动同步**（到期巡检，0=仅手动，`IAM_CONNECTOR_AUTO_SYNC=off` 停用） |
+| 组织数据通道（接入应用拉名册） | `GET /api/iam/roster`（`iam.roster.read`）：在职账号 + 组织树 + 部门负责人，机器凭证授权、invoke 审计留痕、PII 最小化（无手机号/无注销账号） |
 | 统一认证（§7） | 双轨身份、HMAC 短期令牌（默认 2h）、吊销/轮换、Client Credentials、机器凭证 scopes 编辑与 secret 轮换（联动吊销令牌） |
 | on-behalf-of（§5.5/6.5） | 用户→Agent 令牌链（act 叠加），审计可还原完整链路 |
 | MCP 部署/灰度/回滚（§3.2） | 草稿→验证→灰度→全量，版本不可变，一键回滚 |
@@ -508,7 +532,8 @@ PV 同日累加与 UV/DAU 取最大、效益分析毛利恒等、技能热力矩
 - 生产部署默认**基线初始化**（内置角色 + 根组织 + `admin`，零演示数据）；完整演示数据仅在 `DEMO_SEED=1` 时注入，请勿在生产环境启用
 - 业务配置存储为 JSON 集合（原子落盘）；计量/资金/分账类数据存 SQLite（`data/txnstore.db`，WAL + 事务 + 幂等唯一索引）
 - MCP 执行层支持真实 HTTP 传输（`exec: real`，JSON-RPC tools/call + initialize 探活）；`exec: demo` 为显式降级演示传输层（确定性模拟、不计费不计 SLO）
-- 钉钉连接器支持真实 OpenAPI（`mode: real` + `apiBase`）与 mock 演示（显式标注）
+- 钉钉连接器支持真实 OpenAPI（`mode: real` + `apiBase`）与 mock 演示（显式标注）；通讯录按连接器
+  「同步频率」定时自动同步（下限 5 分钟，填 0 仅手动；`IAM_CONNECTOR_AUTO_SYNC=off` 停用定时器）
 - 模型网关仅转发 OpenAI 兼容 chat/completions；模型未配置 endpoint 时拒绝调用（不生成假 completion）
 - 资金通道为手工过渡形态（见「三A」资金红线）；OIDC 私钥存 data 目录，生产建议迁 KMS
 - NAS 文件操作全部经 MCP 文件网关（不直连 DSM 私有 API）；`fs_upload/fs_download` 在网关进程侧读写本地路径——平台与网关需同机部署，或把资产 `stagingDir` 配置为共享挂载点；`/mcp` 端点为无会话纯 JSON 形态（不提供 GET SSE 长流，主流客户端兼容）

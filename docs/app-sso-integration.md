@@ -169,3 +169,37 @@ body {"ticket":"etk_…"}
 - 与标准授权码流的分工：需要**长期令牌/refresh/标准 RP 语义**走 `/oauth/authorize`（授权码 + PKCE S256）；
   只需要**单次进入时的用户身份**用 entry-ticket（无 secret、无换牌，应用后端可后置接入）。
 - **报错回跳**：授权失败一律 302 平台错误页（`/#/oauth/error`），不会重定向到外部地址（防开放重定向）；拒绝授权（`consent=false`）会按标准以 `error=access_denied` 回跳。
+
+## 十、全员名册（组织数据通道，服务端到服务端）
+
+应用要做「全员填报」类业务时，需要一份在职员工名册来铺排任务（给谁发填报、谁是部门汇总人）。
+平台提供受权限保护的名册端点，应用后端以**机器凭证**拉取（与 §二 的用户登录 OIDC 通道互补：
+登录解决「单个人是谁」，名册解决「全部人有谁」）：
+
+```
+GET /api/iam/roster          （Bearer 机器凭证令牌，须含 iam.roster.read 权限点）
+→ 200 {
+  generatedAt: "…",
+  orgs:  [{ id, name, parentId, status, leaderUserIds: ["<平台用户ID>"] }],   // leaderUserIds 来自钉钉 dept_manager_userid_list 同步链
+  users: [{ id, username, displayName, email, jobNumber, title,
+            orgId, orgName, primaryOrgId?, status, accountType? }]
+}
+```
+
+**接入三步**：
+
+1. **拿机器凭证**：应用注册时自动签发（`refType:'app'`）；管理员在「统一认证中心 → 身份主体」为该凭证
+   追加 scope `iam.roster.read`（调整 scopes 会联动吊销存量令牌，换牌后生效）。
+2. **换牌**：`POST /api/auth/client-credentials`，body `{clientId, clientSecret}` → `token`（Bearer）。
+3. **拉取**：`GET /api/iam/roster`。建议按填报周期拉取（组织变动经连接器定时自动同步进平台，
+   见 README「连接器定时自动同步」），勿高频轮询。
+
+**契约要点**：
+
+- `users[].id` 即 userinfo 的 `sub`——**同一稳定关联键**，名册铺的任务与登录回流的身份直接对上；
+- `orgs[].leaderUserIds` 给出各部门负责人（钉钉「部门负责人」字段同步），应用可直接识别汇总/审批人，无需自建名单；
+- PII 最小化：不含手机号；已注销（deactivated）账号不出现在名册；`status` 字段照常返回，应用应只对 `active` 账号铺任务；
+- 每次拉取记 invoke 审计（谁在何时拉了多少），越权访问 403 并触发 `audit.authz.denied`。
+
+> 与 OIDC 的分工记忆：**登录用人（§一~九）管"一个人来"，名册（本节）管"全部人有"**；
+> 两者都以用户 `id`/`sub` 为唯一关联键，应用内建一张 `sub → 业务角色` 映射表即可把两条通道拼起来。

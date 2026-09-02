@@ -1088,6 +1088,36 @@ export function apply(ctx: Context) {
     return result
   })
 
+  // 连接器自动同步的手动触发口：立即巡检全部到期配置（定时器每分钟自动跑同一逻辑，
+  // IAM_CONNECTOR_AUTO_SYNC=off 停用定时器后可改由外部调度调本端点）。
+  guarded('POST', '/api/iam/connectors/auto-sync', 'iam.connector.write', async (exchange) => {
+    const results = await ctx.iam.runDueAutoSyncs()
+    changeLog(exchange, 'iam.connector.auto-sync', 'connector', 'auto-sync', '连接器到期巡检', `处理 ${results.length} 条（${results.filter((item) => item.ok).length} 成功）`)
+    return { processed: results.length, results }
+  })
+
+  // 全员名册（组织数据通道）：接入应用（人事/绩效等）以机器凭证批量拉取在职账号与组织树。
+  // 授权=iam.roster.read（应用注册凭证经「统一认证中心」追加 scope；org_admin 经 iam.* 通配自带）；
+  // 批量 PII 出口，每次拉取记 invoke 审计（谁在何时拉了多少）。
+  guarded('GET', '/api/iam/roster', 'iam.roster.read', (exchange) => {
+    const info = caller(exchange)
+    const roster = ctx.iam.roster()
+    ctx.audit.record({
+      type: 'invoke',
+      actorType: info.kind === 'human' ? 'human' : 'machine',
+      actorId: info.userId ?? info.principalId,
+      actorName: info.name,
+      action: 'iam.roster.pull',
+      resourceType: 'roster',
+      resourceId: 'roster',
+      resourceName: '全员名册',
+      result: 'ok',
+      detail: `orgs=${roster.orgs.length} users=${roster.users.length}`,
+      ...(info.actChain.length > 0 ? { actChain: info.actChain } : {}),
+    })
+    return roster
+  })
+
   guarded('GET', '/api/iam/conflicts', 'iam.org.read', (exchange) => ({
     conflicts: ctx.iam.conflicts().find((item) => item.status === (exchange.query.get('status') ?? 'pending')),
   }))

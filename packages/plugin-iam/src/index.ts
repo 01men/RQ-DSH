@@ -179,6 +179,13 @@ export interface GroupSnapshotRecord extends RecordBase {
 /** 组成员漂移告警默认阈值（人数）。 */
 export const DEFAULT_GROUP_DRIFT_THRESHOLD = 5
 
+/** 连接器自动同步巡检 tick：到期判定按各配置自身 intervalMinutes，不在此处定周期。 */
+const AUTO_SYNC_TICK_MS = 60_000
+/** 启动后首跑延迟：错开平台装载窗口，超期/从未同步的连接器启动即补同步。 */
+const AUTO_SYNC_BOOT_DELAY_MS = 15_000
+/** 单连接器最小生效间隔（防误配高频拖垮钉钉 OpenAPI 配额；0=该连接器关闭自动同步）。 */
+const AUTO_SYNC_MIN_INTERVAL_MINUTES = 5
+
 // ---------------------------------------------------------------------------
 // 权限点目录
 // ---------------------------------------------------------------------------
@@ -192,6 +199,7 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'iam.user.freeze', label: '冻结/注销账号', group: '组织账号' },
   { point: 'iam.role.write', label: '管理角色', group: '组织账号' },
   { point: 'iam.connector.write', label: '管理三方接入', group: '组织账号' },
+  { point: 'iam.roster.read', label: '读取全员名册（组织数据通道，接入应用拉取）', group: '组织账号' },
   { point: 'authn.principal.read', label: '查看身份/凭证', group: '统一认证' },
   { point: 'authn.principal.write', label: '管理机器凭证', group: '统一认证' },
   { point: 'authn.token.issue', label: '签发令牌', group: '统一认证' },
@@ -536,6 +544,9 @@ export class IamService extends Service {
   /** 运行时注册表：key 为配置实例 ID（DEMO_SEED 内置 mock 用 'demo:dingtalk'），provider 仅表示平台类型。 */
   private connectors = new Map<string, OrgConnector>()
   private authProviders = new Map<string, IdentityProviderAdapter>()
+  /** 自动同步去重：同一配置实例上一轮尚未结束时跳过（同步耗时超过巡检周期时不叠加并发）。 */
+  private autoSyncing = new Set<string>()
+  private autoSyncTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(ctx: Context) {
     super(ctx, 'iam')
@@ -551,6 +562,14 @@ export class IamService extends Service {
     for (const config of this.connectorConfigs().all()) {
       this.applyConnectorMode(config.id)
     }
+    // 连接器定时自动同步（intervalMinutes 落地）：控制台「同步频率」此前只存不跑，
+    // 通讯录变动（新入职/离职/调岗）需人工点同步才进平台。启动后首跑补同步超期配置，
+    // 此后每分钟巡检到期；IAM_CONNECTOR_AUTO_SYNC=off 一键停用（对齐 PORTAL_SYNC 惯例）。
+    this.autoSyncTimer = setInterval(() => void this.runDueAutoSyncs(), AUTO_SYNC_TICK_MS)
+    setTimeout(() => void this.runDueAutoSyncs(), AUTO_SYNC_BOOT_DELAY_MS)
+    ctx.effect(() => {
+      if (this.autoSyncTimer) clearInterval(this.autoSyncTimer)
+    })
   }
 
   /** 注册连接器实例：key 为配置实例 id（多主体各自独立注册/注销）。 */
@@ -1597,6 +1616,77 @@ export class IamService extends Service {
       resolvedBy: actor,
       resolvedAt: new Date().toISOString(),
     })
+  }
+
+  /**
+   * 连接器自动同步巡检（定时器每分钟调用；POST /api/iam/connectors/auto-sync 为其手动触发口）：
+   * 已启用的配置实例中，lastSyncAt 距今超过生效间隔（intervalMinutes，下限 5 分钟；0=关闭自动同步）
+   * 即全量同步——从未同步过的连接器视为到期（启动即补同步）。actor 记 'auto-sync' 与手动同步区分；
+   * 单配置失败不阻断其余配置（失败已落 lastSyncResult），返回逐条处理结果。
+   */
+  async runDueAutoSyncs(now = Date.now()): Promise<Array<{ configId: string; provider: string; name: string; message: string; ok: boolean }>> {
+    if (process.env.IAM_CONNECTOR_AUTO_SYNC === 'off') return []
+    const handled: Array<{ configId: string; provider: string; name: string; message: string; ok: boolean }> = []
+    for (const config of this.connectorConfigs().all()) {
+      const intervalMinutes = config.intervalMinutes ?? 0
+      if (!config.enabled || intervalMinutes <= 0) continue
+      if (config.lastSyncAt && now - new Date(config.lastSyncAt).getTime() < Math.max(intervalMinutes, AUTO_SYNC_MIN_INTERVAL_MINUTES) * 60_000) continue
+      if (this.autoSyncing.has(config.id)) continue
+      this.autoSyncing.add(config.id)
+      try {
+        const result = await this.syncConnector(config.id, 'auto-sync')
+        handled.push({ configId: config.id, provider: config.provider, name: config.name, ok: true, message: result.message })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.ctx.logger('iam').warn(`连接器自动同步失败（${config.name}）：${message}`)
+        handled.push({ configId: config.id, provider: config.provider, name: config.name, ok: false, message })
+      } finally {
+        this.autoSyncing.delete(config.id)
+      }
+    }
+    if (handled.length > 0) {
+      this.ctx.logger('iam').info(`连接器自动同步巡检：本次处理 ${handled.length} 条（${handled.filter((item) => item.ok).length} 成功）`)
+    }
+    return handled
+  }
+
+  /**
+   * 全员名册（组织数据通道）：供已接入的外部应用（人事/绩效等）以机器凭证
+   * （iam.roster.read scope，应用注册凭证经控制台追加授权）一次性拉取在职账号与组织树，
+   * 用于铺排填报任务与 sub → 业务角色映射；id 即 userinfo 的 sub（稳定关联键）。
+   * PII 最小化：不含手机号；已注销账号不出现在名册；每次拉取由控制台层记审计（invoke）。
+   */
+  roster(): {
+    generatedAt: string
+    orgs: Array<{ id: string; name: string; parentId: string | null; status: string; leaderUserIds: string[] }>
+    users: Array<{ id: string; username: string; displayName: string; email: string; jobNumber: string; title: string; orgId: string; orgName: string; primaryOrgId?: string; status: UserStatus; accountType?: UserRecord['accountType'] }>
+  } {
+    const orgNames = new Map(this.orgs().all().map((org) => [org.id, org.name]))
+    return {
+      generatedAt: new Date().toISOString(),
+      orgs: this.orgs().all().map((org) => ({
+        id: org.id,
+        name: org.name,
+        parentId: org.parentId,
+        status: org.status,
+        leaderUserIds: this.leadersOf(org.id),
+      })),
+      users: this.users().all()
+        .filter((user) => user.status !== 'deactivated')
+        .map((user) => ({
+          id: user.id,
+          username: user.username,
+          displayName: user.displayName,
+          email: user.email,
+          jobNumber: user.jobNumber ?? '',
+          title: user.title,
+          orgId: user.orgId,
+          orgName: orgNames.get(user.orgId) ?? '',
+          ...(user.primaryOrgId !== undefined ? { primaryOrgId: user.primaryOrgId } : {}),
+          status: user.status,
+          ...(user.accountType !== undefined ? { accountType: user.accountType } : {}),
+        })),
+    }
   }
 }
 

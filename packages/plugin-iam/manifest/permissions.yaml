@@ -8,3 +8,4 @@ points:
   - iam.user.freeze
   - iam.role.write
   - iam.connector.write
+  - iam.roster.read
