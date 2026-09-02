@@ -9,6 +9,17 @@
 
 【任务】接入宿主平台 http://192.168.0.7:7300，完成 Agent 注册、机器身份打通与计量对齐。
 
+0.5 平台自营 dsh Agent（一条命令登记）：若你要登记的是运行在 dsh 宿主上的平台自营 Agent，
+   直接用登记脚本替代下述 1-3 步（幂等可重跑；注册 + 凭证落盘 0600 + entryUrl/提示词版本/密级提报 +
+   首次运营提报 + Agent 关联 OIDC 客户端签发一次完成）：
+   ```bash
+   node scripts/register-dsh-agent.mjs --url http://192.168.0.7:3080 --entry http://192.168.0.7:3080/
+   # 管理员凭证：DSHCTL_USER/DSHCTL_PASS（或已有令牌 DSHCTL_TOKEN）
+   ```
+   凭证落盘 `<data>/dsh-agent-credential.json`（含机器凭证与 OIDC 客户端凭证；secret 仅下发一次，
+   丢失走轮换不重注册）。登记完成后仍需人工治理闭环：试运行（trialGroups）→ L4 上线审批
+   （上线门禁：OIDC 客户端或 entryUrl 免登通道，AGENT_SSO_ENFORCE 可调）。
+
 0. 环境：所有 dshctl 命令前先设置平台地址（CLI 默认指向 127.0.0.1，必须覆盖）：
    export DSHCTL_URL=http://192.168.0.7:7300
    （Windows PowerShell 用 $env:DSHCTL_URL="http://192.168.0.7:7300"，cmd 用 set DSHCTL_URL=...）
