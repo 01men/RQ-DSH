@@ -364,6 +364,7 @@ export function apply(ctx: Context) {
     const code = exchange.query.get('authCode') ?? exchange.query.get('code') ?? ''
     const state = exchange.query.get('state') ?? ''
     const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!)
+    const webBase = ctx.httpServer?.externalBase ?? ''
     const render = (title: string, bodyHtml: string, script = ''): void => {
       exchange.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
       exchange.res.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
@@ -387,15 +388,15 @@ export function apply(ctx: Context) {
           action: 'iam.user.bind', resourceType: 'user', resourceId: result.userId,
           resourceName: result.displayName, result: 'ok', detail: `${result.provider} 扫码授权绑定`,
         })
-        render('绑定成功', `<div class="ok">✓</div><h2>钉钉身份绑定成功</h2><p>已绑定：<b>${escapeHtml(result.displayName)}</b></p><p>即将自动返回控制台…</p><p><a href="/#/iam">立即返回</a></p>`,
-          '<script>setTimeout(()=>{location.href="/#/iam"},2000)</script>')
+        render('绑定成功', `<div class="ok">✓</div><h2>钉钉身份绑定成功</h2><p>已绑定：<b>${escapeHtml(result.displayName)}</b></p><p>即将自动返回控制台…</p><p><a href="${webBase}/#/iam">立即返回</a></p>`,
+          `<script>setTimeout(()=>{location.href=\`${webBase}/#/iam\`},2000)</script>`)
         return
       }
       const result = await ctx.authn.completeSso(peeked.provider, code, state)
       if (result.kind === 'pending') {
         // 未命中身份链接：回登录页走「绑定已有账号 / 注册新账号」分支
         render('首次登录', `<h2>首次使用该三方身份</h2><p>正在返回登录页完成绑定/注册…</p>`,
-          `<script>localStorage.setItem('heng_ops_sso_pending', JSON.stringify({ pendingTicket: ${JSON.stringify(result.pendingTicket)}, profileName: ${JSON.stringify(result.profileName)} })); location.replace('/#/login')</script>`)
+          `<script>localStorage.setItem('heng_ops_sso_pending', JSON.stringify({ pendingTicket: ${JSON.stringify(result.pendingTicket)}, profileName: ${JSON.stringify(result.profileName)} })); location.replace('${webBase}/#/login')</script>`)
         return
       }
       const user = ctx.iam.users().get(result.userId)!
@@ -406,7 +407,7 @@ export function apply(ctx: Context) {
         permissions: ctx.iam.userPermissions(user.id),
       }
       render('登录成功', `<div class="ok">✓</div><h2>欢迎回来，${escapeHtml(user.displayName)}</h2><p>正在进入控制台…</p>`,
-        `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))}); location.replace('/#/dashboard')</script>`)
+        `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))}); location.replace('${webBase}/#/dashboard')</script>`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       render('操作失败', `<div class="bad">✕</div><h2>三方授权失败</h2><p>${escapeHtml(message)}</p><p><a href="/">返回控制台</a></p>`)

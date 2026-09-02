@@ -13,14 +13,17 @@
 # 行为与 cordis.yml 一致：
 #   - provideToolRuntime=false：复用 dsh 原生 ToolRuntime（服务键 tools），
 #     平台插件注册的全部运维工具将直接进入 dsh 工具注册表、对模型可见、可被调用
-#   - startHttp=false：控制台 SPA 仍由独立进程提供（node src/main.ts），
-#     两个进程共享同一 data/ 目录即可管理同一份数据
+#   - startHttp=false + plugin-dsh-bridge：榕器数据面（REST/控制台 SPA/docs/mcp）
+#     以 /rq 前缀挂进 dsh webServer——单进程单入口，无需另起独立进程
 - insert:
     - id: ops-platform-core
       name: dsh-enterprise-ops/packages/platform-core/src/index.ts
       config:
         provideToolRuntime: false
         startHttp: false
+        http:
+          # 对外前缀：OIDC 授权页 302 等「根绝对路径」构造据此保持 /rq 自洽
+          externalBase: /rq
     # connect 必须先于业务插件加载：client 角色要在业务工具注册前完成代理包裹。
     # 安装后自动向宿主申请口令的三条通道：
     #   1. dsh 界面对 Agent 说「接入宿主 <地址>，接入码 <enr_…>」→ connect_setup
@@ -63,3 +66,14 @@
     # 平台自更新：上游版本检查 + Agent 工具（发现新版本提示升级，source 形态可一键执行）
     - id: ops-update
       name: dsh-enterprise-ops/packages/plugin-update/src/index.ts
+    # 门户数据通道（公开只读拉取端点）：必须先于 console 装配——在其鉴权中间件之前截获 /api/portal/*
+    - id: ops-portal
+      name: dsh-enterprise-ops/packages/plugin-portal/src/index.ts
+    # 控制台 REST 网关 + SPA（Bearer 鉴权/工具桥/MCP 端点/静态托管）
+    - id: ops-console
+      name: dsh-enterprise-ops/packages/plugin-console/src/index.ts
+    # 单进程单入口：把榕器数据面挂进 dsh webServer（/rq 前缀），必须在 console 之后装配
+    - id: ops-dsh-bridge
+      name: dsh-enterprise-ops/packages/plugin-dsh-bridge/src/index.ts
+      config:
+        mountPath: /rq

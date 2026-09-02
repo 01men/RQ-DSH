@@ -12,14 +12,18 @@
 #     （路径含中文等非 ASCII 字符时用百分号编码）
 #   - provideToolRuntime=false：完整 dsh 自带 ToolRuntime（ctx.tools），
 #     平台插件注册的全部运维工具将直接对模型可见、可被调用
-#   - 控制台 SPA 仍由本项目的独立进程提供（node src/main.ts），
-#     两个进程共享同一 data/ 目录即可管理同一份数据
+#   - startHttp=false + plugin-dsh-bridge：榕器数据面（REST/控制台 SPA/docs/mcp）
+#     以 /rq 前缀挂进 dsh webServer——单进程单入口（dsh web 端口即唯一入口），
+#     独立进程形态（node src/main.ts）保留为开发形态，两种形态不再要求并跑
 - insert:
     - id: ops-platform-core
       name: '<PROJECT_ROOT>/packages/platform-core/src/index.ts'
       config:
         provideToolRuntime: false
         startHttp: false
+        http:
+          # 对外前缀：OIDC 授权页 302 等「根绝对路径」构造据此保持 /rq 自洽
+          externalBase: /rq
     # connect 必须先于业务插件加载：client 角色要在业务工具注册前完成代理包裹
     - id: ops-connect
       name: '<PROJECT_ROOT>/packages/plugin-connect/src/index.ts'
@@ -58,7 +62,14 @@
     # 平台自更新：上游版本检查 + Agent 工具（update_status/update_check/update_apply）
     - id: ops-update
       name: '<PROJECT_ROOT>/packages/plugin-update/src/index.ts'
-    # 门户数据通道（外部系统拉取端点，非核心）：仅独立宿主进程提供 HTTP 数据面；
-    # 此处挂载保持两形态插件树一致（dsh 形态 startHttp=false 不监听端口，无副作用）
+    # 门户数据通道（公开只读拉取端点）：必须先于 console 装配——在其鉴权中间件之前截获 /api/portal/*
     - id: ops-portal
       name: '<PROJECT_ROOT>/packages/plugin-portal/src/index.ts'
+    # 控制台 REST 网关 + SPA（Bearer 鉴权/工具桥/MCP 端点/静态托管）
+    - id: ops-console
+      name: '<PROJECT_ROOT>/packages/plugin-console/src/index.ts'
+    # 单进程单入口：把榕器数据面挂进 dsh webServer（/rq 前缀），必须在 console 之后装配
+    - id: ops-dsh-bridge
+      name: '<PROJECT_ROOT>/packages/plugin-dsh-bridge/src/index.ts'
+      config:
+        mountPath: /rq

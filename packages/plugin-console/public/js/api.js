@@ -4,6 +4,12 @@ const TOKEN_KEY = 'heng_ops_token'
 const REFRESH_KEY = 'heng_ops_refresh'
 const USER_KEY = 'heng_ops_user'
 
+/**
+ * 部署前缀：独立形态（根路径部署）为 ''；dsh 宿主挂载形态下页面位于 /rq/ 之下，
+ * 由文档地址自动推导（SPA 全程 hash 路由，document URL 恒为目录形态）。
+ */
+export const BASE = new URL('.', document.baseURI).pathname.replace(/\/$/, '')
+
 export const session = {
   get token() { return localStorage.getItem(TOKEN_KEY) ?? '' },
   get refreshToken() { return localStorage.getItem(REFRESH_KEY) ?? '' },
@@ -41,7 +47,7 @@ async function tryRefresh() {
   if (!refreshing) {
     refreshing = (async () => {
       try {
-        const response = await fetch('/api/auth/refresh', {
+        const response = await fetch(`${BASE}/api/auth/refresh`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ refreshToken: session.refreshToken }),
@@ -64,7 +70,7 @@ async function tryRefresh() {
 async function request(method, path, body, retried = false) {
   const headers = { 'content-type': 'application/json' }
   if (session.token) headers.authorization = `Bearer ${session.token}`
-  const response = await fetch(path, {
+  const response = await fetch(`${BASE}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),

@@ -12,6 +12,9 @@ import {
 } from '../packages/plugin-nas/src/authz/engine.ts'
 import { readFileSync as __readFileSyncSeed } from 'node:fs'
 const NAS_AUTHZ_SEED = JSON.parse(__readFileSyncSeed(new URL('../packages/plugin-nas/seed/nas-authz-rules.json', import.meta.url), 'utf8'))
+import * as platformCore from '../packages/platform-core/src/index.ts'
+import * as dshBridge from '../packages/plugin-dsh-bridge/src/index.ts'
+import { Context } from '@deepseek-ai/cordis'
 import { createServer, request as httpRequest } from 'node:http'
 import { createHash } from 'node:crypto'
 import { rm, mkdir } from 'node:fs/promises'
@@ -3528,6 +3531,60 @@ try {
   check('无 Origin 请求正常应答（仅不回 CORS 放行头）', portalNoOrigin.status === 200 && !portalNoOrigin.headers['access-control-allow-origin'])
   const portalPost = await rawReq('POST', '/api/portal/apps', { headers: { 'content-type': 'application/json', origin: portalOrigin }, body: '{}' })
   check('写方法被拒 405（契约全只读）', portalPost.status === 405)
+
+  // ================================================================ dsh 宿主挂载（plugin-dsh-bridge，dev-plan-agent-host-unification M1）
+  // 进程内构造最小插件树：platform-core（不监听）+ dsh-bridge（挂载半），
+  // 用伪造 dsh webServer 捕获注册的 prefix 路由，再经真实 HTTP 端口模拟 dsh 侧分发。
+  section('dsh 宿主挂载（单进程单入口 /rq 前缀）')
+  {
+    const captured = []
+    const fakeWebServer = { register: (route) => { captured.push(route); return () => {} } }
+    const bridgeDataDir = join(DATA_DIR, 'bridge-mount')
+    await mkdir(bridgeDataDir, { recursive: true })
+    const mountCtx = new Context()
+    await mountCtx.plugin(platformCore, { dataDir: bridgeDataDir, http: { port: 0, externalBase: '/rq' }, startHttp: false })
+    mountCtx.httpServer.register('GET', '/api/__mount_probe', (exchange) => exchange.ok({ pong: exchange.path }))
+    // SPA 静态目录（临时双文件：index.html + assets/app.js），验证前缀内静态与 SPA 回退
+    const staticDir = join(bridgeDataDir, 'public')
+    await mkdir(join(staticDir, 'assets'), { recursive: true })
+    const indexHtml = '<!doctype html><html><title>rq-console-marker</title></html>'
+    const appJs = 'console.log("rq-asset-marker")'
+    await (await import('node:fs/promises')).writeFile(join(staticDir, 'index.html'), indexHtml)
+    await (await import('node:fs/promises')).writeFile(join(staticDir, 'assets', 'app.js'), appJs)
+    mountCtx.httpServer.serveStatic('/', staticDir, '/index.html')
+    // 直接以「带 webServer 的 ctx 视图」调用 apply（等价于 dsh 形态下 inject 完成后的装配）
+    dshBridge.apply(
+      { webServer: fakeWebServer, httpServer: mountCtx.httpServer, logger: (name) => mountCtx.logger(name) },
+      { mountPath: '/rq' },
+    )
+    check('bridge 向 webServer 注册唯一 prefix 路由 /rq', captured.length === 1 && captured[0].kind === 'prefix' && captured[0].path === '/rq')
+    check('externalBase 配置生效（/rq）', mountCtx.httpServer.externalBase === '/rq')
+    // 模拟 dsh webserver 分发：命中 /rq 前缀即交给 bridge handler，其余 404
+    const sim = createServer((req, res) => {
+      const route = captured.find((r) => r.kind === 'prefix' && (req.url === r.path || (req.url ?? '').startsWith(`${r.path}/`)))
+      if (route) { route.handler(req, res); return }
+      res.writeHead(404).end('sim-miss')
+    })
+    await new Promise((resolve) => sim.listen(0, '127.0.0.1', resolve))
+    const simGet = async (path) => fetch(`http://127.0.0.1:${sim.address().port}${path}`, { redirect: 'manual' })
+    const probe = await simGet('/rq/api/__mount_probe')
+    const probeBody = await probe.json().catch(() => null)
+    check('/rq/api/* 剥前缀后与独立形态路由等价', probe.status === 200 && probeBody?.data?.pong === '/api/__mount_probe', `status=${probe.status} body=${JSON.stringify(probeBody)}`)
+    const redir = await simGet('/rq')
+    check('/rq 302 归一到 /rq/（SPA 相对引用可解析）', redir.status === 302 && redir.headers.get('location') === '/rq/')
+    const spa = await simGet('/rq/')
+    check('/rq/ 回落控制台 index.html（SPA fallback）', spa.status === 200 && (await spa.text()).includes('rq-console-marker'))
+    const asset = await simGet('/rq/assets/app.js')
+    check('/rq/assets/* 静态资源按前缀命中', asset.status === 200 && (await asset.text()).includes('rq-asset-marker'))
+    const spaMiss = await simGet('/rq/anything-else')
+    check('非 /api 未命中回落 SPA（与独立形态一致）', spaMiss.status === 200 && (await spaMiss.text()).includes('rq-console-marker'))
+    const apiMiss = await simGet('/rq/api/definitely-missing')
+    const apiMissBody = await apiMiss.json().catch(() => null)
+    check('未匹配 API 404 JSON 不落静态（DEF-01）', apiMiss.status === 404 && apiMissBody?.error?.code === 'NOT_FOUND')
+    const simMiss = await fetch(`http://127.0.0.1:${sim.address().port}/outside`)
+    check('前缀外请求不进榕器数据面（dsh 侧自有路由域不受影响）', simMiss.status === 404 && (await simMiss.text()) === 'sim-miss')
+    await new Promise((resolve) => sim.close(resolve))
+  }
 
   // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
   section('凭证零进平台（红线一 · T-24 全目录扫描）')

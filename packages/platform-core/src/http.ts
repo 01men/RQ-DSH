@@ -38,6 +38,12 @@ interface Route {
 export interface HttpServerConfig {
   port?: number
   host?: string
+  /**
+   * 对外挂载前缀（默认 ''，即根路径）。挂载进完整 dsh 宿主（plugin-dsh-bridge）时设为 '/rq'：
+   * 平台侧所有「根绝对路径」构造（OIDC 授权页 302、SSO 回跳 HTML 等）据此拼接，
+   * 保证单入口（dsh web 端口）下 /rq 前缀内的链接自洽。
+   */
+  externalBase?: string
 }
 
 const MIME: Record<string, string> = {
@@ -68,11 +74,14 @@ export class HttpServerService extends Service {
   private server: Server | undefined
   readonly port: number
   readonly host: string
+  /** 对外挂载前缀：'' 或形如 '/rq'（无尾斜杠）。见 HttpServerConfig.externalBase。 */
+  readonly externalBase: string
 
   constructor(ctx: Context, config: HttpServerConfig = {}) {
     super(ctx, 'httpServer')
     this.port = config.port ?? 7300
     this.host = config.host ?? '0.0.0.0'
+    this.externalBase = (config.externalBase ?? '').replace(/\/+$/, '')
     ctx.effect(() => () => {
       void this.stop()
     })
@@ -153,7 +162,12 @@ export class HttpServerService extends Service {
     return undefined
   }
 
-  private async dispatch(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  /**
+   * 请求入口（公开）。独立形态由 start() 的 listener 调用；挂载形态（plugin-dsh-bridge，
+   * 完整 dsh 宿主下的单进程单入口）由 dsh webServer 的前缀路由剥离对外前缀后直接调用。
+   * 调用方保证 req.url 已是平台内部路径（/api/*、/、/docs/* 等）。
+   */
+  async dispatch(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
     const pathSegments = url.pathname.split('/').filter(Boolean).map((s) => s)
     const method = (req.method ?? 'GET').toUpperCase()

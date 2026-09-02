@@ -29,7 +29,7 @@ export interface PlatformCoreConfig {
   dataDir?: string
   /** 独立宿主默认 true；挂载进完整 dsh 时设为 false，避免与真正 ToolRuntime 冲突。 */
   provideToolRuntime?: boolean
-  http?: { port?: number; host?: string }
+  http?: { port?: number; host?: string; externalBase?: string }
   /** 是否自动启动 HTTP 监听。 */
   startHttp?: boolean
 }
