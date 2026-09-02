@@ -1,7 +1,7 @@
 # 形态 B（dsh 单入口）Mac 服务器部署记录
 
 > 部署日期：2026-09-03 · 目标机：`mdzx.fun`（macOS 15.7.1，Apple Silicon，用户 xiaodaoqin）
-> 端口：**8801**（用户指定 8802 被 `ai.hermes.gateway`（Hermes 钉钉助手）占用，经确认换端口）
+> 端口：**8801**（用户指定 8802 被 `ai.hermes.gateway`（Hermes 钉钉助手）占用，经确认换端口；形态 A 曾短暂占用 8801，现已**彻底移除**——launchd 服务定义与数据目录均已删除，8801 归 dsh 单一服务）
 > 形态：**B 单进程单入口**——`/` 为 dsh 对话界面，`/rq/*` 为榕器数据面（控制台/REST/docs/MCP）
 
 ## 一、部署布局
