@@ -25,6 +25,11 @@
    我签发后给你 client_id / client_secret。机器身份自签一律 403（平台硬校验，仅应用 owner 用户身份可操作）。
    用户授权确认页必须真人完成，属正常流程。
    注意：web/h5 形态应用未完成 SSO 签发无法上线（上线门禁），SSO 不是可选项。
+   钉钉扫码等三方登录由平台登录页承接，应用不直接对接钉钉 SDK；钉钉组织通讯录由平台连接器
+   定时自动同步（README「连接器定时自动同步」），应用按需消费即可，不必自己拉通讯录。
+   组织名册：人事/绩效类应用可经机器凭证拉取全员名册 GET /api/iam/roster
+   （需管理员为凭证追加 iam.roster.read scope；users[].id 即 sub 同一关联键、orgs[].leaderUserIds
+   为部门负责人同步链），接入示例见 docs/app-sso-integration.md §十。
 
 3. 指标提报：应用上线（含试运行）后，每天 09:00 提报前一日指标（必须带 --date=昨日，不带会记到当天）：
    dshctl app report <appId> --date=<昨日YYYY-MM-DD> --dau=<n> --sessions=<n> --retention7=<n> [--avg-depth=<n>]

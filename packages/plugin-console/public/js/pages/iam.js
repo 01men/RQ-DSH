@@ -1097,7 +1097,7 @@ export async function renderIam(content, params, ctx) {
             <div class="grid-3 mb-14">
               ${syncStatCard('最近同步', config.lastSyncAt ? timeAgo(config.lastSyncAt) : '从未同步', config.lastSyncResult?.ok ? 'var(--ok)' : 'var(--text-3)')}
               ${syncStatCard('同步结果', config.lastSyncResult ? config.lastSyncResult.message : '—', 'var(--text-1)')}
-              ${syncStatCard('同步频率', `每 ${config.intervalMinutes ?? 60} 分钟`, 'var(--text-1)')}
+              ${syncStatCard('同步频率', (config.intervalMinutes ?? 60) > 0 ? `每 ${config.intervalMinutes ?? 60} 分钟（自动）` : '仅手动', 'var(--text-1)')}
             </div>
             <div class="desc-grid">
               <div class="desc-item"><span class="k">平台</span><span class="v">${esc(providerName(config.provider))}</span></div>
@@ -1159,7 +1159,7 @@ export async function renderIam(content, params, ctx) {
             ${field('CorpID', inputField('corpId', { value: config?.corpId }), { required: true })}
             ${field('AppKey', inputField('appKey', { value: config?.appKey }), { required: true })}
             ${field('AppSecret', inputField('appSecret', { value: '', placeholder: isEdit ? '留空保持不变（加密存储）' : '必填（加密存储）' }), { required: !isEdit, hint: '通过 KMS 托管加密，禁止明文落库' })}
-            ${field('同步频率（分钟）', inputField('intervalMinutes', { value: config?.intervalMinutes ?? 60 }))}
+            ${field('同步频率（分钟）', inputField('intervalMinutes', { value: config?.intervalMinutes ?? 60 }), { hint: '按此间隔自动同步通讯录（下限 5 分钟）；填 0 表示仅手动同步' })}
             ${field('回调地址（自动生成）', `
               <div class="flex" style="gap:8px">
                 <input class="input" name="callbackUrl" readonly value="${esc(callbackUrl)}" style="flex:1">
@@ -1188,7 +1188,8 @@ export async function renderIam(content, params, ctx) {
           name: data2.name,
           corpId: data2.corpId,
           appKey: data2.appKey,
-          intervalMinutes: Number(data2.intervalMinutes) || 60,
+          // 显式输入按原值落库（0=仅手动同步）；空/非法输入回落默认 60（Number('')===0 须先排除空串，否则清空会误存 0）
+          intervalMinutes: data2.intervalMinutes === '' || !Number.isFinite(Number(data2.intervalMinutes)) ? 60 : Math.max(0, Number(data2.intervalMinutes)),
           callbackUrl: data2.callbackUrl,
           conflictStrategy: data2.conflictStrategy,
           targetOrgId: data2.targetOrgId || undefined,

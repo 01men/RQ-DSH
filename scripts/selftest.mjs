@@ -1649,6 +1649,45 @@ try {
   check('三方登录入口带 configId/name（多主体可区分）', authProviders.ok && authProviders.data.providers.length >= 1
     && authProviders.data.providers.every((p) => p.configId && p.name), JSON.stringify(authProviders.data).slice(0, 300))
 
+  section('连接器自动同步与全员名册（组织数据通道）')
+  // 自动同步：intervalMinutes 到期巡检（定时器每分钟跑同一 runDueAutoSyncs，此处以手动触发口等价验证）
+  const autoSyncConn = await api('POST', '/api/iam/connectors', { token: admin, body: { provider: 'dingtalk', name: '自动同步主体', corpId: 'ding-autosync', appKey: 'demo-key-auto', appSecret: 'demo-secret-auto', mode: 'mock', enabled: true, intervalMinutes: 5, conflictStrategy: 'manual' } })
+  check('创建自动同步主体（intervalMinutes=5，从未同步=到期）', autoSyncConn.ok && Boolean(autoSyncConn.data?.id), JSON.stringify(autoSyncConn).slice(0, 200))
+  const manualOnlyConn = await api('POST', '/api/iam/connectors', { token: admin, body: { provider: 'dingtalk', name: '仅手动主体', corpId: 'ding-manualonly', appKey: 'demo-key-manual', appSecret: 'demo-secret-manual', mode: 'mock', enabled: true, intervalMinutes: 0, conflictStrategy: 'manual' } })
+  check('创建仅手动主体（intervalMinutes=0）', manualOnlyConn.ok && Boolean(manualOnlyConn.data?.id), JSON.stringify(manualOnlyConn).slice(0, 200))
+  const autoRun1 = await api('POST', '/api/iam/connectors/auto-sync', { token: admin })
+  check('到期巡检：从未同步的连接器被补同步', autoRun1.ok && autoRun1.data.processed >= 1
+    && autoRun1.data.results.some((item) => item.configId === autoSyncConn.data?.id && item.ok), JSON.stringify(autoRun1.data).slice(0, 300))
+  check('到期巡检：0=仅手动的连接器不被处理', autoRun1.ok && !autoRun1.data.results.some((item) => item.configId === manualOnlyConn.data?.id), JSON.stringify(autoRun1.data).slice(0, 300))
+  const autoRun2 = await api('POST', '/api/iam/connectors/auto-sync', { token: admin })
+  check('到期巡检：刚同步过的连接器不重复处理', autoRun2.ok && autoRun2.data.processed === 0, JSON.stringify(autoRun2.data).slice(0, 200))
+  const delAutoSync = await api('DELETE', `/api/iam/connectors/${autoSyncConn.data?.id}`, { token: admin })
+  check('清理自动同步主体', delAutoSync.ok)
+  const delManualOnly = await api('DELETE', `/api/iam/connectors/${manualOnlyConn.data?.id}`, { token: admin })
+  check('清理仅手动主体', delManualOnly.ok)
+
+  // 全员名册：iam.roster.read（org_admin 经 iam.* 通配自带；接入应用经机器凭证 scope 授权）
+  const rosterAdmin = await api('GET', '/api/iam/roster', { token: admin })
+  check('管理员拉取全员名册（users+orgs）', rosterAdmin.ok && Array.isArray(rosterAdmin.data.users) && Array.isArray(rosterAdmin.data.orgs), JSON.stringify(rosterAdmin.data).slice(0, 200))
+  const rosterSyncedUser = rosterAdmin.ok ? rosterAdmin.data.users.find((u) => u.jobNumber === 'DD0001') : undefined
+  check('名册含同步账号（工号/组织名/稳定关联键 id）', Boolean(rosterSyncedUser) && Boolean(rosterSyncedUser.orgName) && Boolean(rosterSyncedUser.id))
+  check('名册组织含部门负责人（钉钉 dept_manager 同步链）', rosterAdmin.ok && rosterAdmin.data.orgs.some((org) => Array.isArray(org.leaderUserIds) && org.leaderUserIds.length > 0))
+  const rosterText = rosterAdmin.ok ? JSON.stringify(rosterAdmin.data) : ''
+  check('名册 PII 最小化（无口令字段/无手机号）', rosterText !== '' && !rosterText.includes('passwordHash') && !rosterText.includes('"phone"'))
+  const rosterNoAuth = await api('GET', '/api/iam/roster')
+  check('未认证拉取名册 401', rosterNoAuth.status === 401)
+  const rosterDeniedCred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'roster-denied', refType: 'app', scopes: ['agent.read'] } })
+  const rosterDeniedCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: rosterDeniedCred.data.clientId, clientSecret: rosterDeniedCred.data.clientSecret } })
+  const rosterDenied = await api('GET', '/api/iam/roster', { token: rosterDeniedCc.data?.token })
+  check('无 iam.roster.read 的机器凭证 403', rosterDenied.status === 403)
+  const rosterCred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'hr-app-roster', refType: 'app', scopes: ['iam.roster.read'] } })
+  check('签发名册读取机器凭证（应用接入组织数据通道）', rosterCred.ok && Boolean(rosterCred.data.clientId), JSON.stringify(rosterCred.data).slice(0, 200))
+  const rosterCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: rosterCred.data.clientId, clientSecret: rosterCred.data.clientSecret } })
+  const rosterMachine = await api('GET', '/api/iam/roster', { token: rosterCc.data?.token })
+  check('机器凭证（iam.roster.read）拉取名册 200（与管理员同视图）', rosterMachine.ok && rosterMachine.data.users.length === (rosterAdmin.data?.users?.length ?? -1))
+  const rosterAudit = await api('GET', '/api/audit/logs?type=invoke&q=roster', { token: admin })
+  check('名册拉取留痕（invoke 审计含 machine actor）', rosterAudit.ok && JSON.stringify(rosterAudit.data).includes('iam.roster.pull'))
+
   mcpStub.close()
   ddStub.close()
 
