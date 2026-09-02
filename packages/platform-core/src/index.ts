@@ -40,14 +40,18 @@ export interface PlatformCoreConfig {
 
 export const name = 'platform-core'
 
-export function apply(ctx: Context, config: PlatformCoreConfig = {}) {
-  ctx.plugin(StorageService, { dataDir: config.dataDir })
+export async function apply(ctx: Context, config: PlatformCoreConfig = {}) {
+  const storage = new StorageService(ctx, { dataDir: config.dataDir })
   ctx.plugin(PlatformBusService)
   ctx.plugin(SqliteTxnService, { dataDir: config.dataDir })
   if (config.provideToolRuntime !== false) {
     ctx.plugin(ToolRuntimeLite)
   }
   const http = new HttpServerService(ctx, config.http ?? {})
+  // 集合恢复必须先于一切业务集合读取（form B 教训：boot-all 的 restoreAll 在 loader
+  // 链路不存在，集合全空 → 演示种子重种撞幂等键 fatal）。apply 异步化，loader 会等待。
+  await storage.start()
+  await storage.restoreAll()
   // behavior 行为事件管道（WP-03/D6）：端点随基础层装配，鉴权依赖 console 中间件 + 本端点双层校验
   ctx.plugin(BehaviorService)
   // 卡片包服务（WP-05）：JSON 配置装载（目录可经 CARDPACK_DIR 覆盖）；端点由 console 聚合注册

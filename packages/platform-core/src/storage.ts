@@ -192,6 +192,26 @@ export class StorageService extends Service {
       if (this.flushTimer) clearTimeout(this.flushTimer)
       void this.flushNow()
     })
+    this.installSignalFlush()
+  }
+
+  /**
+   * 信号落盘钩子（form B 数据安全）：form A 的 main.ts 自带 SIGTERM/SIGINT → flushNow，
+   * 但挂载进 dsh 宿主后（loader 装配）没有等价钩子——防抖窗口内的写会在进程被
+   * SIGTERM（launchd kickstart / pkill）时丢失，且 SQLite（即时写）与 JSON 集合
+   * （防抖写）不同步会造成「半套数据」启动态。基础层自装一次（跨形态生效）；
+   * 双注册无害（form A main.ts 的处理器并存：flushChain 串行 + exit 幂等）。
+   */
+  private installSignalFlush(): void {
+    const proc = process as unknown as NodeJS.Process & Record<string, unknown>
+    for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+      const guard = `__rqStorageFlushInstalled_${signal}`
+      if (proc[guard] === true) continue
+      proc[guard] = true
+      process.on(signal, () => {
+        void this.flushNow().finally(() => process.exit(0))
+      })
+    }
   }
 
   async start(): Promise<void> {

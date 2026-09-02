@@ -505,7 +505,9 @@ async function seedDemo(ctx: Context): Promise<void> {
   for (let day = 27; day >= 0; day--) {
     const date = new Date(today.getTime() - day * 86400_000).toISOString().slice(0, 10)
     for (const service of [kb, dw, ticket, hrSvc]) {
-      const tokens = 20_000 + Math.floor(rand() * 160_000)
+      // 确定性派生（slug:date 锚定）：日期窗口随启动日滑动，tokens 若按循环位置取值，
+      // 同一幂等键跨日重种会绑到不同内容 → 冲突 fatal。键锚定内容后重种 = 幂等重放。
+      const tokens = 20_000 + Math.floor(mulberry32([...`${service.slug}:${date}`].reduce((acc, ch) => (acc * 31 + ch.charCodeAt(0)) >>> 0, 0))() * 160_000)
       ctx.usage.record({
         org: service.orgId,
         subject: 'agent:seed-demo',

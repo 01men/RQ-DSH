@@ -65,7 +65,10 @@ export interface DshBridgeConfig {
 export const name = 'dsh-bridge'
 
 /** webServer/httpServer 由 dsh web profile 与 platform-core 提供；entryTickets/oidc 由 plugin-authn 提供。 */
-export const inject = ['webServer', 'httpServer', 'entryTickets', 'oidc']
+export const inject = ['webServer', 'httpServer', 'entryTickets', 'oidc', 'opsStorage', 'iam']
+// 注：identityBinding 由本插件内部的 IdentityBindingService 直挂提供（不经 inject 声明，
+// 避免「自提供自依赖」死锁）；identityBinding 之外的存储/身份依赖必须声明——
+// dsh loader 按此列表裁剪轻量 ctx 的能力面，漏声明会在 form B 装配期抛 without inject。
 
 const BIND_TOKEN_PREFIX = 'rbs_'
 const DEFAULT_COOKIE = 'rq_sid'
@@ -234,9 +237,16 @@ export class IdentityBindingService extends Service {
 
 export function apply(ctx: Context, config: DshBridgeConfig = {}) {
   const mountPath = (config.mountPath ?? '/rq').replace(/\/+$/, '')
-  // 直挂（Service 基类注册 ctx.identityBinding）：复用已存在实例（自测视图注入），否则新建
-  const bindingService = (ctx as unknown as { identityBinding?: IdentityBindingService }).identityBinding
-    ?? new IdentityBindingService(ctx, { cookieName: config.cookieName, bindTtlSeconds: config.bindTtlSeconds })
+  // 直挂（Service 基类注册 ctx.identityBinding）：复用已存在实例（自测视图注入），否则新建。
+  // dsh loader 的轻量 ctx 对「未在 inject 声明的服务」读取会抛错（form B 实测）：
+  // 先探测再构造，探测失败（未预注入/被裁剪）一律走本地构造。
+  let prebound: IdentityBindingService | undefined
+  try {
+    prebound = (ctx as unknown as { identityBinding?: IdentityBindingService }).identityBinding
+  } catch {
+    prebound = undefined
+  }
+  const bindingService = prebound ?? new IdentityBindingService(ctx, { cookieName: config.cookieName, bindTtlSeconds: config.bindTtlSeconds })
   if (!mountPath.startsWith('/') || mountPath === '/') {
     throw new Error(`dsh-bridge mountPath 非法：${JSON.stringify(config.mountPath)}（须为以 / 开头的非根路径）`)
   }
