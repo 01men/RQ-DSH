@@ -2838,6 +2838,38 @@ try {
     && vacancyAlerts.some((alert) => alert.title.includes('负责人悬空')),
     JSON.stringify({ vacant: vacancy.data?.vacant?.map((org) => org.orgName) }))
 
+  // —— 负责人手动绑定（手动锁定优先于连接器同步，leaderVacant 处置入口）——
+  const mstUid = userAll.find((user) => user.jobNumber === 'DD0008')?.id // 孟疏桐：mock 目录市场部负责人的同步口径
+  check('负责人手动绑定夹具就绪（市场部同步负责人 DD0008）', Boolean(mstUid))
+  await api('PATCH', `/api/iam/orgs/${vacantOrg.data.id}`, { token: admin, body: { leaderUserIds: [mstUid] } })
+  const pinnedSample = (await api('GET', '/api/iam/orgs', { token: admin })).data.find((org) => org.id === vacantOrg.data.id)
+  const vacancyPinned = await api('POST', '/api/nas/authz/leader-vacancy-scan', { token: admin })
+  check('负责人手动绑定：落库 + leaderSource=manual + 悬空扫描不再命中',
+    pinnedSample?.leaderSource === 'manual' && JSON.stringify(pinnedSample?.leaderUserIds) === JSON.stringify([mstUid])
+    && !(vacancyPinned.data?.vacant ?? []).some((org) => org.orgId === vacantOrg.data.id),
+    JSON.stringify({ leaders: pinnedSample?.leaderUserIds, source: pinnedSample?.leaderSource }))
+
+  const mktId = orgByName('市场部')
+  await api('PATCH', `/api/iam/orgs/${mktId}`, { token: admin, body: { leaderUserIds: [linxmUid] } })
+  const resyncGuard = await api('POST', '/api/iam/connectors/dingtalk/sync', { token: admin })
+  const mktAfterSync = (await api('GET', '/api/iam/orgs', { token: admin })).data.find((org) => org.id === mktId)
+  check('手动锁定不被连接器同步覆盖（同步跳过 manual 组织并在消息计数）',
+    resyncGuard.ok && String(resyncGuard.data?.message ?? '').includes('手动锁定')
+    && mktAfterSync?.leaderSource === 'manual' && JSON.stringify(mktAfterSync?.leaderUserIds) === JSON.stringify([linxmUid]),
+    JSON.stringify({ msg: resyncGuard.data?.message, mkt: mktAfterSync?.leaderUserIds, src: mktAfterSync?.leaderSource }))
+
+  await api('PATCH', `/api/iam/orgs/${mktId}`, { token: admin, body: { leaderUserIds: [] } })
+  const mktCleared = (await api('GET', '/api/iam/orgs', { token: admin })).data.find((org) => org.id === mktId)
+  check('清空负责人恢复跟随同步（leaderSource 回 sync）',
+    mktCleared?.leaderSource === 'sync' && (mktCleared?.leaderUserIds ?? []).length === 0,
+    JSON.stringify({ src: mktCleared?.leaderSource }))
+  const resyncRestore = await api('POST', '/api/iam/connectors/dingtalk/sync', { token: admin })
+  const mktRestored = (await api('GET', '/api/iam/orgs', { token: admin })).data.find((org) => org.id === mktId)
+  check('恢复跟随同步后负责人由同步回填（孟疏桐 DD0008）',
+    resyncRestore.ok && JSON.stringify(mktRestored?.leaderUserIds) === JSON.stringify([mstUid]),
+    JSON.stringify({ mkt: mktRestored?.leaderUserIds, err: resyncRestore.error }))
+  await api('PATCH', `/api/iam/orgs/${vacantOrg.data.id}`, { token: admin, body: { leaderUserIds: [] } })
+
   const reconcile = await api('POST', '/api/nas/authz/reconcile', { token: admin })
   const reconcileReport = reconcile.data?.report ?? []
   const reconcileFindings = reconcileReport.flatMap((row) => row.findings ?? [])

@@ -6,7 +6,7 @@ const base = () => location.origin
 /** Agent 接入指引全文（可直接交给执行 Agent 照做；凭证已填好）。 */
 export function buildAgentOnboardingText(agent, credential) {
   const origin = base()
-  return `【任务】按《榕器平台 · Agent 接入指引》完成下方 Agent 的接入验证、运营数据提报与资料更新。平台地址：${origin}
+  return `【任务】按《榕器平台 · Agent 接入指引》完成下方 Agent 的接入验证与运营数据提报。平台地址：${origin}
 
 【资源与凭证】（client_secret 仅此一次展示，请立即安全保存，不落明文日志）
 - Agent ID：${agent.id}
@@ -31,26 +31,12 @@ curl -s -X POST ${origin}/api/agents/${agent.id}/metrics-report \\
 - 重复上报安全，可带 date（YYYY-MM-DD）补录历史；漏报将导致平台运营数据失真，接入验收以本接口 200 为准。
 - 调用次数/成功率/Token 由平台网关自动归集，无须也无法替代上述提报，两者口径互补。
 
-【第 3 步 · 提报更新（交互界面地址 + 自主更新资料）】
-curl -s -X PATCH ${origin}/api/agents/${agent.id} \\
-  -H "Authorization: Bearer <token>" -H 'content-type: application/json' \\
-  -d '{"attrs":{"entryUrl":"<交互界面地址 https://…>","description":"<最新描述，可注明版本号>","tags":["<版本号，如 v1.0.0>"]}}'
-→ entryUrl 是 Agent 面向用户的真实交互入口，接入后必须提报（白名单内字段）：
-  平台控制台据此在 Agent 卡片与详情页提供直达入口。PATCH 后 GET 复核生效。
-→ 平台授权直达（交互界面建议支持）：控制台「打开交互界面」以 #entry_ticket=<一次性票据> 打开
-  entryUrl；交互界面读取该片段并回平台兑换登录身份——
-  POST ${origin}/api/authn/entry-tickets/redeem  body {"ticket":"<票据>"}
-  → 响应 data.identity 即平台用户身份（sub/username/name/org/roles/tenant），据此免登进入界面。
-  票据一次性、约 2 分钟过期，过期/重放让用户从控制台重新打开即可。
-→ attrs 为白名单制：白名单外字段（含 version，放 attrs 或请求顶层都一样）静默丢弃——返回 200 但不落库。
-  版本登记：通用版本写 tags / description；提示词版本用 systemPromptVersion（上线必填）。
-
-【第 4 步 · 计量自推（直连场景必做）】
+【第 3 步 · 计量自推（直连场景必做）】
 仅绕过平台网关直连外部资源时需要：POST ${origin}/api/usage/record（凭自身凭证即可，凭证默认含 usage.write）。
 经平台网关的调用已自动计量（MCP 网关经 mcp.invoked、模型网关 POST /api/modelgw/invoke 凭自身凭证可调，
 计量事件 subject=agent:<id> 自动回灌调用台账），禁止双计。
 
-【第 5 步 · NAS 文件能力与数据权限（需文件能力时必读）】
+【第 4 步 · NAS 文件能力与数据权限（需文件能力时必读）】
 NAS 文件操作经文件网关（MCP：url=<网关地址>/mcp + Authorization: Bearer <管理员签发的网关令牌>）统一执法，
 按组织位置 + 角色层级 RBAC 判定，全链 fail-closed：
 - 身份红线（P0-2）：真实用户身份一律经请求头 X-On-Behalf-User: <平台或钉钉 userId> 透传，禁止进工具参数；
@@ -95,14 +81,7 @@ curl -s -X POST ${origin}/api/apps/${app.id}/metrics-report \\
 → 返回 200 即接入成功；GET ${origin}/api/apps/${app.id} 中 metrics.sessions ≥ 1 可复核。
 建议每日定时提报（同日 DAU 取最大值、会话数累加，重复上报安全，可带 date 补录历史）。
 
-【第 3 步 · 提报更新（自主更新资料）】
-curl -s -X PATCH ${origin}/api/apps/${app.id} \\
-  -H "Authorization: Bearer <token>" -H 'content-type: application/json' \\
-  -d '{"attrs":{"url":"<最新访问地址>","description":"<最新说明>","publishVersion":"<版本号，如 v1.0.0>"}}'
-→ attrs 为白名单制（应用没有 tags 字段）：白名单外字段（含 version）静默丢弃——返回 200 但不落库。
-  版本登记用 publishVersion；PATCH 后 GET 复核生效。
-
-【第 4 步 · 计量自推（可选）】
+【第 3 步 · 计量自推（可选）】
 仅绕过平台网关直连消耗才需要：POST ${origin}/api/usage/record（凭证默认含 usage.write）。
 经平台网关的调用已自动计量，禁止双计。
 
@@ -124,6 +103,9 @@ export function openOnboardingModal({ title, resource, credential, metaRows, gui
   const modal = openModal({
     title, wide: true,
     body: `
+      <div class="form-hint mb-8" style="background:var(--warn-bg);border:1px solid var(--warn-border);border-radius:8px;padding:10px 12px;font-size:13px">
+        <b style="color:var(--warn)">📢 强提醒：注册完成后，请务必立即把下方接入指引全文发给你的 Agent</b>（点「一键复制全部指引」粘贴到 Agent 对话框或任务指令中）——Agent 只有收到指引才会执行换牌、接入验证与后续运营数据提报，不发给 Agent 接入无法完成。
+      </div>
       <div class="form-hint mb-8" style="display:flex;gap:8px;align-items:center">
         <span style="color:var(--warn)">⏳</span>
         <span>凭证（client_secret）<b>仅此一次展示</b>，请立即通过下方「一键复制」保存；平台侧不可再查询，丢失请联系平台管理员处理。</span>
@@ -136,8 +118,8 @@ export function openOnboardingModal({ title, resource, credential, metaRows, gui
         <button class="btn btn-primary btn-sm" id="onboard-copy-all">${esc('⧉ 一键复制全部指引')}</button>
       </div>
       <pre class="mono fs-12" id="onboard-guide" style="white-space:pre-wrap;background:var(--bg-2);padding:12px;border-radius:8px;max-height:380px;overflow:auto;line-height:1.7">${esc(guideText)}</pre>
-      <div class="form-hint mt-8">整段复制后可直接粘贴给执行 Agent（或开发者）照做：换牌 → 接入验证 → 提报更新，${esc(resourceLabel)}即可自主完成接入与提报闭环。</div>`,
-    foot: '<button class="btn btn-primary" data-ok>我已保存凭证，关闭</button>',
+      <div class="form-hint mt-8">整段复制后发给执行 Agent（或开发者）照做：换牌 → 接入验证，${esc(resourceLabel)}即可自主完成接入与提报闭环。</div>`,
+    foot: '<button class="btn btn-primary" data-ok>我已保存凭证并已把指引发给 Agent，关闭</button>',
   })
   modal.el.querySelector('#onboard-copy-all').onclick = () => {
     const result = copyText(guideText)

@@ -28,11 +28,6 @@ export const AGENT_TYPE_SPEC: ResourceTypeSpec = {
       { key: 'entryUrl', label: '交互界面地址', type: 'url', group: 'tech', placeholder: 'https://…', hint: 'Agent 面向用户的真实交互入口；接入后由 Agent 凭自身凭证提报（接入义务），控制台据此提供直达入口' },
       { key: 'skills', label: '关联 Skill', type: 'tags', group: 'tech', defaultValue: [], hint: '从市场安装后自动回填' },
       { key: 'mcpPermGroupIds', label: 'MCP 权限组', type: 'tags', group: 'tech', defaultValue: [], hint: '授予该 Agent 的工具访问范围' },
-      { key: 'env', label: '运行环境', type: 'enum', group: 'tech', defaultValue: 'sandbox', options: [
-        { value: 'sandbox', label: '平台沙箱' },
-        { value: 'shared', label: '共享运行时' },
-        { value: 'dedicated', label: '独占实例' },
-      ] },
       { key: 'riskLevel', label: '风险等级', type: 'enum', group: 'governance', required: true, options: [
         { value: 'low', label: '低', hint: '只读检索类' },
         { value: 'medium', label: '中', hint: '可写业务数据' },

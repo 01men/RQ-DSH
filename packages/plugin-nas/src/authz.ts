@@ -349,7 +349,7 @@ export class NasAuthzService extends Service {
       this.ctx.audit.fire({
         severity: 'info',
         title: `组织「${org.name}」负责人悬空`,
-        message: `leaderUserIds 为空：该部门 delete/share 按矩阵无人可执行，请补录负责人（组织管理 → 负责人）。`,
+        message: `leaderUserIds 为空：该部门 delete/share 按矩阵无人可执行。可在控制台「组织与账号」选中该组织 →「设置负责人」手动绑定（锁定后不被连接器同步覆盖，清空即恢复跟随同步），或在钉钉侧配置部门负责人后触发同步。`,
         resourceType: 'org',
         resourceId: org.id,
       })

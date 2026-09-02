@@ -2002,6 +2002,9 @@ export function apply(ctx: Context) {
 
   guarded('PATCH', '/api/nas/:id', 'nas.write', (exchange) => {
     const input = body<{ name?: string; attrs?: Record<string, unknown> }>(exchange)
+    // 接入属性表单回显的是脱敏令牌（**** / 前 6 位+…）：原样保存会打穿真实令牌导致网关 401，丢弃之
+    const token = input.attrs?.['accessToken']
+    if (typeof token === 'string' && (/^\*+$/.test(token) || token.includes('…'))) delete input.attrs!['accessToken']
     const nas = ctx.nasRegistry.update(exchange.params['id']!, input)
     changeLog(exchange, 'nas.update', 'nas', nas.id, nas.name)
     return maskNasEntity(nas)

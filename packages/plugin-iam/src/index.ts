@@ -31,6 +31,11 @@ export interface OrgRecord extends RecordBase {
    * 多负责人全部推导为对应负责人角色（co-leader）；为空时 nasAuthz 发 leaderVacant 告警。
    */
   leaderUserIds?: string[]
+  /**
+   * 负责人口径（缺省 = 'sync' 跟随连接器同步）：'manual' 表示控制台手动绑定锁定，
+   * 连接器同步不再覆盖该组织的负责人（远端没配负责人的部门靠它补录）；清空负责人即恢复 'sync'。
+   */
+  leaderSource?: 'sync' | 'manual'
 }
 
 /** 租户（多租户最小集）：计量/钱包/分账的租户维度载体。 */
@@ -762,19 +767,23 @@ export class IamService extends Service {
       status: 'active',
       customFields: input.customFields ?? {},
       ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
-      ...(input.leaderUserIds !== undefined ? { leaderUserIds: input.leaderUserIds } : {}),
+      ...(input.leaderUserIds !== undefined ? { leaderUserIds: input.leaderUserIds, leaderSource: 'manual' } : {}),
     })
     this.ctx.platformBus.emit(PlatformEvents.OrgChanged, { kind: 'create', orgId: record.id, name: record.name })
     return record
   }
 
-  /** 维护组织负责人（控制台补录 / leaderVacant 告警后的处置入口）。传空数组即清空。 */
+  /** 维护组织负责人（控制台补录 / leaderVacant 告警后的处置入口）。传空数组即清空并恢复跟随同步。 */
   setOrgLeaders(id: string, leaderUserIds: string[]): OrgRecord {
     this.requireOrg(id)
-    for (const userId of leaderUserIds) {
+    const unique = [...new Set(leaderUserIds)]
+    for (const userId of unique) {
       if (!this.users().get(userId)) throw new Error(`负责人账号不存在：${userId}`)
     }
-    return this.orgs().update(id, { leaderUserIds: [...new Set(leaderUserIds)] })
+    // 手动绑定即锁定：连接器同步不再覆盖（钉钉侧没配负责人的部门靠它补录）；清空 = 恢复跟随同步。
+    return unique.length > 0
+      ? this.orgs().update(id, { leaderUserIds: unique, leaderSource: 'manual' })
+      : this.orgs().update(id, { leaderUserIds: [], leaderSource: 'sync' })
   }
 
   /** 兼容读取：负责人历史口径 customFields['leaderUserIds']（逗号分隔），结构化字段优先。 */
@@ -1539,15 +1548,19 @@ export class IamService extends Service {
     // 负责人同步（dev-plan-nas-authz 步骤 1）：dept_manager_userid_list → 平台 userId（identityLinks 反查）。
     // 置于用户循环之后：userid 身份链在同一轮先落库，负责人才映射得上（钉钉负责人列表是 userid 口径）。
     // 远端显式给空列表=清空负责人；字段缺省=不动本地（兼容旧目录源）。映射不上的远端负责人被丢弃（不落悬空 ID）。
+    // 手动锁定（leaderSource='manual'，控制台补录）的组织整段跳过——远端没配负责人的部门靠手动补录兜底。
     let leaderSynced = 0
+    let leaderPinned = 0
     for (const remoteOrg of directory.orgs) {
       if (!Array.isArray(remoteOrg.managerRemoteIds)) continue
       const localOrgId = remoteOrgToId.get(remoteOrg.remoteId)
       if (!localOrgId) continue
+      const localOrg = this.orgs().get(localOrgId)
+      if (localOrg?.leaderSource === 'manual') { leaderPinned++; continue }
       const leaderUserIds = remoteOrg.managerRemoteIds
         .map((remoteUserId) => this.identityLinks().findOne((link) => link.provider === provider && link.providerUserId === remoteUserId && (link.corpId ?? '') === config.corpId)?.userId)
         .filter((id): id is string => Boolean(id))
-      this.orgs().update(localOrgId, { leaderUserIds })
+      this.orgs().update(localOrgId, { leaderUserIds, leaderSource: 'sync' })
       leaderSynced++
     }
 
@@ -1555,7 +1568,7 @@ export class IamService extends Service {
     // 组成员可能静默变化，同步收尾时统一重算并与快照比对，漂移超阈值或涉及 C 关联组即告警。
     const drifts = this.refreshGroupSnapshots('connector-sync')
 
-    const result = { ok: true, created, updated, conflicts, frozen, message: `同步完成：新建 ${created}，更新 ${updated}，冲突 ${conflicts}，离职冻结 ${frozen}${leaderSynced > 0 ? `，负责人 ${leaderSynced}` : ''}${drifts.length > 0 ? `，组漂移 ${drifts.length}` : ''}` }
+    const result = { ok: true, created, updated, conflicts, frozen, message: `同步完成：新建 ${created}，更新 ${updated}，冲突 ${conflicts}，离职冻结 ${frozen}${leaderSynced > 0 ? `，负责人 ${leaderSynced}` : ''}${leaderPinned > 0 ? `，手动锁定 ${leaderPinned}` : ''}${drifts.length > 0 ? `，组漂移 ${drifts.length}` : ''}` }
     this.connectorConfigs().update(config.id, { lastSyncAt: new Date().toISOString(), lastSyncResult: result })
     this.ctx.platformBus.emit(PlatformEvents.ConnectorSynced, { provider, actor, ...result })
     return result

@@ -5,7 +5,7 @@ import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   renderTable, statusBadge, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, timeAgo, emptyState, sparkline, lineChart, maybeShowConceptCard,
-  searchableSelectField, mountSearchableSelects,
+  searchableSelectField, multiSelectField, mountSearchableSelects,
 } from '../ui.js'
 import { buildAgentOnboardingText, openOnboardingModal } from '../onboarding.js'
 
@@ -165,7 +165,7 @@ async function openAgentDetail(id, ctx) {
         ${statusBadge(agent.status)}
         <span class="badge ${riskClass(agent.attrs['riskLevel'])} no-dot">风险：${riskLabel(agent.attrs['riskLevel'])}</span>
         <span class="badge badge-info no-dot">密级：${dataClassLabel(agent.attrs['dataClass'])}</span>
-        <span class="badge badge-muted no-dot">环境：${envLabel(agent.attrs['env'])}</span>
+        ${agent.attrs['env'] ? `<span class="badge badge-muted no-dot">环境：${envLabel(agent.attrs['env'])}</span>` : ''}
       </div>
 
       <div class="stat-grid mb-20" style="grid-template-columns:repeat(4,1fr)">
@@ -325,7 +325,7 @@ token:    ${esc(result.token)}</div>`,
           <div class="card card-pad">
             <div class="card-title mb-8">${icon('key', 14)} 平台授权直达（entry-ticket）</div>
             <div class="muted-box mb-14" style="display:flex;gap:8px">${icon('info', 15)}<span>该 Agent 尚未提报交互界面地址——提报 <code class="mono">attrs.entryUrl</code> 后本页即可配置平台身份直达。</span></div>
-            <div class="form-hint">接入后由 Agent 凭自身凭证提报：PATCH /api/agents/:id {"attrs":{"entryUrl":"https://…"}}（接入提示词已含该义务）。</div>
+            <div class="form-hint">需要平台身份直达时由 Agent 凭自身凭证提报：PATCH /api/agents/:id {"attrs":{"entryUrl":"https://…"}}（首次接入指引不强制，接入后随时可补报）。</div>
           </div>`
         return
       }
@@ -489,7 +489,20 @@ function footForStatus(agent, ctx) {
   return buttons + deleteBtn || '<button class="btn btn-default" disabled>终态（已归档）</button>'
 }
 
-function openAgentCreate(schema, ctx) {
+async function openAgentCreate(schema, ctx) {
+  // 绑定类资源下拉数据源：拉取失败或为空时退回手填，不阻塞注册
+  const [skillData, pgData, groupsData] = await Promise.all([
+    api.get('/api/skills').catch(() => ({ skills: [] })),
+    api.get('/api/mcp/perm-groups').catch(() => ({ groups: [] })),
+    api.get('/api/iam/groups').catch(() => ({ groups: [] })),
+  ])
+  const resourceOptions = {
+    skills: (skillData.skills ?? []).filter((s) => s.status === 'published')
+      .map((s) => ({ value: s.slug, label: `${s.name}（${s.slug}）` })),
+    mcpPermGroupIds: (pgData.groups ?? []).map((g) => ({ value: g.id, label: g.name })),
+    trialGroups: [...new Map((groupsData.groups ?? []).map((g) => [g.name, g])).values()]
+      .map((g) => ({ value: g.name, label: g.name })),
+  }
   const groupsByField = new Map()
   for (const fieldSpec of schema.fields) {
     if (!groupsByField.has(fieldSpec.group)) groupsByField.set(fieldSpec.group, [])
@@ -512,13 +525,14 @@ function openAgentCreate(schema, ctx) {
       <div class="muted-box mt-8" style="display:flex;gap:8px">${icon('key', 15)}<span>注册成功后自动颁发机器身份凭证（Client Credentials），密钥仅展示一次。</span></div>`,
     foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>注册并颁发凭证</button>',
   })
+  mountSearchableSelects(modal.el)
   modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
   modal.el.querySelector('[data-ok]').onclick = async () => {
     const data = collectForm(modal.body)
     const attrs = {}
     for (const [key, value] of Object.entries(data)) {
       if (key.startsWith('attr_') && value !== '') attrs[key.slice(5)] = value
-      if (key.startsWith('tags_') && value) attrs[key.slice(4)] = value.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+      if (key.startsWith('tags_') && value) attrs[key.slice(5)] = value.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
     }
     try {
       const result = await api.post('/api/agents', { name: data.name, slug: data.slug || undefined, attrs })
@@ -554,6 +568,13 @@ function openAgentCreate(schema, ctx) {
       return field(f.label, textareaField(name, { placeholder: f.placeholder, rows: 2 }), { required: f.required, hint: f.hint, full: true })
     }
     if (f.type === 'tags') {
+      // 绑定类资源（skill / MCP 权限组 / 用户组）用多选搜索下拉；无可选项时退回手填
+      const options = resourceOptions[f.key]
+      if (options) {
+        return field(f.label, options.length
+          ? multiSelectField(tagsName, options, { placeholder: `搜索并选择${f.label}，可多选` })
+          : inputField(tagsName, { placeholder: '逗号分隔（平台暂无可选项，可手填）' }), { hint: f.hint, full: false })
+      }
       return field(f.label, inputField(tagsName, { placeholder: '逗号分隔' }), { hint: f.hint, full: false })
     }
     const input = inputField(name, { placeholder: f.placeholder, value: String(f.defaultValue ?? '') })

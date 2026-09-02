@@ -125,6 +125,7 @@ export async function renderIam(content, params, ctx) {
             </select>
             <span class="fs-12 text-3" id="member-count"></span>
           </div>
+          <div id="org-leader-bar"></div>
           <div id="member-table"></div>
         </div>
       </div>`
@@ -185,10 +186,12 @@ export async function renderIam(content, params, ctx) {
       attachDropdown(anchor, (menu) => {
         menu.innerHTML = `
           <button class="dropdown-item" data-act="add-child">${icon('plus')}新建子组织</button>
+          <button class="dropdown-item" data-act="leaders">${icon('users')}设置负责人</button>
           <button class="dropdown-item" data-act="rename">${icon('edit')}重命名</button>
           <button class="dropdown-item" data-act="move">${icon('gitBranch')}调整上级组织</button>
           <button class="dropdown-item danger" data-act="delete">${icon('trash')}删除组织</button>`
         menu.querySelector('[data-act="add-child"]').onclick = () => { anchor.remove(); openOrgCreate(treeData, node.id) }
+        menu.querySelector('[data-act="leaders"]').onclick = () => { anchor.remove(); openOrgLeaders(node) }
         menu.querySelector('[data-act="rename"]').onclick = async () => {
           anchor.remove()
           const modal = openModal({
@@ -271,6 +274,7 @@ export async function renderIam(content, params, ctx) {
       const search = api.qs({ orgId: selectedOrgId || undefined, q: q || undefined, status: status || undefined })
       const data = await api.get('/api/iam/users' + search)
       $('#member-count').textContent = `共 ${data.total} 人`
+      renderLeaderBar()
       const table = renderTable({
         columns: [
           {
@@ -299,6 +303,76 @@ export async function renderIam(content, params, ctx) {
     }
     $('#member-q').oninput = debounce(() => void refreshMembers(), 250)
     $('#member-status').onchange = () => void refreshMembers()
+
+    // 负责人栏：选中组织时展示当前负责人与口径（手动绑定 / 跟随同步）——
+    // 负责人是 NAS 数据权限 P/D/T 角色推导依据，leaderVacant 告警后的处置入口
+    function renderLeaderBar() {
+      const barEl = $('#org-leader-bar')
+      if (!barEl) return
+      const orgNode = selectedOrgId ? findOrgNode(treeData, selectedOrgId) : null
+      if (!orgNode) { barEl.innerHTML = ''; return }
+      const leaderIds = orgNode.leaderUserIds ?? []
+      const leaders = leaderIds.map((id) => usersData.users.find((u) => u.id === id)).filter(Boolean)
+      const manual = orgNode.leaderSource === 'manual'
+      barEl.innerHTML = `
+        <div class="flex muted-box" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;align-items:center">
+          ${icon('users', 14)}
+          <span class="fs-12 text-3" style="font-weight:600">负责人</span>
+          ${leaders.length
+            ? leaders.map((u) => `<span class="badge badge-brand no-dot">${esc(u.displayName)}</span>`).join('')
+              + `<span class="badge ${manual ? 'badge-purple' : 'badge-muted'} no-dot">${manual ? '手动绑定 · 同步不覆盖' : '跟随钉钉同步'}</span>`
+            : `<span class="fs-12 text-4">未设置——该部门在 NAS 数据权限中 delete/share 无人可执行，并触发负责人悬空告警</span>`}
+          <button class="btn btn-ghost btn-sm" id="org-lead-set" style="margin-left:auto">${icon('edit', 12)}设置负责人</button>
+        </div>`
+      barEl.querySelector('#org-lead-set').onclick = () => openOrgLeaders(orgNode)
+    }
+
+    /** 负责人维护弹窗：复选多选（co-leader）+ 搜索；保存非空 = 手动绑定锁定，清空 = 恢复跟随同步。 */
+    function openOrgLeaders(node) {
+      const leaderIds = node.leaderUserIds ?? []
+      const manual = node.leaderSource === 'manual'
+      const modal = openModal({
+        title: `设置负责人（${esc(node.name)}）`,
+        body: `
+          <div class="muted-box mb-14" style="display:flex;gap:8px">
+            ${icon('info', 15)}
+            <span class="fs-12">负责人是 NAS 数据权限 P/D/T 角色的推导依据（可多选，co-leader）。${manual
+              ? '当前为<b>手动绑定</b>：连接器同步不会覆盖；清空保存即恢复跟随钉钉同步。'
+              : '当前跟随钉钉同步：保存非空后转为<b>手动绑定</b>并被同步锁定——钉钉侧没配负责人的部门用这里补录。'}</span>
+          </div>
+          <div class="search-input mb-8">${icon('search')}<input class="input" id="org-lead-q" placeholder="搜索姓名 / 用户名 / 部门"></div>
+          <div id="org-lead-list" style="max-height:320px;overflow:auto"></div>`,
+        foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" id="org-lead-save">保存</button>',
+      })
+      const listEl = modal.body.querySelector('#org-lead-list')
+      const renderList = (kw) => {
+        const key = String(kw ?? '').trim().toLowerCase()
+        const candidates = usersData.users
+          .filter((u) => u.status === 'active' || leaderIds.includes(u.id))
+          .filter((u) => !key || `${u.displayName} ${u.username} ${u.orgName ?? ''}`.toLowerCase().includes(key))
+          .slice(0, 50)
+        listEl.innerHTML = candidates.length ? candidates.map((u) => `
+          <label class="flex" style="padding:9px 4px;border-bottom:1px solid var(--border);cursor:pointer">
+            <input type="checkbox" name="leader" value="${esc(u.id)}" ${leaderIds.includes(u.id) ? 'checked' : ''} style="accent-color:var(--brand-500)">
+            <div class="avatar sm">${esc(u.displayName.slice(0, 1))}</div>
+            <div class="grow">
+              <div class="fs-13" style="font-weight:500">${esc(u.displayName)} <span class="fs-11 text-4">@${esc(u.username)}</span></div>
+              <div class="fs-12 text-3">${esc(u.orgName ?? '—')} · ${esc(u.title || '未设置职位')}</div>
+            </div>
+          </label>`).join('') : '<div class="muted-box">没有匹配的账号</div>'
+      }
+      renderList('')
+      modal.body.querySelector('#org-lead-q').oninput = debounce((e) => renderList(e.target.value), 200)
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('#org-lead-save').onclick = async () => {
+        const picked = [...modal.body.querySelectorAll('input[name=leader]:checked')].map((el) => el.value)
+        try {
+          await api.patch(`/api/iam/orgs/${node.id}`, { leaderUserIds: picked })
+          toast(picked.length ? '负责人已保存（手动绑定，连接器同步不覆盖）' : '已清空负责人（恢复跟随钉钉同步）', 'success')
+          modal.close(); location.hash = '#/iam'; ctx.rerender()
+        } catch (error) { toast(error.message, 'error') }
+      }
+    }
 
     renderTree()
     await refreshMembers()
@@ -1082,6 +1156,15 @@ function flattenTreePaths(nodes, parentPath = [], rootName = '', out = []) {
     flattenTreePaths(node.children ?? [], path, rootName || node.name, out)
   }
   return out
+}
+/** 组织树按 id 查节点（负责人栏用；树节点为 OrgRecord 展开，自带 leaderUserIds/leaderSource）。 */
+function findOrgNode(nodes, id) {
+  for (const node of nodes ?? []) {
+    if (node.id === id) return node
+    const hit = findOrgNode(node.children ?? [], id)
+    if (hit) return hit
+  }
+  return null
 }
 /** 平铺组织列表（GET /api/iam/orgs）按 parentId 还原层级，拍平成带缩进深度的序列（下拉选项用）。 */
 function flattenOrgList(orgs) {
