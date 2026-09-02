@@ -1,0 +1,27 @@
+{
+  "name": "@dsh-ops/plugin-rq-card",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "榕器会话侧注入插件（WP-06）：四态执行卡片 + 👍/👎 反馈条，dsh.client 双面插件（浏览器半经 /plugins/<id>/client.js 下发）",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./*": "./src/*"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  }
+}

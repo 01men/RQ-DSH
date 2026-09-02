@@ -135,6 +135,20 @@ export class IdentityBindingService extends Service {
     return this.publicIdentity(record)
   }
 
+  /**
+   * 绑定自检（WP-04/A2）：带可识别原因码的绑定态查询——
+   * no_cookie（从未绑定/已注销）/ expired（绑定过期）/ account_inactive（账号冻结离职联动失效）。
+   * 工作台横幅与重绑引导按 reason 出文案（errors.js「身份绑定已失效」族）。
+   */
+  bindingStatus(cookieHeader: string | undefined): { bound: boolean; reason?: 'no_cookie' | 'expired' | 'account_inactive'; identity?: Record<string, unknown> } {
+    const token = this.readCookieToken(cookieHeader)
+    if (!token) return { bound: false, reason: 'no_cookie' }
+    const record = this.byToken.get(token)
+    if (!record || Date.now() - record.issuedAt > this.ttlMs) return { bound: false, reason: 'expired' }
+    if (!this.isAccountActive(record.userId)) return { bound: false, reason: 'account_inactive' }
+    return { bound: true, identity: this.publicIdentity(record) }
+  }
+
   /** 直接以平台身份建立绑定（OIDC 授权码通道：userinfo 换取后）。 */
   bindIdentity(identity: { sub: string; name?: string; roles?: string[]; org?: { id?: string } }): string {
     const token = BIND_TOKEN_PREFIX + randomBytes(24).toString('hex')
@@ -340,8 +354,9 @@ export function apply(ctx: Context, config: DshBridgeConfig = {}) {
         return
       }
       if (req.method === 'GET' && endpoint === 'status') {
-        const identity = binding.identityForCookie(req.headers.cookie)
-        json(200, { ok: true, data: identity ? { bound: true, identity } : { bound: false } })
+        // WP-04/A2：带原因码的绑定自检（no_cookie/expired/account_inactive），供工作台横幅与重绑引导
+        const status = binding.bindingStatus(req.headers.cookie)
+        json(200, { ok: true, data: status })
         return
       }
       if (req.method === 'POST' && endpoint === 'logout') {

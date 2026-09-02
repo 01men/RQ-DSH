@@ -3,6 +3,10 @@ import { icon } from './icons.js'
 import { session, api } from './api.js'
 import { $, $$, h, toast, esc } from './ui.js'
 import { openCmdk } from './cmdk.js'
+import { replayPlatformTheme } from './platform.js'
+
+// 平台主题（WP-05/B3）：启动即回放记忆的平台（免闪默认色）；登录后由工作台按卡片包下发的 platform 校准。
+replayPlatformTheme()
 
 import { renderLogin } from './pages/login.js'
 import { renderDashboard } from './pages/dashboard.js'
@@ -18,6 +22,7 @@ import { renderApps } from './pages/apps.js'
 import { renderAudit } from './pages/audit.js'
 import { renderApprovals } from './pages/approvals.js'
 import { renderAssets } from './pages/assets.js'
+import { renderRegister } from './pages/register.js'
 import { renderPlatform } from './pages/platform.js'
 import { renderConnect } from './pages/connect.js'
 import { renderOauthAuthorize, renderOauthError, renderOauthLogout } from './pages/oauth.js'
@@ -28,6 +33,7 @@ const NAV = [
     { path: '#/dashboard', label: '工作台', icon: 'dashboard', perm: 'console.login' },
   ] },
   { section: 'AI 资源', items: [
+    { path: '#/register', label: '资产登记', icon: 'zap', perm: 'console.login' },
     { path: '#/skills', label: 'Skill 市场', icon: 'sparkles', perm: 'skill.read' },
     { path: '#/agents', label: 'Agent 本体', icon: 'bot', perm: 'agent.read' },
     { path: '#/apps', label: 'AI 应用', icon: 'app', perm: 'app.read' },
@@ -81,6 +87,7 @@ function navigate() {
 
   const builders = {
     dashboard: renderDashboard,
+    register: renderRegister,
     iam: renderIam,
     authn: renderAuthn,
     mcp: renderMcp,

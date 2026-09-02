@@ -1,5 +1,5 @@
 /** Skill 市场：卡片市场 + 详情（版本历史/审批时间线/安装）+ 提交/审批流。 */
-import { api, session, BASE } from '../api.js'
+import { api, session, downloadBlob } from '../api.js'
 import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
@@ -240,11 +240,8 @@ async function openSkillDetail(id, ctx, refresh) {
     try {
       // 先登记下载（审计可回溯谁下载了哪个版本），再拉 zip 触发浏览器保存
       await api.post(`/api/skills/${skill.id}/download`, {})
-      const resp = await fetch(`${BASE}/api/skills/${skill.id}/package?version=${encodeURIComponent(skill.currentVersion)}`, {
-        headers: { authorization: `Bearer ${session.token}` },
-      })
-      if (!resp.ok) throw new Error(`skill.zip 下载失败（${resp.status}）`)
-      const url = URL.createObjectURL(await resp.blob())
+      const blob = await downloadBlob(`/api/skills/${skill.id}/package?version=${encodeURIComponent(skill.currentVersion)}`)
+      const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
       a.download = `${skill.slug}-${skill.currentVersion}.zip`

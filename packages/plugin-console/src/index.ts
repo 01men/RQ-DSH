@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url'
 import { existsSync, readdirSync, createReadStream } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
-import { createPluginContext, newId, platformVersionInfo } from '../../platform-core/src/index.ts'
+import { createPluginContext, newId, platformVersionInfo, CARD_PLATFORMS, filterCards, type CardPlatform } from '../../platform-core/src/index.ts'
+import { nonbillableUsage } from '../../plugin-usage/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import { AppRegistryService } from '../../plugin-app/src/index.ts'
 import { AgentRegistryService } from '../../plugin-agent/src/index.ts'
@@ -24,7 +25,7 @@ export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'oidc', 'entryTickets', 'audit', 'usage', 'billing', 'market', 'modelGateway',
   'mcpRegistry', 'nasRegistry', 'nasAuthz', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
-  'connectorHub',
+  'connectorHub', 'cardpacks',
 ]
 
 interface CallerInfo {
@@ -39,8 +40,8 @@ interface CallerInfo {
   actChain: Array<{ name: string; type: string }>
 }
 
-const PUBLIC_PATHS = new Set([
-  '/api/auth/login',
+// 公开路径白名单（免鉴权）：导出供 selftest「rbac endpoint matrix」比对——清单变动即红
+export const PUBLIC_PATHS = new Set([  '/api/auth/login',
   '/api/auth/sso',
   '/api/auth/sso/authorize',
   '/api/auth/sso/callback',
@@ -192,8 +193,10 @@ export function apply(ctx: Context) {
     return false
   }
 
-  /** 注册一条受权限保护的路由。 */
+  /** 注册一条受权限保护的路由。同时登记进路由×权限矩阵（WP-04/A1：矩阵驱动 RBAC 断言）。 */
+  const routeMatrix: Array<{ method: string; path: string; permission: string }> = []
   const guarded = (method: string, path: string, permission: string, handler: (exchange: HttpExchange) => unknown | Promise<unknown>): void => {
+    routeMatrix.push({ method, path, permission })
     http.register(method, path, async (exchange) => {
       if (!requirePermission(exchange, permission)) return
       try {
@@ -3097,6 +3100,77 @@ export function apply(ctx: Context) {
     return event
   })
 
+  // -- 全员工作台 / 效果回传（WP-04/A3 + WP-07/D1） ---------------------------------
+
+  /** 资产引用 → 展示名（agent/app/nas 走资源注册表，mcp/skill 走各自注册表；id 或 slug 命中均可）。 */
+  const usageAssetName = (resource: string): string => {
+    const colon = resource.indexOf(':')
+    const type = resource.slice(0, colon)
+    const id = resource.slice(colon + 1)
+    const matches = (item: { id?: string; slug?: string; name?: string }): boolean => item.id === id || item.slug === id
+    try {
+      if (type === 'agent' || type === 'app' || type === 'nas') return ctx.resourceCore.list(type).find(matches)?.name ?? id
+      if (type === 'mcp') return ctx.mcpRegistry.services().all().find(matches)?.name ?? id
+      if (type === 'skill') return ctx.skillHub.skills().all().find(matches)?.name ?? id
+    } catch { /* 注册表缺失时回落裸标识 */ }
+    return id
+  }
+
+  /**
+   * 最近调用（WP-04/A3 全员工作台）：当前登录人自身的计量事件 ≤5，只读自见（不做跨人透视）。
+   * 管理口径仍走 /api/usage/events（usage.read）。
+   */
+  guarded('GET', '/api/usage/recent', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    if (!info.userId) return { items: [] }
+    const limit = Math.min(Number(exchange.query.get('limit') ?? 5) || 5, 20)
+    const subject = `user:${info.userId}`
+    const items = ctx.usage.query({ limit: 200 }).items
+      .filter((event) => event.subject === subject)
+      .slice(0, limit)
+      .map((event) => ({
+        event_id: event.event_id,
+        occurred_at: event.occurred_at,
+        resource: event.resource,
+        name: usageAssetName(event.resource),
+        meters: event.meters,
+        charge_cents: event.pricing.charge_cents,
+        nonbillable: event.pricing.rate?.nonbillable === true,
+      }))
+    return { items }
+  })
+
+  /**
+   * 反馈回传（WP-07/D1）：👍/👎 薄端点 —— 落零价快照 usage 事件（D2：charge=0 + nonbillable，
+   * 不污染计费口径）。主体经 X-On-Behalf-User 归因（Agent 代用户回传），缺省取登录人；
+   * 幂等键=主体+资源+消息+评分，同键重放不重复计数。
+   */
+  guarded('POST', '/api/usage/feedback', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    const input = body<{ resource: string; messageId?: string; score: 'up' | 'down'; note?: string }>(exchange)
+    if (!input.resource?.trim() || (input.score !== 'up' && input.score !== 'down')) {
+      exchange.fail(400, 'BAD_REQUEST', 'resource 与 score（up/down）必填')
+      return
+    }
+    const onBehalf = String(exchange.headers['x-on-behalf-user'] ?? '').trim()
+    const subject = onBehalf ? `user:${onBehalf}` : (info.userId ? `user:${info.userId}` : '')
+    if (!subject) {
+      exchange.fail(403, 'FORBIDDEN', '机器主体回传反馈须携带 X-On-Behalf-User 归因到人')
+      return
+    }
+    const orgId = (info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined) ?? ''
+    const event = ctx.usage.record(nonbillableUsage({
+      org: orgId,
+      subject,
+      principal: orgId ? `org:${orgId}` : 'platform',
+      resource: input.resource,
+      idempotency_key: `feedback:${subject}:${input.resource}:${input.messageId ?? 'anon'}:${input.score}`,
+    }))
+    changeLog(exchange, 'usage.feedback', 'usage_event', event.event_id, input.resource,
+      `${input.score}${input.note ? `：${input.note}` : ''}（非计费零价快照，X-On-Behalf-User${onBehalf ? `=${onBehalf}` : '未用'}）`)
+    return { event_id: event.event_id, charge_cents: event.pricing.charge_cents, nonbillable: event.pricing.rate?.nonbillable === true }
+  })
+
   guarded('GET', '/api/usage/price-book', 'usage.admin', () => ({
     entries: ctx.usage.priceBook().all(),
   }))
@@ -3422,6 +3496,59 @@ export function apply(ctx: Context) {
   })
 
   // -- 平台信息与工具桥 -----------------------------------------------------
+  /**
+   * 卡片包下发（WP-05/B1）：按「角色 × 平台」过滤，首页上限 6 张；
+   * 资产 ref 存活性在此裁决（console 持有 iam/资源注册表），失效 ref 静默过滤并留审计告警。
+   */
+  guarded('GET', '/api/platform/card-packs', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    // 平台解析链：显式 query > 部署环境 RQ_PLATFORM > rd 试点 > 首个有包平台 > strategy 兜底
+    const available = [...new Set(ctx.cardpacks.all().map((pack) => pack.platform))]
+    const requested = exchange.query.get('platform') ?? process.env.RQ_PLATFORM
+      ?? (available.includes('rd') ? 'rd' : available[0]) ?? 'strategy'
+    if (!CARD_PLATFORMS.includes(requested as CardPlatform)) {
+      exchange.fail(400, 'BAD_REQUEST', `platform 非法（应为 ${CARD_PLATFORMS.join('/')}）`)
+      return
+    }
+    const platform = requested as CardPlatform
+    const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
+    const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
+    const refAlive = (ref: string): boolean => {
+      const colon = ref.indexOf(':')
+      const type = ref.slice(0, colon)
+      const id = ref.slice(colon + 1)
+      const matches = (item: { id?: string; slug?: string }): boolean => item.id === id || item.slug === id
+      try {
+        if (type === 'agent' || type === 'app' || type === 'nas') {
+          return ctx.resourceCore.list(type).some(matches)
+        }
+        if (type === 'mcp') return ctx.mcpRegistry.services().all().some(matches)
+        if (type === 'skill') return ctx.skillHub.skills().all().some(matches)
+        if (type === 'kb') return ctx.iam.orgs().get(id) !== undefined
+        return true
+      } catch {
+        return true
+      }
+    }
+    ctx.cardpacks.setRefAliveResolver(refAlive)
+    const packs = ctx.cardpacks.forPlatform(platform)
+    const { cards, droppedDeadRefs } = filterCards({ packs, roles, refAlive })
+    if (droppedDeadRefs.length > 0) {
+      ctx.platformBus.emit('audit.alert.fired', {
+        id: newId('alt'), severity: 'warning', title: '卡片包含失效资产引用',
+        message: `平台 ${platform} 卡片包中 ${droppedDeadRefs.length} 个 ref 已失效被过滤：${droppedDeadRefs.join('、')}（请修正 cardpacks 配置）`,
+      })
+    }
+    return { platform, label: packs[0]?.label ?? '', roles, cards, totalPacks: packs.length, availablePlatforms: available, droppedDeadRefs }
+  })
+
+  /** 路由×权限矩阵（WP-04/A1）：RBAC 端点覆盖的服务端事实源，selftest 据此驱动 100% 越权断言。 */
+  guarded('GET', '/api/platform/route-matrix', 'audit.read', () => ({
+    guarded: routeMatrix,
+    public: [...PUBLIC_PATHS],
+    note: 'guarded=权限点保护端点；public=鉴权中间件白名单（免鉴权，变动须经评审）',
+  }))
+
   guarded('GET', '/api/platform/info', 'console.login', () => {
     const versionInfo = platformVersionInfo()
     const plugins = [

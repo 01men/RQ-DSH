@@ -14,6 +14,7 @@ import { ToolRuntimeLite } from './tools-lite.ts'
 import { HttpServerService } from './http.ts'
 import { SqliteTxnService } from './sqlite.ts'
 import { BehaviorService } from './behavior.ts'
+import { CardpackService } from './cardpacks.ts'
 
 export * from './storage.ts'
 export * from './bus.ts'
@@ -26,6 +27,7 @@ export * from './zip.ts'
 export * from './plugin-ctx.ts'
 export * from './version.ts'
 export * from './behavior.ts'
+export * from './cardpacks.ts'
 
 export interface PlatformCoreConfig {
   dataDir?: string
@@ -48,6 +50,8 @@ export function apply(ctx: Context, config: PlatformCoreConfig = {}) {
   const http = new HttpServerService(ctx, config.http ?? {})
   // behavior 行为事件管道（WP-03/D6）：端点随基础层装配，鉴权依赖 console 中间件 + 本端点双层校验
   ctx.plugin(BehaviorService)
+  // 卡片包服务（WP-05）：JSON 配置装载（目录可经 CARDPACK_DIR 覆盖）；端点由 console 聚合注册
+  ctx.plugin(CardpackService)
   if (config.startHttp !== false) {
     void http.start().then(() => {
       ctx.logger('platform-core').info(`HTTP 服务已启动：http://${http.host}:${http.port}`)

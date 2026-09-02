@@ -1,0 +1,51 @@
+{
+  "platform": "quality",
+  "label": "质量平台卡片包（客服与质量场景，试点）",
+  "roles": ["*"],
+  "cards": [
+    {
+      "id": "qa-smart-cs",
+      "title": "智能客服",
+      "description": "客诉首答与安抚话术推荐，坐席辅助主入口",
+      "badge": "agent",
+      "href": "#/agents",
+      "ref": "agent:smart-cs",
+      "order": 10
+    },
+    {
+      "id": "qa-complaint-skill",
+      "title": "客诉安抚话术库",
+      "description": "按情绪等级匹配安抚话术，先共情后解释",
+      "badge": "skill",
+      "href": "#/skills",
+      "ref": "skill:客诉安抚话术库",
+      "order": 20
+    },
+    {
+      "id": "qa-ticket",
+      "title": "客服工单系统",
+      "description": "工单创建、流转与SLA跟踪的对话式入口",
+      "badge": "mcp",
+      "href": "#/mcp",
+      "ref": "mcp:ticket-service",
+      "order": 30
+    },
+    {
+      "id": "qa-portal",
+      "title": "智能客服门户",
+      "description": "面向客户的客服门户应用，直达在线服务",
+      "badge": "app",
+      "href": "#/apps",
+      "ref": "app:cs-portal",
+      "order": 40
+    },
+    {
+      "id": "qa-register",
+      "title": "登记新资产",
+      "description": "提示词、流程、接口、数据——四步登记上架",
+      "badge": "skill",
+      "href": "#/register",
+      "order": 50
+    }
+  ]
+}

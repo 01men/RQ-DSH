@@ -1002,6 +1002,159 @@ try {
     check('behavior 只读：audit.read 可查且幂等不双计（total=1）', adminRead.ok && adminRead.data.total === 1, JSON.stringify(adminRead.data))
   }
 
+  section('卡片包与五平台主题（WP-05：角色×平台下发 / ref 存活 / 主题属性差）')
+  {
+    const packsRd = await api('GET', '/api/platform/card-packs?platform=rd', { token: dev })
+    check('卡片包：研发平台试点包下发（装载 + 首页 ≤6 张）',
+      packsRd.ok && packsRd.data.totalPacks >= 1 && packsRd.data.cards.length >= 3 && packsRd.data.cards.length <= 6,
+      JSON.stringify(packsRd.error ?? { totalPacks: packsRd.data?.totalPacks, cards: packsRd.data?.cards?.length }))
+    check('卡片包：试点卡引用真实资产（agent:dev-coder / skill:sql-审查助手 存活命中）',
+      packsRd.ok && packsRd.data.cards.some((card) => card.ref === 'agent:dev-coder') && packsRd.data.cards.some((card) => card.ref === 'skill:sql-审查助手'),
+      JSON.stringify(packsRd.data?.cards?.map((card) => card.ref)))
+    const packsQuality = await api('GET', '/api/platform/card-packs?platform=quality', { token: dev })
+    check('卡片包：质量平台试点包下发', packsQuality.ok && packsQuality.data.cards.length >= 3, JSON.stringify(packsQuality.error))
+    const packsBad = await api('GET', '/api/platform/card-packs?platform=nope', { token: dev })
+    check('卡片包：非法平台 400（枚举校验）', packsBad.status === 400, String(packsBad.status))
+    const themeCss = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'css', 'base.css'), 'utf8')
+    check('主题：五平台仅 data-platform 属性差（五块覆盖 + 定版色值在位，无 Tailwind 引入）',
+      [['strategy', '#3B4CC0'], ['marketing', '#E8590C'], ['manufacturing', '#0C8599'], ['rd', '#7048E8'], ['quality', '#2F9E44']]
+        .every(([platform, hex]) => themeCss.includes(`data-platform="${platform}"`) && themeCss.includes(hex))
+        && !themeCss.includes('tailwind'),
+      'base.css 平台主题块缺失或色值漂移')
+  }
+
+  section('rbac endpoint matrix（WP-04/A1：普通成员直调管理端点 100% 被拒，矩阵驱动）')
+  {
+    const matrix = await api('GET', '/api/platform/route-matrix', { token: admin })
+    check('矩阵：服务端路由×权限矩阵可查询（端点覆盖面充足）',
+      matrix.ok && matrix.data.guarded.length >= 100 && matrix.data.public.length >= 5,
+      `guarded=${matrix.data?.guarded?.length} public=${matrix.data?.public?.length}`)
+    // 普通成员：member 角色仅 console.login + skill.read + agent.read + app.read
+    const roles = (await api('GET', '/api/iam/roles', { token: admin })).data.roles
+    const memberRole = roles.find((role) => role.code === 'member')
+    const memberInit = await api('POST', '/api/iam/users', { token: admin, body: { username: 'matrix_member', displayName: '矩阵探针', orgId: tenantOrg.data.id, roleIds: [memberRole.id] } })
+    const memberInitPassword = memberInit.data?.initialPassword ?? 'Ybk@2026'
+    const memberLogin = await api('POST', '/api/auth/login', { body: { username: 'matrix_member', password: memberInitPassword } })
+    check('矩阵：普通成员账号就绪', memberLogin.ok, JSON.stringify(memberLogin.error))
+    const member = memberLogin.data.token
+    const memberPerms = memberLogin.data.user.permissions
+    const denied = matrix.data.guarded.filter((route) => !route.permission.split(',').some((point) => memberPerms.includes(point)))
+    let rejectedCount = 0
+    const leaked = []
+    for (const route of denied) {
+      const probePath = route.path.replace(/:[a-zA-Z]+/g, 'selftest-probe')
+      try {
+        const probe = await api(route.method, probePath, { token: member, ...(route.method === 'GET' ? {} : { body: {} }) })
+        if (probe.status === 403) rejectedCount++
+        else leaked.push(`${route.method} ${route.path}(${route.permission}) → ${probe.status}`)
+      } catch (error) {
+        leaked.push(`${route.method} ${route.path} → 异常 ${error.message}`)
+      }
+    }
+    check(`矩阵：${denied.length} 个越权探针 100% 被拒 403（端点清单变动即红）`,
+      denied.length >= 50 && leaked.length === 0,
+      leaked.length ? `泄漏端点：${leaked.slice(0, 5).join('；')}` : `denied=${denied.length} rejected=${rejectedCount}`)
+    const expectedPublic = ['/api/auth/login', '/api/auth/refresh', '/api/health', '/api/authn/entry-tickets/redeem', '/api/auth/entry-ticket-session']
+    check('矩阵：公开白名单零意外扩张（变动须经评审后同步本清单）',
+      expectedPublic.every((path) => matrix.data.public.includes(path)),
+      JSON.stringify(matrix.data.public))
+    const bareFetch = []
+    const walkJs = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory() ? walkJs(join(dir, entry.name)) : [join(dir, entry.name)])
+    for (const file of walkJs(join(process.cwd(), 'packages', 'plugin-console', 'public'))) {
+      if (!file.endsWith('.js')) continue
+      if (file.replaceAll('\\', '/').endsWith('/js/api.js')) continue
+      if (file.replaceAll('\\', '/').endsWith('/js/pages/oauth.js')) continue // 协议页豁免（注释在案）
+      const text = readFileSync(file, 'utf8')
+      if (/fetch\(|XMLHttpRequest|EventSource/.test(text)) bareFetch.push(file.split(/[\\/]/).pop())
+    }
+    check('走查不变量：console 前端除 api.js（与协议页豁免）外零裸 fetch/XHR/SSE',
+      bareFetch.length === 0, JSON.stringify(bareFetch))
+  }
+
+  section('usage 最近调用（WP-04/A3：工作台自见 ≤5）')
+  {
+    const devUserId = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('dev'), { token: admin })).data.users.find((user) => user.username === 'dev').id
+    await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: `user:${devUserId}`, principal: `org:${tenantOrg.data.id}`,
+      resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 1200, unit: 'token' }], idempotency_key: 'test-usage-recent-001',
+    } })
+    const recent = await api('GET', '/api/usage/recent?limit=5', { token: dev })
+    check('最近调用：登录人自身计量事件自见（≤5 条，含展示名与计量明细）',
+      recent.ok && recent.data.items.length >= 1 && recent.data.items.length <= 5
+      && recent.data.items[0].resource === 'mcp:real-backend' && Boolean(recent.data.items[0].name) && Array.isArray(recent.data.items[0].meters),
+      JSON.stringify(recent.error ?? recent.data))
+    const recentAnon = await api('GET', '/api/usage/recent')
+    check('最近调用：未认证被拒（401，服务端强制不靠菜单隐藏）', recentAnon.status === 401)
+  }
+
+  section('feedback 回传（WP-07/D1：👍👎 落零价快照 + 归因 + 幂等不重复计数）')
+  {
+    const fb = await api('POST', '/api/usage/feedback', { token: dev, body: { resource: 'agent:dev-coder', messageId: 'msg-drill-1', score: 'up', note: '很准' } })
+    check('feedback：👍 落库为非计费零价快照（charge=0 + nonbillable）',
+      fb.ok && fb.data.charge_cents === 0 && fb.data.nonbillable === true, JSON.stringify(fb.error ?? fb.data))
+    const fbReplay = await api('POST', '/api/usage/feedback', { token: dev, body: { resource: 'agent:dev-coder', messageId: 'msg-drill-1', score: 'up' } })
+    check('feedback：同键重放幂等（同一 event_id，不重复计数）', fbReplay.ok && fbReplay.data.event_id === fb.data.event_id)
+    const devUserId = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('dev'), { token: admin })).data.users.find((user) => user.username === 'dev').id
+    const fbOnBehalf = await rawReq('POST', '/api/usage/feedback', {
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}`, 'x-on-behalf-user': devUserId },
+      body: JSON.stringify({ resource: 'agent:dev-coder', messageId: 'msg-drill-2', score: 'down' }),
+    })
+    check('feedback：X-On-Behalf-User 归因到人（Agent 代用户回传）', fbOnBehalf.status === 200, String(fbOnBehalf.status))
+    const agentEvents = await api('GET', '/api/usage/events?resource=' + encodeURIComponent('agent:dev-coder') + '&limit=50', { token: admin })
+    const subjects = new Set(agentEvents.data.items.map((event) => event.subject))
+    check('feedback：事件主体归因正确（dev 本人 + OBO 归因均在列）', subjects.has(`user:${devUserId}`), JSON.stringify([...subjects]))
+    const fbBad = await api('POST', '/api/usage/feedback', { token: dev, body: { resource: 'agent:dev-coder', score: 'meh' } })
+    check('feedback：非法评分被拒 400', fbBad.status === 400, String(fbBad.status))
+  }
+
+  section('错误文案映射完整性（WP-06/C3：枚举全部对外原因码，漏配即红）')
+  {
+    const errors = await import(new URL('../packages/plugin-console/public/js/errors.js', import.meta.url).href)
+    const REQUIRED = ['nas-authz-deny', 'breaker-open', 'quota-exhausted', 'pdp-unreachable', 'degraded', 'binding-invalid', 'invoke-error']
+    const missing = REQUIRED.filter((code) => !errors.ERROR_CODES.includes(code))
+    check('文案：定版六条原因码 + 会话侧兜底码全部在册', missing.length === 0, `缺失：${missing.join(', ')}`)
+    const blank = REQUIRED.filter((code) => {
+      const copy = errors.errorCopy(code)
+      return !copy.title || !copy.message || (copy.action ? !copy.action.label || !copy.action.href : false)
+    })
+    check('文案：每条原因码均有标题/正文/行动按钮（无空文案）', blank.length === 0, `空配：${blank.join(', ')}`)
+    const bindingDetail = errors.errorCopy('binding-invalid', 'account_inactive')
+    check('文案：绑定失效细分原因出可读补充（冻结/离职联动语义）',
+      bindingDetail.message.includes('账号状态'), JSON.stringify(bindingDetail.message))
+    const fallback = errors.errorCopy('no-such-code-xyz')
+    check('文案：未知原因码回落通用兜底（永不裸奔技术错误）', fallback.title.includes('无法完成') || fallback.title.length > 0)
+    check('文案：绑定细分原因码在册（no_cookie/expired/account_inactive）',
+      ['no_cookie', 'expired', 'account_inactive'].every((reason) => errors.BINDING_REASONS.includes(reason)))
+  }
+
+  section('四态状态源映射（WP-06/C2：rq-card 纯函数，状态输入 → UI 态输出）')
+  {
+    const stateMod = await import(new URL('../packages/plugin-rq-card/src/client/state.ts', import.meta.url).href)
+    const derive = stateMod.deriveExecutionState
+    check('四态：调用中（invoke 发起中 → calling，骨架可取消）', derive({ invokePhase: 'calling', hasResult: false, resultIsError: false }).state === 'calling')
+    check('四态：执行中（healthy + 无结果 → executing）', derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, healthStatus: 'healthy' }).state === 'executing')
+    check('四态：执行中 degraded 附「有点慢」（degraded:true 附加信息）', (() => {
+      const result = derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, healthStatus: 'degraded' })
+      return result.state === 'executing' && result.degraded === true
+    })())
+    check('四态：已完成（调用返回 + 非 error → done，呈现 👍/👎）', derive({ invokePhase: 'idle', hasResult: true, resultIsError: false }).state === 'done')
+    check('四态：异常阻断优先级（authzDenied > quotaExceeded > pdpUnreachable > breakerOpen > down）',
+      derive({ invokePhase: 'idle', hasResult: true, resultIsError: false, authzDenied: true, quotaExceeded: true, breakerOpen: true, healthStatus: 'down' }).reason === 'nas-authz-deny'
+      && derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, quotaExceeded: true, breakerOpen: true, healthStatus: 'down' }).reason === 'quota-exhausted'
+      && derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, breakerOpen: true, healthStatus: 'down' }).reason === 'breaker-open'
+      && derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, healthStatus: 'down' }).reason === 'down')
+    check('四态：阻断 fail-safe 优先于完成态（历史结果不误导当前可用性）',
+      derive({ invokePhase: 'idle', hasResult: true, resultIsError: false, breakerOpen: true }).state === 'blocked')
+    check('四态：工具报错兜底第七码 invoke-error（errors.js 文案在册）',
+      derive({ invokePhase: 'idle', hasResult: true, resultIsError: true }).reason === 'invoke-error')
+    check('四态：空闲基态（无结果无调用无健康 → idle）', derive({ invokePhase: 'idle', hasResult: false, resultIsError: false }).state === 'idle')
+    // 随包自证单测（测试随包走，不欠账）
+    const stateTest = spawn(process.execPath, ['packages/plugin-rq-card/src/client/state.test.mjs'], { stdio: 'pipe' })
+    await new Promise((resolve) => stateTest.on('close', resolve))
+    check('四态：rq-card 随包单测全绿（node --test）', stateTest.exitCode === 0, `exit=${stateTest.exitCode}`)
+  }
+
   // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
   section('第 3 步：契约五面 / 事件源校验 / 代理 ctx / L0 市场')
 
@@ -1113,10 +1266,11 @@ try {
   const { execFile } = await import('node:child_process')
   const scaffoldDir = join(DATA_DIR, 'scaffold-plugin')
   await new Promise((resolve) => execFile(process.execPath, ['cli/dshctl.mjs', 'plugin', 'init', '--id=com.selftest.scaffold', `--dir=${scaffoldDir}`], { cwd: process.cwd() }, (error) => { void error; resolve() }))
-  const { existsSync: existsFile, readFileSync } = await import('node:fs')
+  // 注意：局部命名避免遮蔽模块级 readFileSync（const TDZ 会波及同块早前引用）
+  const { existsSync: existsFile, readFileSync: scaffoldRead } = await import('node:fs')
   const SCAFFOLD_FILES = ['plugin.yaml', 'manifest/permissions.yaml', 'manifest/api.yaml', 'manifest/events.yaml', 'manifest/billing.yaml']
   check('dshctl plugin init 脚手架五面生成', SCAFFOLD_FILES.every((f) => existsFile(join(scaffoldDir, f))))
-  const scaffoldYaml = existsFile(join(scaffoldDir, 'plugin.yaml')) ? readFileSync(join(scaffoldDir, 'plugin.yaml'), 'utf8') : ''
+  const scaffoldYaml = existsFile(join(scaffoldDir, 'plugin.yaml')) ? scaffoldRead(join(scaffoldDir, 'plugin.yaml'), 'utf8') : ''
   check('脚手架默认 L0 + Hello World + 发布者密钥对', scaffoldYaml.includes('sandbox: L0') && scaffoldYaml.includes('hello') && existsFile(join(scaffoldDir, 'publisher-private-key.pem')))
 
   // ================================================================ 第 5 步：钱包 / 资金流水 / 模型转售
@@ -3847,7 +4001,9 @@ try {
     const statusBody = await statusRes.json()
     check('/dsh-bridge/status 读 Cookie 返回绑定身份', statusBody?.data?.bound === true && statusBody.data.identity?.sub === adminUser.id, JSON.stringify(statusBody))
     const statusAnon = await fetch(`${simOrigin}/dsh-bridge/status`)
-    check('无 Cookie 状态查询 → 未绑定（不作身份推断）', (await statusAnon.json())?.data?.bound === false)
+    const statusAnonBody = await statusAnon.json()
+    check('无 Cookie 状态查询 → 未绑定（不作身份推断）', statusAnonBody?.data?.bound === false)
+    check('绑定自检原因码：无 Cookie → no_cookie（WP-04/A2 文案映射依据）', statusAnonBody?.data?.reason === 'no_cookie', JSON.stringify(statusAnonBody))
     const entryReplay = await fetch(`${simOrigin}/auth/entry?entry_ticket=${encodeURIComponent(entryIssue.ticket)}`, { redirect: 'manual' })
     check('票据重放被拒（一次性消费，redeem 抛错→400）', entryReplay.status === 400)
     const bindRes = await fetch(`${simOrigin}/dsh-bridge/bind-session`, {
@@ -3860,7 +4016,9 @@ try {
     check('工具出站归因解析：会话绑定优先 / 未绑定回落最近绑定', boundViaSession?.userId === adminUser.id && boundFallback?.userId === adminUser.id, JSON.stringify({ boundViaSession, boundFallback }))
     mountCtx.iam.users().update(adminUser.id, { status: 'suspended' })
     const statusFrozen = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { cookie } })
-    check('账号停用 → 绑定实时失效（兑换面已校验 + 读取面再校验）', (await statusFrozen.json())?.data?.bound === false)
+    const statusFrozenBody = await statusFrozen.json()
+    check('账号停用 → 绑定实时失效（兑换面已校验 + 读取面再校验）', statusFrozenBody?.data?.bound === false)
+    check('绑定自检原因码：停用账号 → account_inactive（可识别、可出文案）', statusFrozenBody?.data?.reason === 'account_inactive', JSON.stringify(statusFrozenBody))
     mountCtx.iam.users().update(adminUser.id, { status: 'active' })
     const crossOrigin = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { origin: 'http://evil.example.com' } })
     check('绑定面同源收紧：跨站 Origin 403（对齐 dsh fence 语义）', crossOrigin.status === 403)
@@ -3884,6 +4042,33 @@ try {
     const retriedBehavior = mountCtx.behavior.retryDeadLetters()
     check('behavior 投递：死信重投（故障消费方仍失败则保留死信）', retriedBehavior.remaining >= 1 && mountCtx.behavior.deadLetters().all().some((letter) => letter.consumer === 'selftest-broken'))
     offBehavior()
+
+    // -- 卡片包装载与过滤（WP-05/B1，进程内直测：坏文件跳过 / 死 ref / 角色过滤 / 上限） ----
+    const packDir = join(bridgeDataDir, 'cardpacks-test')
+    await mkdir(packDir, { recursive: true })
+    const tCards = Array.from({ length: 7 }, (_, index) => ({
+      id: `t${index + 1}`, title: `卡${index + 1}`, description: '自测卡', badge: 'mcp', href: '#/mcp',
+      ...(index === 1 ? { ref: 'app:no-such-app' } : { ref: 'mcp:datawise' }),
+      order: index + 1,
+    }))
+    writeFileSync(join(packDir, 'rd-test.json'), JSON.stringify({ platform: 'rd', roles: ['*'], cards: tCards }))
+    writeFileSync(join(packDir, 'admin-only.json'), JSON.stringify({
+      platform: 'rd', roles: ['super_admin'],
+      cards: [{ id: 'tadm', title: '管理员专属', description: '仅管理员可见', badge: 'nas', href: '#/nas' }],
+    }))
+    writeFileSync(join(packDir, 'broken.json'), JSON.stringify({ platform: 'nope', roles: ['*'], cards: [] }))
+    // 独立 Context 构造（mountCtx 已由 platformCore 装配过 cardpacks 服务，重复 provide 会抛错）
+    const packCtx = new Context()
+    const packSvc = new platformCore.CardpackService(packCtx, { dir: packDir })
+    await packSvc.loadFromDir(packDir)
+    check('卡片包装载：坏文件跳过不阻断启动（loadProblems 留痕，合法 2 包在册）',
+      packSvc.all().length === 2 && packSvc.loadProblems().length >= 1,
+      JSON.stringify({ packs: packSvc.all().length, errors: packSvc.loadProblems() }))
+    const devCards = platformCore.filterCards({ packs: packSvc.forPlatform('rd'), roles: ['developer'], refAlive: (ref) => ref !== 'app:no-such-app' })
+    check('卡片包过滤：死 ref 丢弃留痕 + 角色过滤生效 + 首页上限 6',
+      devCards.cards.length === 6 && !devCards.cards.some((card) => card.id === 't2') && !devCards.cards.some((card) => card.id === 'tadm')
+      && devCards.droppedDeadRefs.includes('app:no-such-app'),
+      JSON.stringify({ cards: devCards.cards.map((card) => card.id), dropped: devCards.droppedDeadRefs }))
 
     // -- OIDC 授权码通道（start 302 → PKCE；callback 坏 state 拒绝） -----------------
     const oidcStart = await fetch(`${simOrigin}/auth/oidc/start`, { redirect: 'manual' })

@@ -426,6 +426,8 @@ export class UsageService extends Service {
       // D1（WP-03）：应用与知识包观测入管道——零费率起步，事件自动按非计费零价快照入账（D2）
       { pattern: 'app:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09' },
       { pattern: 'kb:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09' },
+      // WP-07（feedback 回传）：宿主数字员工作为可观测资源——零费率起步，运营可调价
+      { pattern: 'agent:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09' },
     ]
     for (const entry of defaults) {
       if (!this.priceBook().findOne((item) => item.pattern === entry.pattern)) this.upsertPrice(entry)

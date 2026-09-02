@@ -116,6 +116,31 @@ export async function entryTicketSession(ticket) {
   return result.user
 }
 
+/**
+ * dsh-bridge 绑定自检（WP-04/A2）：cookie 面（rq_sid，非 Bearer 通道），不在 request() 内。
+ * 独立形态（无宿主）404/异常 → 返回 null，由调用方静默处理。
+ */
+export async function bridgeStatus() {
+  let response
+  try {
+    response = await fetch('/dsh-bridge/status', { headers: { accept: 'application/json' } })
+  } catch {
+    return null
+  }
+  if (!response.ok) return null
+  const payload = await response.json().catch(() => null)
+  return payload?.data ?? null
+}
+
+/** Blob 下载（skill.zip 等二进制）：统一走 BASE 与 Bearer 头，页面不得自带裸 fetch。 */
+export async function downloadBlob(path) {
+  const headers = {}
+  if (session.token) headers.authorization = `Bearer ${session.token}`
+  const response = await fetch(`${BASE}${path}`, { headers })
+  if (!response.ok) throw new ApiError('HTTP_' + response.status, `下载失败（${response.status}）`, response.status)
+  return response.blob()
+}
+
 export const api = {
   get: (path) => request('GET', path),
   post: (path, body = {}) => request('POST', path, body),

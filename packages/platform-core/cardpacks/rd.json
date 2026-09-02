@@ -1,0 +1,50 @@
+{
+  "platform": "rd",
+  "label": "研发平台卡片包（研发效能场景，试点）",
+  "roles": ["*"],
+  "cards": [
+    {
+      "id": "rd-coder",
+      "title": "研发编码助手",
+      "description": "代码补全、评审与重构建议，研发日常主入口",
+      "badge": "agent",
+      "href": "#/agents",
+      "ref": "agent:dev-coder",
+      "order": 10
+    },
+    {
+      "id": "rd-sql-review",
+      "title": "SQL 审查助手",
+      "description": "MR 里提交 SQL 变更，自动索引与风险审查",
+      "badge": "skill",
+      "href": "#/skills",
+      "ref": "skill:sql-审查助手",
+      "order": 20
+    },
+    {
+      "id": "rd-datawise",
+      "title": "数据分析引擎",
+      "description": "自然语言查数与可视化，接数仓只读权限",
+      "badge": "mcp",
+      "href": "#/mcp",
+      "ref": "mcp:datawise",
+      "order": 30
+    },
+    {
+      "id": "rd-knowledge",
+      "title": "研发知识检索",
+      "description": "企业知识库语义检索，覆盖规范与设计文档",
+      "badge": "kb",
+      "href": "#/nas-authz",
+      "order": 40
+    },
+    {
+      "id": "rd-register",
+      "title": "登记新资产",
+      "description": "提示词、流程、接口、数据——四步登记上架",
+      "badge": "skill",
+      "href": "#/register",
+      "order": 50
+    }
+  ]
+}

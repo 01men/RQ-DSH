@@ -5,6 +5,7 @@
  *   #/oauth/error?error=…     —— 协议错误页（静态展示，error_description 一律转义）
  *   #/oauth/logout?…          —— RP 发起登出中转（清平台会话后带 state 跳回应用）
  * 说明：本页直连原始 fetch（不经 api.js 会话拦截），保证协议流不被控制台跳转劫持。
+ *       本页是「裸 fetch 收编」纪律（WP-04/A3 grep 不变量）的唯一豁免面（协议页例外，selftest 白名单在案）。
  */
 import { session } from '../api.js'
 import { icon } from '../icons.js'

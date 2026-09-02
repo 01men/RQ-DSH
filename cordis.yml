@@ -73,3 +73,10 @@
       name: '<PROJECT_ROOT>/packages/plugin-dsh-bridge/src/index.ts'
       config:
         mountPath: /rq
+    # 会话侧注入插件（WP-06）：四态执行卡 + 👍/👎 反馈条（dsh.client 双面插件）。
+    # name 必须写包名而非源码路径：client-modules 用 require.resolve('<条目>/package.json')
+    # 解析包元数据，文件路径会被负判为「非 client 包」且永久缓存（spike §4.2）。
+    # 启动前必须先构建浏览器半（激活期缺 bundle 会响亮抛错、宿主启动失败，spike §4.4）：
+    #   node packages/plugin-rq-card/build.mjs   →  packages/plugin-rq-card/lib/client.js
+    - id: rq-card
+      name: '@dsh-ops/plugin-rq-card'

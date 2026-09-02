@@ -1,7 +1,17 @@
-/** 工作台：角色化首页（待办审批 + 健康看板 + 快捷入口 + 事件流 + 成本趋势）。 */
-import { api, session } from '../api.js'
+/** 工作台：全员四区首页（问候 / 场景卡片 / 最近调用 / 对话入口）+ 管理简报（按权限显现）。 */
+import { api, session, bridgeStatus } from '../api.js'
 import { icon } from '../icons.js'
 import { h, $, $$, esc, fmtNum, fmtCost, fmtPct, timeAgo, statusBadge, sparkline } from '../ui.js'
+import { applyPlatformTheme, currentPlatform } from '../platform.js'
+import { errorBarHtml } from '../errors.js'
+
+/** 行为埋点（WP-07/D2）：卡片曝光/点击上报 behavior 管道；失败静默（不打扰工作）。 */
+function track(type, payload) {
+  api.post('/api/behavior/events', { type, platform: document.documentElement.dataset.platform || undefined, payload }).catch(() => {})
+}
+
+const BADGE_ICON = { skill: 'sparkles', app: 'app', mcp: 'plug', nas: 'server', kb: 'layers', data: 'trending', model: 'cpu', agent: 'bot' }
+const BADGE_LABEL = { skill: '技能', app: '应用', mcp: '服务', nas: '数据', kb: '知识', data: '数据', model: '模型', agent: '数字员工' }
 
 export async function renderDashboard(content) {
   content.innerHTML = `<div style="padding:60px;text-align:center;color:var(--text-4)">加载中…</div>`
@@ -16,6 +26,7 @@ export async function renderDashboard(content) {
   const hour = new Date().getHours()
   const greet = hour < 6 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好'
   const firstName = session.user?.displayName ?? ''
+  const isManager = session.can('usage.read')
 
   content.innerHTML = `
     <div class="page-head">
@@ -30,6 +41,36 @@ export async function renderDashboard(content) {
       </div>
     </div>
 
+    <div id="dash-binding-banner"></div>
+
+    <div class="card mb-20" id="dash-scene">
+      <div class="card-head">
+        <span class="card-title">${icon('zap', 15)} 场景入口</span>
+        <span class="card-sub" id="dash-scene-label"></span>
+        <div class="card-head-actions"><button class="btn btn-default btn-sm" id="dash-open-chat">${icon('bot', 13)}打开对话</button></div>
+      </div>
+      <div class="card-body"><div class="dash-scene-grid" id="dash-scene-cards"></div></div>
+    </div>
+
+    <div class="grid-2 mb-20">
+      <div class="card">
+        <div class="card-head">
+          <span class="card-title">${icon('clock', 15)} 最近调用</span>
+          <div class="card-head-actions"><a href="#/assets" class="fs-12">用量明细 ›</a></div>
+        </div>
+        <div class="card-body" id="dash-recent"></div>
+      </div>
+      <div class="card" id="dash-chat-card">
+        <div class="card-head"><span class="card-title">${icon('bot', 15)} 对话入口</span></div>
+        <div class="card-body" style="display:flex;flex-direction:column;gap:12px">
+          <div class="fs-13 text-2">自然语言直达：问数据、跑流程、调资产——每一次调用都有宿主支撑与审计归因。</div>
+          <a class="btn btn-primary btn-lg btn-block" id="dash-open-chat-main" href="/" target="_top" rel="noopener">进入 AI 对话工作区</a>
+          <div class="fs-11 text-4">单入口免登：从门户/钉钉进入即已登录，无需二次认证。</div>
+        </div>
+      </div>
+    </div>
+
+    ${isManager ? `
     <div class="stat-grid mb-20">
       ${statCard('users', '账号总数', d.iam.users, `待激活 ${d.iam.pendingUsers} 人`, 'var(--brand-500)', 'var(--brand-50)', '#/iam')}
       ${statCard('plug', 'MCP 在线', d.mcp.onlineServices, `成功率 ${fmtPct(d.mcp.successRate)}${d.mcp.unhealthyServices ? ` · 异常 ${d.mcp.unhealthyServices}` : ''}`, 'var(--ok)', 'var(--ok-bg)', '#/mcp', '统计口径：近期 MCP/连接器探活与调用的成功占比。网关未配置或探活失败会拉低该值，不代表平台故障；点击卡片可查看各服务健康明细。')}
@@ -75,17 +116,93 @@ export async function renderDashboard(content) {
         </div>
         <div class="card-body" id="dash-events"></div>
       </div>
-    </div>`
+    </div>` : ''}`
 
   $('#dash-goto-agents')?.addEventListener('click', () => { location.hash = '#/agents' })
   $('#dash-goto-approve')?.addEventListener('click', () => { location.hash = '#/approvals' })
   $('#dash-goto-conflicts')?.addEventListener('click', () => { location.hash = '#/iam?tab=conflicts' })
+  $('#dash-open-chat')?.addEventListener('click', () => { window.open('/', '_top') })
+  $$('.stat-card[data-href]').forEach((card) => {
+    card.onclick = () => { location.hash = card.dataset.href }
+  })
+
+  void mountBindingBanner()
+  void mountSceneCards()
+  void mountRecentCalls()
+  if (isManager) { void mountManagerCards(d) }
+}
+
+/** A2 绑定自检：dsh 宿主形态下探测绑定态，失效出横幅 + 一键重绑（OIDC 既有通道）；独立形态静默。 */
+async function mountBindingBanner() {
+  const host = $('#dash-binding-banner')
+  if (!host) return
+  const status = await bridgeStatus()
+  if (!status || status.bound !== false) return
+  host.innerHTML = errorBarHtml('binding-invalid', status.reason)
+}
+
+/** B4/A3 场景卡片区：卡片包按角色×平台下发（≤6 张），曝光/点击埋点，点击直达目标页。 */
+async function mountSceneCards() {
+  const host = $('#dash-scene-cards')
+  if (!host) return
+  try {
+    const pack = await api.get(`/api/platform/card-packs${currentPlatform() ? `?platform=${currentPlatform()}` : ''}`)
+    if (pack.platform) applyPlatformTheme(pack.platform)
+    $('#dash-scene-label').textContent = pack.label || `${pack.cards.length} 个场景直达`
+    host.innerHTML = pack.cards.map((card) => `
+      <div class="dash-scene-card" data-card-id="${esc(card.id)}" data-href="${esc(card.href)}" tabindex="0" role="link">
+        <div class="dash-scene-badge">${icon(BADGE_ICON[card.badge] ?? 'zap', 15)}<span>${BADGE_LABEL[card.badge] ?? card.badge}</span></div>
+        <div class="dash-scene-title">${esc(card.title)}</div>
+        <div class="dash-scene-desc">${esc(card.description)}</div>
+      </div>`).join('')
+    host.querySelectorAll('.dash-scene-card').forEach((el) => {
+      el.onclick = () => {
+        track('card.clicked', { cardId: el.dataset.cardId, href: el.dataset.href })
+        const href = el.dataset.href ?? ''
+        if (href.startsWith('#/')) location.hash = href
+        else if (href) window.open(href, '_top')
+      }
+      el.onkeydown = (event) => { if (event.key === 'Enter') el.onclick() }
+    })
+    track('card.exposed', { cardIds: pack.cards.map((card) => card.id) })
+  } catch { /* 卡片包不可用（低版本平台）：工作台其余区域不受影响 */ }
+}
+
+/** A3 最近调用（≤5，自见）：来自 /api/usage/recent（当前登录人自身计量）。 */
+async function mountRecentCalls() {
+  const host = $('#dash-recent')
+  if (!host) return
+  try {
+    const recent = await api.get('/api/usage/recent?limit=5')
+    if (!recent.items?.length) {
+      host.innerHTML = `
+        <div style="text-align:center;padding:26px 10px">
+          <div style="color:var(--ok);margin-bottom:8px">${icon('zap', 26)}</div>
+          <div class="fs-13" style="font-weight:500">还没有调用记录</div>
+          <div class="fs-12 text-4">从上方场景入口开始你的第一次 AI 调用</div>
+        </div>`
+      return
+    }
+    host.innerHTML = recent.items.map((item) => `
+      <div class="flex" style="padding:10px 0;border-bottom:1px solid var(--border)">
+        <span class="badge badge-muted no-dot" style="min-width:64px;justify-content:center">${esc(item.name || item.resource)}</span>
+        <div class="grow fs-12 text-3">${item.meters?.map((meter) => `${esc(meter.key)} ${fmtNum(meter.value)}`).join(' · ') || '—'}${item.nonbillable ? ' · 非计费' : ''}</div>
+        <span class="fs-11 text-4">${timeAgo(item.occurred_at)}</span>
+      </div>`).join('')
+  } catch {
+    host.innerHTML = `<div class="fs-12 text-4" style="padding:14px 0">最近调用加载失败</div>`
+  }
+}
+
+/** 管理简报（保留既有管理价值，仅对 usage.read 持有者渲染）。 */
+async function mountManagerCards(d) {
   $$('.stat-card[data-href]').forEach((card) => {
     card.onclick = () => { location.hash = card.dataset.href }
   })
 
   // 待办审批
   const approvalsEl = $('#dash-approvals')
+  if (!approvalsEl) return
   if (d.approvals.items?.length) {
     approvalsEl.innerHTML = d.approvals.items.map((item) => `
       <div class="flex" style="padding:10px 0;border-bottom:1px solid var(--border);cursor:pointer" data-id="${esc(item.id)}">
@@ -136,6 +253,7 @@ export async function renderDashboard(content) {
     'authn.token.issued': '令牌签发', 'authn.token.revoked': '令牌吊销',
     'oidc.authorize.granted': 'SSO 授权通过', 'oidc.authorize.denied': 'SSO 授权拒绝',
     'mcp.deployed': 'MCP 发布', 'mcp.offlined': 'MCP 下线', 'mcp.unhealthy': 'MCP 熔断', 'mcp.invoked': 'MCP 调用',
+    'behavior.recorded': '行为事件',
     'connector.gateway.changed': '连接器网关变更', 'connector.gateway.synced': '连接器目录同步',
     'connector.gateway.unhealthy': '连接器网关异常', 'connector.connected': 'SaaS 连接建立',
     'connector.disconnected': 'SaaS 连接断开', 'connector.invoked': 'SaaS 连接器调用',
@@ -171,7 +289,7 @@ function eventLabel(name, labels) {
     iam: '账号', authn: '认证', oidc: '单点登录', mcp: 'MCP', nas: 'NAS', audit: '审计',
     skill: '技能', agent: '智能体', app: '应用', usage: '用量', billing: '计费', market: '市场',
     wallet: '钱包', platform: '平台', approval: '审批', connector: '连接器', console: '控制台', connect: '接入',
-    user: '用户', org: '组织', permission: '权限', token: '令牌', gateway: '网关', permgroup: '权限组',
+    behavior: '行为', user: '用户', org: '组织', permission: '权限', token: '令牌', gateway: '网关', permgroup: '权限组',
     created: '创建', changed: '变更', issued: '签发', revoked: '吊销', deployed: '发布', onlined: '上线',
     offlined: '下线', unhealthy: '异常', invoked: '调用', connected: '连接', disconnected: '断开',
     submitted: '提交', published: '上架', installed: '安装', deprecated: '弃用', registered: '注册',

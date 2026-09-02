@@ -63,6 +63,42 @@
   --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Consolas, monospace;
 }
 
+/* ------------------------------------------------------------
+   五平台差异化主题（WP-05/B3）：仅 data-platform 一个属性差，
+   换平台 = document.documentElement.dataset.platform 赋值，零前端代码改动。
+   战略 #3B4CC0 / 营销 #E8590C / 智造 #0C8599 / 研发 #7048E8 / 质量 #2F9E44
+   ------------------------------------------------------------ */
+:root[data-platform="strategy"] {
+  --brand-50: #eef1fb; --brand-100: #dde5f7; --brand-200: #bccbf0; --brand-300: #97abe6;
+  --brand-400: #6f86d6; --brand-500: #3B4CC0; --brand-600: #3240a3; --brand-700: #293485;
+  --brand-gradient: linear-gradient(135deg, #3B4CC0 0%, #5a5fd0 55%, #7c6ce0 100%);
+  --sidebar-active: linear-gradient(90deg, rgba(59, 76, 192, 0.28), rgba(59, 76, 192, 0.10));
+}
+:root[data-platform="marketing"] {
+  --brand-50: #fef0e8; --brand-100: #fde0d0; --brand-200: #fbc0a0; --brand-300: #f79c6b;
+  --brand-400: #f07a35; --brand-500: #E8590C; --brand-600: #c44a09; --brand-700: #9e3c07;
+  --brand-gradient: linear-gradient(135deg, #E8590C 0%, #f0762e 55%, #f59f00 100%);
+  --sidebar-active: linear-gradient(90deg, rgba(232, 89, 12, 0.28), rgba(232, 89, 12, 0.10));
+}
+:root[data-platform="manufacturing"] {
+  --brand-50: #e6f7fa; --brand-100: #c5edf4; --brand-200: #99dde9; --brand-300: #63c7d8;
+  --brand-400: #2aabbd; --brand-500: #0C8599; --brand-600: #0a6f80; --brand-700: #085a67;
+  --brand-gradient: linear-gradient(135deg, #0C8599 0%, #15a0b5 55%, #20c1a8 100%);
+  --sidebar-active: linear-gradient(90deg, rgba(12, 133, 153, 0.28), rgba(12, 133, 153, 0.10));
+}
+:root[data-platform="rd"] {
+  --brand-50: #f1edfd; --brand-100: #e3dcfb; --brand-200: #c7b8f6; --brand-300: #a88ef0;
+  --brand-400: #8a63ec; --brand-500: #7048E8; --brand-600: #5e3cc4; --brand-700: #4c309e;
+  --brand-gradient: linear-gradient(135deg, #7048E8 0%, #9062ea 55%, #b19ae8 100%);
+  --sidebar-active: linear-gradient(90deg, rgba(112, 72, 232, 0.28), rgba(112, 72, 232, 0.10));
+}
+:root[data-platform="quality"] {
+  --brand-50: #e9f9ec; --brand-100: #d2f3d9; --brand-200: #a8e5b6; --brand-300: #74d289;
+  --brand-400: #4cbb63; --brand-500: #2F9E44; --brand-600: #278339; --brand-700: #1f682e;
+  --brand-gradient: linear-gradient(135deg, #2F9E44 0%, #40b857 55%, #66d37a 100%);
+  --sidebar-active: linear-gradient(90deg, rgba(47, 158, 68, 0.28), rgba(47, 158, 68, 0.10));
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 body {
@@ -278,6 +314,27 @@ button { font-family: inherit; }
 .stat-label { font-size: 12.5px; color: var(--text-3); margin-top: 2px; }
 .stat-foot { font-size: 11.5px; color: var(--text-4); margin-top: 10px; display: flex; align-items: center; gap: 4px; }
 .stat-foot .up { color: var(--ok); } .stat-foot .down { color: var(--danger); }
+
+/* ============ 场景卡片区（WP-04/A3 + WP-05：卡片包驱动，≤6 张） ============ */
+.dash-scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.dash-scene-card {
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2);
+  padding: 14px 16px; cursor: pointer; transition: all 0.18s; position: relative; overflow: hidden;
+}
+.dash-scene-card::before {
+  content: ''; position: absolute; inset: 0 auto 0 0; width: 3px;
+  background: var(--brand-gradient); opacity: 0; transition: opacity 0.18s;
+}
+.dash-scene-card:hover { border-color: var(--brand-300); box-shadow: var(--shadow-s); transform: translateY(-2px); background: var(--surface); }
+.dash-scene-card:hover::before, .dash-scene-card:focus-visible::before { opacity: 1; }
+.dash-scene-card:focus-visible { outline: 2px solid var(--brand-300); outline-offset: 1px; }
+.dash-scene-badge {
+  display: inline-flex; align-items: center; gap: 5px; height: 21px; padding: 0 8px;
+  border-radius: 10px; font-size: 11.5px; font-weight: 500;
+  color: var(--brand-600); background: var(--brand-50); margin-bottom: 10px;
+}
+.dash-scene-title { font-size: 13.5px; font-weight: 600; }
+.dash-scene-desc { font-size: 12px; color: var(--text-3); margin-top: 4px; line-height: 1.5; }
 
 /* ============ 徽章体系 ============ */
 .badge {
@@ -1092,3 +1149,19 @@ textarea.form-control { height: auto; min-height: 88px; padding: 9px 12px; resiz
 .az-op-check:has(input:checked) { border-color: var(--brand-400); background: var(--brand-50); color: var(--brand-600); }
 .az-op-check input { accent-color: var(--brand-500); margin: 0; }
 .az-op-check code { font-family: var(--mono); font-size: 10.5px; color: var(--text-4); }
+
+/* ============ 资产登记引导（WP-08/E1） ============ */
+.reg-tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.reg-tile {
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2);
+  padding: 16px; cursor: pointer; transition: all 0.18s;
+}
+.reg-tile:hover { border-color: var(--brand-300); box-shadow: var(--shadow-s); transform: translateY(-2px); background: var(--surface); }
+.reg-tile:focus-visible { outline: 2px solid var(--brand-300); outline-offset: 1px; }
+.reg-tile-disabled { opacity: 0.62; }
+.reg-tile-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.reg-tile-icon { color: var(--brand-500); display: flex; }
+.reg-tile-title { font-size: 14px; font-weight: 600; }
+.reg-tile-desc { font-size: 12px; color: var(--text-3); margin-top: 4px; line-height: 1.55; }
+.reg-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+@media (max-width: 720px) { .reg-form { grid-template-columns: 1fr; } }

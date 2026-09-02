@@ -133,6 +133,15 @@
 
 **Phase 1 退出门禁**：WP-04~08 全绿推送；门禁验收四项——① 全链路闭环演练通过；② 免登 ≤2 步、零二次登录；③ 研发+质量卡片包在用、核心路径 ≤3 步；④ selftest+lint 全绿。
 
+### Phase 1 退出门禁执行记录（2026-09-02，全项通过）
+
+| 门禁 | 结果 | 证据 |
+|---|---|---|
+| ① 全链路闭环演练 | ✅ 27/27 步 PASS（skill/app/mcp/nas 四资产 × 六步） | `node scripts/full-chain-drill.mjs`（可重复执行），真实 usage 事件 ID 归档于 `docs/drill-full-chain-l3.md`；L3 登记→上架秒级达成 |
+| ② 免登 ≤2 步、零二次登录 | ✅ 票据兑换直建控制台会话（1 步）；早高峰 50 并发零失败 | `scripts/morning-peak-entry.mjs`（领票 50/50 · 兑换 50/50 · 会话可用 50/50，165ms）；selftest「console ticket redeem」节 |
+| ③ 卡片包在用、核心路径 ≤3 步 | ✅ rd/quality 试点包过 lint 且存活过滤生效；走查 6/6 | `scripts/walkthrough.mjs`（认证 1 + 进工作台 1 + 进功能 1 = 3 步达标）；`npm run lint:manifests`（清单 75/75 + 卡片包 2/2） |
+| ④ selftest + lint 全绿 | ✅ selftest 801/801（基线 737 → +64 项随包断言） | `npm run selftest`；新增节：console ticket redeem / usage 值域 / 零价快照 / behavior 管道 / 卡片包与主题 / rbac endpoint matrix（212 越权探针 100% 被拒）/ usage 最近调用 / feedback 回传 / 错误文案映射完整性 / 四态状态源映射 / dsh 宿主挂载（behavior+cardpacks 进程内直测） |
+
 ---
 
 ## 四、Phase 2：推广工作包（依赖 Phase 1 门禁）
@@ -164,7 +173,8 @@
 | D3 | 行为事件独立 `behavior.recorded`，不混入 usage 计量管道 | **默认采纳，直接执行** | 避免污染计费口径 |
 | D4 | L4 终审由平台管理员承接 + audit 留痕 + 钉钉审批卡 48h 超时升级老板 | **默认采纳** | 替代 V2.0 §12 待决项，避免审批瓶颈绑在老板日历 |
 | D5 | dsh.client 实现档次（A/B/C） | **已判定：档次 A（2026-09-02，spike 实测）** | 证据与实现建议见 `docs/spike-dsh-client-capability.md`：消息流 slot（`tool.call.toolview`/`conversation.chat.assistant-actions`）流式增量存活 + `ctx.conversationEvents` 可订阅工具生命周期；新约束——cordis.yml 客户端条目必须写包名（require.resolve 解析），`lib/client.js` 必须在 `dsh web` 启动前构建，否则宿主启动失败（降级预案见 spike 文档 §5） |
-| D6 | behavior 端点归属 platform-core | **默认采纳** | 与仓库惯例冲突时按惯例调整并在此留痕 |
+| D6 | behavior 端点归属 platform-core | **默认采纳（已按此落地 + 一处惯例微调）** | behavior.ts/cardpacks.ts 均落 platform-core（钦定）；REST 路由注册：behavior 端点在 behavior.ts 自带（双层 fail-closed 鉴权），card-packs 端点按仓库惯例由 console 聚合（角色×平台×ref 存活性三维过滤需要 iam/资源注册表），已在两文件头注释留痕 |
+| D7 | 会话侧新增兜底原因码 `invoke-error`（WP-06 报备） | **已采纳（2026-09-02）** | 工具结果 isError 且无平台侧六码时，会话卡呈现 blocked + invoke-error 兜底文案；已计入 errors.js 文案完整性枚举（selftest 断言） |
 
 **勘误回执（对 V2.0 设计文档，随本方案执行生效）**：① §8.2 kb.ingest 改标深化期入口，推广期=NAS 目录登记；② §8.1 状态机拆两层标注（`pending_domain/pending_security` 属 SkillVersion 态，`plugin-skillhub/src/index.ts:50`；Skill 本体 `:21`）；③ F6/§6.1 出处修正为 dsh harness checkout；④ §10.1 补注 D1/D2/D3。
 

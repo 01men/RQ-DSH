@@ -9,5 +9,6 @@ provides:
     - platformBus
     - tools
     - httpServer
+    - behavior
 permissions:
   - console.login
