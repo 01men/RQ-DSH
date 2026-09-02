@@ -5,6 +5,7 @@ import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
   statusBadge, collectForm, field, inputField, selectField, textareaField,
   fmtNum, timeAgo, emptyState, maybeShowConceptCard,
+  searchableSelectField, mountSearchableSelects,
 } from '../ui.js'
 
 const COVERS = ['linear-gradient(135deg,#4f6ef7,#7c5cf5)', 'linear-gradient(135deg,#10b981,#34d399)', 'linear-gradient(135deg,#f59e0b,#fbbf24)', 'linear-gradient(135deg,#8b5cf6,#a78bfa)', 'linear-gradient(135deg,#3b82f6,#60a5fa)', 'linear-gradient(135deg,#ef4444,#f87171)']
@@ -259,10 +260,11 @@ async function openSkillDetail(id, ctx, refresh) {
     const modal = openModal({
       title: '安装到 Agent',
       body: `
-        ${field('目标 Agent', selectField('agentId', agentData.agents.map((a) => ({ value: a.id, label: `${a.name}（${a.status}）` }))), { required: true })}
+        ${field('目标 Agent', searchableSelectField('agentId', agentData.agents.map((a) => ({ value: a.id, label: `${a.name}（${a.status}）` })), { placeholder: '点击选择目标 Agent，支持搜索' }), { required: true })}
         <div class="form-hint">安装后自动登记依赖关系，Agent 的「关联 Skill」属性同步回填。</div>`,
       foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>安装</button>',
     })
+    mountSearchableSelects(modal.el)
     modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
     modal.el.querySelector('[data-ok]').onclick = async () => {
       try {

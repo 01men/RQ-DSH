@@ -5,6 +5,7 @@ import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   renderTable, statusBadge, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, timeAgo, emptyState, sparkline, lineChart, maybeShowConceptCard,
+  searchableSelectField, mountSearchableSelects,
 } from '../ui.js'
 import { buildAgentOnboardingText, openOnboardingModal } from '../onboarding.js'
 
@@ -301,11 +302,13 @@ token:    ${esc(result.token)}</div>`,
       })
       tabBody.querySelector('#ag-bind').onclick = async () => {
         const users = await api.get('/api/iam/users')
+        const activeUsers = users.users.filter((u) => u.status === 'active')
         const modal = openModal({
           title: '绑定用户',
-          body: field('选择用户', selectField('userId', users.users.filter((u) => u.status === 'active').map((u) => ({ value: u.id, label: `${u.displayName}（${u.orgName}）` }))), { required: true }),
+          body: field('选择用户', searchableSelectField('userId', activeUsers.map((u) => ({ value: u.id, label: `${u.displayName}（${u.orgName ?? '—'}）` })), { placeholder: '点击选择，支持搜索姓名/组织' }), { required: true }),
           foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>绑定</button>',
         })
+        mountSearchableSelects(modal.el)
         modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
         modal.el.querySelector('[data-ok]').onclick = async () => {
           try {
@@ -433,17 +436,23 @@ token:    ${esc(result.token)}</div>`,
       } else {
         try {
           if (transition.action === 'submit_trial') {
+            const groupsData = await api.get('/api/iam/groups').catch(() => ({ groups: [] }))
+            const groupOptions = [...new Map((groupsData.groups ?? []).map((g) => [g.name, g])).values()]
+              .map((g) => ({ value: g.name, label: g.name }))
             const modal = openModal({
               title: '进入试运行',
-              body: field('试运行用户组', inputField('groups', { value: '灰度试点组', placeholder: '用户组名称' }), { required: true, hint: '试运行期间仅该用户组成员可用' }),
+              body: field('试运行用户组', groupOptions.length
+                ? searchableSelectField('groups', groupOptions, { placeholder: '点击选择用户组，支持搜索' })
+                : inputField('groups', { placeholder: '用户组名称（当前无可选用户组，可手填）' }), { required: true, hint: '试运行期间仅该用户组成员可用' }),
               foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>确认</button>',
             })
+            mountSearchableSelects(modal.el)
             modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
             modal.el.querySelector('[data-ok]').onclick = async () => {
               const groupName = collectForm(modal.body).groups
-              const groupsData = await api.get('/api/iam/groups')
-              const group = groupsData.groups.find((g) => g.name === groupName)
-              await api.patch(`/api/agents/${agent.id}`, { attrs: { trialGroups: group ? [group.name] : [groupName] } })
+              if (!groupName) return toast('请选择试运行用户组', 'error')
+              const group = groupOptions.find((g) => g.value === groupName)
+              await api.patch(`/api/agents/${agent.id}`, { attrs: { trialGroups: [group ? group.value : groupName] } })
               await api.post(`/api/agents/${agent.id}/transition`, { action: 'submit_trial' })
               toast('已进入试运行'); modal.close(); drawer.close(); ctx.rerender()
             }

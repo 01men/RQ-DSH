@@ -65,7 +65,7 @@ NAS 文件操作经文件网关（MCP：url=<网关地址>/mcp + Authorization: 
   不要连续重试。observeOnly 观察期越权放行但留痕告警，不代表越权合法。
 
 【注意】
-1. client_secret 等价口令：只在注册响应出现一次，平台不可再查询；丢失只能在「身份与凭证」轮换。
+1. client_secret 等价口令：只在注册响应出现一次，平台不可再查询，请务必妥善保存；如不慎丢失请联系平台管理员处理，无须自行轮换。
 2. 幂等：重名注册返回 400「已存在」时，按名称查列表复用既有资源，不得换名重复注册。
 3. 上线/下线走审批流（POST /api/agents/${agent.id}/transition → 审批中心 decision），禁止绕过审批改状态。
 4. 失败锁定：换牌连续失败 5 次锁来源 IP 15 分钟，重试前先核对凭证。`
@@ -107,7 +107,7 @@ curl -s -X PATCH ${origin}/api/apps/${app.id} \\
 经平台网关的调用已自动计量，禁止双计。
 
 【注意】
-1. client_secret 等价口令：只在注册响应出现一次，平台不可再查询；丢失只能在「身份与凭证」轮换。
+1. client_secret 等价口令：只在注册响应出现一次，平台不可再查询，请务必妥善保存；如不慎丢失请联系平台管理员处理，无须自行轮换。
 2. 幂等：重名注册返回 400「已存在」时，按名称查列表复用既有资源。
 3. 上线走审批流且 web/h5 形态有 SSO 门禁（owner 在应用详情签发 OIDC 客户端），禁止绕过审批改状态。
 4. 失败锁定：换牌连续失败 5 次锁来源 IP 15 分钟，重试前先核对凭证。
@@ -126,7 +126,7 @@ export function openOnboardingModal({ title, resource, credential, metaRows, gui
     body: `
       <div class="form-hint mb-8" style="display:flex;gap:8px;align-items:center">
         <span style="color:var(--warn)">⏳</span>
-        <span>凭证（client_secret）<b>仅此一次展示</b>，请立即通过下方「一键复制」保存；平台侧不可再查询，丢失只能轮换。</span>
+        <span>凭证（client_secret）<b>仅此一次展示</b>，请立即通过下方「一键复制」保存；平台侧不可再查询，丢失请联系平台管理员处理。</span>
       </div>
       <div class="desc-grid mb-8">
         ${metaRows.map(([k, v]) => `<div class="desc-item"><span class="k">${esc(k)}</span><span class="v mono">${esc(v)}</span></div>`).join('')}

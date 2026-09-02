@@ -5,6 +5,7 @@ import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, timeAgo, emptyState, sparkline, barChart, lineChart, maybeShowConceptCard,
+  multiSelectField, mountSearchableSelects,
 } from '../ui.js'
 
 const ICON_COLORS = { kb: ['#eef2ff', '#4f6ef7'], chart: ['#ecfdf5', '#10b981'], ticket: ['#fff7ed', '#f97316'], hr: ['#f5f3ff', '#8b5cf6'], fx: ['#fef2f2', '#ef4444'], mcp: ['#eff6ff', '#3b82f6'] }
@@ -591,7 +592,15 @@ async function openPermGroups(ctx) {
   renderList()
   drawer.el.querySelector('#pg-add').onclick = () => {
     const agentsPromise = api.get('/api/agents').catch(() => ({ agents: [] }))
-    void agentsPromise.then((agentData) => {
+    const groupsPromise = api.get('/api/iam/groups').catch(() => ({ groups: [] }))
+    const appsPromise = api.get('/api/apps').catch(() => ({ apps: [] }))
+    void Promise.all([agentsPromise, groupsPromise, appsPromise]).then(([agentData, groupData, appData]) => {
+      // 主体候选：Agent / 用户组 / 应用 三类（与后端 subject 类型对齐）
+      const subjectOptions = [
+        ...(agentData.agents ?? []).map((a) => ({ value: `agent:${a.id}`, label: `${a.name}（${a.slug ?? a.id}）`, group: 'Agent' })),
+        ...(groupData.groups ?? []).map((g) => ({ value: `user_group:${g.id}`, label: g.name, group: '用户组' })),
+        ...(appData.apps ?? []).map((a) => ({ value: `app:${a.id}`, label: a.name, group: '应用' })),
+      ]
       const modal = openModal({
         title: '新建 MCP 权限组', wide: true,
         body: `
@@ -609,13 +618,11 @@ async function openPermGroups(ctx) {
               </div>
             </div>`).join('')}
           <div class="card-title mb-8">绑定主体</div>
-          <div class="fs-12 text-3 mb-8" style="margin-top:8px">绑定后主体立即获得对应工具访问权（用户组经 iam 圈人，Agent 按机器身份命中）</div>
-          <div style="max-height:160px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px">
-            <div class="fs-12" style="font-weight:600;padding:4px">Agent</div>
-            ${agentData.agents.map((a) => `<label class="flex" style="padding:3px 0;font-size:12.5px"><input type="checkbox" data-agent="${esc(a.id)}" style="accent-color:var(--brand-500)">${esc(a.name)}<span class="text-4" style="margin-left:auto">${esc(a.slug)}</span></label>`).join('')}
-          </div>`,
+          <div class="fs-12 text-3 mb-8" style="margin-top:8px">绑定后主体立即获得对应工具访问权（用户组经 iam 圈人，Agent 按机器身份命中，应用按客户端身份命中）</div>
+          ${field('绑定主体（可多选）', multiSelectField('subjects', subjectOptions, { placeholder: '搜索并选择 Agent / 用户组 / 应用，可多选' }))}`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>创建</button>',
       })
+      mountSearchableSelects(modal.el)
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.el.querySelector('[data-ok]').onclick = async () => {
         const name = collectForm(modal.body).name
@@ -625,7 +632,11 @@ async function openPermGroups(ctx) {
           const ro = modal.body.querySelector(`[data-ro="${serviceId}"]`)?.checked
           policies[serviceId] = { allowedTools: '*', constraints: ro ? { readOnly: true } : {} }
         })
-        const subjects = [...modal.body.querySelectorAll('[data-agent]:checked')].map((el) => ({ type: 'agent', id: el.dataset.agent }))
+        // 主体值格式 type:id，还原为后端 subjects 数组
+        const subjects = (collectForm(modal.body).subjects ?? '').split(',').filter(Boolean).map((v) => {
+          const idx = v.indexOf(':')
+          return { type: v.slice(0, idx), id: v.slice(idx + 1) }
+        })
         try {
           await api.post('/api/mcp/perm-groups', { name, description: collectForm(modal.body).description, policies, subjects })
           toast('权限组已创建'); modal.close(); drawer.close(); ctx.rerender()

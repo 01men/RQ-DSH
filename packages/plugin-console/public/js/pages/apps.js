@@ -5,6 +5,7 @@ import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog, copyText,
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
   fmtNum, fmtPct, fmtCost, fmtTime, timeAgo, emptyState, lineChart, maybeShowConceptCard,
+  multiSelectField, mountSearchableSelects,
 } from '../ui.js'
 import { buildAppOnboardingText, openOnboardingModal } from '../onboarding.js'
 import {
@@ -530,14 +531,12 @@ function openAppCreate(schema, ctx) {
           ${field('描述', textareaField('description', { rows: 2 }), { full: true })}
         </div>
         <div class="card-title mb-8" style="margin-top:8px">编排 Agent（依赖拓扑数据源）</div>
-        <div style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:8px">
-          ${onlineAgents.map((a) => `
-            <label class="flex" style="padding:5px 4px;font-size:13px;cursor:pointer">
-              <input type="checkbox" name="agentIds" value="${esc(a.id)}" style="accent-color:var(--brand-500)">
-              <span>${esc(a.attrs['avatar'] ?? '🤖')} ${esc(a.name)}</span>
-              <span class="text-4" style="margin-left:auto">${esc(a.slug)}</span>
-            </label>`).join('') || '<span class="text-4 fs-12">没有在线 Agent 可编排（Agent 需先上线）</span>'}
-        </div>
+        ${onlineAgents.length
+          ? field('选择编排 Agent（可多选）', multiSelectField('agentIds', onlineAgents.map((a) => ({
+              value: a.id,
+              label: `${a.attrs['avatar'] ?? '🤖'} ${a.name}（${a.slug}）`,
+            })), { placeholder: '搜索并选择编排 Agent，可多选；留空表示暂无依赖' }))
+          : '<div class="form-hint mb-8">没有在线 Agent 可编排（Agent 需先上线）</div>'}
         <div class="form-grid">
           ${field('风险等级', selectField('riskLevel', [{ value: 'low', label: '低' }, { value: 'medium', label: '中' }, { value: 'high', label: '高' }]), { required: true })}
           ${field('数据密级', selectField('dataClass', [{ value: 'internal', label: '内部' }, { value: 'public', label: '公开' }, { value: 'confidential', label: '机密' }]), { required: true })}
@@ -545,9 +544,10 @@ function openAppCreate(schema, ctx) {
       foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>注册应用</button>',
     })
     modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+    mountSearchableSelects(modal.el)
     modal.el.querySelector('[data-ok]').onclick = async () => {
       const data = collectForm(modal.body)
-      const agentIds = [...modal.body.querySelectorAll('input[name=agentIds]:checked')].map((el) => el.value)
+      const agentIds = (data.agentIds ?? '').split(',').filter(Boolean)
       try {
         const result = await api.post('/api/apps', {
           name: data.name, slug: data.slug || undefined,

@@ -104,7 +104,7 @@ export async function renderIam(content, params, ctx) {
       <button class="btn btn-primary" id="user-add">${icon('plus', 14)}创建账号</button>`
     $('#user-add').onclick = () => openUserCreate(treeData, usersData)
     $('#org-add').onclick = () => openOrgCreate(treeData)
-    $('#user-import').onclick = () => openUserImport(treeData)
+    $('#user-import').onclick = () => void openUserImport()
 
     const body = $('#iam-body')
     body.innerHTML = `
@@ -359,25 +359,63 @@ export async function renderIam(content, params, ctx) {
       }
     }
 
-    function openUserImport(tree) {
+    async function openUserImport() {
+      let orgs = []
+      try { orgs = await api.get('/api/iam/orgs') } catch { /* 组织读取失败时退回仅支持手填 orgId */ }
+      // 组织解析索引：orgId / 全路径 / 唯一短名（小写键）→ orgId
+      const orgOpts = buildOrgPaths(orgs)
+      const labelById = new Map(orgOpts.map((opt) => [opt.value, opt.label]))
+      const idByKey = new Map()
+      const leafCount = new Map()
+      for (const opt of orgOpts) {
+        idByKey.set(String(opt.value).toLowerCase(), opt.value)
+        idByKey.set(String(opt.label).toLowerCase(), opt.value)
+        const leaf = String(opt.label).split(' / ').pop()
+        leafCount.set(leaf, (leafCount.get(leaf) ?? 0) + 1)
+      }
+      for (const opt of orgOpts) {
+        const leaf = String(opt.label).split(' / ').pop()
+        if (leafCount.get(leaf) === 1) idByKey.set(leaf.toLowerCase(), opt.value)
+      }
+      const resolveOrg = (input) => {
+        const key = String(input ?? '').trim().toLowerCase()
+        if (!key) return { id: '', label: '' }
+        const id = idByKey.get(key)
+        return id ? { id, label: labelById.get(id) ?? id } : { id: null, label: String(input).trim() }
+      }
       const modal = openModal({
         title: '批量导入账号',
         body: `
-          <div class="form-hint" style="margin-bottom:10px">每行一个账号，格式：<code>用户名,姓名,组织ID,职位</code>（支持 Excel/CSV 导出后粘贴）</div>
-          ${field('导入数据', textareaField('raw', { placeholder: 'wangwu,王五,org_xxx,算法工程师\nzhaoliu,赵六,org_xxx,产品经理', rows: 6 }), { full: true })}
-          <div class="muted-box" id="import-preview"></div>`,
+          <div class="form-hint" style="margin-bottom:10px">每行一个账号，格式：<code>用户名,姓名,组织ID或组织全路径,职位</code>（支持 Excel/CSV 导出后粘贴；组织可填 org_xxx、完整路径或唯一短名）</div>
+          ${field('导入数据', textareaField('raw', { placeholder: 'wangwu,王五,org_xxx,算法工程师\nzhaoliu,赵六,杭州榕器创科技有限公司 / 数字化技术服务平台,产品经理', rows: 6 }), { full: true })}
+          <div class="muted-box" id="import-preview">粘贴数据后在此预览解析结果…</div>`,
         foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>导入</button>',
+      })
+      const parseRows = () => modal.body.querySelector('[name="raw"]').value.split('\n').map((rawLine) => rawLine.trim()).filter(Boolean).map((rawLine) => {
+        const [username, displayName, orgInput, title] = rawLine.split(',').map((s) => s?.trim())
+        return { rawLine, username, displayName, orgInput, title, org: resolveOrg(orgInput) }
+      })
+      const previewEl = modal.body.querySelector('#import-preview')
+      modal.body.querySelector('[name="raw"]').addEventListener('input', () => {
+        const rows = parseRows()
+        if (!rows.length) {
+          previewEl.textContent = '粘贴数据后在此预览解析结果…'
+          return
+        }
+        previewEl.innerHTML = rows.map((row) => {
+          if (!row.username || !row.displayName || !row.orgInput) return `<div style="padding:2px 0;font-size:12px;color:var(--danger)">⚠ ${esc(row.rawLine)}（字段不足：需要 用户名,姓名,组织,职位）</div>`
+          if (row.org.id === null) return `<div style="padding:2px 0;font-size:12px;color:var(--danger)">⚠ ${esc(row.username)} → 组织未命中：${esc(row.orgInput)}</div>`
+          return `<div style="padding:2px 0;font-size:12px">· ${esc(row.username)} / ${esc(row.displayName)} → 组织：${esc(row.org.label)}${row.title ? ` / ${esc(row.title)}` : ''}</div>`
+        }).join('')
       })
       modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
       modal.el.querySelector('[data-ok]').onclick = async () => {
-        const raw = collectForm(modal.body).raw
-        const items = raw.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
-          const [username, displayName, orgId, title] = line.split(',').map((s) => s?.trim())
-          return { username, displayName, orgId, title }
-        }).filter((item) => item.username && item.displayName && item.orgId)
-        if (!items.length) return toast('没有可导入的数据（检查格式）', 'error')
+        const rows = parseRows().filter((row) => row.username && row.displayName && row.orgInput)
+        if (!rows.length) return toast('没有可导入的数据（检查格式）', 'error')
+        const bad = rows.filter((row) => row.org.id === null)
+        if (bad.length) return toast(`组织未命中：${bad.map((row) => row.orgInput).join('、')}，请修正后重试`, 'error')
         try {
-          const result = await api.post('/api/iam/users/import', { items })
+          const result = await api.post('/api/iam/users/import', { items: rows.map(({ username, displayName, org, title }) => ({ username, displayName, orgId: org.id, title })) })
           toast(`导入完成：新建 ${result.created.length}，跳过 ${result.skipped.length}`)
           modal.close(); ctx.rerender()
         } catch (error) { toast(error.message, 'error') }
@@ -913,12 +951,44 @@ export async function renderIam(content, params, ctx) {
     // 统一解析为「法人 / 部门」全路径展示；同名部门靠路径区分。
     const orgPathById = new Map(buildOrgPaths(orgs).map((opt) => [opt.value, opt.label]))
     $('#conflict-count').textContent = String(pending.length)
-    $('#iam-actions').innerHTML = ''
+    $('#iam-actions').innerHTML = `
+      <button class="btn btn-default" id="cf-batch-platform" ${pending.length ? '' : 'disabled'}>${icon('shield', 14)}一键保留平台</button>
+      <button class="btn btn-danger-ghost" id="cf-batch-third" ${pending.length ? '' : 'disabled'}>${icon('refresh', 14)}一键以三方为准</button>`
+    if (pending.length) {
+      $('#cf-batch-platform').onclick = () => batchResolve('platform')
+      $('#cf-batch-third').onclick = () => batchResolve('third_party')
+    }
     const body = $('#iam-body')
     if (!pending.length) {
       body.innerHTML = ''
       body.appendChild(emptyState({ title: '没有待处理的同步冲突', desc: '三方通讯录与平台数据一致，或冲突均已处理', icon: 'shieldCheck' }))
       return
+    }
+    // 批量处理：逐条调用单条 resolve 接口，逐条容错，最后汇总结果（不新增后端接口）
+    async function batchResolve(keep) {
+      const label = keep === 'platform' ? '保留平台' : '以三方为准'
+      const confirmed = await confirmDialog({
+        title: `批量处理 ${pending.length} 条同步冲突`,
+        message: keep === 'platform'
+          ? `将忽略三方差异，${pending.length} 条冲突全部保留平台侧当前数据并关闭工单。`
+          : `将用三方通讯录数据覆盖平台侧数据，共 ${pending.length} 条，立即生效并留痕。确认继续？`,
+        danger: keep !== 'platform',
+        confirmText: `确认全部${label}`,
+      })
+      if (!confirmed) return
+      let ok = 0
+      const failed = []
+      for (const conflict of pending) {
+        try {
+          await api.post(`/api/iam/conflicts/${conflict.id}/resolve`, { keep })
+          ok++
+        } catch (error) {
+          failed.push(error.message)
+        }
+      }
+      if (failed.length) toast(`已处理 ${ok} 条，失败 ${failed.length} 条：${failed[0]}`, 'error')
+      else toast(`一键${label}完成：共处理 ${ok} 条冲突`, 'success')
+      ctx.rerender()
     }
     for (const conflict of pending) {
       const card = h(`

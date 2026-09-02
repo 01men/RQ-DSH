@@ -11,6 +11,7 @@ import { icon } from '../icons.js'
 import {
   $, $$, esc, toast, openDrawer, openModal, confirmDialog,
   renderTable, fmtTime, field, inputField, selectField, textareaField,
+  searchableSelectField, multiSelectField, mountSearchableSelects,
 } from '../ui.js'
 
 const RISK_BADGE = { read: 'success', write: 'warning', admin: 'danger' }
@@ -445,18 +446,39 @@ export async function renderConnectors(content, params, ctx) {
     holder.appendChild(grid)
   }
 
+  /** 组织下拉选项：value=orgId，label=完整路径（同名部门靠路径区分）。 */
+  function buildOrgOptions(orgs) {
+    const byId = new Map((orgs ?? []).map((o) => [o.id, o]))
+    const pathOf = (org) => {
+      const parts = []
+      let cur = org
+      const seen = new Set()
+      while (cur && !seen.has(cur.id)) {
+        seen.add(cur.id)
+        parts.unshift(cur.name)
+        cur = cur.parentId ? byId.get(cur.parentId) : undefined
+      }
+      return parts.join(' / ')
+    }
+    return (orgs ?? []).map((o) => ({ value: o.id, label: pathOf(o) })).sort((a, b) => a.label.localeCompare(b.label, 'zh'))
+  }
+
   async function connectionWizard(providerHint) {
     let providers = []
     try {
       providers = (await api.get('/api/connector/catalog')).providers ?? []
     } catch { /* catalog.read 缺失时向导降级为手填 */ }
+    let orgOpts = []
+    try {
+      orgOpts = buildOrgOptions(await api.get('/api/iam/orgs'))
+    } catch { /* iam.org.read 缺失时降级为手填 orgId */ }
     const modal = openModal({
       title: '新建连接（三形态）',
       body: `
-        ${field('Provider', selectField('provider', [
+        ${field('Provider', searchableSelectField('provider', [
           { value: '', label: providerHint ?? '（目录未同步时手动输入）' },
           ...providers.slice(0, 200).map((item) => ({ value: item.service, label: `${item.name ?? item.service}（${item.service}）` })),
-        ], { value: providerHint ?? '' }), { hint: '目录同步后可下拉选择；也可在下一栏直接填 service 标识' })}
+        ], { value: providerHint ?? '', placeholder: '点击选择 Provider，支持搜索' }), { hint: '目录同步后可搜索下拉选择；也可在下一栏直接填 service 标识' })}
         ${field('或直接填 service 标识', inputField('serviceInput', { placeholder: 'hackernews / github …' }))}
         ${field('认证形态', selectField('authType', [
           { value: 'no_auth', label: 'no_auth：免凭证虚拟登记' },
@@ -464,11 +486,14 @@ export async function renderConnectors(content, params, ctx) {
           { value: 'api_key', label: 'api_key / custom_credential：表单直达网关（不落盘）' },
         ], { value: 'no_auth' }))}
         ${field('别名后缀', inputField('aliasSuffix', { value: 'main' }), { required: true, hint: '完整别名 = org:<orgId>:<后缀>' })}
-        ${field('归属组织 ID', inputField('orgId', { placeholder: 'org_xxx' }), { required: true })}
+        ${field('归属组织', orgOpts.length
+          ? searchableSelectField('orgId', orgOpts, { placeholder: '点击选择归属组织，支持搜索' })
+          : inputField('orgId', { placeholder: 'org_xxx' }), { required: true })}
         <div id="cw-dynamic"></div>`,
       foot: `<button class="btn btn-default" data-cancel>取消</button>
              <button class="btn btn-primary" id="cw-submit">${icon('zap', 14)}创建</button>`,
     })
+    mountSearchableSelects(modal.el)
     const dynamic = modal.body.querySelector('#cw-dynamic')
     const renderDynamic = () => {
       const type = modal.body.querySelector('[name=authType]').value
@@ -590,19 +615,37 @@ export async function renderConnectors(content, params, ctx) {
     }))
   }
 
-  function permGroupModal(existing) {
+  async function permGroupModal(existing) {
     const isEdit = Boolean(existing)
     const defaultPolicies = existing?.policies ?? { hackernews: { allowedActions: ['hackernews.get_top_stories'], riskCap: 'read', constraints: { readOnly: true } } }
+    // 主体候选：Agent / 用户组 / 应用 三类（与后端 subject 类型对齐），组织用于归属下拉
+    const [agentsData, groupsData, appsData, orgsData] = await Promise.all([
+      api.get('/api/agents').catch(() => ({ agents: [] })),
+      api.get('/api/iam/groups').catch(() => ({ groups: [] })),
+      api.get('/api/apps').catch(() => ({ apps: [] })),
+      api.get('/api/iam/orgs').catch(() => []),
+    ])
+    const subjectOptions = [
+      ...(agentsData.agents ?? []).map((a) => ({ value: `agent:${a.id}`, label: `${a.name}（${a.slug ?? a.id}）`, group: 'Agent' })),
+      ...(groupsData.groups ?? []).map((g) => ({ value: `user_group:${g.id}`, label: g.name, group: '用户组' })),
+      ...(appsData.apps ?? []).map((a) => ({ value: `app:${a.id}`, label: a.name, group: '应用' })),
+    ]
+    const orgOpts = buildOrgOptions(Array.isArray(orgsData) ? orgsData : orgsData.orgs ?? [])
     const modal = openModal({
       title: isEdit ? `编辑权限组：${existing.name}` : '新建权限组',
       wide: true,
       body: `
         <div style="display:flex;gap:12px">
           <div style="flex:1">${field('名称', inputField('name', { value: existing?.name ?? '' }), { required: true })}</div>
-          <div style="flex:1">${field('组织 ID', `<input class="input" name="orgId" placeholder="org_xxx" value="${esc(existing?.orgId ?? '')}" ${isEdit ? 'disabled' : ''}>`, { required: !isEdit })}</div>
+          <div style="flex:1">${field('归属组织', !isEdit && orgOpts.length
+            ? searchableSelectField('orgId', orgOpts, { placeholder: '点击选择归属组织，支持搜索' })
+            : `<input class="input" name="orgId" placeholder="org_xxx" value="${esc(existing?.orgId ?? '')}" ${isEdit ? 'disabled' : ''}>`, { required: !isEdit })}</div>
         </div>
         ${field('policies（{service:{allowedActions:[],riskCap,connections?,constraints?}}）', textareaField('policiesJson', { value: JSON.stringify(defaultPolicies, null, 2), rows: 10 }), { required: true })}
-        ${field('subjects（JSON 数组）', textareaField('subjectsJson', { value: JSON.stringify(existing?.subjects ?? [], null, 0), rows: 3 }), { hint: '如 [{"type":"agent","id":"agt_xxx"}]；留空表示暂不授权，仅持令牌' })}
+        ${field('绑定主体', multiSelectField('subjects', subjectOptions, {
+          values: (existing?.subjects ?? []).map((s) => `${s.type}:${s.id}`),
+          placeholder: '搜索并选择 Agent / 用户组 / 应用，可多选；留空 = 暂不授权仅持令牌',
+        }))}
         <div style="display:flex;gap:12px">
           <div style="flex:1">${field('限流（次/分/主体）', inputField('rateLimitPerMin', { value: String(existing?.rateLimitPerMin ?? 60) }))}</div>
           <div style="flex:1">${field('计费预估（分）', inputField('precheckCents', { value: String(existing?.precheckCents ?? 0) }))}</div>
@@ -611,23 +654,30 @@ export async function renderConnectors(content, params, ctx) {
       foot: `<button class="btn btn-default" data-cancel>取消</button>
              <button class="btn btn-primary" id="pg-save">${isEdit ? '保存（PUT 四数组全发镜像令牌）' : '创建并铸令牌'}</button>`,
     })
+    mountSearchableSelects(modal.el)
+    modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
     modal.el.querySelector('#pg-save').addEventListener('click', async () => {
-      const val = (name) => modal.body.querySelector(`[name=${name}]`).value
+      const val = (name) => modal.body.querySelector(`[name=${name}]`)?.value ?? ''
       let policies
-      let subjects
       try {
         policies = JSON.parse(val('policiesJson'))
-        subjects = JSON.parse(val('subjectsJson'))
       } catch (error) {
-        return toast(`JSON 解析失败：${error.message}`, 'error')
+        return toast(`policies JSON 解析失败：${error.message}`, 'error')
       }
+      // 主体值格式 type:id（id 不含冒号），还原为后端 subjects 数组
+      const subjects = val('subjects').split(',').filter(Boolean).map((v) => {
+        const idx = v.indexOf(':')
+        return { type: v.slice(0, idx), id: v.slice(idx + 1) }
+      })
       const basePayload = {
-        name: val('name'),
+        name: val('name').trim(),
         policies,
         subjects,
         rateLimitPerMin: Number(val('rateLimitPerMin')) || 60,
         precheckCents: Number(val('precheckCents')) || 0,
       }
+      if (!basePayload.name) return toast('请填写名称', 'error')
+      if (!isEdit && !val('orgId')) return toast('请选择归属组织', 'error')
       const target = isEdit ? `/api/connector/perm-groups/${existing.id}` : '/api/connector/perm-groups'
       try {
         if (isEdit) await api.patch(target, basePayload)

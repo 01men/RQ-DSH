@@ -442,7 +442,7 @@ export function searchableSelectField(name, options, { value, placeholder = '点
     </div>`
 }
 
-/** 在容器内激活所有 searchable-select（弹窗内容插入 DOM 后调用一次）。 */
+/** 在容器内激活所有 searchable-select / multi-select（弹窗内容插入 DOM 后调用一次）。 */
 let pickerGlobalBound = false
 export function mountSearchableSelects(rootEl) {
   // 全局点击关闭只绑一次，避免每次弹窗都向 document 累积监听器
@@ -459,6 +459,7 @@ export function mountSearchableSelects(rootEl) {
     const conf = pickerRegistry.get(key)
     pickerRegistry.delete(key)
     if (!conf) return
+    if (conf.multi) return mountMultiPicker(picker, conf)
     const hidden = picker.querySelector('[name]')
     const display = picker.querySelector('[data-ss-display]')
     const menu = picker.querySelector('[data-ss-menu]')
@@ -524,6 +525,105 @@ export function mountSearchableSelects(rootEl) {
     qEl.oninput = () => renderList(qEl.value)
     menu.onclick = (e) => e.stopPropagation()
   })
+}
+
+// ---------- 多选搜索选择器（绑定主体/限定用户/编排 Agent 等多选场景） ----------
+// 选中项以 chip 呈现，框内输入即过滤候选；值以逗号串写入同名 hidden input，
+// 与 collectForm / [name=xxx].value 读取模式完全兼容。
+
+/**
+ * @param options Array<{ value, label, group? }>
+ * @param opts.values 初始选中值数组
+ */
+export function multiSelectField(name, options, { values = [], placeholder = '搜索并选择，可多选' } = {}) {
+  const key = `ms${++pickerSeq}`
+  pickerRegistry.set(key, { options, placeholder, multi: true })
+  return `
+    <div class="searchable-select multi-select" data-sselect="${key}">
+      <input type="hidden" name="${esc(name)}" value="${esc(values.map(String).join(','))}">
+      <div class="ms-box" data-ms-box>
+        <span class="ms-chips" data-ms-chips></span>
+        <input class="ms-input" type="text" data-ms-q placeholder="${esc(placeholder)}">
+      </div>
+      <div class="searchable-select-menu" data-ss-menu>
+        <div class="searchable-select-list" data-ss-list></div>
+      </div>
+    </div>`
+}
+
+function mountMultiPicker(picker, conf) {
+  const hidden = picker.querySelector('[name]')
+  const box = picker.querySelector('[data-ms-box]')
+  const chipsEl = picker.querySelector('[data-ms-chips]')
+  const inlineQ = picker.querySelector('[data-ms-q]')
+  const list = picker.querySelector('[data-ss-list]')
+  let selected = hidden.value ? hidden.value.split(',').filter(Boolean) : []
+
+  const labelOf = (v) => conf.options.find((opt) => String(opt.value) === String(v))?.label ?? v
+
+  const renderChips = () => {
+    hidden.value = selected.join(',')
+    chipsEl.innerHTML = selected.map((v) => `
+      <span class="ms-chip" title="${esc(labelOf(v))}">
+        <span class="ms-chip-label">${esc(labelOf(v))}</span>
+        <button type="button" class="ms-x" data-ms-remove="${esc(v)}" title="移除">${icon('x', 10)}</button>
+      </span>`).join('')
+    inlineQ.placeholder = selected.length ? '' : (conf.placeholder ?? '搜索并选择，可多选')
+    chipsEl.querySelectorAll('[data-ms-remove]').forEach((btn) => {
+      btn.onclick = (e) => {
+        e.stopPropagation()
+        selected = selected.filter((v) => v !== btn.dataset.msRemove)
+        renderChips()
+        renderList(inlineQ.value)
+      }
+    })
+  }
+
+  const renderList = (keyword) => {
+    if (!conf.options.length) {
+      list.innerHTML = '<div class="searchable-select-empty">没有可选项</div>'
+      return
+    }
+    const kw = (keyword ?? '').trim().toLowerCase()
+    const matched = conf.options.filter((opt) => !kw || String(opt.label).toLowerCase().includes(kw) || String(opt.group ?? '').toLowerCase().includes(kw))
+    if (!matched.length) {
+      list.innerHTML = '<div class="searchable-select-empty">没有匹配的选项，换个关键词试试</div>'
+      return
+    }
+    const groups = new Map()
+    for (const opt of matched) {
+      const g = opt.group ?? ''
+      if (!groups.has(g)) groups.set(g, [])
+      groups.get(g).push(opt)
+    }
+    let html = ''
+    for (const [group, opts] of groups) {
+      if (group) html += `<div class="searchable-select-group">${esc(group)}</div>`
+      for (const opt of opts) {
+        const picked = selected.includes(String(opt.value))
+        html += `<div class="searchable-select-item${picked ? ' active' : ''}" data-value="${esc(opt.value)}" title="${esc(opt.label)}"><span class="ms-item-check">${picked ? '✓ ' : ''}</span>${esc(opt.label)}</div>`
+      }
+    }
+    list.innerHTML = html
+    list.querySelectorAll('.searchable-select-item').forEach((item) => {
+      item.onclick = () => {
+        const v = item.dataset.value
+        selected = selected.includes(v) ? selected.filter((x) => x !== v) : [...selected, v]
+        renderChips()
+        renderList(inlineQ.value)
+      }
+    })
+  }
+
+  const openMenu = () => {
+    picker.classList.add('open')
+    renderList(inlineQ.value)
+    setTimeout(() => inlineQ.focus(), 0)
+  }
+  box.onclick = () => { picker.classList.contains('open') ? picker.classList.remove('open') : openMenu() }
+  inlineQ.oninput = () => renderList(inlineQ.value)
+  picker.querySelector('[data-ss-menu]').onclick = (e) => e.stopPropagation()
+  renderChips()
 }
 
 export function textareaField(name, { placeholder, value, rows = 3 } = {}) {
