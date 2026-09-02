@@ -79,8 +79,8 @@ export function apply(ctx: Context) {
       const nasId = String(args.nasId)
       const path = args.path === undefined || args.path === '' ? undefined : String(args.path)
       return path === undefined
-        ? await ctx.nasRegistry.listShares(nasId, actorOf(args, exec))
-        : await ctx.nasRegistry.listFiles(nasId, path, actorOf(args, exec))
+        ? await ctx.nasRegistry.listShares(nasId, actorOf(args, exec, ctx))
+        : await ctx.nasRegistry.listFiles(nasId, path, actorOf(args, exec, ctx))
     },
   }))
 
@@ -95,7 +95,7 @@ export function apply(ctx: Context) {
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args, exec) {
-      return await ctx.nasRegistry.search(String(args.nasId), String(args.pattern), args.path ? String(args.path) : '/', actorOf(args, exec))
+      return await ctx.nasRegistry.search(String(args.nasId), String(args.pattern), args.path ? String(args.path) : '/', actorOf(args, exec, ctx))
     },
   }))
 
@@ -109,7 +109,7 @@ export function apply(ctx: Context) {
     },
     output: { type: 'object', additionalProperties: true },
     async execute(args, exec) {
-      return await ctx.nasRegistry.mkdir(String(args.nasId), String(args.path), actorOf(args, exec))
+      return await ctx.nasRegistry.mkdir(String(args.nasId), String(args.path), actorOf(args, exec, ctx))
     },
   }))
 
@@ -124,7 +124,7 @@ export function apply(ctx: Context) {
     output: { type: 'object', additionalProperties: true },
     async execute(args, exec) {
       const paths = Array.isArray(args.paths) ? args.paths.map(String) : [String(args.paths)]
-      return await ctx.nasRegistry.delete(String(args.nasId), paths, actorOf(args, exec))
+      return await ctx.nasRegistry.delete(String(args.nasId), paths, actorOf(args, exec, ctx))
     },
   }))
 
@@ -142,7 +142,7 @@ export function apply(ctx: Context) {
       return await ctx.nasRegistry.uploadFile(String(args.nasId), {
         localFile: String(args.localFile),
         destPath: String(args.destPath),
-        actor: actorOf(args, exec),
+        actor: actorOf(args, exec, ctx),
       })
     },
   }))
@@ -153,8 +153,21 @@ export function apply(ctx: Context) {
  * P0-2 教训（dev-plan-nas-authz §2.3）：身份一律来自入口从令牌解析的 exec.principal，
  * 禁止从 args 读取（schema 无身份参数）——缺失即 fail-closed，不降级到共享身份。
  */
-function actorOf(args: Record<string, unknown>, exec: { callId: string; principal?: { userId?: string; principalId: string; name: string } }): { id: string; name: string } {
+function actorOf(
+  args: Record<string, unknown>,
+  exec: { callId: string; principal?: { userId?: string; principalId: string; name: string }; agent?: { session?: { id?: string } } },
+  ctx?: Context,
+): { id: string; name: string } {
   void args
+  // dsh 宿主形态（plugin-dsh-bridge 装配）：平台身份绑定优先——dsh 会话绑定的真实用户
+  // （或最近一次绑定，单操作者姿态）作为 actor，onBehalfHeaders 据此注入 X-On-Behalf-User。
+  // 独立形态无 identityBinding 服务，行为不变（exec.principal 机器身份）。
+  const binding = (ctx as { identityBinding?: { identityForSession(sessionId?: string): { userId: string; name: string } | undefined } } | undefined)?.identityBinding
+  if (binding) {
+    const sessionId = exec.agent?.session?.id
+    const identity = binding.identityForSession(typeof sessionId === 'string' ? sessionId : undefined)
+    if (identity) return { id: identity.userId, name: identity.name }
+  }
   const principal = exec.principal
   if (!principal) throw new Error('缺少调用者身份（exec.principal），文件操作 fail-closed 拒绝执行')
   return { id: principal.userId ?? principal.principalId, name: principal.name }

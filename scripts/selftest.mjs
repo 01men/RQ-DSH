@@ -13,12 +13,30 @@ import {
 import { readFileSync as __readFileSyncSeed } from 'node:fs'
 const NAS_AUTHZ_SEED = JSON.parse(__readFileSyncSeed(new URL('../packages/plugin-nas/seed/nas-authz-rules.json', import.meta.url), 'utf8'))
 import * as platformCore from '../packages/platform-core/src/index.ts'
+import * as resourceCore from '../packages/plugin-resource-core/src/index.ts'
+import * as iam from '../packages/plugin-iam/src/index.ts'
+import * as authn from '../packages/plugin-authn/src/index.ts'
+import * as usage from '../packages/plugin-usage/src/index.ts'
+import * as billing from '../packages/plugin-billing/src/index.ts'
+import * as audit from '../packages/plugin-audit/src/index.ts'
+import * as market from '../packages/plugin-market/src/index.ts'
+import * as agent from '../packages/plugin-agent/src/index.ts'
+import * as app from '../packages/plugin-app/src/index.ts'
+import * as connector from '../packages/plugin-connector/src/index.ts'
+import * as mcp from '../packages/plugin-mcp/src/index.ts'
+import * as nas from '../packages/plugin-nas/src/index.ts'
+import * as skillhub from '../packages/plugin-skillhub/src/index.ts'
+import * as modelgw from '../packages/plugin-modelgw/src/index.ts'
+import * as connect from '../packages/plugin-connect/src/index.ts'
+import * as update from '../packages/plugin-update/src/index.ts'
+import * as portal from '../packages/plugin-portal/src/index.ts'
+import * as consolePlugin from '../packages/plugin-console/src/index.ts'
 import * as dshBridge from '../packages/plugin-dsh-bridge/src/index.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { createServer, request as httpRequest } from 'node:http'
 import { createHash } from 'node:crypto'
 import { rm, mkdir } from 'node:fs/promises'
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const readBody = (req) => new Promise((resolve) => {
@@ -3584,51 +3602,139 @@ try {
   section('dsh 宿主挂载（单进程单入口 /rq 前缀）')
   {
     const captured = []
-    const fakeWebServer = { register: (route) => { captured.push(route); return () => {} } }
+    const taps = []
+    const fakeWebServer = {
+      register: (route) => { captured.push(route); return () => {} },
+      tapIndex: (transform) => { taps.push(transform); return () => {} },
+    }
     const bridgeDataDir = join(DATA_DIR, 'bridge-mount')
     await mkdir(bridgeDataDir, { recursive: true })
     const mountCtx = new Context()
     await mountCtx.plugin(platformCore, { dataDir: bridgeDataDir, http: { port: 0, externalBase: '/rq' }, startHttp: false })
+    // 完整业务树（等价 boot-all 依赖序；startHttp=false → 数据面经 bridge 挂载）：
+    await mountCtx.plugin(resourceCore)
+    await mountCtx.plugin(iam)
+    await mountCtx.plugin(authn)
+    await mountCtx.plugin(usage)
+    await mountCtx.plugin(billing)
+    await mountCtx.plugin(audit)
+    await mountCtx.plugin(market)
+    await mountCtx.plugin(connector)
+    await mountCtx.plugin(mcp)
+    await mountCtx.plugin(nas)
+    await mountCtx.plugin(skillhub)
+    await mountCtx.plugin(agent)
+    await mountCtx.plugin(app)
+    await mountCtx.plugin(modelgw)
+    await mountCtx.plugin(connect, { role: 'host' })
+    await mountCtx.plugin(update)
+    // 先于 console：门户端点在其鉴权中间件之前截获 /api/portal/*
+    await mountCtx.plugin(portal)
+    await mountCtx.plugin(consolePlugin) // 基线初始化：内置角色 + 根组织 + admin
+    await mountCtx.plugin(dshBridge, { mountPath: '/rq' })
     mountCtx.httpServer.register('GET', '/api/__mount_probe', (exchange) => exchange.ok({ pong: exchange.path }))
-    // SPA 静态目录（临时双文件：index.html + assets/app.js），验证前缀内静态与 SPA 回退
-    const staticDir = join(bridgeDataDir, 'public')
-    await mkdir(join(staticDir, 'assets'), { recursive: true })
-    const indexHtml = '<!doctype html><html><title>rq-console-marker</title></html>'
-    const appJs = 'console.log("rq-asset-marker")'
-    await (await import('node:fs/promises')).writeFile(join(staticDir, 'index.html'), indexHtml)
-    await (await import('node:fs/promises')).writeFile(join(staticDir, 'assets', 'app.js'), appJs)
-    mountCtx.httpServer.serveStatic('/', staticDir, '/index.html')
-    // 直接以「带 webServer 的 ctx 视图」调用 apply（等价于 dsh 形态下 inject 完成后的装配）
+    // 将伪造 webServer 提供给 ctx 后正常装配（等价 dsh 形态：inject 完成后 apply）
+    // 绑定服务显式构造（注册在真实 mountCtx 上，供 plugin-nas 出站归因读取）；
+    // apply 以「服务视图」调用——等价 dsh 形态下 inject 完成后的装配
+    // OIDC 授权码通道凭证（register-dsh-agent.mjs 产物形态）
+    writeFileSync(join(bridgeDataDir, 'dsh-agent-credential.json'), JSON.stringify({
+      agentId: 'agt_mount_test',
+      oidc: { clientId: 'oc-selftest-bridge', clientSecret: 'ocs_selftest_secret' },
+    }))
+    const bindingService = new dshBridge.IdentityBindingService(mountCtx, {})
     dshBridge.apply(
-      { webServer: fakeWebServer, httpServer: mountCtx.httpServer, logger: (name) => mountCtx.logger(name) },
-      { mountPath: '/rq' },
+      { webServer: fakeWebServer, httpServer: mountCtx.httpServer, entryTickets: mountCtx.entryTickets, oidc: mountCtx.oidc, logger: (name) => mountCtx.logger(name), identityBinding: bindingService },
+      { mountPath: '/rq', oidcCredentialFile: join(bridgeDataDir, 'dsh-agent-credential.json') },
     )
-    check('bridge 向 webServer 注册唯一 prefix 路由 /rq', captured.length === 1 && captured[0].kind === 'prefix' && captured[0].path === '/rq')
+    check('bridge 向 webServer 注册挂载路由（/rq + /auth/entry + /dsh-bridge + /auth/oidc/*）',
+      captured.some((r) => r.kind === 'prefix' && r.path === '/rq') && captured.some((r) => r.kind === 'exact' && r.path === '/auth/entry')
+      && captured.some((r) => r.kind === 'prefix' && r.path === '/dsh-bridge') && captured.some((r) => r.kind === 'exact' && r.path === '/auth/oidc/start')
+      && captured.some((r) => r.kind === 'exact' && r.path === '/auth/oidc/callback'),
+      JSON.stringify(captured.map((r) => `${r.kind}:${r.path}`)))
     check('externalBase 配置生效（/rq）', mountCtx.httpServer.externalBase === '/rq')
     // 模拟 dsh webserver 分发：命中 /rq 前缀即交给 bridge handler，其余 404
     const sim = createServer((req, res) => {
+      const exact = captured.find((r) => r.kind === 'exact' && (req.url ?? '').split('?')[0] === r.path)
+      if (exact) { exact.handler(req, res); return }
       const route = captured.find((r) => r.kind === 'prefix' && (req.url === r.path || (req.url ?? '').startsWith(`${r.path}/`)))
       if (route) { route.handler(req, res); return }
       res.writeHead(404).end('sim-miss')
     })
     await new Promise((resolve) => sim.listen(0, '127.0.0.1', resolve))
-    const simGet = async (path) => fetch(`http://127.0.0.1:${sim.address().port}${path}`, { redirect: 'manual' })
-    const probe = await simGet('/rq/api/__mount_probe')
+    // 完整树下数据面带 console 鉴权中间件：先经 /rq/api/auth/login 换 Bearer（基线初始口令文件）
+    const pwFile = join(bridgeDataDir, 'admin-initial-password.txt')
+    const adminPassword = existsSync(pwFile)
+      ? (readFileSync(pwFile, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('平台管理员'))[0] ?? '')
+      : ''
+    const loginRes = await fetch(`http://127.0.0.1:${sim.address().port}/rq/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: adminPassword || '自测兜底口令' }),
+    })
+    const adminToken = (await loginRes.json().catch(() => null))?.data?.token
+    check('/rq/api/auth/login 可用（单入口下登录链路通）', Boolean(adminToken), `status=${loginRes.status}`)
+    const simGet = async (path, token) => fetch(`http://127.0.0.1:${sim.address().port}${path}`, {
+      redirect: 'manual', headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
+    const probe = await simGet('/rq/api/__mount_probe', adminToken)
     const probeBody = await probe.json().catch(() => null)
-    check('/rq/api/* 剥前缀后与独立形态路由等价', probe.status === 200 && probeBody?.data?.pong === '/api/__mount_probe', `status=${probe.status} body=${JSON.stringify(probeBody)}`)
+    check('/rq/api/* 剥前缀后与独立形态路由等价（含 Bearer 鉴权链）', probe.status === 200 && probeBody?.data?.pong === '/api/__mount_probe', `status=${probe.status} body=${JSON.stringify(probeBody)}`)
     const redir = await simGet('/rq')
     check('/rq 302 归一到 /rq/（SPA 相对引用可解析）', redir.status === 302 && redir.headers.get('location') === '/rq/')
     const spa = await simGet('/rq/')
-    check('/rq/ 回落控制台 index.html（SPA fallback）', spa.status === 200 && (await spa.text()).includes('rq-console-marker'))
-    const asset = await simGet('/rq/assets/app.js')
-    check('/rq/assets/* 静态资源按前缀命中', asset.status === 200 && (await asset.text()).includes('rq-asset-marker'))
+    check('/rq/ 伺服控制台 index.html（SPA fallback）', spa.status === 200 && (await spa.text()).includes('<!doctype html>'))
+    const asset = await simGet('/rq/js/app.js')
+    check('/rq/js/* 控制台静态资源按前缀命中', asset.status === 200 && String(asset.headers.get('content-type') ?? '').includes('javascript'), `status=${asset.status}`)
     const spaMiss = await simGet('/rq/anything-else')
-    check('非 /api 未命中回落 SPA（与独立形态一致）', spaMiss.status === 200 && (await spaMiss.text()).includes('rq-console-marker'))
-    const apiMiss = await simGet('/rq/api/definitely-missing')
+    check('非 /api 未命中回落 SPA（与独立形态一致）', spaMiss.status === 200 && (await spaMiss.text()).includes('<!doctype html>'))
+    const apiMiss = await simGet('/rq/api/definitely-missing', adminToken)
     const apiMissBody = await apiMiss.json().catch(() => null)
     check('未匹配 API 404 JSON 不落静态（DEF-01）', apiMiss.status === 404 && apiMissBody?.error?.code === 'NOT_FOUND')
     const simMiss = await fetch(`http://127.0.0.1:${sim.address().port}/outside`)
     check('前缀外请求不进榕器数据面（dsh 侧自有路由域不受影响）', simMiss.status === 404 && (await simMiss.text()) === 'sim-miss')
+
+    // -- 身份半：票据兑换 → Cookie 绑定 → 状态 → 会话归因 → 实时失效（M4/M5） ----
+    check('免登引导脚本经 tapIndex 注入', taps.length === 1 && taps[0]('<html><head></head></html>').includes('entry_ticket'))
+    const simOrigin = `http://127.0.0.1:${sim.address().port}`
+    const adminUser = mountCtx.iam.users().findOne((u) => u.username === 'admin')
+    check('基线初始化（挂载形态最小树）产出 admin', Boolean(adminUser))
+    const entryIssue = mountCtx.entryTickets.issue({ refType: 'agent', refId: 'agt_mount_test', userId: adminUser.id, userName: '平台管理员' })
+    const entryRes = await fetch(`${simOrigin}/auth/entry?entry_ticket=${encodeURIComponent(entryIssue.ticket)}`, { redirect: 'manual' })
+    const setCookie = entryRes.headers.get('set-cookie') ?? ''
+    check('/auth/entry 兑换 → 302 / + Set-Cookie rq_sid（HttpOnly/SameSite=Lax）',
+      entryRes.status === 302 && entryRes.headers.get('location') === '/' && setCookie.includes('rq_sid=rbs_') && setCookie.includes('HttpOnly') && setCookie.includes('SameSite=Lax'),
+      `${entryRes.status} ${setCookie}`)
+    const cookie = setCookie.split(';')[0] ?? ''
+    const statusRes = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { cookie } })
+    const statusBody = await statusRes.json()
+    check('/dsh-bridge/status 读 Cookie 返回绑定身份', statusBody?.data?.bound === true && statusBody.data.identity?.sub === adminUser.id, JSON.stringify(statusBody))
+    const statusAnon = await fetch(`${simOrigin}/dsh-bridge/status`)
+    check('无 Cookie 状态查询 → 未绑定（不作身份推断）', (await statusAnon.json())?.data?.bound === false)
+    const entryReplay = await fetch(`${simOrigin}/auth/entry?entry_ticket=${encodeURIComponent(entryIssue.ticket)}`, { redirect: 'manual' })
+    check('票据重放被拒（一次性消费，redeem 抛错→400）', entryReplay.status === 400)
+    const bindRes = await fetch(`${simOrigin}/dsh-bridge/bind-session`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ sessionId: 'sess-mount-1' }),
+    })
+    check('会话绑定 200（Cookie 定身份 → sessionId 关联）', bindRes.status === 200, JSON.stringify(await bindRes.json()))
+    const boundViaSession = mountCtx.identityBinding.identityForSession('sess-mount-1')
+    const boundFallback = mountCtx.identityBinding.identityForSession('sess-unknown')
+    check('工具出站归因解析：会话绑定优先 / 未绑定回落最近绑定', boundViaSession?.userId === adminUser.id && boundFallback?.userId === adminUser.id, JSON.stringify({ boundViaSession, boundFallback }))
+    mountCtx.iam.users().update(adminUser.id, { status: 'suspended' })
+    const statusFrozen = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { cookie } })
+    check('账号停用 → 绑定实时失效（兑换面已校验 + 读取面再校验）', (await statusFrozen.json())?.data?.bound === false)
+    mountCtx.iam.users().update(adminUser.id, { status: 'active' })
+    const crossOrigin = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { origin: 'http://evil.example.com' } })
+    check('绑定面同源收紧：跨站 Origin 403（对齐 dsh fence 语义）', crossOrigin.status === 403)
+
+    // -- OIDC 授权码通道（start 302 → PKCE；callback 坏 state 拒绝） -----------------
+    const oidcStart = await fetch(`${simOrigin}/auth/oidc/start`, { redirect: 'manual' })
+    const oidcLocation = oidcStart.headers.get('location') ?? ''
+    check('/auth/oidc/start 302 平台授权页（client_id + PKCE S256 + state）',
+      oidcStart.status === 302 && oidcLocation.startsWith(`${mountCtx.oidc.issuer()}/oauth/authorize`)
+      && oidcLocation.includes('client_id=oc-selftest-bridge') && oidcLocation.includes('code_challenge_method=S256') && oidcLocation.includes('state='),
+      `${oidcStart.status} ${oidcLocation}`)
+    const oidcCallbackBad = await fetch(`${simOrigin}/auth/oidc/callback?code=x&state=bogus`, { redirect: 'manual' })
+    check('/auth/oidc/callback 坏 state 被拒 400（防 CSRF/重放）', oidcCallbackBad.status === 400)
     await new Promise((resolve) => sim.close(resolve))
   }
 

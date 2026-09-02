@@ -10,13 +10,14 @@
 
 | 形态 | 进程 | 说明 | 适用 |
 |---|---|---|---|
-| A. 独立宿主（默认） | `node src/main.ts` | 一个进程提供 REST 网关 + 控制台 SPA + 41 运维工具桥（含 4 个接入管理工具） | 企业生产最小形态，控制台人工使用 |
-| B. 独立宿主 + dsh 运行时 | A 的进程 + `dsh web --patch cordis.yml` | dsh 侧插件树对模型暴露全部运维工具，Agent 可用自然语言运维平台；两进程**共享同一 `data/` 目录** | 需要 Agent 驱动运维的企业 |
-| C. 远程 dsh 接入 | 宿主（A）+ 远程电脑 `dsh plugin add` | 远程电脑经插件市场安装本平台，凭**一次性接入码**向宿主申请机器凭证；运维工具全部远程代理到宿主执行（免源码、免共享 data） | 多办公点/多人用 dsh 协作运维同一平台 |
+| A. 独立宿主（默认/开发形态） | `node src/main.ts` | 一个进程提供 REST 网关 + 控制台 SPA + 41 运维工具桥（含 4 个接入管理工具） | 开发调试、最小化部署 |
+| B. **dsh 宿主单进程单入口（推荐生产形态）** | `dsh web --patch cordis.yml` | 一个进程、一个端口：dsh web UI（`/`）+ 榕器数据面（`/rq/*`：REST/控制台 SPA/docs/MCP）+ 37+ 运维工具进原生 ToolRuntime；`plugin-dsh-bridge` 提供免登（`/auth/entry`、`#entry_ticket` 引导）与平台身份绑定（工具出站 `X-On-Behalf-User` 归因到人） | 企业生产：Agent 驱动运维 + 平台账号身份统一 |
+| C. 远程 dsh 接入 | 宿主（B/A）+ 远程电脑 `dsh plugin add` | 远程电脑经插件市场安装本平台，凭**一次性接入码**向宿主申请机器凭证；运维工具全部远程代理到宿主执行（免源码、免共享 data） | 多办公点/多人用 dsh 协作运维同一平台 |
 
-> 关键事实：`cordis.yml` 不挂载 console 插件——控制台 SPA 与 REST 始终由独立宿主进程提供；
-> dsh 侧只挂业务插件（`provideToolRuntime: false`，使用 dsh 原生 ToolRuntime）。
-> 因此**形态 B 也必须先完成形态 A**。
+> 关键事实（2026-09-02 更新，dev-plan-agent-host-unification M1-M5 落地）：`cordis.yml` / `cordis.patch.yml`
+> 现在挂载 portal → console → dsh-bridge 完整数据面；`platform-core` 配置 `startHttp:false`（不再自行监听）
+> + `http.externalBase:'/rq'`。**形态 B 无需再并跑独立进程**；形态 A 保留为开发形态。
+> 详见 `docs/dev-plan-agent-host-unification.md`。
 
 环境要求：Node ≥ 22.6（原生 TypeScript 运行，无构建步骤）；数据落盘在 `--data` 指定目录
 （JSON 集合 + SQLite `txnstore.db`）。
@@ -201,3 +202,36 @@ DSHCTL_URL=http://宿主IP:7300 DSHCTL_USER=admin DSHCTL_PASS=*** \
 - [ ] （形态 C）远程电脑 `connect_status` 显示 remote 模式；宿主「平台接入」页可见该客户端
 - [ ] 备份策略就位（data/ 目录定时冷备）
 - [ ] admin 初始口令已更换，演示口令 `Ybk@2026` 无法登录
+
+---
+
+## 六、单进程单入口 runbook（形态 B，2026-09-02）
+
+```bash
+# 1. 源码模式前置（两步缺一不可，保证全局唯一 cordis 实例）：
+#    a. 本项目 node_modules/@deepseek-ai/cordis junction 到 dsh 源码树 vendor/cordis
+#       （先改名保留上游：vendor/cordis → vendor/cordis.bak，再建 junction）
+#       cmd /c "mklink /J D:\DSH\deepseek-harness\vendor\cordis D:\DSH-RQ\node_modules\@deepseek-ai\cordis"
+#    b. cordis.yml 的 <PROJECT_ROOT> 替换为 file:/// 绝对路径生成 overlay
+#       sed 's|<PROJECT_ROOT>|file:///D:/DSH-RQ|g' cordis.yml > overlay.yml
+
+# 2. 启动（一个进程、一个端口）
+ADMIN_PASSWORD='<强口令>' OIDC_ISSUER='http://<对外地址>:3080/rq'   node <dsh树>/apps/cli/lib/bin.js --profile <profile> --patch overlay.yml --port 3080
+#    - 局域网访问：--trusted-host <对外地址>:3080（dsh 信任围栏）；webserver host 覆盖 0.0.0.0
+#      须 patch 直写（dsh CLI 刻意拒绝 --host 0.0.0.0），残余风险见
+#      docs/dev-plan-agent-host-unification.md §七
+#    - OIDC_ISSUER 必须显式声明且带 /rq 前缀（discovery/authorize 端点语义自洽）
+
+# 3. dsh Agent 自登记（幂等；注册/凭证落盘/治理提报/OIDC 客户端签发一次完成）
+node scripts/register-dsh-agent.mjs --url http://<对外地址>:3080 --entry http://<对外地址>:3080/
+
+# 4. 验证
+#    http://<对外地址>:3080/       → dsh web UI
+#    http://<对外地址>:3080/rq/    → 榕器控制台（登录后管理全部资产）
+#    控制台「Agent 本体」→ 打开交互界面 → dsh UI 免登即用（entry_ticket 自动兑换）
+```
+
+身份通道（全部入审计）：① 控制台/门户直达 → `?entry_ticket=`（或 `#entry_ticket` fragment 引导）
+→ `/auth/entry` 兑换 → `rq_sid` Cookie；② 未登录直开 → `/auth/oidc/start` → 平台授权页
+（授权码 + PKCE S256）→ 回跳绑定；③ 绑定后 dsh 会话经 `/dsh-bridge/bind-session` 关联身份，
+NAS 文件网关调用注入 `X-On-Behalf-User`（P0-2 红线）。账号冻结/离职实时失效绑定。

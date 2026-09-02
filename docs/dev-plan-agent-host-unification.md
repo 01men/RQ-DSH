@@ -233,10 +233,16 @@ NAS 注入头（绑定存在）/standalone 不注入（无绑定服务）断言�
 ## 八、实施顺序与里程碑
 
 ```
-M1 阶段一（挂载）     platform-core handleRequest + dsh-bridge 挂载半 + SPA base-path + cordis.yml + selftest
-M2 阶段三-A（OIDC）   refType/生命周期/门禁/控制台 UI（纯平台侧，可先行）
-M3 阶段二（登记）     register-dsh-agent.mjs（依赖 M2 的客户端签发）
-M4 阶段三-B（绑定）   IdentityBindingService + session.create 拦截 + NAS 出站注入
-M5 阶段四（免登 UI）  /auth/entry + 引导脚本 + 浏览器半插件 + 部署文档
+M1 阶段一（挂载）     platform-core handleRequest + dsh-bridge 挂载半 + SPA base-path + cordis.yml + selftest   ✅ 2026-09-02
+M2 阶段三-A（OIDC）   refType/生命周期/门禁/控制台 UI（纯平台侧，可先行）                                          ✅ 2026-09-02
+M3 阶段二（登记）     register-dsh-agent.mjs（依赖 M2 的客户端签发）                                              ✅ 2026-09-02
+M4 阶段三-B（绑定）   IdentityBindingService + 会话绑定 + NAS 出站注入                                            ✅ 2026-09-02
+                      （实施修正：dsh rc.7 的 /api 拦截器不向 handler 暴露 Cookie——
+                       会话绑定改走自有前缀路由 /dsh-bridge/bind-session，由引导脚本显式调用）
+M5 阶段四（免登 UI）  /auth/entry + 引导脚本 + OIDC 授权码通道（start/callback PKCE）+ 部署文档                    ✅ 2026-09-02
+                      （浏览器半插件「登录态 UI 显示」降为后续迭代：免登/登录链路已闭环）
 每步交付物 commit 并推送备份仓库（RQ-DSH main），selftest 全绿为准。
+落地验证：selftest 721/721；真实 dsh 宿主冒烟（127.0.0.1:3080 单端口承载 dsh UI + /rq/* 全数据面）；
+register-dsh-agent.mjs 隔离实例端到端（首跑/幂等重跑/门禁放行）。
+后续迭代（非阻塞）：dsh /api 全量 cookie 门禁（hardening）；浏览器半插件登录态 UI；多用户并发会话归因精确化。
 ```
