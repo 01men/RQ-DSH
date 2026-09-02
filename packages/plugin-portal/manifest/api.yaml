@@ -1,0 +1,16 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-portal
+base: /api
+endpoints:
+  - GET /api/portal（端点发现：联调自检入口，公开无鉴权）
+  - GET /api/portal/apps # 已上线 AI 应用（门户契约 /apps，api.md v1.0）
+  - GET /api/portal/employees # 已上线 Agent=数字员工（门户契约 /employees）
+  - GET /api/portal/solutions # 解决方案（暂无数据源，空数组=门户降级样板）
+  - GET /api/portal/tools # AI 工具地图（暂无数据源，空数组=门户降级样板）
+  - GET /api/portal/skills # 已上架 Skill（门户契约 /skills）
+  - GET /api/portal/stats # 首页统计 4 卡（门户契约 /stats）
+
+services:
+  - key: portalFeed
+    access: ctx.portalFeed
+    description: 门户契约快照：apps/employees/skills/stats 映射与公开只读端点应答

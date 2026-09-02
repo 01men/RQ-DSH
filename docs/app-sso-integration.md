@@ -58,7 +58,7 @@ const user = await oc.fetchUserInfo(config, tokens.access_token, tokens.claims()
 ```
 
 - 静默续期：`oc.refreshTokenGrant(config, tokens.refresh_token)`（轮转一次一换，旧值重放会吊销整链）。
-- 登出联动：`oc.buildEndSessionUrl(config, { id_token_hint, post_logout_redirect_uri, state })`，平台会同时吊销该用户在本应用下的 refresh 链。
+- 登出联动：`oc.buildEndSessionUrl(config, { id_token_hint, post_logout_redirect_uri, state })`，平台会同时吊销该用户在本应用下的 refresh 链。未携带 `post_logout_redirect_uri` 时，若该客户端仅登记了一个登出回跳地址，平台按其登记地址回跳（推荐仍显式传参，多环境登记时不受此兜底影响）。
 - 主动吊销：`oc.tokenRevocation(config, tokens.access_token)`（RFC 7009）。
 
 ### 纯前端 SPA（public 客户端，D-a 决策：支持 public 形态）
@@ -78,6 +78,14 @@ const user = await mgr.signinRedirectCallback()     // 回调处，id_token 已�
 ```
 
 > 安全提示：public 客户端的令牌暴露面更大，仅建议用于内网工具 / 无敏感数据的应用；能上 BFF 的尽量走 confidential。
+
+#### CORS（纯前端跨域直调，平台已内置放行）
+
+浏览器内 JS 跨域直调 `POST /oauth/token`、`GET /oauth/userinfo`、`POST /oauth/revoke` 与两个 discovery 端点时，平台自动返回 CORS 放行头，**无需任何界面配置**：
+
+- 允许来源 = 已登记客户端 `redirect_uri` 的 origin（scheme://host:port）∪ 环境变量 `OIDC_CORS_ORIGINS`（逗号分隔，追加非登记来源）。登记回调 `http://192.168.0.4:8092/cb` 即自动放行 `http://192.168.0.4:8092`。
+- `OPTIONS` 预检统一 204，`Access-Control-Allow-Headers: authorization, content-type`；成功与错误响应都携带 `Access-Control-Allow-Origin`（浏览器可读错误体）。
+- 未登记来源不发放放行头（仅 `Vary: Origin`）；授权第一跳 `/oauth/authorize` 与登出 `/oauth/end_session` 是浏览器顶级跳转，不涉及 CORS。
 
 ## 三、端点与 discovery
 
@@ -119,7 +127,7 @@ OIDC_ISSUER=https://sso.yourcompany.com   # discovery/JWKS/端点全部按此拼
 - **PKCE S256**：平台对所有客户端强制；`code_challenge` 43–128 位 base64url。
 - **client_secret 保管**：仅存应用后端（环境变量 / KMS）；轮换入口在应用详情「SSO 配置」，旧值立即失效。
 - **HTTPS**：redirect_uri 允许 `https://` 任意主机；`http://` 仅放行内网地址（`localhost` / `127.0.0.1` / `10.x.x.x` / `172.16-31.x.x` / `192.168.x.x`，含内网 IPv6 ULA）。纯内网部署可设 `APP_SSO_ALLOW_HTTP=1` 放开全部 http 主机。
-- **登出联动**：应用登出时应调 `end_session`，平台会吊销该用户在本应用下的 refresh 链（否则登出后应用仍可静默续期）。
+- **登出联动**：应用登出时应调 `end_session`，平台会吊销该用户在本应用下的 refresh 链（否则登出后应用仍可静默续期）。回跳规则：显式携带 `post_logout_redirect_uri` 必须命中客户端登记的登出白名单（未命中拒绝）；未携带时，客户端仅登记一个登出地址则按该地址回跳，未登记或登记多个则停留在平台登出页。
 - **冻结即时失效**：平台账号冻结 / 离职 → `userinfo` 与 `refresh` 立即拒绝（实时校验用户状态）。
 - **门禁**：`web`/`h5` 应用上线前必须持有 active SSO 客户端；审批挂单期间客户端被禁用会在执行期复核失败。
 

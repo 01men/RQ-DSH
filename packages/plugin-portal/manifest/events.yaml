@@ -1,0 +1,9 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-portal
+events:
+  - name: app.onlined / app.offlined
+    mode: subscribe
+    description: 应用上下线 → 门户可见性审计留痕（拉取模式，无外呼）
+  - name: agent.onlined / agent.offlined
+    mode: subscribe
+    description: Agent 上下线 → 门户可见性审计留痕（拉取模式，无外呼）

@@ -261,6 +261,27 @@ const PLUGINS = [
     tools: ['update_status', 'update_check', 'update_apply'],
     ui: { routes: ['顶栏更新徽标 + 更新抽屉（无独立页面）'], menus: [] },
   },
+  {
+    dir: 'portal', id: 'dsh-plugin-portal', label: '门户数据通道（外部拉取端点·非核心）',
+    depends: ['dsh-plugin-platform-core'], permissions: [],
+    services: [
+      ['portalFeed', 'ctx.portalFeed', '门户契约快照：apps/employees/skills/stats 映射与公开只读端点应答'],
+    ],
+    events: [
+      ['app.onlined / app.offlined', 'subscribe', '应用上下线 → 门户可见性审计留痕（拉取模式，无外呼）'],
+      ['agent.onlined / agent.offlined', 'subscribe', 'Agent 上下线 → 门户可见性审计留痕（拉取模式，无外呼）'],
+    ],
+    api: [
+      'GET /api/portal（端点发现：联调自检入口，公开无鉴权）',
+      'GET /api/portal/apps # 已上线 AI 应用（门户契约 /apps，api.md v1.0）',
+      'GET /api/portal/employees # 已上线 Agent=数字员工（门户契约 /employees）',
+      'GET /api/portal/solutions # 解决方案（暂无数据源，空数组=门户降级样板）',
+      'GET /api/portal/tools # AI 工具地图（暂无数据源，空数组=门户降级样板）',
+      'GET /api/portal/skills # 已上架 Skill（门户契约 /skills）',
+      'GET /api/portal/stats # 首页统计 4 卡（门户契约 /stats）',
+    ],
+    ui: { routes: [], menus: [] },
+  },
 ]
 
 const yml = (value, indent = 0) => {

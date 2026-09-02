@@ -94,10 +94,14 @@ export async function renderIam(content, params, ctx) {
 
   // ------------------------------------------------------------------
   async function renderMembers() {
-    const [treeData, usersData] = await Promise.all([
+    let [treeData, usersData] = await Promise.all([
       api.get('/api/iam/orgs/tree'),
       api.get('/api/iam/users'),
     ])
+    // 批量勾选 + 拖拽调岗共享状态：勾选集跨列表刷新保留；dragging 记录拖拽载荷
+    // （dragover/drop 阶段安全策略读不到 dataTransfer.getData，须走闭包变量）。
+    const selectedUserIds = new Set()
+    let draggingUserIds = []
     $('#iam-actions').innerHTML = `
       <button class="btn btn-default" id="org-add">${icon('plus', 14)}新建组织</button>
       <button class="btn btn-default" id="user-import">${icon('download', 14)}批量导入</button>
@@ -112,9 +116,10 @@ export async function renderIam(content, params, ctx) {
         <div class="card" style="padding:10px 8px">
           <div class="flex" style="padding:4px 8px 8px;justify-content:space-between">
             <span class="fs-12 text-3" style="font-weight:600">组织架构</span>
-            <span class="fs-11 text-4">${usersData.total} 人</span>
+            <span class="fs-11 text-4" id="org-user-total">${usersData.total} 人</span>
           </div>
           <div class="tree" id="org-tree"></div>
+          <div class="fs-11 text-4" style="padding:8px 8px 2px;margin-top:6px;border-top:1px dashed var(--border);display:flex;gap:5px;align-items:center">${icon('gitBranch', 11)}<span>把右侧成员拖到部门上可直接调岗</span></div>
         </div>
         <div>
           <div class="filter-bar">
@@ -126,6 +131,7 @@ export async function renderIam(content, params, ctx) {
             <span class="fs-12 text-3" id="member-count"></span>
           </div>
           <div id="org-leader-bar"></div>
+          <div id="member-batchbar"></div>
           <div id="member-table"></div>
         </div>
       </div>`
@@ -172,6 +178,21 @@ export async function renderIam(content, params, ctx) {
           e.preventDefault()
           openOrgMenu(e, node)
         }
+        // 拖拽落点：成员表拖来的账号落到该组织（dragover 必须 preventDefault 才允许触发 drop）
+        row.addEventListener('dragover', (e) => {
+          if (!draggingUserIds.length) return
+          e.preventDefault()
+          e.dataTransfer.dropEffect = 'move'
+          row.classList.add('drag-over')
+        })
+        row.addEventListener('dragleave', () => row.classList.remove('drag-over'))
+        row.addEventListener('drop', (e) => {
+          e.preventDefault()
+          row.classList.remove('drag-over')
+          const ids = draggingUserIds.slice()
+          draggingUserIds = []
+          if (ids.length) void moveUsersToOrg(ids, node)
+        })
       }
       return el
     }
@@ -278,6 +299,11 @@ export async function renderIam(content, params, ctx) {
       const table = renderTable({
         columns: [
           {
+            title: '<input type="checkbox" class="member-checkall" title="全选本页成员">',
+            width: '36px', cls: 'col-check',
+            render: (u) => `<input type="checkbox" class="member-check" data-id="${esc(u.id)}"${selectedUserIds.has(u.id) ? ' checked' : ''}>`,
+          },
+          {
             title: '姓名', width: '22%',
             render: (u) => `
               <div class="flex" style="gap:10px">
@@ -300,6 +326,182 @@ export async function renderIam(content, params, ctx) {
       const holder = $('#member-table')
       holder.innerHTML = ''
       holder.appendChild(table)
+      wireMemberTable(table)
+      updateBatchBar()
+    }
+
+    /** 成员表接线：勾选（单选/全选）入集、行可拖拽（勾选集成员被拖动时整批携带）。 */
+    function wireMemberTable(table) {
+      table.querySelectorAll('input.member-check').forEach((cb) => {
+        cb.addEventListener('change', () => {
+          if (cb.checked) selectedUserIds.add(cb.dataset.id)
+          else selectedUserIds.delete(cb.dataset.id)
+          updateBatchBar()
+        })
+      })
+      const checkAll = table.querySelector('input.member-checkall')
+      if (checkAll) checkAll.addEventListener('change', () => {
+        table.querySelectorAll('input.member-check').forEach((cb) => {
+          cb.checked = checkAll.checked
+          if (checkAll.checked) selectedUserIds.add(cb.dataset.id)
+          else selectedUserIds.delete(cb.dataset.id)
+        })
+        updateBatchBar()
+      })
+      table.querySelectorAll('tbody tr').forEach((tr) => {
+        tr.draggable = true
+        tr.addEventListener('dragstart', (e) => {
+          draggingUserIds = selectedUserIds.has(tr.dataset.key) ? [...selectedUserIds] : [tr.dataset.key]
+          e.dataTransfer.effectAllowed = 'move'
+          try { e.dataTransfer.setData('text/plain', JSON.stringify(draggingUserIds)) } catch { /* 兜底走闭包变量 */ }
+          tr.classList.add('row-dragging')
+        })
+        tr.addEventListener('dragend', () => {
+          tr.classList.remove('row-dragging')
+          draggingUserIds = []
+        })
+      })
+    }
+
+    /** 批量操作条：勾选数 > 0 时出现，提供批量改属性入口（调岗 / 职位 / 角色）。 */
+    function updateBatchBar() {
+      const bar = $('#member-batchbar')
+      if (!bar) return
+      if (!selectedUserIds.size) { bar.innerHTML = ''; return }
+      bar.innerHTML = `
+        <div class="flex muted-box" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;align-items:center">
+          ${icon('check', 14)}
+          <span class="fs-12" style="font-weight:600">已选 ${selectedUserIds.size} 人</span>
+          <span class="fs-11 text-4">勾选后拖到左侧组织可批量调岗</span>
+          <span style="flex:1"></span>
+          <button class="btn btn-default btn-sm" data-batch="org">${icon('building', 12)}调整组织</button>
+          <button class="btn btn-default btn-sm" data-batch="title">${icon('edit', 12)}设置职位</button>
+          <button class="btn btn-default btn-sm" data-batch="roles">${icon('shield', 12)}分配角色</button>
+          <button class="btn btn-ghost btn-sm" data-batch="clear">清空选择</button>
+        </div>`
+      bar.querySelector('[data-batch="org"]').onclick = () => openBatchOrgModal()
+      bar.querySelector('[data-batch="title"]').onclick = () => openBatchTitleModal()
+      bar.querySelector('[data-batch="roles"]').onclick = () => void openBatchRolesModal()
+      bar.querySelector('[data-batch="clear"]').onclick = () => {
+        selectedUserIds.clear()
+        $$('#member-table input.member-check').forEach((cb) => { cb.checked = false })
+        const checkAllEl = $('#member-table input.member-checkall')
+        if (checkAllEl) checkAllEl.checked = false
+        updateBatchBar()
+      }
+    }
+
+    /**
+     * 批量修改通用执行器：逐条 PATCH /api/iam/users/:id（服务端逐个校验并留痕），
+     * 逐条容错、汇总结果——与同步冲突批量处理同口径，不新增后端接口。
+     */
+    async function applyBatchUpdates(label, buildPatch) {
+      const ids = [...selectedUserIds]
+      let ok = 0
+      const failed = []
+      for (const id of ids) {
+        const user = usersData.users.find((u) => u.id === id)
+        try {
+          await api.patch(`/api/iam/users/${id}`, buildPatch(user))
+          ok++
+        } catch (error) { failed.push(`${user?.displayName ?? id}：${error.message}`) }
+      }
+      if (failed.length) toast(`${label}：成功 ${ok} 人，失败 ${failed.length} 人（${failed[0]}）`, 'error')
+      else toast(`${label}完成：共 ${ok} 人`)
+      selectedUserIds.clear()
+      await reloadBaseData()
+    }
+
+    /** 批量调整组织：目标组织按「法人 / 部门」全路径搜索选择（与创建/编辑账号同组件）。 */
+    function openBatchOrgModal() {
+      const modal = openModal({
+        title: `批量调整组织（已选 ${selectedUserIds.size} 人）`,
+        body: `
+          <div class="form-hint" style="margin-bottom:10px">所选成员将统一移动到目标组织下，立即生效并写入变更留痕。</div>
+          ${field('目标组织', searchableSelectField('orgId', flattenTreePaths(treeData), { placeholder: '点击选择：输入部门名搜索，显示「法人 / 部门」全路径' }), { required: true, full: true, hint: '同名部门跨法人重复，请认准完整路径再选' })}`,
+        foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>确认调整</button>',
+      })
+      mountSearchableSelects(modal.body)
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
+        const data = collectForm(modal.body)
+        if (!data.orgId) return toast('请选择目标组织', 'error')
+        const orgName = flattenTreePaths(treeData).find((opt) => opt.value === data.orgId)?.label ?? data.orgId
+        modal.close()
+        await applyBatchUpdates(`批量调岗到「${orgName}」`, () => ({ orgId: data.orgId }))
+      }
+    }
+
+    /** 批量设置职位：留空提交即批量清空职位。 */
+    function openBatchTitleModal() {
+      const modal = openModal({
+        title: `批量设置职位（已选 ${selectedUserIds.size} 人）`,
+        body: field('职位', inputField('title', { placeholder: '如：算法工程师；留空则清空这些成员的职位' }), { full: true }),
+        foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>确认设置</button>',
+      })
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
+        const title = (collectForm(modal.body).title ?? '').trim()
+        modal.close()
+        await applyBatchUpdates(title ? `批量设置职位「${title}」` : '批量清空职位', () => ({ title }))
+      }
+    }
+
+    /** 批量分配角色：以勾选角色替换所选成员的角色清单（服务端 assignRoles 校验并广播权限变更）。 */
+    async function openBatchRolesModal() {
+      let rolesData
+      try { rolesData = await api.get('/api/iam/roles') } catch (error) { return toast(error.message, 'error') }
+      const modal = openModal({
+        title: `批量分配角色（已选 ${selectedUserIds.size} 人）`,
+        body: `
+          <div class="form-hint" style="margin-bottom:10px">将以勾选的角色<b>替换</b>所选成员的角色清单；不勾选任何角色 = 批量清空角色。权限点实时生效。</div>
+          ${rolesData.roles.map((role) => `
+            <label class="flex" style="padding:10px 4px;border-bottom:1px solid var(--border);cursor:pointer">
+              <input type="checkbox" name="batch-role" value="${esc(role.id)}" style="accent-color:var(--brand-500)">
+              <div class="grow">
+                <div class="fs-13" style="font-weight:500">${esc(role.name)} ${role.builtin ? '<span class="badge badge-muted no-dot">内置</span>' : ''}</div>
+                <div class="fs-12 text-3">${esc(role.description)}</div>
+              </div>
+            </label>`).join('')}`,
+        foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>确认分配</button>',
+      })
+      modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+      modal.el.querySelector('[data-ok]').onclick = async () => {
+        const roleIds = [...modal.body.querySelectorAll('input[name=batch-role]:checked')].map((el) => el.value)
+        modal.close()
+        await applyBatchUpdates('批量分配角色', () => ({ roleIds }))
+      }
+    }
+
+    /** 拖拽落点处理：把拖来的成员逐个调岗到目标组织，随后重拉组织树与成员表保持计数一致。 */
+    async function moveUsersToOrg(userIds, orgNode) {
+      const users = usersData.users.filter((u) => userIds.includes(u.id))
+      const targets = users.filter((u) => u.orgId !== orgNode.id)
+      if (!targets.length) { toast('所选成员已在该组织下，无需调岗'); return }
+      let ok = 0
+      const failed = []
+      for (const user of targets) {
+        try {
+          await api.patch(`/api/iam/users/${user.id}`, { orgId: orgNode.id })
+          ok++
+        } catch (error) { failed.push(`${user.displayName}：${error.message}`) }
+      }
+      if (failed.length) toast(`调岗到「${orgNode.name}」：成功 ${ok} 人，失败 ${failed.length} 人（${failed[0]}）`, 'error')
+      else toast(`已将 ${ok} 名成员移动到「${orgNode.name}」`)
+      selectedUserIds.clear()
+      await reloadBaseData()
+    }
+
+    /** 重拉组织树与全量账号并重渲染：保证树计数 / 人数 / 表格与服务端一致（拖拽与批量修改后调用）。 */
+    async function reloadBaseData() {
+      ;[treeData, usersData] = await Promise.all([
+        api.get('/api/iam/orgs/tree'),
+        api.get('/api/iam/users'),
+      ])
+      const totalEl = $('#org-user-total')
+      if (totalEl) totalEl.textContent = `${usersData.total} 人`
+      renderTree()
+      await refreshMembers()
     }
     $('#member-q').oninput = debounce(() => void refreshMembers(), 250)
     $('#member-status').onchange = () => void refreshMembers()

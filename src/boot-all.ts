@@ -20,6 +20,7 @@ import * as agent from '@dsh-ops/plugin-agent'
 import * as app from '@dsh-ops/plugin-app'
 import * as connect from '@dsh-ops/plugin-connect'
 import * as update from '@dsh-ops/plugin-update'
+import * as portal from '@dsh-ops/plugin-portal'
 import * as consolePlugin from '@dsh-ops/plugin-console'
 
 export interface BootOptions {
@@ -53,5 +54,8 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   await ctx.plugin(connect, { role: 'host' })
   // 平台自更新：上游版本检查（自动+手动）与一键升级（source 形态）
   await ctx.plugin(update)
+  // 门户数据通道（外部系统拉取端点，非核心；PORTAL_SYNC=off 可停用）：
+  // 端点公开只读，必须先于 console 装配——在其鉴权中间件之前截获 /api/portal/* 请求
+  await ctx.plugin(portal)
   await ctx.plugin(consolePlugin)
 }

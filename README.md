@@ -80,6 +80,7 @@ DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭
          dsh-plugin-audit          四类审计日志 + 告警规则 + 成本归集 + 审批中心
          dsh-plugin-connect        远程 dsh 接入（宿主角色：接入码/enroll/客户端管理；客户端角色：凭证申请 + 工具远程代理 + 本机配置页）
          dsh-plugin-update         平台自更新：上游版本检查（自动+手动）→ 通知 → source 形态一键升级（git pull + npm install，dry-run/审计/权限点）
+         dsh-plugin-portal         门户数据通道（外部拉取端点·非核心：企业门户免鉴权只读拉取已上线应用/Agent/技能，CORS + 可见性留痕，PORTAL_SYNC=off 可停用，见 docs/portal-integration.md）
 底座     dsh-plugin-resource-core  资源本体：属性 schema + 生命周期状态机 + 依赖图
 基础层   dsh-plugin-platform-core  存储(JSON集合/原子落盘) + SQLite 事务存储 + YAML 解析 + 事件总线 + ToolRuntime-lite + HTTP
 ```

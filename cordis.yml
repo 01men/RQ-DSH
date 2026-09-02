@@ -58,3 +58,7 @@
     # 平台自更新：上游版本检查 + Agent 工具（update_status/update_check/update_apply）
     - id: ops-update
       name: '<PROJECT_ROOT>/packages/plugin-update/src/index.ts'
+    # 门户数据通道（外部系统拉取端点，非核心）：仅独立宿主进程提供 HTTP 数据面；
+    # 此处挂载保持两形态插件树一致（dsh 形态 startHttp=false 不监听端口，无副作用）
+    - id: ops-portal
+      name: '<PROJECT_ROOT>/packages/plugin-portal/src/index.ts'

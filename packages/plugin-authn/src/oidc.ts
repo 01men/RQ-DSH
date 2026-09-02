@@ -14,6 +14,9 @@
  *   POST /oauth/revoke —— RFC 7009 令牌吊销（access jti 黑名单 / refresh 整链）。
  *
  * 密钥：RS256 数组化 JWKS（kid 匹配验签，签名恒用最新 key；旧 key 24h 宽限保留验签）。
+ * CORS：纯前端（public + PKCE）客户端在浏览器跨域直调 /oauth/token、/oauth/userinfo、
+ *      /oauth/revoke 与 discovery 端点——允许来源 = 已登记客户端 redirect_uri 的 origin
+ *      ∪ OIDC_CORS_ORIGINS（逗号分隔），OPTIONS 预检统一 204（见 allowedCorsOrigins）。
  * 注意：/oauth/* 与 /.well-known/* 不受控制台 Bearer 中间件约束（协议公开端点）；
  *      /api/authn/oidc/auth-requests/:id 为公开查询（仅回显客户端名/scope，不泄露 redirect_uri）。
  */
@@ -599,6 +602,8 @@ export class OidcService extends Service {
   /**
    * GET /oauth/end_session：验签 id_token_hint 定位 client → 吊销该用户在该 client 下的
    * refresh 链 → 回跳地址命中 postLogoutUris → 302 平台登出页（页面清会话后带 state 跳回）。
+   * 未携带 post_logout_redirect_uri 时（轻量 RP 只传 id_token_hint），若该 client 仅登记了
+   * 一个登出回跳地址，按其登记意图回跳——仍受白名单约束，显式传参非法依旧拒绝（防开放重定向）。
    */
   endSession(input: { idTokenHint?: string; postLogoutRedirectUri?: string; state?: string }): { location: string } {
     if (!input.idTokenHint) throw new OidcEndpointError(302, 'invalid_request', '缺少 id_token_hint')
@@ -622,8 +627,15 @@ export class OidcService extends Service {
       client: client.name,
     })
     const logoutPage = `/#/oauth/logout?${logoutParams.toString()}`
-    if (input.postLogoutRedirectUri === undefined) return { location: logoutPage }
     const whitelist = client.postLogoutUris ?? []
+    if (input.postLogoutRedirectUri === undefined) {
+      // RP 未传回跳参数：仅登记唯一登出地址时按登记意图回跳；未登记或多个候选则停留平台登出页
+      if (whitelist.length === 1) {
+        logoutParams.set('post_logout_redirect_uri', whitelist[0]!)
+        return { location: `/#/oauth/logout?${logoutParams.toString()}` }
+      }
+      return { location: logoutPage }
+    }
     if (!whitelist.includes(input.postLogoutRedirectUri)) {
       // 非法回跳：只回平台错误页，绝不开放重定向
       throw new OidcEndpointError(302, 'invalid_request', 'post_logout_redirect_uri 未登记在客户端登出白名单')
@@ -828,12 +840,37 @@ export class OidcService extends Service {
 
   // -- 协议端点 ---------------------------------------------------------------
 
+  /**
+   * CORS 允许来源：已登记客户端 redirect_uri 的 origin ∪ OIDC_CORS_ORIGINS（逗号分隔显式清单）。
+   * 收敛在已登记来源内——未登记站点的页面拿不到放行头；code 本身绑定 redirect_uri，双重兜底。
+   */
+  private allowedCorsOrigins(): Set<string> {
+    const origins = new Set<string>(
+      String(process.env.OIDC_CORS_ORIGINS ?? '').split(',').map((item) => item.trim()).filter(Boolean),
+    )
+    for (const client of this.clients().all()) {
+      for (const uri of client.redirectUris ?? []) {
+        try { origins.add(new URL(uri).origin) } catch { /* 非法 redirect_uri 不参与 CORS 判定 */ }
+      }
+    }
+    return origins
+  }
+
+  /** 按 Origin 头生成放行头；无 Origin（非浏览器调用）不发放，未登记来源仅回 vary。 */
+  private corsHeaders(exchange: { headers: import('node:http').IncomingHttpHeaders }): Record<string, string> {
+    const header = exchange.headers['origin']
+    const origin = Array.isArray(header) ? header[0] : header
+    if (!origin) return {}
+    if (!this.allowedCorsOrigins().has(origin)) return { vary: 'Origin' }
+    return { vary: 'Origin', 'access-control-allow-origin': origin }
+  }
+
   /** 公开端点（非 /api/*：不受控制台 Bearer 中间件约束，属 OIDC 协议要求）。 */
   private registerRoutes(): void {
     const http = this.ctx.httpServer
-    // OIDC 协议端点返回原始 JSON（标准客户端不识别平台的 {ok,data} 包裹）
-    const raw = (exchange: { res: import('node:http').ServerResponse }, status: number, payload: unknown, headers: Record<string, string> = {}): void => {
-      exchange.res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...headers })
+    // OIDC 协议端点返回原始 JSON（标准客户端不识别平台的 {ok,data} 包裹）；成功/错误一律合并 CORS 放行头
+    const raw = (exchange: { res: import('node:http').ServerResponse; headers: import('node:http').IncomingHttpHeaders }, status: number, payload: unknown, extra: Record<string, string> = {}): void => {
+      exchange.res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', ...this.corsHeaders(exchange), ...extra })
       exchange.res.end(JSON.stringify(payload))
     }
     const redirect = (exchange: { res: import('node:http').ServerResponse }, location: string): void => {
@@ -842,6 +879,20 @@ export class OidcService extends Service {
     }
     const clientIp = (exchange: { raw: import('node:http').IncomingMessage }): string =>
       String(exchange.raw.socket?.remoteAddress ?? 'unknown')
+
+    // -- CORS 预检：纯前端（public + PKCE）客户端跨域直调的端点，统一 204 应答 ------
+    const preflight = (exchange: { res: import('node:http').ServerResponse; headers: import('node:http').IncomingHttpHeaders }): void => {
+      exchange.res.writeHead(204, {
+        ...this.corsHeaders(exchange),
+        'access-control-allow-methods': 'GET, POST, OPTIONS',
+        'access-control-allow-headers': 'authorization, content-type',
+        'access-control-max-age': '600',
+      })
+      exchange.res.end()
+    }
+    for (const pattern of ['/oauth/token', '/oauth/userinfo', '/oauth/revoke', '/.well-known/openid-configuration', '/.well-known/jwks.json']) {
+      http.register('OPTIONS', pattern, preflight)
+    }
 
     http.register('GET', '/.well-known/openid-configuration', (exchange) => {
       raw(exchange, 200, this.discovery())

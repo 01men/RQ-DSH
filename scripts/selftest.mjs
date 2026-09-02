@@ -1108,6 +1108,16 @@ try {
   check('登记 OIDC 客户端（secret 一次性返回）', oidcClient.ok && oidcClient.data.clientId.startsWith('oc-') && oidcClient.data.clientSecret.startsWith('ocs'))
   const OC = oidcClient.data
 
+  // -- CORS：纯前端（public + PKCE）客户端跨域直调协议端点（允许来源 = 已登记 redirect_uri origin）--
+  const corsHit = await rawReq('GET', '/.well-known/openid-configuration', { headers: { origin: 'https://crm.partner.example' } })
+  check('discovery 携带 CORS 放行头（origin 命中已登记 redirect_uri）', corsHit.headers['access-control-allow-origin'] === 'https://crm.partner.example' && String(corsHit.headers.vary).includes('Origin'))
+  const corsPreflight = await rawReq('OPTIONS', '/oauth/token', { headers: { origin: 'https://crm.partner.example', 'access-control-request-method': 'POST' } })
+  check('OPTIONS 预检 → 204 + allow-methods/headers/max-age', corsPreflight.status === 204 && corsPreflight.headers['access-control-allow-origin'] === 'https://crm.partner.example' && String(corsPreflight.headers['access-control-allow-headers']).includes('authorization') && String(corsPreflight.headers['access-control-allow-headers']).includes('content-type'))
+  const corsMiss = await rawReq('GET', '/.well-known/openid-configuration', { headers: { origin: 'https://evil.example' } })
+  check('未登记来源不发放 allow-origin（仅 vary）', corsMiss.headers['access-control-allow-origin'] === undefined && String(corsMiss.headers.vary).includes('Origin'))
+  const corsErrPath = await rawReq('POST', '/oauth/token', { headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'https://crm.partner.example' }, body: 'grant_type=authorization_code&code=forged' })
+  check('错误响应（invalid_client）同样携带放行头（浏览器可读错误体）', corsErrPath.status === 401 && jsonBody(corsErrPath).error === 'invalid_client' && corsErrPath.headers['access-control-allow-origin'] === 'https://crm.partner.example')
+
   // -- 第一跳校验：任一失败 → 302 平台错误页（绝不携带外部 redirect_uri，防开放重定向）--
   const pkceVerifier = 'selftest-pkce-verifier-43-chars-aaaaaaaaaaaaaa'
   const pkceChallenge = createHash('sha256').update(pkceVerifier).digest('base64url')
@@ -2101,6 +2111,16 @@ try {
   check('end_session 同时吊销 refresh 链（登出后不能静默续期）', esChainDead !== '')
   const esBad = await rawReq('GET', `/oauth/end_session?${new URLSearchParams({ id_token_hint: esTokens.id_token, post_logout_redirect_uri: 'https://evil.example/x' }).toString()}`)
   check('end_session 非法回跳 → 平台错误页（不开放重定向）', esBad.status === 302 && String(esBad.headers.location).startsWith('/#/oauth/error'))
+  // 登出回退：RP 未显式携带 post_logout_redirect_uri（如纯前端门户只传 id_token_hint）
+  const esBare = await rawReq('GET', `/oauth/end_session?${new URLSearchParams({ id_token_hint: esTokens.id_token }).toString()}`)
+  check('end_session 未带回跳参数 → 按唯一登记登出地址回跳（门户登出场景兜底）',
+    esBare.status === 302 && String(esBare.headers.location).startsWith('/#/oauth/logout') && String(esBare.headers.location).includes('logged-out'))
+  await api('PATCH', `/api/authn/oidc/clients/${ocRecord.id}`, { token: admin, body: { postLogoutUris: ['https://crm.partner.example/logged-out', 'https://crm.partner.example/other'] } })
+  const esAmbiguous = await rawReq('GET', `/oauth/end_session?${new URLSearchParams({ id_token_hint: esTokens.id_token }).toString()}`)
+  const esAmbiguousLoc = String(esAmbiguous.headers.location)
+  check('end_session 未带参数且登记多个登出地址 → 不猜测回跳，停留平台登出页',
+    esAmbiguous.status === 302 && esAmbiguousLoc.startsWith('/#/oauth/logout') && !esAmbiguousLoc.includes('post_logout_redirect_uri'))
+  await api('PATCH', `/api/authn/oidc/clients/${ocRecord.id}`, { token: admin, body: { postLogoutUris: ['https://crm.partner.example/logged-out'] } })
 
   // revoke（RFC 7009）：access jti 黑名单 + refresh 链
   const rvAuth = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ state: 'p3-revoke' })}`)
@@ -3456,6 +3476,58 @@ try {
   check('/docs 编码 %2e%2e 穿越 → SPA 兜底页（不泄露文件）', docTraverseEncoded.status === 200 && String(docTraverseEncoded.headers['content-type']).startsWith('text/html') && !docTraverseEncoded.body.includes('"name": "dsh-enterprise-ops"'))
   const spaStillOk = await rawReq('GET', '/')
   check('SPA 静态兜底不受影响（/ 仍返回控制台首页）', spaStillOk.status === 200 && String(spaStillOk.headers['content-type']).startsWith('text/html') && spaStillOk.body.includes('榕器'))
+
+  // ================================================================ 门户数据通道（plugin-portal：外部拉取端点）
+  section('门户数据通道（plugin-portal：企业门户拉取已发布应用/Agent，非核心）')
+  const portalOrigin = 'http://192.168.0.4:8092'
+  const portalGet = async (path, headers = {}) => rawReq('GET', `/api/portal${path}`, { headers })
+  const portalJson = async (path, headers = {}) => {
+    const raw = await portalGet(path, headers)
+    return { status: raw.status, headers: raw.headers, body: jsonBody(raw) }
+  }
+  // 门户契约：纯前端无鉴权拉取——不带 Bearer 直接访问（console 鉴权中间件不得拦截门户前缀）
+  const portalDiscovery = await portalJson('/', { origin: portalOrigin })
+  check('公开访问 200（无 Bearer，门户前缀先于 console 鉴权中间件截获）', portalDiscovery.status === 200 && portalDiscovery.body.code === 0 && Array.isArray(portalDiscovery.body.data?.endpoints))
+  const portalApps = await portalJson('/apps', { origin: portalOrigin })
+  check('契约包装 {code:0, message, data} + no-cache（刷新即可见）', portalApps.status === 200 && portalApps.body.code === 0 && portalApps.body.message === 'ok' && Array.isArray(portalApps.body.data) && portalApps.headers['cache-control'] === 'no-cache')
+  check('CORS 放行生产门户来源', portalApps.headers['access-control-allow-origin'] === portalOrigin)
+  // 全链路：注册 → L4 审批上线 → 门户拉取即可见（miniapp 形态不走 SSO 门禁）
+  const portalProbe = await api('POST', '/api/apps', { token: admin, body: { name: '门户拉取探针应用', attrs: { description: '门户数据通道验收：上线即对门户可见', appType: 'miniapp', url: 'http://192.168.0.8:9000/', riskLevel: 'low', dataClass: 'internal' } } })
+  const portalProbeReq = await api('POST', `/api/apps/${portalProbe.data.app.id}/transition`, { token: admin, body: { action: 'online' } })
+  await api('POST', `/api/approvals/${portalProbeReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '门户可见性验收' } })
+  const portalAppsAfter = await portalJson('/apps', { origin: portalOrigin })
+  const portalApp = portalAppsAfter.body.data.find((item) => item.id === portalProbe.data.app.id)
+  check('已上线应用进入 /apps（link=访问地址，tag/version/accent 契约齐全）',
+    portalApp && portalApp.name === '门户拉取探针应用' && portalApp.link === 'http://192.168.0.8:9000/'
+    && portalApp.tag === '小程序' && portalApp.desc === '门户数据通道验收：上线即对门户可见'
+    && typeof portalApp.accent === 'string' && /^#[0-9A-Fa-f]{6}$/.test(portalApp.accent))
+  check('launchDate 为上线当日（YYYY-MM-DD）', /^\d{4}-\d{2}-\d{2}$/.test(portalApp?.launchDate ?? '') && portalApp.launchDate === new Date().toISOString().slice(0, 10))
+  const adminApps = (await api('GET', '/api/apps', { token: admin })).data.apps
+  const expectedOnline = adminApps.filter((item) => item.status === 'online')
+  check('/apps 与平台已上线应用一致（仅 online 进入门户，未上线/下架不出现）',
+    portalAppsAfter.body.data.length === expectedOnline.length
+    && expectedOnline.every((item) => portalAppsAfter.body.data.some((entry) => entry.id === item.id)))
+  const portalEmployees = await portalJson('/employees', { origin: 'http://192.168.0.8:8443' })
+  check('/employees：已上线 Agent=数字员工（内网 :8443 开发来源 CORS 同样放行）',
+    portalEmployees.status === 200 && portalEmployees.headers['access-control-allow-origin'] === 'http://192.168.0.8:8443'
+    && Array.isArray(portalEmployees.body.data) && portalEmployees.body.data.some((item) => item.id === targetAgent.id && item.avatar && typeof item.skills === 'string'))
+  const portalSkills = await portalJson('/skills')
+  check('/skills：已上架 Skill 契约（tag/version/downloadUrl 字段齐全）',
+    portalSkills.status === 200 && Array.isArray(portalSkills.body.data) && portalSkills.body.data.every((item) => typeof item.downloadUrl === 'string' && typeof item.version === 'string'))
+  const portalStats = await portalJson('/stats', { origin: portalOrigin })
+  check('/stats：恰 4 卡且 value 为字符串（契约明确非数值）', portalStats.body.data.length === 4 && portalStats.body.data.every((item) => typeof item.value === 'string' && item.unit !== undefined && item.label !== undefined))
+  check('/stats 口径：已上线应用计数与 /apps 一致', Number(portalStats.body.data[0].value) === portalAppsAfter.body.data.length)
+  const portalSolutions = await portalJson('/solutions')
+  const portalTools = await portalJson('/tools')
+  check('/solutions、/tools：暂无数据源 → 空数组（门户契约 §5：降级展示内置样板）', portalSolutions.body.data?.length === 0 && portalTools.body.data?.length === 0)
+  const portalPreflight = await rawReq('OPTIONS', '/api/portal/apps', { headers: { origin: portalOrigin, 'access-control-request-method': 'GET' } })
+  check('OPTIONS 预检 204 + 放行方法/来源头', portalPreflight.status === 204 && portalPreflight.headers['access-control-allow-origin'] === portalOrigin && String(portalPreflight.headers['access-control-allow-methods']).includes('GET'))
+  const portalUnknown = await portalJson('/nope', { origin: portalOrigin })
+  check('未知端点 404 契约错误（门户展示错误与重试，不影响其他端点）', portalUnknown.status === 404 && portalUnknown.body.code === 40400)
+  const portalNoOrigin = await portalGet('/stats')
+  check('无 Origin 请求正常应答（仅不回 CORS 放行头）', portalNoOrigin.status === 200 && !portalNoOrigin.headers['access-control-allow-origin'])
+  const portalPost = await rawReq('POST', '/api/portal/apps', { headers: { 'content-type': 'application/json', origin: portalOrigin }, body: '{}' })
+  check('写方法被拒 405（契约全只读）', portalPost.status === 405)
 
   // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
   section('凭证零进平台（红线一 · T-24 全目录扫描）')
