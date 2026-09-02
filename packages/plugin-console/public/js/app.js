@@ -3,13 +3,23 @@ import { icon } from './icons.js'
 import { session, api } from './api.js'
 import { $, $$, h, toast, esc } from './ui.js'
 import { openCmdk } from './cmdk.js'
-import { replayPlatformTheme } from './platform.js'
+import { replayPlatformTheme, PLATFORM_KEY } from './platform.js'
 
 // 平台主题（WP-05/B3）：启动即回放记忆的平台（免闪默认色）；登录后由工作台按卡片包下发的 platform 校准。
 replayPlatformTheme()
 
+// 钉钉微应用入口探测（WP-11）：钉钉 webview UA 且无记忆平台时，标记钉钉入口态。
+// 只写独立键 heng_ops_dingtalk，不写 heng_ops_platform——钉钉是入口不是第六平台，不改五平台 data-platform 语义。
+try {
+  if (/DingTalk/i.test(navigator.userAgent) && !localStorage.getItem(PLATFORM_KEY)) {
+    localStorage.setItem('heng_ops_dingtalk', '1')
+    document.documentElement.dataset.platformEntry = 'dingtalk'
+  }
+} catch { /* 忽略 */ }
+
 import { renderLogin } from './pages/login.js'
 import { renderDashboard } from './pages/dashboard.js'
+import { renderBoard } from './pages/board.js'
 import { renderIam } from './pages/iam.js'
 import { renderAuthn } from './pages/authn.js'
 import { renderMcp } from './pages/mcp.js'
@@ -31,6 +41,7 @@ import { mountUpdateBadge, openUpdateDrawer } from './update.js'
 const NAV = [
   { section: '总览', items: [
     { path: '#/dashboard', label: '工作台', icon: 'dashboard', perm: 'console.login' },
+    { path: '#/board', label: '战略看板', icon: 'trending', perm: 'console.login' },
   ] },
   { section: 'AI 资源', items: [
     { path: '#/register', label: '资产登记', icon: 'zap', perm: 'console.login' },
@@ -87,6 +98,7 @@ function navigate() {
 
   const builders = {
     dashboard: renderDashboard,
+    board: renderBoard,
     register: renderRegister,
     iam: renderIam,
     authn: renderAuthn,

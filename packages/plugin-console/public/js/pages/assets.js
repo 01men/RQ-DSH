@@ -2,6 +2,7 @@
 import { api } from '../api.js'
 import { icon } from '../icons.js'
 import { $, esc, toast, statusBadge } from '../ui.js'
+import { filterAssets, platformFacets, assetPlatform } from '../asset-filters.js'
 
 const TYPE_META = {
   mcp: ['MCP 服务', 'plug'],
@@ -185,56 +186,75 @@ export async function renderAssets(content, params, { rerender }) {
 
     <div class="card">
       <div class="card-head">
-        <span class="card-title">${icon('layers', 15)} 资产台账（${inv.total}）</span>
+        <span class="card-title">${icon('layers', 15)} 资产目录（<span id="asset-count">${inv.items.length}</span>）</span>
         <div class="card-head-actions">
-          <div class="search-input">${icon('search')}<input id="asset-q" class="input" placeholder="搜索名称 / 组织 / 负责人…" style="width:220px" value="${esc(params.get('q') ?? '')}"></div>
-          <select id="asset-type" class="input" style="width:auto">
-            <option value="">全部类型</option>
-            ${Object.entries(TYPE_META).map(([t, meta]) => `<option value="${t}" ${typeFilter === t ? 'selected' : ''}>${meta[0]}</option>`).join('')}
-          </select>
+          <div class="search-input">${icon('search')}<input id="asset-q" class="input" placeholder="搜索名称 / 组织 / 负责人…" style="width:200px" value="${esc(params.get('q') ?? '')}"></div>
         </div>
       </div>
-      <div class="card-body" style="padding:10px 8px 14px">
-        <div class="table-wrap">
-          <table class="tbl">
-            <thead><tr><th>资产</th><th>类型</th><th>状态</th><th>健康</th><th>归属组织</th><th>负责人</th><th style="text-align:right">近 ${esc(days)} 天调用</th><th style="text-align:right">消耗</th></tr></thead>
-            <tbody>
-              ${inv.items.length ? inv.items.map((item) => `
-                <tr ${item.type === 'nas' ? `data-nas-id="${esc(item.id)}" style="cursor:pointer" title="打开 NAS 详情"` : ''}>
-                  <td><div class="col-strong">${esc(item.name)}</div><div class="col-sub mono">${esc(item.slug ?? '')}</div></td>
-                  <td>${typeBadge(item.type)}</td>
-                  <td>${statusBadge(item.status)}</td>
-                  <td>${healthBadge(item.health)}</td>
-                  <td><span class="org-cell">${icon('building', 12)}<span class="fs-12">${esc(item.org)}</span></span></td>
-                  <td>${ownerCell(item.owner)}</td>
-                  <td class="col-num fs-12" style="text-align:right">${item.calls}</td>
-                  <td class="col-num col-strong" style="text-align:right">${item.chargeCents > 0 ? fmtCents(item.chargeCents) : '—'}</td>
-                </tr>`).join('') : `
-                <tr><td colspan="8">
-                  <div class="tbl-empty">${icon('search', 28)}<span>暂无匹配资产，试试调整搜索或类型筛选</span></div>
-                </td></tr>`}
-            </tbody>
-          </table>
+      <div class="card-body" style="padding-top:6px">
+        <div class="asset-chips" id="asset-chips">
+          <span class="fs-12 text-4" style="margin-right:4px">类型</span>
+          <button class="chip active" data-filter="type" data-value="">全部</button>
+          ${Object.entries(TYPE_META).map(([t, meta]) => `<button class="chip" data-filter="type" data-value="${t}">${meta[0]}</button>`).join('')}
+          <span class="fs-12 text-4" style="margin:0 4px 0 12px">平台</span>
+          ${platformFacets(inv.items).map((platform) => `<button class="chip" data-filter="platform" data-value="${esc(platform)}">${esc(platform)}</button>`).join('')}
         </div>
+        <div class="asset-flow" id="asset-flow"></div>
       </div>
     </div>`
 
+  // 客户端筛选（单请求 + 纯函数过滤，1000 项毫秒级）；筛选状态仅存内存，刷新回落全量
+  const filters = { type: typeFilter, platform: '', q: params.get('q') ?? '' }
+  const renderFlow = () => {
+    const items = filterAssets(inv.items, filters)
+    const holder = $('#asset-flow')
+    if (!holder) return
+    $('#asset-count').textContent = String(items.length)
+    holder.innerHTML = items.length ? items.map((item) => `
+      <div class="asset-card" ${item.type === 'nas' ? `data-nas-id="${esc(item.id)}" title="打开 NAS 详情"` : ''} role="listitem">
+        <div class="flex" style="gap:12px;align-items:center">
+          <div style="width:34px;height:34px;border-radius:9px;background:var(--brand-50);color:var(--brand-500);display:grid;place-items:center;flex-shrink:0">${icon(TYPE_META[item.type]?.[1] ?? 'box', 16)}</div>
+          <div class="grow" style="min-width:0">
+            <div class="flex" style="gap:8px;align-items:center">
+              <span class="fs-13" style="font-weight:600">${esc(item.name)}</span>
+              ${typeBadge(item.type)}
+              ${statusBadge(item.status)}
+              ${healthBadge(item.health)}
+              ${item.platform && item.platform !== '' ? `<span class="badge badge-muted no-dot">${esc(item.platform)}</span>` : ''}
+            </div>
+            <div class="fs-11 text-4 ellipsis" style="margin-top:3px">${esc(item.org)} · ${esc(item.owner || '—')} · ${item.calls} 次 / ${esc(days)} 天 · ${item.chargeCents > 0 ? fmtCents(item.chargeCents) : '无消耗'}</div>
+          </div>
+          ${item.type === 'nas' ? `<span class="fs-12" style="color:var(--brand-500);flex-shrink:0">详情 ›</span>` : ''}
+        </div>
+      </div>`).join('') : `
+      <div class="tbl-empty">${icon('search', 28)}<span>暂无匹配资产，试试调整筛选或搜索</span></div>`
+    holder.querySelectorAll('[data-nas-id]').forEach((el) => {
+      el.onclick = () => { location.hash = `#/nas?focus=${encodeURIComponent(el.dataset.nasId)}` }
+    })
+  }
+  renderFlow()
+  $('#asset-chips').querySelectorAll('.chip').forEach((chip) => {
+    chip.onclick = () => {
+      const group = chip.dataset.filter
+      filters[group] = chip.dataset.value
+      $('#asset-chips').querySelectorAll(`.chip[data-filter="${group}"]`).forEach((item) => item.classList.toggle('active', item === chip))
+      renderFlow()
+    }
+  })
   const go = (extra) => {
     const p = new URLSearchParams()
     p.set('days', $('#asset-days').value)
-    if ($('#asset-type').value) p.set('type', $('#asset-type').value)
     const q = $('#asset-q').value.trim()
     if (q) p.set('q', q)
     if (extra) for (const [k, v] of Object.entries(extra)) p.set(k, v)
     location.hash = `#/assets?${p.toString()}`
   }
   $('#asset-days').onchange = () => go()
-  $('#asset-type').onchange = () => go()
-  content.querySelectorAll('[data-nas-id]').forEach((tr) => {
-    tr.onclick = () => { location.hash = `#/nas?focus=${encodeURIComponent(tr.dataset.nasId)}` }
-  })
   let debounce
-  $('#asset-q').oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => go(), 300) }
+  $('#asset-q').oninput = () => {
+    clearTimeout(debounce)
+    debounce = setTimeout(() => { filters.q = $('#asset-q').value.trim(); renderFlow() }, 250)
+  }
   $('#btn-healthcheck').onclick = async (e) => {
     const btn = e.currentTarget
     btn.disabled = true

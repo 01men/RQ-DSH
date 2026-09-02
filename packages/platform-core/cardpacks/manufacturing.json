@@ -1,0 +1,49 @@
+{
+  "platform": "manufacturing",
+  "label": "智造平台卡片包（生产与车间场景，WP-09 全量）",
+  "roles": ["*"],
+  "cards": [
+    {
+      "id": "mf-datawise",
+      "title": "产线数据查询",
+      "description": "自然语言查产量、良率与设备数据，只读数仓",
+      "badge": "mcp",
+      "href": "#/mcp",
+      "ref": "mcp:datawise",
+      "order": 10
+    },
+    {
+      "id": "mf-analyst",
+      "title": "数据分析师",
+      "description": "产线指标波动下钻归因，车间平板一键提问",
+      "badge": "agent",
+      "href": "#/agents",
+      "ref": "agent:data-analyst",
+      "order": 20
+    },
+    {
+      "id": "mf-kb",
+      "title": "工艺知识检索",
+      "description": "工艺文件与作业规范检索，NAS 授权目录内可用",
+      "badge": "kb",
+      "href": "#/nas-authz",
+      "order": 30
+    },
+    {
+      "id": "mf-nas",
+      "title": "生产文档存储",
+      "description": "图纸、SOP 与检验报告的统一存储入口",
+      "badge": "nas",
+      "href": "#/nas",
+      "order": 40
+    },
+    {
+      "id": "mf-register",
+      "title": "登记新资产",
+      "description": "提示词、流程、接口、数据——四步登记上架",
+      "badge": "skill",
+      "href": "#/register",
+      "order": 50
+    }
+  ]
+}

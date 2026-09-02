@@ -153,9 +153,13 @@
 | WP-11 钉钉微应用 | H5 复用同一对话面；**钉钉 webview cookie/SSE 实测**；SSE 失败自动降级 30s 轮询（不恢复 WS）；车间平板优先验证智造包 | P3 路径 ≤2 步；降级路径有自动化测试；webview 实测报告入 docs/ |
 | WP-12 看板 v1 + 目录瘦身 | 老板战略视图走 portal 只读端点扩展（不开特权接口）；资产目录单栏卡片流+类型/平台筛选 chips | 漏斗指标可测（behavior 全量）；目录页性能与筛选有断言 |
 
+**Phase 2 退出门禁执行记录（2026-09-02，全项通过）**：selftest 820/820；lint 清单 75/75 + 卡片包 5/5（五平台全量）；走查 6/6 核心路径 3 步；早高峰 50/50；全链路演练 27/27；钉钉 H5 冒烟 6/6（SSE 降级 30s 轮询，`docs/dingtalk-webview-report.md` 含现场实测清单）。WP-10 增量：高风险审批服务端强制二次确认 + 公司级终审标记审计可追溯（approval.final_review）+ MCP 调用水印 + SLA 看板（/api/approvals/sla）。WP-12 增量：portal /board 只读聚合（漏斗四级=behavior+usage+mcp 联合、WAIC、ROI 用工成本模型）+ 目录单栏卡片流（纯函数筛选 1000 项 <50ms 断言）+ 战略看板页。
+
 ---
 
 ## 五、Phase 3：深化工作包（★=依赖外部排期）
+
+> **执行记录（2026-09-02）**：WP-14 已提前落地（ROI 随 WP-12 看板 v1 下发）；WP-15/16 评估完成、路线预置；WP-13 维持降级态（启用 checklist 就绪）。详见 `docs/phase3-deepening-evaluation.md`。
 
 - **WP-13** ★KBaaS 上线后：kb.ingest 磁贴启用、语义召回第三路启用（依赖 WP-08 E2 描述规范已生效）。
 - **WP-14** ROI 看板对接用工成本模型（usage 聚合 → 替代工时估算）。

@@ -259,7 +259,7 @@ try {
   const appSso = await api('POST', `/api/apps/${appId}/sso-client`, { token: ops, body: { redirectUris: ['https://drill-app.example.com/cb'], clientType: 'confidential', consentRequired: false } })
   const appOnlineReq = await api('POST', `/api/apps/${appId}/transition`, { token: ops, body: { action: 'online' } })
   const appApprove = appOnlineReq.ok
-    ? await api('POST', `/api/approvals/${appOnlineReq.data?.approval?.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '演练：同意发布上线' } })
+    ? await api('POST', `/api/approvals/${appOnlineReq.data?.approval?.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '演练：同意发布上线（二次确认）', confirmed: true } })
     : null
   step('app', 'step2-approve', appSso.ok && appOnlineReq.ok && appApprove?.ok && ['approved', 'executed'].includes(appApprove.data?.status),
     `api=POST /api/apps/${appId}/sso-client status=${appSso.status} clientId=${idOf(appSso.data?.clientId)}；POST transition(online) status=${appOnlineReq.status} approval=${idOf(appOnlineReq.data?.approval?.id)}；POST /api/approvals/:id/decide status=${idOf(appApprove?.status)} state=${idOf(appApprove?.data?.status)}`)

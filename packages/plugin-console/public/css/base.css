@@ -1165,3 +1165,18 @@ textarea.form-control { height: auto; min-height: 88px; padding: 9px 12px; resiz
 .reg-tile-desc { font-size: 12px; color: var(--text-3); margin-top: 4px; line-height: 1.55; }
 .reg-form { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
 @media (max-width: 720px) { .reg-form { grid-template-columns: 1fr; } }
+
+/* ============ 资产目录瘦身（WP-12）：筛选 chips + 单栏卡片流 ============ */
+.asset-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 0 12px; }
+.chip {
+  border: 1px solid var(--border); background: var(--surface-2); color: var(--text-2);
+  border-radius: 999px; padding: 3px 12px; font-size: 12px; cursor: pointer; transition: all 0.15s;
+}
+.chip:hover { border-color: var(--brand-300); color: var(--brand-600); }
+.chip.active { background: var(--brand-500); border-color: var(--brand-500); color: #fff; }
+.asset-flow { display: flex; flex-direction: column; gap: 8px; }
+.asset-card {
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+  padding: 12px 16px; cursor: pointer; transition: all 0.15s;
+}
+.asset-card:hover { border-color: var(--brand-300); box-shadow: var(--shadow-s); }

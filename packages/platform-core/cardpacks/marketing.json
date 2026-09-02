@@ -1,0 +1,50 @@
+{
+  "platform": "marketing",
+  "label": "营销平台卡片包（市场与增长场景，WP-09 全量）",
+  "roles": ["*"],
+  "cards": [
+    {
+      "id": "mk-insight",
+      "title": "数据洞察 BI",
+      "description": "投放与转化指标一屏可视，营销效果先看数",
+      "badge": "app",
+      "href": "#/apps",
+      "ref": "app:insight-bi",
+      "order": 10
+    },
+    {
+      "id": "mk-attribution",
+      "title": "指标异动归因",
+      "description": "转化指标异常时按渠道客群下钻，输出归因结论",
+      "badge": "skill",
+      "href": "#/skills",
+      "ref": "skill:指标异动归因",
+      "order": 20
+    },
+    {
+      "id": "mk-weekly",
+      "title": "周报生成器",
+      "description": "汇总本周市场进展，一键生成结构化营销周报",
+      "badge": "skill",
+      "href": "#/skills",
+      "ref": "skill:周报生成器",
+      "order": 30
+    },
+    {
+      "id": "mk-kb",
+      "title": "营销素材检索",
+      "description": "品牌素材与案例库语义检索，授权目录内可用",
+      "badge": "kb",
+      "href": "#/nas-authz",
+      "order": 40
+    },
+    {
+      "id": "mk-register",
+      "title": "登记新资产",
+      "description": "提示词、流程、接口、数据——四步登记上架",
+      "badge": "skill",
+      "href": "#/register",
+      "order": 50
+    }
+  ]
+}

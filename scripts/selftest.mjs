@@ -1065,6 +1065,7 @@ try {
       if (!file.endsWith('.js')) continue
       if (file.replaceAll('\\', '/').endsWith('/js/api.js')) continue
       if (file.replaceAll('\\', '/').endsWith('/js/pages/oauth.js')) continue // 协议页豁免（注释在案）
+      if (file.replaceAll('\\', '/').endsWith('/js/realtime.js')) continue // SSE/轮询运输层模块（api.js 同级豁免，注释在案）
       const text = readFileSync(file, 'utf8')
       if (/fetch\(|XMLHttpRequest|EventSource/.test(text)) bareFetch.push(file.split(/[\\/]/).pop())
     }
@@ -2179,7 +2180,7 @@ try {
   const onlineRequest = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: admin, body: { action: 'online', note: '自测上线' } })
   check('上线生成 L4 审批单', onlineRequest.ok && onlineRequest.data.approval.status === 'pending')
 
-  const selfApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '自审通过' } })
+  const selfApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '自审通过', confirmed: true } })
   check('发起人可自审，单人审批通过自动执行上线', selfApprove.ok && selfApprove.data.status === 'executed')
   const agentAfter = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
   check('Agent 状态已上线', agentAfter.data.status === 'online')
@@ -2188,7 +2189,7 @@ try {
   const credBefore = agentAfter.data.credential
   const offlineRequest = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: ops, body: { action: 'offline', note: '自测下线' } })
   check('下线生成 L4 审批单', offlineRequest.ok)
-  await api('POST', `/api/approvals/${offlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意下线' } })
+  await api('POST', `/api/approvals/${offlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意下线', confirmed: true } })
   const agentOffline = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
   check('下线后状态与凭证联动禁用', agentOffline.data.status === 'offline' && agentOffline.data.credential.status === 'disabled')
   void credBefore
@@ -2252,7 +2253,7 @@ try {
   check('上线门禁（点1）：已签发客户端后放行并快照 clientId', oidcGatePass.ok && oidcGatePass.data.approval?.payload?.ssoClientId, JSON.stringify(oidcGatePass.error))
   const oidcDisable = await api('POST', `/api/agents/${oidcAgentId}/sso-client/disable`, { token: admin, body: { reason: '执行期复核测试' } })
   check('管理员禁用客户端 200', oidcDisable.ok)
-  const oidcApproveFail = await api('POST', `/api/approvals/${oidcGatePass.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '复核应失败' } })
+  const oidcApproveFail = await api('POST', `/api/approvals/${oidcGatePass.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '复核应失败', confirmed: true } })
   const oidcAfterFail = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
   check('上线门禁（点2）：审批期间禁用 → 执行期复核失败留痕',
     oidcApproveFail.ok && oidcApproveFail.data.status === 'failed' && String(oidcApproveFail.data.execution?.error ?? '').includes('身份纳管'), JSON.stringify(oidcApproveFail.data))
@@ -2260,13 +2261,13 @@ try {
   const oidcEnable = await api('POST', `/api/agents/${oidcAgentId}/sso-client/enable`, { token: ops, body: {} })
   check('owner 重新启用客户端 200', oidcEnable.ok && oidcEnable.data.status === 'active')
   const oidcGatePass2 = await api('POST', `/api/agents/${oidcAgentId}/transition`, { token: ops, body: { action: 'online' } })
-  const oidcApproveOk = await api('POST', `/api/approvals/${oidcGatePass2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '复核通过' } })
+  const oidcApproveOk = await api('POST', `/api/approvals/${oidcGatePass2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '复核通过', confirmed: true } })
   const oidcAfterOnline = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
   check('重新发起上线 → 审批执行成功（状态 online）', oidcApproveOk.ok && oidcApproveOk.data.status === 'executed' && oidcAfterOnline.data.status === 'online', JSON.stringify(oidcApproveFail.data))
   const oidcRotate = await api('POST', `/api/agents/${oidcAgentId}/sso-client/rotate`, { token: ops, body: {} })
   check('owner 轮换 secret 200（旧值立即失效）', oidcRotate.ok && Boolean(oidcRotate.data.clientSecret))
   const oidcOfflineReq = await api('POST', `/api/agents/${oidcAgentId}/transition`, { token: ops, body: { action: 'offline', note: '联动测试' } })
-  const oidcOfflineOk = await api('POST', `/api/approvals/${oidcOfflineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '下线' } })
+  const oidcOfflineOk = await api('POST', `/api/approvals/${oidcOfflineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '下线', confirmed: true } })
   const oidcAfterOffline = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
   check('Agent 下线联动：关联 OIDC 客户端自动禁用（refresh 链一并吊销）',
     oidcOfflineOk.ok && oidcAfterOffline.data.status === 'offline' && oidcAfterOffline.data.sso?.status === 'disabled', JSON.stringify(oidcAfterOffline.data?.sso))
@@ -2323,14 +2324,14 @@ try {
   const onlineReq1 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
   check('签发后发起上线（审批单快照 ssoClientId）', onlineReq1.ok && onlineReq1.data.approval.payload.ssoClientId === issueSso.data.clientId)
   await api('POST', `/api/apps/${ssoAppId}/sso-client/disable`, { token: ops, body: { reason: '审批期间禁用（执行期复核演练）' } })
-  const approveFail = await api('POST', `/api/approvals/${onlineReq1.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '应触发执行期复核失败' } })
+  const approveFail = await api('POST', `/api/approvals/${onlineReq1.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '应触发执行期复核失败', confirmed: true } })
   const appAfterFail = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('门禁点2：审批期间禁用 → 上线执行失败留痕', approveFail.ok && approveFail.data.status === 'failed' && String(approveFail.data.execution?.error ?? '').includes('复核') && appAfterFail.data.status !== 'online')
 
   // 重新启用 → 再次审批 → 上线成功
   await api('POST', `/api/apps/${ssoAppId}/sso-client/enable`, { token: ops })
   const onlineReq2 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
-  await api('POST', `/api/approvals/${onlineReq2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意发布' } })
+  await api('POST', `/api/approvals/${onlineReq2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意发布', confirmed: true } })
   const appOnlineDetail = await api('GET', `/api/apps/${ssoAppId}`, { token: admin })
   check('复核通过后上线成功', appOnlineDetail.data.status === 'online')
   check('应用拓扑穿透（app→agent→skill）', appOnlineDetail.ok && appOnlineDetail.data.topology.children.length >= 1)
@@ -2399,7 +2400,7 @@ try {
 
   // 生命周期联动：下架 → 客户端禁用；恢复上线 → 客户端启用；归档 → 客户端禁用（终态）
   const offlineReq1 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'offline', note: '联动演练：下架' } })
-  await api('POST', `/api/approvals/${offlineReq1.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意下架' } })
+  await api('POST', `/api/approvals/${offlineReq1.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意下架', confirmed: true } })
   const afterOffline = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('应用下架 → SSO 客户端联动禁用（app.offlined）', afterOffline.data.status === 'offline' && afterOffline.data.sso?.status === 'disabled')
   // 重新上线：下架联动禁用了客户端 → 门禁要求先重新启用（控制台 SSO tab 有警示与入口）
@@ -2408,11 +2409,11 @@ try {
   await api('POST', `/api/apps/${ssoAppId}/sso-client/enable`, { token: ops })
   await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'retrial' } })
   const onlineReq3 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
-  await api('POST', `/api/approvals/${onlineReq3.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '再次上线' } })
+  await api('POST', `/api/approvals/${onlineReq3.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '再次上线', confirmed: true } })
   const afterReline = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('应用恢复上线 → 客户端联动启用（app.onlined）', afterReline.data.status === 'online' && afterReline.data.sso?.status === 'active')
   const offlineReq2 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'offline', note: '归档前下架' } })
-  await api('POST', `/api/approvals/${offlineReq2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意' } })
+  await api('POST', `/api/approvals/${offlineReq2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意', confirmed: true } })
   await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'archive' } })
   const afterArchive = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('应用归档 → 客户端联动禁用（app.archived 终态）', afterArchive.data.status === 'archived' && afterArchive.data.sso?.status === 'disabled')
@@ -3198,7 +3199,7 @@ try {
     && Array.isArray(shareReq.data.approverSuggestion?.leaderUserIds) && shareReq.data.approverSuggestion.leaderUserIds.includes(linxmUid)
     && shareReq.data.escalated === false,
     JSON.stringify(shareReq.data))
-  const shareApprove = await api('POST', `/api/approvals/${shareReq.data.approvalId}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意' } })
+  const shareApprove = await api('POST', `/api/approvals/${shareReq.data.approvalId}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意', confirmed: true } })
   const shareAllow = await authzCheck(linxmUid, ['/元冰可集团/技术中心/AI 平台部/季度报告.docx'], 'share')
   check('审批通过 → share 例外自动写入并放行（7 天有效期留痕）', shareApprove.ok && shareAllow.data?.decision === 'allow' && Boolean(shareAllow.data.ruleId))
   const rulesNow5 = await api('GET', '/api/nas/authz/rules', { token: admin })
@@ -3770,6 +3771,92 @@ try {
   const extPermGroups = await api('POST', '/api/tools/execute', { token: extCc.data.token, body: { name: 'connector_perm_group_list', args: { orgId: connOrg } } })
   check('外部机器权限组枚举同样 fail-closed（伪造 orgId 无效）', extPermGroups.ok && extPermGroups.data.value.total === 0, JSON.stringify(extPermGroups.data?.value).slice(0, 180))
 
+  // ================================================================ WP-10 + WP-12
+  section('审批 SLA 与公司级终审（WP-10：二次确认强制 / 终审可追溯 / 调用水印 / SLA 看板）')
+  {
+    const probe = await api('POST', '/api/agents', { token: admin, body: { name: '终审探针Agent', attrs: { description: 'WP-10 审批治理验证', model: 'deepseek-chat', riskLevel: 'medium', entryUrl: 'http://127.0.0.1:3080/', systemPromptVersion: 'v1.0', dataClass: 'internal', avatar: '🛡️' } } })
+    check('终审探针：注册（entryUrl 免登通道过上线门禁）', probe.ok, JSON.stringify(probe.error))
+    const onlineReq = await api('POST', `/api/agents/${probe.data.agent.id}/transition`, { token: admin, body: { action: 'online', note: 'WP-10 二次确认验证' } })
+    check('终审探针：L4 上线审批单为高风险', onlineReq.ok && onlineReq.data.approval?.status === 'pending' && onlineReq.data.approval.riskLevel === 'high', JSON.stringify(onlineReq.data?.approval ?? onlineReq.error))
+    const noConfirm = await api('POST', `/api/approvals/${onlineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '未二次确认应被拒' } })
+    check('终审探针：高风险通过缺二次确认被拒（服务端强制，非仅前端拦截）',
+      noConfirm.status === 400 && JSON.stringify(noConfirm.error).includes('二次确认'), `${noConfirm.status} ${JSON.stringify(noConfirm.error)}`)
+    const withConfirm = await api('POST', `/api/approvals/${onlineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '已复核影响面（二次确认）', confirmed: true } })
+    check('终审探针：二次确认后通过并自动执行', withConfirm.ok && withConfirm.data.status === 'executed', JSON.stringify(withConfirm.error))
+    check('终审探针：审批单落公司级终审标记（终审人 + 时间）',
+      withConfirm.ok && Boolean(withConfirm.data.finalReview?.approverId) && Boolean(withConfirm.data.finalReview?.at), JSON.stringify(withConfirm.data?.finalReview))
+    const finalAudit = await api('GET', '/api/audit/logs?q=' + encodeURIComponent('approval.final_review'), { token: admin })
+    check('终审探针：终审标记审计可追溯（action=approval.final_review 指向本审批单）',
+      finalAudit.ok && (finalAudit.data.items ?? []).some((log) => log.action === 'approval.final_review' && log.resourceId === onlineReq.data.approval.id),
+      JSON.stringify(finalAudit.data?.total))
+    // MCP 服务终审 → 调用水印（hosted 演示服务 + 临时权限组授权 admin，确定性不依赖真实传输 stub 存活）
+    const mcpsAll = await api('GET', '/api/mcp/services', { token: admin })
+    const wmSvc = (mcpsAll.data.services ?? []).find((item) => item.status === 'online' && (item.tools ?? []).some((tool) => tool.riskLevel === 'read'))
+      ?? (mcpsAll.data.services ?? []).find((item) => item.status === 'online')
+    check('终审水印：在线服务在册', Boolean(wmSvc), JSON.stringify(mcpsAll.data?.services?.length))
+    const adminUserId = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('admin'), { token: admin })).data.users.find((user) => user.username === 'admin').id
+    const wmGroup = await api('POST', '/api/iam/groups', { token: admin, body: { name: `终审水印组-${Date.now()}`, type: 'static', memberIds: [adminUserId] } })
+    const wmPerm = await api('POST', '/api/mcp/perm-groups', { token: admin, body: {
+      name: `终审水印权限组-${Date.now()}`,
+      policies: { [wmSvc.id]: { allowedTools: '*', constraints: { readOnly: true } } },
+      subjects: [{ type: 'user_group', id: wmGroup.data.group?.id ?? wmGroup.data.id, name: '终审水印组' }],
+    } })
+    check('终审水印：admin 授权权限组就绪', wmPerm.ok, JSON.stringify(wmPerm.error))
+    const fr = await api('POST', `/api/mcp/services/${wmSvc.id}/final-review`, { token: admin, body: {} })
+    check('终审水印：MCP 服务公司级终审标记成功', fr.ok && Boolean(fr.data.finalReview?.approverId), JSON.stringify(fr.error))
+    const wmTool = (wmSvc.tools ?? [])[0]?.name
+    const wmInvoke = await api('POST', '/api/mcp/invoke', { token: admin, body: { serviceId: wmSvc.id, tool: wmTool, args: {} } })
+    check('终审水印：终审服务可正常调用', wmInvoke.ok && wmInvoke.data.status === 'ok', JSON.stringify({ status: wmInvoke.status, error: wmInvoke.error, data: wmInvoke.data }))
+    const wmCalls = await api('GET', `/api/mcp/calls?serviceId=${wmSvc.id}&limit=5`, { token: admin })
+    check('终审水印：该服务调用记录附带水印（watermark.finalReview=true）',
+      wmCalls.ok && (wmCalls.data.items ?? []).some((call) => call.watermark?.finalReview === true),
+      JSON.stringify(wmCalls.data?.items?.[0]?.watermark ?? wmCalls.error))
+    // SLA 看板
+    const sla = await api('GET', '/api/approvals/sla?windowDays=30', { token: admin })
+    check('SLA 看板：≤2 工作日达成率可查（自测审批即时决策 → 100% 达标）',
+      sla.ok && sla.data.decided >= 1 && sla.data.achievementRate >= 0.9 && typeof sla.data.calendarNote === 'string',
+      JSON.stringify(sla.data ?? sla.error))
+    const slaDenied = await api('GET', '/api/approvals/sla', { token: dev })
+    check('SLA 看板：无 approval.read 被拒（dev 无该权限点）', slaDenied.status === 403, String(slaDenied.status))
+  }
+
+  section('战略看板与目录瘦身（WP-12：portal 只读聚合 / 漏斗可测 / 纯函数筛选）')
+  {
+    const boardAnon = await rawReq('GET', '/api/portal/board', { headers: { origin: 'http://192.168.0.4:8092' } })
+    const boardBody = jsonBody(boardAnon)
+    check('看板：portal 只读端点公开可取（不开特权接口，CORS 与门户一致）',
+      boardAnon.status === 200 && boardBody.code === 0 && Boolean(boardBody.data?.assets) && Boolean(boardBody.data?.funnel),
+      `${boardAnon.status} ${JSON.stringify(boardBody).slice(0, 160)}`)
+    const behaviorAdmin = await api('GET', '/api/behavior/events?type=card.exposed', { token: admin })
+    check('看板：漏斗曝光级与 behavior 台账一致（behavior 全量口径）',
+      boardBody.data.funnel.exposed === behaviorAdmin.data.total,
+      `funnel=${boardBody.data.funnel.exposed} ledger=${behaviorAdmin.data.total}`)
+    check('看板：漏斗调用级 ≥1（usage 事件在册）且 WAIC 口径齐备',
+      boardBody.data.funnel.invoked >= 1 && typeof boardBody.data.waic.chargeCents === 'number' && Array.isArray(boardBody.data.byDay),
+      JSON.stringify(boardBody.data.funnel))
+    check('看板：ROI 用工成本模型随板下发（替代工时估算 + 时薪系数 + 口径声明，WP-14）',
+      Boolean(boardBody.data.roi) && Number(boardBody.data.roi.minutesPerCallEstimate) > 0
+      && Number(boardBody.data.roi.laborCostCentsPerHour) > 0 && String(boardBody.data.roi.note).includes('估算'),
+      JSON.stringify(boardBody.data.roi ?? null))
+    const filters = await import(new URL('../packages/plugin-console/public/js/asset-filters.js', import.meta.url).href)
+    const items = [
+      { type: 'mcp', name: '数据分析引擎', slug: 'datawise', platform: 'rd', org: 'AI部', owner: '甲' },
+      { type: 'agent', name: '研发编码助手', slug: 'dev-coder', platform: '', org: '研发部', owner: '乙' },
+      { type: 'app', name: '数据洞察 BI', slug: 'insight-bi', platform: 'rd', org: 'AI部', owner: '丙' },
+    ]
+    check('目录：纯函数筛选（类型/平台/关键词三条件）',
+      filters.filterAssets(items, { type: 'mcp' }).length === 1
+      && filters.filterAssets(items, { platform: 'rd' }).length === 2
+      && filters.filterAssets(items, { q: '编码' }).length === 1
+      && filters.filterAssets(items, { q: 'DEV-CODER' }).length === 1
+      && filters.assetPlatform(items[1]) === '未标注')
+    const big = Array.from({ length: 1000 }, (_, i) => ({ type: i % 2 ? 'mcp' : 'agent', name: `资产${i}`, platform: i % 3 ? 'rd' : 'quality', org: 'o', owner: 'w' }))
+    const perfStart = Date.now()
+    filters.filterAssets(big, { type: 'mcp', platform: 'rd', q: '资产99' })
+    const perfMs = Date.now() - perfStart
+    check('目录：筛选性能断言（1000 项三条件 < 50ms，单栏卡片流无服务端二次请求）', perfMs < 50, `${perfMs}ms`)
+  }
+
   // ================================================================ 验收回归：offline 审批闭环 / 规则播种 / mcp 直调 execute
   section('验收回归（offline 闭环 · 规则播种 · mcp 直调 execute）')
 
@@ -3854,7 +3941,7 @@ try {
   // 全链路：注册 → L4 审批上线 → 门户拉取即可见（miniapp 形态不走 SSO 门禁）
   const portalProbe = await api('POST', '/api/apps', { token: admin, body: { name: '门户拉取探针应用', attrs: { description: '门户数据通道验收：上线即对门户可见', appType: 'miniapp', url: 'http://192.168.0.8:9000/', riskLevel: 'low', dataClass: 'internal' } } })
   const portalProbeReq = await api('POST', `/api/apps/${portalProbe.data.app.id}/transition`, { token: admin, body: { action: 'online' } })
-  await api('POST', `/api/approvals/${portalProbeReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '门户可见性验收' } })
+  await api('POST', `/api/approvals/${portalProbeReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '门户可见性验收', confirmed: true } })
   const portalAppsAfter = await portalJson('/apps', { origin: portalOrigin })
   const portalApp = portalAppsAfter.body.data.find((item) => item.id === portalProbe.data.app.id)
   check('已上线应用进入 /apps（link=访问地址，tag/version/accent 契约齐全）',

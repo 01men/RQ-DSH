@@ -1,0 +1,59 @@
+{
+  "platform": "strategy",
+  "label": "战略平台卡片包（经营与决策场景，WP-09 全量）",
+  "roles": ["*"],
+  "cards": [
+    {
+      "id": "st-insight",
+      "title": "经营洞察 BI",
+      "description": "经营指标一屏总览，异动自动提示，决策先看数",
+      "badge": "app",
+      "href": "#/apps",
+      "ref": "app:insight-bi",
+      "order": 10
+    },
+    {
+      "id": "st-finance",
+      "title": "财务报告助手",
+      "description": "自动汇总财务数据，生成月度经营分析报告初稿",
+      "badge": "agent",
+      "href": "#/agents",
+      "ref": "agent:finance-report",
+      "order": 20
+    },
+    {
+      "id": "st-analyst",
+      "title": "数据分析师",
+      "description": "自然语言下钻经营数据，输出归因结论卡片",
+      "badge": "agent",
+      "href": "#/agents",
+      "ref": "agent:data-analyst",
+      "order": 30
+    },
+    {
+      "id": "st-attribution",
+      "title": "指标异动归因",
+      "description": "指标同比环比异常时多维下钻，给出 Top3 归因",
+      "badge": "skill",
+      "href": "#/skills",
+      "ref": "skill:指标异动归因",
+      "order": 40
+    },
+    {
+      "id": "st-assets",
+      "title": "全资产运营",
+      "description": "五类 AI 资产的调用、成本与热度一图总览",
+      "badge": "data",
+      "href": "#/assets",
+      "order": 50
+    },
+    {
+      "id": "st-register",
+      "title": "登记新资产",
+      "description": "提示词、流程、接口、数据——四步登记上架",
+      "badge": "skill",
+      "href": "#/register",
+      "order": 60
+    }
+  ]
+}

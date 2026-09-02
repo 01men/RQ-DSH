@@ -1400,6 +1400,21 @@ export function apply(ctx: Context) {
     return service
   })
 
+  /**
+   * MCP 服务公司级终审标记（WP-10/L1）：终审通过后，该服务全部调用记录附带水印
+   * （watermark.finalReview），标记与水印在审计/调用台账双侧可追溯。
+   */
+  guarded('POST', '/api/mcp/services/:id/final-review', 'mcp.service.deploy', (exchange) => {
+    const id = exchange.params['id']!
+    const service = ctx.mcpRegistry.services().get(id)
+    if (!service) throw new Error(`MCP 服务不存在：${id}`)
+    const info = caller(exchange)
+    const mark = { approverId: info.userId ?? info.principalId, approverName: info.name, at: new Date().toISOString() }
+    const updated = ctx.mcpRegistry.services().update(id, { finalReview: mark })
+    changeLog(exchange, 'mcp.final_review', 'mcp_service', id, service.name, '公司级终审标记：后续调用将附带水印')
+    return { id, finalReview: updated.finalReview }
+  })
+
   guarded('POST', '/api/mcp/services/:id/deploy', 'mcp.service.deploy', async (exchange) => {
     const input = body<{ grayPercent?: number; version?: string; changelog?: string; dryRun?: boolean }>(exchange)
     const id = exchange.params['id']!
@@ -3489,10 +3504,16 @@ export function apply(ctx: Context) {
   }))
 
   guarded('POST', '/api/approvals/:id/decide', 'approval.decide', async (exchange) => {
-    const { decision, opinion } = body<{ decision: 'approve' | 'reject'; opinion?: string }>(exchange)
+    const { decision, opinion, confirmed, finalReview } = body<{ decision: 'approve' | 'reject'; opinion?: string; confirmed?: boolean; finalReview?: boolean }>(exchange)
     const info = caller(exchange)
-    const record = await ctx.audit.decideApproval(exchange.params['id']!, decision, info.userId ?? info.principalId, info.name, opinion)
+    const record = await ctx.audit.decideApproval(exchange.params['id']!, decision, info.userId ?? info.principalId, info.name, opinion, { confirmed, finalReview })
     return record
+  })
+
+  /** 审批 SLA 看板（WP-10）：≤2 工作日达成率可查（L2 审批周期指标口径）。 */
+  guarded('GET', '/api/approvals/sla', 'approval.read', (exchange) => {
+    const windowDays = Number(exchange.query.get('windowDays') ?? 30) || 30
+    return ctx.audit.slaReport(Math.min(Math.max(windowDays, 1), 365))
   })
 
   // -- 平台信息与工具桥 -----------------------------------------------------
