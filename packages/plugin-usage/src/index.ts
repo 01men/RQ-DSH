@@ -12,6 +12,13 @@
  *   - 弃用字段走 platform.schema.deprecated 事件，历史数据不迁移不重算。
  * 投递语义（M8）：at-least-once + 消费端按 idempotency_key 幂等；先落库后分发（宕机不丢）；
  *   消费异常重试 3 次入死信集合并告警；支持按时间窗重放。
+ *
+ * schema 变更记录（action-plan-dsh-frontend WP-03 / 默认决议 D1、D2，2026-09-02）：
+ *   - D1 resource 值域增补 `app:<id>`、`kb:<orgId>`（additive）：价格簿播种零费率 `app:*`/`kb:*`
+ *     （meter_key=calls），是否计费由运营调价决定；
+ *   - D2 非计费事件统一零价快照：零费率规则产出 charge_cents=0 且 rate.nonbillable=true；
+ *     UsageRecordInput.nonbillable=true 为便捷构造入口（非计费反馈/知识事件），仅允许配零费率规则，
+ *     防止「标了非计费却按计费规则入账」的口径漂移。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
@@ -40,7 +47,7 @@ export interface UsagePricingSnapshot {
   /** 本事件平台成本（口径：L1 采购成本）。 */
   cost_cents: number
   /** 计价明细快照（费率 + 计量键），分账/审计复算依据。 */
-  rate: { pattern: string; meter_key: string; list_cents_per_unit: number; cost_cents_per_unit: number; units_per_step: number; tax_rate: number }
+  rate: { pattern: string; meter_key: string; list_cents_per_unit: number; cost_cents_per_unit: number; units_per_step: number; tax_rate: number; nonbillable?: boolean }
 }
 
 /** usage.recorded v1 事件（只追加，禁改版；扩展仅允许新增可选字段）。 */
@@ -57,7 +64,7 @@ export interface UsageEvent {
   subject: string
   /** 计费责任主体：org:<id> | plugin:<id> | app:<id> | platform */
   principal: string
-  /** 资源：model:<slug> | plugin:<id> | mcp:<slug> | skill:<id> | nas:<id> */
+  /** 资源：model:<slug> | plugin:<id> | mcp:<slug> | skill:<id> | nas:<id> | app:<id> | kb:<orgId>（D1 additive） */
   resource: string
   meters: UsageMeter[]
   pricing: UsagePricingSnapshot
@@ -75,6 +82,20 @@ export interface UsageRecordInput {
   /** 幂等键：调用方自带（推荐，如 <producer>:<业务单号>）；缺省按主体+资源+窗口+序号生成。 */
   idempotency_key?: string
   occurred_at?: string
+  /**
+   * 非计费便捷构造（D2 零价快照）：true 时要求该资源命中零费率价格簿规则，
+   * 事件按 charge_cents=0 + rate.nonbillable=true 入账（反馈/知识等观测事件不污染计费口径）。
+   */
+  nonbillable?: boolean
+}
+
+/**
+ * D2 零价快照便捷构造：非计费观测事件（反馈/知识包使用等）统一按零费率 calls 计量登记。
+ * 返回值可直接交给 usage.record()；资源必须命中零费率价格簿规则（app: 与 kb: 前缀已默认播种），
+ * 否则 record() 拒绝（nonbillable 标记防口径漂移）。
+ */
+export function nonbillableUsage(base: Omit<UsageRecordInput, 'meters' | 'nonbillable'> & { calls?: number }): UsageRecordInput {
+  return { ...base, meters: [{ key: 'calls', value: base.calls ?? 1, unit: 'call' }], nonbillable: true }
 }
 
 /** 价格簿条目：resource 模式（精确 → 前缀匹配）→ 计量键与费率。 */
@@ -153,6 +174,12 @@ export class UsageService extends Service {
     this.validate(input)
     const tenant = input.tenant_id ?? this.resolveTenant(input.org)
     const price = this.priceOf(input.resource)
+    // D2 非计费便捷构造：nonbillable 标记只允许配零费率规则（防「标了非计费却按计费规则入账」）
+    if (input.nonbillable === true && !(price.list_cents_per_unit === 0 && price.cost_cents_per_unit === 0)) {
+      throw new Error(`非计费事件只允许命中零费率价格簿规则：资源 ${input.resource} 命中 ${price.pattern}（非零费率），请去掉 nonbillable 或先调零费率`)
+    }
+    // 零费率规则产出的即非计费事件（统一零价快照口径）：charge_cents=0 + rate.nonbillable=true
+    const nonbillable = input.nonbillable === true || (price.list_cents_per_unit === 0 && price.cost_cents_per_unit === 0)
     // 硬校验：事件必须携带价格簿计价键（宁可拒绝不可静默 0 计费——
     // 价格簿对调用方不可见（usage.admin），错误信息直接携带期望键供自纠）
     if (!input.meters.some((item) => item.key === price.meter_key)) {
@@ -188,6 +215,7 @@ export class UsageService extends Service {
           cost_cents_per_unit: price.cost_cents_per_unit,
           units_per_step: price.units_per_step,
           tax_rate: price.tax_rate,
+          ...(nonbillable ? { nonbillable: true } : {}),
         },
       },
     }
@@ -395,6 +423,9 @@ export class UsageService extends Service {
       // 连接器纳管（open-connector 融合）：同上零费率起步；record() 硬校验要求有规则方可入管道，
       // 运营按需把特定 connector:<provider> 调整为非零费率（dev-plan-connector §2.6）
       { pattern: 'connector:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' },
+      // D1（WP-03）：应用与知识包观测入管道——零费率起步，事件自动按非计费零价快照入账（D2）
+      { pattern: 'app:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09' },
+      { pattern: 'kb:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09' },
     ]
     for (const entry of defaults) {
       if (!this.priceBook().findOne((item) => item.pattern === entry.pattern)) this.upsertPrice(entry)
@@ -499,7 +530,7 @@ export class UsageService extends Service {
     if (!input.subject?.trim()) throw new Error('usage 事件 subject 必填（user:<id> / agent:<id>）')
     if (!input.principal?.trim()) throw new Error('usage 事件 principal 必填（org:<id> / plugin:<id> / platform）')
     if (!input.resource?.trim() || !/^[a-z]+:[A-Za-z0-9._-]+$/.test(input.resource)) {
-      throw new Error(`usage 事件 resource 格式非法：${input.resource}（应为 model:<slug> / mcp:<slug> / plugin:<id> / skill:<id> / nas:<id>）`)
+      throw new Error(`usage 事件 resource 格式非法：${input.resource}（应为 model:<slug> / mcp:<slug> / plugin:<id> / skill:<id> / nas:<id> / app:<id> / kb:<orgId>）`)
     }
     if (!Array.isArray(input.meters) || input.meters.length === 0) throw new Error('usage 事件 meters 至少一项')
     for (const meter of input.meters) {

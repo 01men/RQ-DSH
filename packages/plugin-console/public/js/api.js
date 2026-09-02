@@ -91,7 +91,30 @@ async function request(method, path, body, retried = false) {
   return payload?.data
 }
 
-const PUBLIC_TOKEN_PATHS = new Set(['/api/auth/login', '/api/auth/refresh', '/api/auth/sso', '/api/auth/sso/authorize', '/api/auth/sso/bind', '/api/auth/sso/register', '/api/auth/client-credentials'])
+const PUBLIC_TOKEN_PATHS = new Set(['/api/auth/login', '/api/auth/refresh', '/api/auth/sso', '/api/auth/sso/authorize', '/api/auth/sso/bind', '/api/auth/sso/register', '/api/auth/client-credentials', '/api/auth/entry-ticket-session'])
+
+/**
+ * 票据免登：一次性入场票据 → 控制台会话（门户/钉钉「打开即工作台」）。
+ * 票据只进请求体与内存：调用方须先从 URL 取出并立即清除参数，不得常驻地址栏或写入 localStorage。
+ */
+export async function entryTicketSession(ticket) {
+  const response = await fetch(`${BASE}/api/auth/entry-ticket-session`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ ticket }),
+  })
+  let payload = null
+  try { payload = await response.json() } catch { /* non-json */ }
+  if (!response.ok || payload?.ok === false) {
+    const err = payload?.error ?? {}
+    throw new ApiError(err.code ?? 'HTTP_' + response.status, err.message ?? `票据兑换失败（${response.status}）`, response.status, err)
+  }
+  const result = payload.data
+  session.clear()
+  session.save(result.token, result.user)
+  if (result.refreshToken) session.saveRefresh(result.refreshToken)
+  return result.user
+}
 
 export const api = {
   get: (path) => request('GET', path),

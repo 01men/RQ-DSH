@@ -2,7 +2,9 @@
 plugin: dsh-plugin-platform-core
 base: /api
 endpoints:
-  - # 平台自身无业务 REST；由 console 插件聚合暴露
+  - POST /api/behavior/events（前端行为埋点采集，write-only；iam 鉴权 fail-closed，主体强制取认证身份）
+  - GET /api/behavior/events（行为事件查询，audit.read 门禁；审计/看板订阅面）
+  - # 其余业务 REST 仍由 console 插件聚合暴露
 
 services:
   - key: opsStorage
@@ -17,3 +19,6 @@ services:
   - key: httpServer
     access: ctx.httpServer
     description: HTTP 服务：REST 路由 + 静态资源
+  - key: behavior
+    access: ctx.behavior
+    description: 行为事件管道（behavior.recorded 先写后发/幂等/死信/重放，WP-03/D3）

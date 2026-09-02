@@ -74,13 +74,15 @@ export const PlatformEvents = {
   ConnectClientDisabled: 'connect.client.disabled',
   UpdateAvailable: 'platform.update.available',
   UpdateApplied: 'platform.update.applied',
+  // 前端行为埋点（WP-03/D3）：独立于 usage 计量管道，audit/看板订阅
+  BehaviorRecorded: 'behavior.recorded',
 } as const
 
 /** 平台保留命名空间：第三方插件（source=plugin:*）禁止发射。 */
 const PLATFORM_RESERVED_PREFIXES = [
   'iam.', 'authn.', 'oidc.', 'mcp.', 'nas.', 'audit.', 'skill.', 'agent.', 'app.',
   'usage.', 'billing.', 'model.', 'market.', 'developer.', 'wallet.',
-  'platform.', 'approval.', 'connector.', 'console.', 'connect.',
+  'platform.', 'approval.', 'connector.', 'console.', 'connect.', 'behavior.',
 ]
 
 export class PlatformBusService extends Service {

@@ -1,5 +1,5 @@
-/** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）。 */
-import { api, session } from '../api.js'
+/** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）/ 票据免登（?ticket= 一次性参数）。 */
+import { api, session, entryTicketSession } from '../api.js'
 import { icon } from '../icons.js'
 import { h, $, esc, toast } from '../ui.js'
 
@@ -116,6 +116,23 @@ export function renderLogin(app) {
 
   const tabPassword = $('#login-form-password')
   const tabDing = $('#login-form-dingtalk')
+
+  // 票据免登：?ticket= 一次性参数（门户/钉钉入口复用平台领票模式）。
+  // 读取后立即清除 URL 参数（票据不常驻地址栏），兑换成功直达工作台；失败清参数后走常规登录。
+  {
+    const urlTicket = new URLSearchParams(location.search).get('ticket')
+    if (urlTicket) {
+      history.replaceState(null, '', location.pathname + location.hash)
+      entryTicketSession(urlTicket).then((user) => {
+        toast(`欢迎回来，${user.displayName}`)
+        location.hash = '#/dashboard'
+        window.dispatchEvent(new Event('hashchange'))
+      }).catch((error) => {
+        toast(`免登失败：${error.message}，请常规登录`, 'error')
+      })
+    }
+  }
+
   // 上次使用的接入主体（多主体部署时保持入口视觉一致；身份归属最终以钉钉组织选择为准）
   const LAST_SSO_CONFIG_KEY = 'heng_ops_last_sso_config'
   let preferredConfigId = ''

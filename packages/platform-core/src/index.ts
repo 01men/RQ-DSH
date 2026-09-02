@@ -13,6 +13,7 @@ import { PlatformBusService } from './bus.ts'
 import { ToolRuntimeLite } from './tools-lite.ts'
 import { HttpServerService } from './http.ts'
 import { SqliteTxnService } from './sqlite.ts'
+import { BehaviorService } from './behavior.ts'
 
 export * from './storage.ts'
 export * from './bus.ts'
@@ -24,6 +25,7 @@ export * from './yaml.ts'
 export * from './zip.ts'
 export * from './plugin-ctx.ts'
 export * from './version.ts'
+export * from './behavior.ts'
 
 export interface PlatformCoreConfig {
   dataDir?: string
@@ -44,6 +46,8 @@ export function apply(ctx: Context, config: PlatformCoreConfig = {}) {
     ctx.plugin(ToolRuntimeLite)
   }
   const http = new HttpServerService(ctx, config.http ?? {})
+  // behavior 行为事件管道（WP-03/D6）：端点随基础层装配，鉴权依赖 console 中间件 + 本端点双层校验
+  ctx.plugin(BehaviorService)
   if (config.startHttp !== false) {
     void http.start().then(() => {
       ctx.logger('platform-core').info(`HTTP 服务已启动：http://${http.host}:${http.port}`)

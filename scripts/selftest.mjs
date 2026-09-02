@@ -553,6 +553,10 @@ const proc = spawn(process.execPath, ['src/main.ts', '--port', String(PORT), '--
   },
 })
 proc.stderr.on('data', (chunk) => process.stderr.write(`\x1b[90m[server] ${chunk}\x1b[0m`))
+// 服务端日志全量累积（stdout+stderr）：凭证/票据零日志类断言的扫描面
+const serverLogChunks = []
+proc.stdout.on('data', (chunk) => serverLogChunks.push(chunk))
+proc.stderr.on('data', (chunk) => serverLogChunks.push(chunk))
 
 let booted = false
 for (let i = 0; i < 40; i++) {
@@ -934,6 +938,69 @@ try {
   check('授权后该主体能力漂移消除', grant.ok && tenantStillDrift === undefined)
   const driftAlerts = await api('GET', '/api/audit/alerts', { token: admin })
   check('能力漂移已入告警中心', driftAlerts.ok && JSON.stringify(driftAlerts.data.alerts).includes('能力漂移'))
+
+  // ================================================================ WP-03：usage 值域扩展 + 零价快照 + behavior 管道
+  section('usage 值域扩展（WP-03/D1：app:<id> 与 kb:<orgId>）')
+  {
+    const appMeter = await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: 'app:app-selftest-01', meters: [{ key: 'calls', value: 1, unit: 'call' }], idempotency_key: 'test-usage-app-001',
+    } })
+    check('app:<id> 事件入管道（默认零费率规则播种，charge=0）', appMeter.ok && appMeter.data.pricing.charge_cents === 0, JSON.stringify(appMeter.error))
+    check('零费率事件自动标非计费（rate.nonbillable=true，D2 统一零价快照）', appMeter.ok && appMeter.data.pricing.rate?.nonbillable === true)
+    const kbMeter = await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: `kb:${tenantOrg.data.id}`, meters: [{ key: 'calls', value: 3, unit: 'call' }], idempotency_key: 'test-usage-kb-001',
+    } })
+    check('kb:<orgId> 事件入管道（值域 additive，命中 kb:* 零费率）', kbMeter.ok && kbMeter.data.pricing.charge_cents === 0 && kbMeter.data.pricing.rate?.pattern === 'kb:*', JSON.stringify(kbMeter.error))
+    const kbWrongMeter = await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: `kb:${tenantOrg.data.id}`, meters: [{ key: 'tokens', value: 5, unit: 'token' }], idempotency_key: 'test-usage-kb-002',
+    } })
+    check('kb:* 计量键仍受价格簿硬校验（须 calls，不静默 0 计费）', !kbWrongMeter.ok && JSON.stringify(kbWrongMeter.error).includes('计量键不匹配'))
+  }
+
+  section('零价快照构造（WP-03/D2：nonbillableUsage 便捷入口）')
+  {
+    const constructed = usage.nonbillableUsage({
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: `kb:${tenantOrg.data.id}`, idempotency_key: 'test-usage-nbu-001',
+    })
+    check('nonbillableUsage 便捷构造（calls 计量 + nonbillable 标记）',
+      Array.isArray(constructed.meters) && constructed.meters[0]?.key === 'calls' && constructed.nonbillable === true, JSON.stringify(constructed))
+    const recorded = await api('POST', '/api/usage/record', { token: admin, body: constructed })
+    check('便捷构造事件直入 record（零价入账 + 标记在快照）', recorded.ok && recorded.data.pricing.charge_cents === 0 && recorded.data.pricing.rate?.nonbillable === true, JSON.stringify(recorded.error))
+    const nonbillableOnPaid = await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 100, unit: 'token' }], idempotency_key: 'test-usage-nb-001', nonbillable: true,
+    } })
+    check('nonbillable 标记配非零费率规则被拒（防计费口径漂移）', !nonbillableOnPaid.ok && JSON.stringify(nonbillableOnPaid.error).includes('非计费'))
+    const orgTotals = await api('GET', '/api/usage/totals?principal=' + encodeURIComponent(`org:${tenantOrg.data.id}`), { token: admin })
+    check('零价快照不污染计费总额（charge 只含计费事件 150+30）', orgTotals.ok && orgTotals.data.charge_cents === 180, JSON.stringify(orgTotals.data))
+  }
+
+  section('behavior 事件管道（WP-03/D3：采集 / 鉴权 / 幂等）')
+  {
+    const anon = await api('POST', '/api/behavior/events', { body: { type: 'card.exposed' } })
+    check('behavior 采集：未认证 401（write-only 门禁 fail-closed）', anon.status === 401, String(anon.status))
+    const evt = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'card.exposed', platform: 'rd', payload: { cardRef: 'c-001' }, idempotency_key: 'test-behavior-001' } })
+    check('behavior 采集：登录用户上报成功（主体强制取认证身份）',
+      evt.ok && evt.data.event?.idempotency_key === 'test-behavior-001' && evt.data.duplicated === false
+      && String(evt.data.event?.subject ?? '').startsWith('user:') && evt.data.event?.schema === 'behavior.recorded',
+      JSON.stringify(evt.error ?? evt.data))
+    const evtDup = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'card.exposed', platform: 'rd', payload: { cardRef: 'c-001' }, idempotency_key: 'test-behavior-001' } })
+    check('behavior 采集：幂等重放返回既有事件 + duplicated 标记', evtDup.ok && evtDup.data.duplicated === true && evtDup.data.event?.event_id === evt.data.event?.event_id)
+    const evtConflict = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'card.clicked', idempotency_key: 'test-behavior-001' } })
+    check('behavior 采集：同幂等键不同内容被拒', !evtConflict.ok)
+    const evtBadType = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'BAD TYPE' } })
+    check('behavior 采集：type 点分小写键校验', !evtBadType.ok)
+    const evtOversize = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'card.exposed', payload: { blob: 'x'.repeat(5000) } } })
+    check('behavior 采集：payload 超 4KB 被拒', !evtOversize.ok && JSON.stringify(evtOversize.error).includes('超限'))
+    const devRead = await api('GET', '/api/behavior/events', { token: dev })
+    check('behavior 只读：无 audit.read 被拒 403', devRead.status === 403, String(devRead.status))
+    const adminRead = await api('GET', '/api/behavior/events?type=card.exposed', { token: admin })
+    check('behavior 只读：audit.read 可查且幂等不双计（total=1）', adminRead.ok && adminRead.data.total === 1, JSON.stringify(adminRead.data))
+  }
 
   // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
   section('第 3 步：契约五面 / 事件源校验 / 代理 ctx / L0 市场')
@@ -1973,6 +2040,38 @@ try {
   void credBefore
 
   // ================================================================ Agent ↔ SSO 打通（OIDC-agent 关联 / 门禁 / 生命周期联动）
+  // ================================================================ console ticket redeem
+  section('console ticket redeem（WP-02：票据免登控制台，零二次登录）')
+  {
+    const issue = await api('POST', `/api/agents/${selfAgent.id}/entry-ticket`, { token: admin, body: {} })
+    check('免登：领票（复用既有签发端点，一次性 etk_ 票据）', issue.ok && issue.data.ticket.startsWith('etk_'), JSON.stringify(issue.error))
+    const redeemSession = await rawReq('POST', '/api/auth/entry-ticket-session', {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticket: issue.data.ticket }),
+    })
+    const sessionBody = jsonBody(redeemSession)
+    check('免登：票据兑换成功建立控制台会话（dst1 令牌 + refresh + 用户档案）',
+      redeemSession.status === 200 && typeof sessionBody.data?.token === 'string' && sessionBody.data.token.startsWith('dst1.')
+      && Boolean(sessionBody.data?.refreshToken) && Boolean(sessionBody.data?.user?.id),
+      `${redeemSession.status} ${JSON.stringify(sessionBody).slice(0, 200)}`)
+    const freeOverview = await api('GET', '/api/overview', { token: sessionBody.data.token })
+    check('免登：兑换所得会话可直接调用工作台聚合（打开即工作台）', freeOverview.ok, JSON.stringify(freeOverview.error))
+    const sessionReplay = await rawReq('POST', '/api/auth/entry-ticket-session', {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticket: issue.data.ticket }),
+    })
+    check('免登：重放票据被拒（一次性消费防重放）', sessionReplay.status === 400, String(sessionReplay.status))
+    const sessionForged = await api('POST', '/api/auth/entry-ticket-session', { body: { ticket: 'etk_forged_0000000000000000000000000000000000000000' } })
+    check('免登：伪造票据被拒', sessionForged.status === 400)
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const serverLog = serverLogChunks.join('')
+    check('免登：票据本体零进服务端日志（stdout/stderr 全量扫描）', Boolean(issue.data.ticket) && !serverLog.includes(issue.data.ticket), '票据本体出现在服务端日志')
+    const auditSession = await api('GET', '/api/audit/logs?q=' + encodeURIComponent('entry.ticket.session'), { token: admin })
+    check('免登：兑换入审计（*.entry.ticket.session 可检索，且审计不含票据本体）',
+      auditSession.ok && (auditSession.data.items ?? []).some((log) => log.action === 'agent.entry.ticket.session' && !JSON.stringify(log).includes(issue.data.ticket)),
+      JSON.stringify(auditSession.error ?? auditSession.data?.total))
+  }
+
   section('Agent ↔ SSO 打通（OIDC-agent 关联，dev-plan-agent-host-unification M2）')
   const oidcAgentCreate = await api('POST', '/api/agents', { token: ops, body: { name: 'SSO 自测机器人', attrs: { description: 'OIDC-agent 关联自测', model: 'deepseek-chat', riskLevel: 'low', avatar: '🔑' } } })
   check('注册 SSO 自测 Agent（owner=资源管理员）', oidcAgentCreate.ok, JSON.stringify(oidcAgentCreate.error))
@@ -3765,6 +3864,26 @@ try {
     mountCtx.iam.users().update(adminUser.id, { status: 'active' })
     const crossOrigin = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { origin: 'http://evil.example.com' } })
     check('绑定面同源收紧：跨站 Origin 403（对齐 dsh fence 语义）', crossOrigin.status === 403)
+
+    // -- behavior 消费语义（WP-03/D3，进程内直测：投递 / 死信 / 重放幂等） -----------
+    const behaviorSeen = []
+    const offBehavior = mountCtx.behavior.consume('selftest-observer', (event) => { behaviorSeen.push(event.event_id) })
+    const bFirst = mountCtx.behavior.record({ subject: 'user:usr-behavior-test', type: 'funnel.step', platform: 'rd', payload: { step: 1 }, idempotency_key: 'b-selftest-001' })
+    check('behavior 投递：先写后发（消费方收到首投）', bFirst.duplicated === false && behaviorSeen.includes(bFirst.event.event_id))
+    const bDup = mountCtx.behavior.record({ subject: 'user:usr-behavior-test', type: 'funnel.step', platform: 'rd', payload: { step: 1 }, idempotency_key: 'b-selftest-001' })
+    check('behavior 投递：幂等重放不重发（消费水位跳过 + duplicated 标记）',
+      bDup.duplicated === true && behaviorSeen.filter((id) => id === bFirst.event.event_id).length === 1)
+    mountCtx.behavior.consume('selftest-broken', () => { throw new Error('自测故障消费方') })
+    const bFail = mountCtx.behavior.record({ subject: 'user:usr-behavior-test', type: 'card.clicked', idempotency_key: 'b-selftest-002' })
+    check('behavior 投递：消费方连续 3 次失败入死信', mountCtx.behavior.deadLetters().all().some((letter) => letter.event_id === bFail.event.event_id && letter.consumer === 'selftest-broken'))
+    check('behavior 投递：死信触发 critical 告警（audit.alert.fired）',
+      mountCtx.platformBus.recent(50).some((event) => event.name === 'audit.alert.fired' && JSON.stringify(event.payload).includes('behavior 消费死信')))
+    const behaviorBeforeReplay = behaviorSeen.length
+    mountCtx.behavior.replay(new Date(0).toISOString())
+    check('behavior 投递：replay 幂等（已消费事件不重投）', behaviorSeen.length === behaviorBeforeReplay)
+    const retriedBehavior = mountCtx.behavior.retryDeadLetters()
+    check('behavior 投递：死信重投（故障消费方仍失败则保留死信）', retriedBehavior.remaining >= 1 && mountCtx.behavior.deadLetters().all().some((letter) => letter.consumer === 'selftest-broken'))
+    offBehavior()
 
     // -- OIDC 授权码通道（start 302 → PKCE；callback 坏 state 拒绝） -----------------
     const oidcStart = await fetch(`${simOrigin}/auth/oidc/start`, { redirect: 'manual' })

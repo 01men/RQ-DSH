@@ -56,6 +56,8 @@ const PUBLIC_PATHS = new Set([
   '/api/connect/enroll',
   // 平台授权直达：一次性短时票据回平台换取身份（票据本身即临时凭证）
   '/api/authn/entry-tickets/redeem',
+  // 票据免登控制台：redeem 通过后直接建立控制台会话（门户/钉钉「打开即工作台」，零二次登录）
+  '/api/auth/entry-ticket-session',
 ])
 
 /** 动态路径的公开前缀（OIDC 授权页查询：仅回显客户端名/scope，不泄露 redirect_uri）。 */
@@ -2699,6 +2701,42 @@ export function apply(ctx: Context) {
         resourceName: result.refId, result: 'ok', detail: '平台授权直达票据兑换（身份已交付目标交互界面）',
       })
       exchange.ok(result)
+    } catch (error) {
+      exchange.fail(400, 'ENTRY_TICKET_INVALID', error instanceof Error ? error.message : String(error))
+    }
+  })
+
+  /**
+   * 票据免登控制台（公开端点，与 redeem 同安全语义）：一次性票据兑换 → 直接建立控制台会话，
+   * 门户/钉钉「打开即工作台」零二次登录。票据只进请求体与内存，不进常驻 URL、不进服务端日志；
+   * 签发侧授权语义已在领票端点定格（agent：owner/绑定用户/管理员；app：登录用户），此处仅消费。
+   */
+  http.register('POST', '/api/auth/entry-ticket-session', (exchange) => {
+    const input = body<{ ticket?: string }>(exchange)
+    const clientIp = String(exchange.raw.socket?.remoteAddress ?? 'unknown')
+    try {
+      const redeemed = ctx.entryTickets.redeem(String(input.ticket ?? ''), clientIp)
+      const user = ctx.iam.users().get(redeemed.identity.sub)
+      if (!user || user.status !== 'active') throw new Error('签发用户状态异常（冻结/离职联动失效）')
+      const principal = ctx.authn.ensureHumanPrincipal(user.id, user.displayName)
+      const session = ctx.authn.issueSessionPair(principal.id, { issuedBy: `entry-ticket:${redeemed.refType}:${redeemed.refId}` })
+      ctx.iam.markLogin(user.id)
+      ctx.audit.record({
+        type: 'auth', actorType: 'human', actorId: user.id, actorName: user.displayName,
+        action: `${redeemed.refType}.entry.ticket.session`, resourceType: redeemed.refType, resourceId: redeemed.refId,
+        resourceName: redeemed.refId, result: 'ok', detail: '入场票据兑换控制台会话（免登直达工作台）',
+      })
+      exchange.ok({
+        token: session.token,
+        refreshToken: session.refreshToken,
+        expiresAt: session.access.expiresAt,
+        user: {
+          id: user.id, username: user.username, displayName: user.displayName,
+          orgId: user.orgId, roleIds: user.roleIds,
+          roles: user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.name).filter(Boolean),
+          permissions: ctx.iam.userPermissions(user.id),
+        },
+      })
     } catch (error) {
       exchange.fail(400, 'ENTRY_TICKET_INVALID', error instanceof Error ? error.message : String(error))
     }

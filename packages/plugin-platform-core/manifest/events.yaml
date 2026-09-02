@@ -4,3 +4,6 @@ events:
   - name: tools/change
     mode: emit
     description: 工具注册变更（lite 运行时）
+  - name: behavior.recorded
+    mode: emit
+    description: 前端行为埋点事件（卡片曝光/点击/漏斗步骤；独立于 usage 计量管道，WP-03/D3）
