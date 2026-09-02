@@ -2269,7 +2269,8 @@ try {
   check('public 客户端免 secret 换牌成功且不签发 refresh', pubTokens.access_token?.split('.').length === 3 && pubTokens.refresh_token === undefined)
 
   // 授权事件审计留痕
-  const oidcAudit = await api('GET', '/api/audit/logs?limit=200', { token: admin })
+  // 合并后自测事件总量增大：窗口放宽到 500 并按 auth 类型过滤（断言语义不变：OIDC 授权双留痕）
+  const oidcAudit = await api('GET', '/api/audit/logs?type=auth&limit=500', { token: admin })
   check('授权事件审计留痕（granted / denied）', oidcAudit.ok && oidcAudit.data.items.some((log) => log.action === 'oidc.authorize.granted') && oidcAudit.data.items.some((log) => log.action === 'oidc.authorize.denied'))
 
   // ================================================================ 审计
