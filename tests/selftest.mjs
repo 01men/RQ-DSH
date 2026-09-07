@@ -3951,6 +3951,8 @@ try {
   const panelApp = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'app.js'), 'utf8')
   check('面板侧切换接线（管理控制台 data-landing 偏好 + 401 引导带 ?next= 回面板）',
     panelApp.includes('data-landing') && panelApp.includes('next='))
+  check('面板模型面接线（composer 模型切换 #chatModel + 模型配置界面 showModels + 回包模型徽标）',
+    panelApp.includes('#chatModel') && panelApp.includes('showModels') && panelApp.includes("role model"))
 
   // ================================================================ 宿主服务连接切换（docs/frontend-host-switching.md）
   section('宿主服务连接切换（前端多宿主 + 数据面跨域放行）')
@@ -4167,6 +4169,38 @@ try {
       check('面板：协作计量落账（D1 键格式 panel:mfg.qb01，价格簿零费率放行）',
         recentUsage.ok && recentUsage.data.items.some((item) => item.resource === 'panel:mfg.qb01'),
         JSON.stringify(recentUsage.data?.items?.map((item) => item.resource)))
+
+      // -- 面板模型目录面（与 dsh 服务共用 modelgw 唯一事实源）+ 对话框模型切换 -----------
+      const panelModelsList = await api('GET', '/api/panel/models', { token: panelAdmin })
+      check('面板：模型目录读取（GET /api/panel/models，直填 apiKey 脱敏不回显）',
+        panelModelsList.ok && panelModelsList.data.models.some((item) => item.slug === 'deepseek-chat')
+        && !JSON.stringify(panelModelsList.data).includes('stub-key'),
+        JSON.stringify(panelModelsList.error ?? panelModelsList.data?.models?.map((item) => item.slug)))
+      const panelModelUpsert = await api('POST', '/api/panel/models', { token: panelAdmin, body: { slug: 'qwen-plus', displayName: 'Qwen Plus（面板登记）', provider: 'aliyun', endpoint: `http://127.0.0.1:${panelModelStub.address().port}/v1`, apiKey: 'panel-stub-key', listCentsPerKTokens: 2, costCentsPerKTokens: 1 } })
+      check('面板：模型登记 upsert（POST /api/panel/models，panel.config.write；回显脱敏）',
+        panelModelUpsert.ok && panelModelUpsert.data.slug === 'qwen-plus' && panelModelUpsert.data.apiKey === '***',
+        JSON.stringify(panelModelUpsert.error ?? panelModelUpsert.data?.apiKey))
+      const panelModelKeepKey = await api('POST', '/api/panel/models', { token: panelAdmin, body: { slug: 'qwen-plus', displayName: 'Qwen Plus（面板登记·改）', endpoint: `http://127.0.0.1:${panelModelStub.address().port}/v1`, listCentsPerKTokens: 2 } })
+      check('面板：编辑模型留空 apiKey 保持既有密钥（不被默认 env 引用覆盖）',
+        panelModelKeepKey.ok && panelModelKeepKey.data.displayName === 'Qwen Plus（面板登记·改）', JSON.stringify(panelModelKeepKey.error))
+      const panelModelTest = await api('POST', '/api/panel/models/qwen-plus/test', { token: panelAdmin })
+      check('面板：模型连通性测试（真实走 modelgw.invoke 全链，失败如实回传不造假成功）',
+        panelModelTest.ok && panelModelTest.data.ok === true && panelModelTest.data.content.length > 0,
+        JSON.stringify(panelModelTest.data ?? panelModelTest.error))
+      const switchMsg = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '@面板质检员 切换模型后再答一次：合格率波动结论？', model: 'qwen-plus', ddSync: false } })
+      check('面板：对话框指定模型发送（POST messages 带 model）', switchMsg.ok, JSON.stringify(switchMsg.error))
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      const afterSwitch = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=10`, { token: panelAdmin })
+      const switchReply = afterSwitch.data.messages.find((m) => m.agentName === '面板质检员' && m.model === 'qwen-plus')
+      check('面板：对话框模型切换生效（modelOverride 优先于资产 model，回包记录实际所用模型）', Boolean(switchReply),
+        JSON.stringify(afterSwitch.data?.messages?.filter((m) => m.agentName)?.map((m) => ({ t: String(m.text).slice(0, 30), model: m.model }))))
+      const badModelMsg = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '未登记模型应被拒', model: 'no-such-model', ddSync: false } })
+      check('面板：对话框指定未登记模型被拒（400，诚实报错）', badModelMsg.status === 400, JSON.stringify(badModelMsg.error))
+      const panelModelDel = await api('DELETE', `/api/panel/models/${panelModelUpsert.data.id}`, { token: panelAdmin })
+      check('面板：模型删除（DELETE /api/panel/models/:id，登记移除后目录不含）',
+        panelModelDel.ok && panelModelDel.data.deleted === true
+        && !(await api('GET', '/api/panel/models', { token: panelAdmin })).data.models.some((item) => item.slug === 'qwen-plus'),
+        JSON.stringify(panelModelDel.error))
     } finally {
       panelModelStub.close()
     }

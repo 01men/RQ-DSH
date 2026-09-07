@@ -13,6 +13,7 @@
  * panelAgentRuntime（MVP 单轮，review Phase 1 第 8 条）：@Agent 唤起 → 读 Agent 资产
  * （model/systemPrompt）→ modelgw.invoke 单轮 → 产出写 messages/artifacts → usage 计量
  * （panel:<dept>.<行业code>，D1 裁决键格式）→ emit panel.message.created。
+ * 模型取向：对话框显式切换（modelOverride）优先，否则跟随 Agent 资产的 model 属性；
  * 模型网关未配置时诚实降级（转人工任务），不造假 completion（对齐 modelgw 原则）。
  *
  * widget 求值 resolveWidgetSource：connector/mcp/manual/mock 四源适配，逐 widget 独立降级
@@ -113,6 +114,8 @@ export interface MessageRecord extends RecordBase {
   /** 钉钉同步态：none 未开 / pending 待桥接投递 / sent 已投递 / failed 失败 / origin 来自钉钉。 */
   ddSync: 'none' | 'pending' | 'sent' | 'failed' | 'origin'
   agentName?: string
+  /** Agent 回包实际使用的模型 slug（对话框切换或 Agent 资产解析结果）；人发消息无此字段。 */
+  model?: string
   sceneCode?: string
   /** 桥接入向去重键（sender 提供时引擎级唯一）。 */
   uniqueKey?: string
@@ -409,6 +412,8 @@ export class PanelService extends Service {
     card?: MessageRecord['card']
     sceneCode?: string
     uniqueKey?: string
+    /** 对话框模型切换：本次会话指定模型（缺省跟随各 Agent 资产的 model 属性）。 */
+    modelOverride?: string
   }): Promise<MessageRecord> {
     const channel = this.channels().get(input.channelId)
     if (!channel || channel.dept !== input.dept) throw new Error(`频道不存在或不属于该部门：${input.channelId}`)
@@ -433,32 +438,34 @@ export class PanelService extends Service {
       senderName: input.senderName, text: input.text, ddSync: record.ddSync,
       card: record.card, title: record.card?.title ?? '',
     })
-    if (input.senderType === 'human') void this.dispatchAgentMentions(record)
+    if (input.senderType === 'human') void this.dispatchAgentMentions(record, input.modelOverride)
     return record
   }
 
   /**
    * panelAgentRuntime MVP（单轮）：@Agent 唤起 → Agent 资产 → modelgw 单轮 → 回包落库。
-   * 未绑定资产/模型未配置 → 诚实降级消息 + 转人工待办，不造假回复。
+   * 模型取向：对话框显式指定的 modelOverride 优先，否则跟随 Agent 资产的 model 属性。
+   * 未绑定资产/无模型可用 → 诚实降级消息 + 转人工待办，不造假回复。
    */
-  async dispatchAgentMentions(message: MessageRecord): Promise<void> {
+  async dispatchAgentMentions(message: MessageRecord, modelOverride?: string): Promise<void> {
     const dept = this.dept(message.dept)
     for (const agentCard of dept.agents) {
       // 按名册全名匹配（Agent 名常含空格，如「质量分析 Agent」），通用 regex 兜不了
       if (!message.text.includes(`@${agentCard.name}`)) continue
-      await this.invokeAgent(dept, agentCard, message)
+      await this.invokeAgent(dept, agentCard, message, modelOverride)
     }
   }
 
-  async invokeAgent(dept: DeptConfigRecord, agentCard: DeptAgent, trigger: MessageRecord): Promise<void> {
+  async invokeAgent(dept: DeptConfigRecord, agentCard: DeptAgent, trigger: MessageRecord, modelOverride?: string): Promise<void> {
     const channel = this.channels().get(trigger.channelId)
     const orgId = this.callerOrgId(trigger.senderId)
-    const reply = async (text: string, card?: MessageRecord['card']) => {
+    const reply = async (text: string, card?: MessageRecord['card'], usedModel?: string) => {
       const record = this.messages().insert({
         id: newId('pmsg'), channelId: trigger.channelId, dept: dept.id,
         senderType: 'agent', senderName: agentCard.name, senderIcon: agentCard.icon,
         text, mentions: [], ...(card ? { card: { ...card, done: [] } } : {}),
-        ddSync: 'none', agentName: agentCard.name, ...(trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}),
+        ddSync: 'none', agentName: agentCard.name, ...(usedModel ? { model: usedModel } : {}),
+        ...(trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}),
       })
       this.ctx.platformBus.emit(PlatformEvents.PanelMessageCreated, {
         messageId: record.id, dept: dept.id, channelId: trigger.channelId,
@@ -478,8 +485,9 @@ export class PanelService extends Service {
     const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
     const asset = ref ? this.ctx.resourceCore.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
     if (!asset) return void fallbackToHuman('未绑定 Agent 资产（请在控制台「Agent 本体」登记并在此配置 agentRef）')
-    const model = String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
-    if (!model) return void fallbackToHuman('Agent 资产未配置模型（model 属性为空）')
+    // 模型取向：对话框显式切换的模型优先，未指定则跟随 Agent 资产的 model 属性
+    const model = modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
+    if (!model) return void fallbackToHuman('Agent 资产未配置模型（model 属性为空），且本次会话未指定模型')
     // 组装频道上下文（最近 8 条）+ 部门场景图谱摘要，单轮调用
     const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8)
     const contextText = recent.map((m) => `${m.senderName}: ${m.text}`).join('\n')
@@ -497,7 +505,7 @@ export class PanelService extends Service {
           { role: 'user', content: trigger.text },
         ],
       })
-      await reply(result.content)
+      await reply(result.content, undefined, result.model)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await fallbackToHuman(`模型网关调用失败（${message}）。`)

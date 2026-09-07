@@ -4,7 +4,8 @@ base: /api
 endpoints:
   - GET /api/panel/depts · GET /api/panel/:dept/overview · GET /api/panel/:dept/board（panel.read）
   - GET/PUT /api/panel/:dept/widgets · GET/PUT /api/panel/:dept/kpis（读 panel.read / 写 panel.config.write）
-  - GET/POST /api/panel/:dept/channels · GET/POST /api/panel/:dept/messages · POST /api/panel/messages/:id/card-action
+  - GET /api/panel/models（panel.read）· POST /api/panel/models · DELETE /api/panel/models/:id · POST /api/panel/models/:slug/test（panel.config.write；与 dsh 服务共用 modelgw 模型目录）
+  - GET/POST /api/panel/:dept/channels · GET/POST /api/panel/:dept/messages（POST 支持 model 参数=对话框切换已登记模型）· POST /api/panel/messages/:id/card-action
   - GET/POST /api/panel/:dept/tasks · POST /api/panel/tasks/:id/transition（panel.task.write）
   - GET /api/panel/:dept/artifacts · GET /api/panel/:dept/poll（降级轮询）
   - GET /api/panel/stream?dept=&token=（SSE；EventSource 无法带 Bearer，端点内部自校验 fail-closed）

@@ -8,6 +8,8 @@
  *   - SSE /api/panel/stream（EventSource 无法带 Bearer → 端点公开 + 内部 ?token= 自校验 fail-closed；
  *     降级轮询 GET /api/panel/:dept/poll——钉钉 webview 30s 轮询兜底铁律）
  *   - 行业激活审批执行器（audit approvals：申请→审批→置 active+grantCapabilities；license 签发链路 Phase 4）
+ *   - 模型目录面（GET/POST/DELETE /api/panel/models + :slug/test 连通性测试）：与 dsh 服务共用
+ *     modelgw 唯一事实源；协作会话对话框经 messages 的 model 参数切换模型（panelAgentRuntime 优先取用）
  *   - panel_* 工具族（注册共享 tools 键，dsh 下即原生 ToolRuntime 可被模型调用）
  *   - 种子：基线=五部门骨架配置+内置行业激活；DEMO_SEED=1 追加演示会话/任务/知识/看板
  */
@@ -220,6 +222,72 @@ export function apply(ctx: Context) {
     return { agents }
   })
 
+  // -- 模型目录（与 dsh 服务共用 modelgw 唯一事实源；对话框切换与 Agent 调用同源） ------
+
+  /** 目录读取（面板视角）：apiKey 脱敏回显（env: 引用原样展示，直填密钥打码），与 console 同口径。 */
+  const maskedModel = (model: { apiKey: string } & Record<string, unknown>) => ({
+    ...model,
+    apiKey: model.apiKey.startsWith('env:') ? model.apiKey : '***',
+  })
+
+  guarded('GET', '/api/panel/models', 'panel.read', () => ({
+    models: ctx.modelGateway.models().all().map(maskedModel),
+  }))
+
+  guarded('POST', '/api/panel/models', 'panel.config.write', (exchange) => {
+    const input = body<{ slug?: string; displayName?: string; provider?: string; endpoint?: string; apiKey?: string; listCentsPerKTokens?: number; costCentsPerKTokens?: number; status?: string }>(exchange)
+    const slug = input.slug?.trim() ?? ''
+    if (!slug) throw new Error('模型 slug 必填（如 deepseek-chat）')
+    if (!/^[A-Za-z0-9._-]{2,64}$/.test(slug)) throw new Error(`slug 仅允许字母/数字/._-（2-64 位）：${slug}`)
+    if (!input.endpoint?.trim()) throw new Error('endpoint 必填（OpenAI 兼容基址；未配置不可调用，绝不造假回复）')
+    if (!Number.isFinite(input.listCentsPerKTokens) || (input.listCentsPerKTokens ?? -1) < 0) throw new Error('listCentsPerKTokens 必须是非负数（挂牌价，分/千 tokens）')
+    const status = input.status === 'offline' ? 'offline' as const : 'online' as const
+    // 编辑时密钥留空 = 保持既有密钥（表单不回填密钥的约定），不得覆盖为默认引用
+    const existing = ctx.modelGateway.models().findOne((item) => item.slug === slug)
+    const model = ctx.modelGateway.upsertModel({
+      slug,
+      displayName: input.displayName?.trim() || slug,
+      provider: input.provider?.trim() || 'external',
+      endpoint: input.endpoint.trim(),
+      apiKey: input.apiKey?.trim() || existing?.apiKey || 'env:MODEL_API_KEY',
+      listCentsPerKTokens: input.listCentsPerKTokens!,
+      costCentsPerKTokens: input.costCentsPerKTokens ?? Math.floor(input.listCentsPerKTokens! / 2),
+      status,
+    })
+    changeLog(exchange, 'panel.model.upsert', 'model', model.id, model.slug, status === 'online' ? '上线' : '下线')
+    return maskedModel(model)
+  })
+
+  /** 删除登记：从模型目录移除；计量与审计数据保留。 */
+  guarded('DELETE', '/api/panel/models/:id', 'panel.config.write', (exchange) => {
+    const id = exchange.params['id']!
+    const model = ctx.modelGateway.models().get(id)
+    if (!model) throw new Error(`模型不存在：${id}`)
+    ctx.modelGateway.models().remove(id)
+    changeLog(exchange, 'panel.model.delete', 'model', id, model.slug)
+    return { deleted: true }
+  })
+
+  /** 连通性测试：真实走 modelgw.invoke 全链（预检/转发/计量），失败如实回传，不造假成功。 */
+  guarded('POST', '/api/panel/models/:slug/test', 'panel.config.write', async (exchange) => {
+    const slug = String(exchange.params.slug ?? '')
+    const info = caller(exchange)
+    const orgId = orgIdOf(exchange)
+    if (!orgId) throw new Error('无法确定计费组织（orgId），无法执行真实调用测试')
+    try {
+      const result = await ctx.modelGateway.invoke({
+        model: slug,
+        messages: [{ role: 'user', content: '模型连通性测试，请直接回复：OK' }],
+        orgId,
+        subject: info.userId ? `user:${info.userId}` : `panel:${info.principalId}`,
+        maxTokens: 16,
+      })
+      return { ok: true, model: result.model, content: result.content.slice(0, 80), outputTokens: result.outputTokens }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
   // -- 频道与消息 ---------------------------------------------------------------
 
   guarded('GET', '/api/panel/:dept/channels', 'panel.read', (exchange) => {
@@ -258,15 +326,21 @@ export function apply(ctx: Context) {
 
   guarded('POST', '/api/panel/:dept/messages', 'panel.write', async (exchange) => {
     const dept = deptOf(exchange)
-    const input = body<{ channelId?: string; text?: string; ddSync?: boolean; uniqueKey?: string }>(exchange)
+    const input = body<{ channelId?: string; text?: string; ddSync?: boolean; uniqueKey?: string; model?: string }>(exchange)
     if (!input.text?.trim()) throw new Error('消息内容必填')
     const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id
     if (!channelId) throw new Error('部门暂无频道，请先创建')
+    // 对话框模型切换：显式指定 model 时必须是模型目录已登记的 slug（未指定则跟随 Agent 资产配置）
+    const requestedModel = input.model?.trim() ?? ''
+    if (requestedModel && !ctx.modelGateway.models().findOne((item) => item.slug === requestedModel)) {
+      throw new Error(`模型未在目录登记：${requestedModel}（可在「🧠 模型」中登记）`)
+    }
     const info = caller(exchange)
     const message = await panel.sendMessage({
       dept: dept.id, channelId, senderType: 'human', senderId: info.userId,
       senderName: info.name, text: input.text.trim(), ddSync: input.ddSync === true,
       ...(input.uniqueKey ? { uniqueKey: input.uniqueKey } : {}),
+      ...(requestedModel ? { modelOverride: requestedModel } : {}),
     })
     return { message }
   })

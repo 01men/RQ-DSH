@@ -243,6 +243,10 @@ button { font-family:inherit; }
 .input-row { display:flex; gap:10px; }
 .input-row input { flex:1; border:1px solid var(--line); border-radius:8px; padding:10px 14px; font-size:13px; outline:none; box-shadow:var(--sh-sm); }
 .input-row input:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+.model-sel { border:1px solid var(--line); border-radius:8px; padding:0 8px; font-size:12px; color:var(--txt); background:#fff; max-width:172px; outline:none; box-shadow:var(--sh-sm); flex-shrink:0; }
+.model-sel:focus { border-color:var(--accent); }
+.model-empty { font-size:11px; color:var(--txt2); border:1px dashed var(--line); border-radius:8px; padding:9px 12px; cursor:pointer; white-space:nowrap; flex-shrink:0; }
+.model-empty:hover { border-color:var(--accent); color:var(--accent-deep); }
 .send { background:var(--accent); color:#fff; border:none; border-radius:8px; padding:0 24px; font-size:13px; font-weight:600; cursor:pointer; box-shadow:var(--sh-sm); }
 
 /* ===== 右列 widgets ===== */
@@ -293,6 +297,17 @@ button { font-family:inherit; }
 .lic-row { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid var(--line); border-radius:10px; margin-bottom:8px; font-size:12.5px; }
 .lic-row .lr-ic { font-size:16px; }
 .lic-row .lr-st { margin-left:auto; font-size:10px; padding:2px 8px; border-radius:10px; background:#fef3c7; color:#92400e; white-space:nowrap; }
+.model-ops { display:flex; gap:6px; margin-left:4px; }
+.model-ops .btn { padding:4px 10px; font-size:11px; }
+.m-meta .role.model { background:var(--bg); color:var(--txt2); border:1px solid var(--line); }
+.mono { font-family:Consolas,Menlo,monospace; font-size:10.5px; color:var(--txt2); }
+.mform { display:flex; flex-direction:column; gap:9px; margin:10px 0 14px; }
+.mform label { display:flex; flex-direction:column; gap:4px; font-size:11.5px; color:var(--txt2); }
+.mform input, .mform select { border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; color:var(--txt); outline:none; }
+.mform input:focus, .mform select:focus { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+.mform input:disabled { background:var(--bg); color:var(--txt2); }
+.mform-grid { display:flex; gap:10px; }
+.mform-grid label { flex:1; }
 .flow { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--txt2); margin:14px 0; flex-wrap:wrap; }
 .flow .fn { background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:5px 10px; }
 .flow .fa { color:#9ca3af; }

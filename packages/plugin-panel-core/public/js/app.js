@@ -59,6 +59,9 @@ const state = {
   artifacts: [],
   scenegraph: null,
   ddSync: localStorage.getItem('panel_ddsync') === '1',
+  /** 模型目录（与 dsh 服务共用 modelgw 事实源）；chatModel='' 表示跟随各 Agent 资产配置。 */
+  models: [],
+  chatModel: localStorage.getItem('panel_chat_model') ?? '',
   stream: null,
   streamDept: '',
 }
@@ -142,6 +145,7 @@ async function init() {
 
   void refreshDingtalk()
   renderShell()
+  await refreshModels()
   await switchDept(state.dept, { keepTab: true })
   connectStream()
   window.addEventListener('keydown', (event) => {
@@ -162,6 +166,15 @@ async function refreshDingtalk() {
     state.bridges = []
   }
   renderTopRight()
+}
+
+/** 模型目录（GET /api/panel/models，panel.read）：失败时置空（composer 退化为「未接入模型」提示）。 */
+async function refreshModels() {
+  try {
+    state.models = (await api.get('/api/panel/models')).models ?? []
+  } catch {
+    state.models = []
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +428,7 @@ function renderDept() {
       <div class="head-actions">
         <button class="btn only-compact toggle-left" id="btnLeftDrawer" title="名册/频道（窄窗抽屉）">👥</button>
         <button class="btn only-compact toggle-right" id="btnRightDrawer" title="部门看板（窄窗抽屉）">📊</button>
+        <button class="btn" id="btnModels" title="模型配置（与 dsh 服务共用模型目录）">🧠 模型</button>
         <button class="btn" id="btnConfig">⚙ 面板配置</button>
         <button class="btn primary" id="btnNewChannel">＋ 发起协作</button>
       </div>
@@ -425,6 +439,7 @@ function renderDept() {
       <div class="col-right" id="colRight"></div>
     </div>`
   document.getElementById('btnConfig').onclick = () => showConfig()
+  document.getElementById('btnModels').onclick = () => void showModels()
   document.getElementById('btnNewChannel').onclick = () => showNewChannel()
   const toggle = (cls) => document.body.classList.toggle(cls)
   document.getElementById('btnLeftDrawer').onclick = () => toggle('left-open')
@@ -611,7 +626,7 @@ function messageHtml(m, ddBound) {
   }
   if (m.senderType === 'agent') {
     return `<div class="msg"><div class="m-av agent">${esc(m.senderIcon ?? '🤖')}</div>
-      <div class="m-body"><div class="m-meta">${esc(m.senderName)} <span class="role">Agent</span></div>
+      <div class="m-body"><div class="m-meta">${esc(m.senderName)} <span class="role">Agent</span>${m.model ? `<span class="role model" title="本次回包使用的模型（可在输入区切换）">🧠 ${esc(m.model)}</span>` : ''}</div>
       <div class="m-txt">${md(m.text)}${card}${ddBadge}</div></div></div>`
   }
   const fromDd = m.ddSync === 'origin'
@@ -641,6 +656,14 @@ function composerHtml() {
   const dept = state.overview.dept
   const bound = Boolean(state.ddStatus?.bound)
   const members = (state.overview.members ?? []).slice(0, 6)
+  // 对话框模型切换：在线模型下拉（默认跟随 Agent 资产配置）；目录为空/全离线时给诚实提示
+  const onlineModels = state.models.filter((model) => model.status === 'online')
+  const modelSwitch = onlineModels.length > 0
+    ? `<select id="chatModel" class="model-sel" title="本次会话使用的模型（默认跟随 Agent 资产配置；目录与 dsh 服务共用）">
+        <option value="">🧠 跟随 Agent</option>
+        ${onlineModels.map((model) => `<option value="${esc(model.slug)}" ${state.chatModel === model.slug ? 'selected' : ''}>${esc(model.displayName || model.slug)}</option>`).join('')}
+      </select>`
+    : '<span class="model-empty" id="modelEmptyHint" title="模型目录暂无在线模型——点此登记接入（与 dsh 服务共用模型目录）">🧠 未接入模型</span>'
   return `
     <div class="composer">
       <div class="at-row">
@@ -652,6 +675,7 @@ function composerHtml() {
         <span class="dd-toggle" id="ddToggle"><span class="sw ${state.ddSync && bound ? 'on' : ''} ${bound ? '' : 'disabled'}" id="ddSw"></span>钉钉同步</span>
       </div>
       <div class="input-row">
+        ${modelSwitch}
         <input id="composerInput" placeholder="发消息给同事 / @Agent 下达任务${bound && state.ddSync ? ' / 本条将同步钉钉群' : ''}…（Enter 发送）">
         <button class="send" id="composerSend">发送</button>
       </div>
@@ -678,6 +702,17 @@ function wireComposer(host) {
   const send = () => void sendMessage(input)
   host.querySelector('#composerSend').onclick = send
   input.onkeydown = (event) => { if (event.key === 'Enter') send() }
+  // 模型切换：目录变化后本地记忆可能失效——以 DOM 实际选中值归一（失配时自动回到「跟随 Agent」）
+  const modelSel = host.querySelector('#chatModel')
+  if (modelSel) {
+    state.chatModel = modelSel.value
+    modelSel.onchange = () => {
+      state.chatModel = modelSel.value
+      try { localStorage.setItem('panel_chat_model', state.chatModel) } catch { /* 忽略 */ }
+    }
+  }
+  const modelHint = host.querySelector('#modelEmptyHint')
+  if (modelHint) modelHint.onclick = () => void showModels()
 }
 
 function atMention(name, inputEl) {
@@ -694,6 +729,8 @@ async function sendMessage(input) {
   try {
     const result = await api.post(`/api/panel/${state.dept}/messages`, {
       channelId: state.channelId, text, ddSync: state.ddSync && Boolean(state.ddStatus?.bound),
+      // 对话框选中的模型（'' = 跟随 Agent 资产配置，不传 model）
+      ...(state.chatModel ? { model: state.chatModel } : {}),
     })
     state.messages.push(result.message)
     renderMessages()
@@ -999,6 +1036,134 @@ async function showConfig() {
       hideModal()
       void toast('配置已保存（范围权限/阵容绑定立即生效）')
       void refreshOverview()
+    } catch (error) {
+      event.target.disabled = false
+      void toast(error.message, 'error')
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 模型配置（与 dsh 服务共用 modelgw 唯一事实源；读 panel.read / 管 panel.config.write）
+// ---------------------------------------------------------------------------
+
+async function showModels() {
+  let models
+  try {
+    models = (await api.get('/api/panel/models')).models ?? []
+  } catch (error) {
+    void toast(error.message, 'error')
+    return
+  }
+  state.models = models
+  const canEdit = session.can('panel.config.write')
+  const rows = models.map((model) => `
+    <div class="lic-row">
+      <span class="lr-ic">🧠</span>
+      <span style="flex:1;min-width:0">
+        ${esc(model.displayName || model.slug)} <span class="mono">${esc(model.slug)}</span>
+        <span style="display:block;font-size:10px;color:var(--txt2)">${esc(model.provider)} · ${esc(model.endpoint || '（未配置 endpoint，拒绝调用）')}</span>
+        <span style="display:block;font-size:10px;color:var(--txt2)">挂牌 ${esc(model.listCentsPerKTokens)} / 成本 ${esc(model.costCentsPerKTokens)} 分/千tokens · 密钥 ${esc(model.apiKey)}</span>
+      </span>
+      <span class="st ${model.status === 'online' ? 'ok' : 'lock'}" style="margin-left:0">${model.status === 'online' ? '在线' : '离线'}</span>
+      ${canEdit ? `<span class="model-ops">
+        <button class="btn" data-mtest="${esc(model.slug)}" title="真实调用一次（走计量计费全链，失败如实回传）">测试</button>
+        <button class="btn" data-medit="${esc(model.id)}">编辑</button>
+        <button class="btn" data-mdel="${esc(model.id)}" title="从目录移除登记（计量与审计数据保留）">删除</button>
+      </span>` : ''}
+    </div>`).join('')
+    || '<div class="sys-line"><span>模型目录为空：登记后即可在协作会话切换模型、供 Agent 真实调用。</span></div>'
+  showModal('🧠 模型配置（与 dsh 服务共用模型目录）', `
+    <p class="note" style="margin-top:0">模型目录（modelgw）是平台服务唯一的模型事实源：此处登记的模型 = 协作会话对话框可切换的模型 = 面板 Agent 实际调用的模型，与 dsh 本身服务保持一致。调用走真实上游（OpenAI 兼容 chat/completions），未配置 endpoint 的模型拒绝调用、绝不造假回复。</p>
+    <div style="margin:12px 0">${rows}</div>
+    ${canEdit ? `<div style="display:flex;gap:10px">
+      <button class="btn primary" id="modelAdd">＋ 登记模型</button>
+      <button class="btn" id="modelClose">关闭</button>
+    </div>` : '<p class="note">登记/修改模型需 panel.config.write 权限。</p>'}`)
+  const closeBtn = document.getElementById('modelClose')
+  if (closeBtn) closeBtn.onclick = hideModal
+  const addBtn = document.getElementById('modelAdd')
+  if (addBtn) addBtn.onclick = () => showModelForm(null)
+  document.querySelectorAll('[data-mtest]').forEach((el) => {
+    el.onclick = async () => {
+      el.disabled = true
+      try {
+        const result = await api.post(`/api/panel/models/${encodeURIComponent(el.dataset.mtest)}/test`)
+        void toast(result.ok ? `✓ ${result.model} 连通正常（输出 ${result.outputTokens} tokens）` : `✗ 连通失败：${result.error}`, result.ok ? undefined : 'error')
+      } catch (error) {
+        void toast(error.message, 'error')
+      } finally {
+        el.disabled = false
+      }
+    }
+  })
+  document.querySelectorAll('[data-medit]').forEach((el) => {
+    el.onclick = () => showModelForm(models.find((model) => model.id === el.dataset.medit) ?? null)
+  })
+  document.querySelectorAll('[data-mdel]').forEach((el) => {
+    el.onclick = async () => {
+      const model = models.find((item) => item.id === el.dataset.mdel)
+      if (!window.confirm(`确定从模型目录移除「${model?.slug ?? el.dataset.mdel}」？（绑定该模型的 Agent 将无法调用）`)) return
+      el.disabled = true
+      try {
+        await api.delete(`/api/panel/models/${el.dataset.mdel}`)
+        void toast('已移除模型登记')
+        void showModels()
+        void refreshModels().then(() => { if (state.tab === 'chat') renderMain() })
+      } catch (error) {
+        el.disabled = false
+        void toast(error.message, 'error')
+      }
+    }
+  })
+}
+
+function showModelForm(existing) {
+  showModal(existing ? `🧠 编辑模型 · ${esc(existing.slug)}` : '🧠 登记模型（OpenAI 兼容 chat/completions）', `
+    <div class="mform">
+      <label>模型 slug（唯一标识；Agent 资产 model 属性与对话框切换均使用它）*
+        <input id="mfSlug" value="${esc(existing?.slug ?? '')}" ${existing ? 'disabled title="slug 是登记主键，如需变更请新建登记"' : ''} placeholder="如 deepseek-chat"></label>
+      <label>显示名<input id="mfName" value="${esc(existing?.displayName ?? '')}" placeholder="缺省同 slug"></label>
+      <label>厂商<input id="mfProvider" value="${esc(existing?.provider ?? '')}" placeholder="如 deepseek / aliyun / openai"></label>
+      <label>Endpoint（OpenAI 兼容基址）*<input id="mfEndpoint" value="${esc(existing?.endpoint ?? '')}" placeholder="如 https://api.deepseek.com/v1"></label>
+      <label>API Key${existing ? '（留空保持不变）' : ''}<input id="mfKey" type="password" autocomplete="new-password" placeholder="${existing ? '留空保持既有密钥' : '直填或环境变量引用（如 env:DEEPSEEK_API_KEY）'}"></label>
+      <div class="mform-grid">
+        <label>挂牌价（分/千 tokens）*<input id="mfList" type="number" min="0" step="0.1" value="${existing?.listCentsPerKTokens ?? 0}"></label>
+        <label>成本价（分/千 tokens）<input id="mfCost" type="number" min="0" step="0.1" value="${existing?.costCentsPerKTokens ?? ''}" placeholder="缺省为挂牌价一半"></label>
+      </div>
+      <label>状态<select id="mfStatus">
+        <option value="online" ${existing?.status !== 'offline' ? 'selected' : ''}>在线（可调用）</option>
+        <option value="offline" ${existing?.status === 'offline' ? 'selected' : ''}>离线（停用）</option>
+      </select></label>
+    </div>
+    <div style="display:flex;gap:10px">
+      <button class="btn primary" id="mfSave">保存</button>
+      <button class="btn" id="mfCancel">返回列表</button>
+    </div>
+    <p class="note">密钥支持 env: 变量名引用（调用时读取进程环境变量），回显一律脱敏；保存即生效并全程审计。保存后可用列表中「测试」真实调用一次验证连通（按量计费）。</p>`)
+  document.getElementById('mfCancel').onclick = () => void showModels()
+  document.getElementById('mfSave').onclick = async (event) => {
+    const payload = {
+      slug: document.getElementById('mfSlug').value.trim(),
+      displayName: document.getElementById('mfName').value.trim(),
+      provider: document.getElementById('mfProvider').value.trim(),
+      endpoint: document.getElementById('mfEndpoint').value.trim(),
+      listCentsPerKTokens: Number(document.getElementById('mfList').value) || 0,
+      status: document.getElementById('mfStatus').value,
+    }
+    const cost = document.getElementById('mfCost').value
+    if (cost !== '') payload.costCentsPerKTokens = Number(cost)
+    const key = document.getElementById('mfKey').value.trim()
+    if (key) payload.apiKey = key
+    if (!payload.slug) { void toast('模型 slug 必填', 'error'); return }
+    if (!payload.endpoint) { void toast('Endpoint 必填（未配置不可调用）', 'error'); return }
+    event.target.disabled = true
+    try {
+      await api.post('/api/panel/models', payload)
+      void toast(`模型 ${payload.slug} 已保存`)
+      await refreshModels()
+      if (state.tab === 'chat') renderMain()
+      void showModels()
     } catch (error) {
       event.target.disabled = false
       void toast(error.message, 'error')
