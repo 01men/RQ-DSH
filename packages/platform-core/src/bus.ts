@@ -76,6 +76,14 @@ export const PlatformEvents = {
   UpdateApplied: 'platform.update.applied',
   // 前端行为埋点（WP-03/D3）：独立于 usage 计量管道，audit/看板订阅
   BehaviorRecorded: 'behavior.recorded',
+  // 部门面板（plugin-panel-core）：消息/任务/行业激活 + 场景图谱热刷新（review-dsh-agent-panel-v2）
+  PanelMessageCreated: 'panel.message.created',
+  PanelCardAction: 'panel.card.action',
+  PanelTaskUpdated: 'panel.task.updated',
+  PanelIndustryActivated: 'panel.industry.activated',
+  ScenegraphUpdated: 'scenegraph.updated',
+  // 钉钉桥接（plugin-dingtalk-bridge）：出向投递回执（面板据此更新 ddSync 状态）
+  DingtalkDelivered: 'dingtalk-bridge.delivered',
 } as const
 
 /** 平台保留命名空间：第三方插件（source=plugin:*）禁止发射。 */
@@ -83,6 +91,8 @@ const PLATFORM_RESERVED_PREFIXES = [
   'iam.', 'authn.', 'oidc.', 'mcp.', 'nas.', 'audit.', 'skill.', 'agent.', 'app.',
   'usage.', 'billing.', 'model.', 'market.', 'developer.', 'wallet.',
   'platform.', 'approval.', 'connector.', 'console.', 'connect.', 'behavior.',
+  // 部门面板 / 场景图谱 / 钉钉桥接（review-dsh-agent-panel-v2 Phase 0）
+  'panel.', 'scenegraph.', 'dingtalk-bridge.',
 ]
 
 export class PlatformBusService extends Service {

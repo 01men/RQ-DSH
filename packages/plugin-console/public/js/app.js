@@ -42,6 +42,8 @@ const NAV = [
   { section: '总览', items: [
     { path: '#/dashboard', label: '工作台', icon: 'dashboard', perm: 'console.login' },
     { path: '#/board', label: '战略看板', icon: 'trending', perm: 'console.login' },
+    // 部门面板（review-dsh-agent-panel-v2）：独立零构建 SPA，经 ext 外链进入（/panel，挂载形态 /rq/panel/）
+    { ext: () => `${BASE}/panel/`, label: '部门面板', icon: 'users', perm: 'console.login' },
   ] },
   { section: 'AI 资源', items: [
     { path: '#/register', label: '资产登记', icon: 'zap', perm: 'console.login' },
@@ -158,9 +160,13 @@ function renderShell(page, params, builder) {
     if (!visible.length) continue
     const sec = h(`<div class="nav-section"><div class="nav-section-title">${esc(section.section)}</div></div>`)
     for (const item of visible) {
-      const active = currentHash().split('?')[0] === item.path
+      const active = item.path && currentHash().split('?')[0] === item.path
       const el = h(`<div class="nav-item ${active ? 'active' : ''}">${icon(item.icon)}<span>${esc(item.label)}</span><span class="nav-badge hidden"></span></div>`)
-      el.onclick = () => { location.hash = item.path }
+      el.onclick = () => {
+        // ext 外链项（部门面板独立 SPA）：整页跳转，不进 hash 路由
+        if (item.ext) { location.assign(item.ext()); return }
+        location.hash = item.path
+      }
       item._badgeEl = el.querySelector('.nav-badge')
       sec.appendChild(el)
     }

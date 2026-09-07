@@ -1,0 +1,12 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-dingtalk-bridge
+base: /api
+endpoints:
+  - GET /api/dingtalk/status（连接器形态/个人绑定/DWS/入向能力声明）
+  - GET /api/dingtalk/bridges?dept= · POST/DELETE /api/dingtalk/channels/:id/bridge（dingtalk.message.send）
+  - POST /api/dingtalk/approvals/:id/push（审批卡片推送钉钉）· POST /api/dingtalk/bridge/callback（回决写回，staffId↔identityLinks 反查 fail-closed）
+
+services:
+  - key: dingtalkBridge
+    access: ctx.dingtalkBridge
+    description: 群桥绑定 + 出向消息投递（凭证单一来源=iam 连接器）+ 回执 + 审批/告警推送

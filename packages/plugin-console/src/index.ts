@@ -59,6 +59,9 @@ export const PUBLIC_PATHS = new Set([  '/api/auth/login',
   '/api/authn/entry-tickets/redeem',
   // 票据免登控制台：redeem 通过后直接建立控制台会话（门户/钉钉「打开即工作台」，零二次登录）
   '/api/auth/entry-ticket-session',
+  // 部门面板 SSE（review-dsh-agent-panel-v2 F13）：EventSource 无法携带 Bearer 头，
+  // 端点公开但内部强制 ?token= 自校验（authn.verify，失败 fail-closed 401），降级轮询端点仍走 guarded
+  '/api/panel/stream',
 ])
 
 /** 动态路径的公开前缀（OIDC 授权页查询：仅回显客户端名/scope，不泄露 redirect_uri）。 */
@@ -197,6 +200,8 @@ export function apply(ctx: Context) {
   const routeMatrix: Array<{ method: string; path: string; permission: string }> = []
   const guarded = (method: string, path: string, permission: string, handler: (exchange: HttpExchange) => unknown | Promise<unknown>): void => {
     routeMatrix.push({ method, path, permission })
+    // 插件自注册路由（如 plugin-panel-core）经 httpServer.routeMatrix 共享登记处汇入同一矩阵
+    http.routeMatrix.push({ method, path, permission })
     http.register(method, path, async (exchange) => {
       if (!requirePermission(exchange, permission)) return
       try {
@@ -3563,17 +3568,22 @@ export function apply(ctx: Context) {
     return { platform, label: packs[0]?.label ?? '', roles, cards, totalPacks: packs.length, availablePlatforms: available, droppedDeadRefs }
   })
 
-  /** 路由×权限矩阵（WP-04/A1）：RBAC 端点覆盖的服务端事实源，selftest 据此驱动 100% 越权断言。 */
-  guarded('GET', '/api/platform/route-matrix', 'audit.read', () => ({
-    guarded: routeMatrix,
-    public: [...PUBLIC_PATHS],
-    note: 'guarded=权限点保护端点；public=鉴权中间件白名单（免鉴权，变动须经评审）',
-  }))
+  /** 路由×权限矩阵（WP-04/A1）：RBAC 端点覆盖的服务端事实源，selftest 据此驱动 100% 越权断言。
+   *  返回 = console 自身 guarded 矩阵 + 插件自注册路由（httpServer.routeMatrix 共享登记处，去重）。 */
+  guarded('GET', '/api/platform/route-matrix', 'audit.read', () => {
+    const seen = new Set(routeMatrix.map((route) => `${route.method} ${route.path}`))
+    const external = http.routeMatrix.filter((route) => !seen.has(`${route.method} ${route.path}`))
+    return {
+      guarded: [...routeMatrix, ...external],
+      public: [...PUBLIC_PATHS],
+      note: 'guarded=权限点保护端点（含插件自注册）；public=鉴权中间件白名单（免鉴权，变动须经评审）',
+    }
+  })
 
   guarded('GET', '/api/platform/info', 'console.login', () => {
     const versionInfo = platformVersionInfo()
     const plugins = [
-      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'nas', 'skillhub', 'agent', 'app', 'connect', 'update', 'console',
+      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'nas', 'skillhub', 'agent', 'app', 'connect', 'update', 'console', 'panel-core', 'dingtalk-bridge',
     ]
     return {
       name: '榕器|企业AI资源管理平台',

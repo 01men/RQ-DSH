@@ -11,6 +11,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseYaml } from '../packages/platform-core/src/yaml.ts'
 import { validateCardpack } from '../packages/platform-core/src/cardpacks.ts'
+import { validateScenegraph } from '../packages/platform-core/src/scenegraph.ts'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const packagesDir = join(root, 'packages')
@@ -75,5 +76,33 @@ for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
   }
 }
 
-console.log(`\n清单校验：${total - failed}/${total} 通过；卡片包：${packTotal - packFailed}/${packTotal} 通过`)
-process.exit(failed + packFailed > 0 ? 1 : 0)
+// -- 行业场景图谱（review-dsh-agent-panel-v2 Phase 2）：packages/*/scenegraphs/*.json 逐个过 validateScenegraph
+// 与运行时装载（scenegraph.ts）同一套规则，故意配错即红
+let sgTotal = 0
+let sgFailed = 0
+for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
+  if (!pkg.isDirectory()) continue
+  const sgDir = join(packagesDir, pkg.name, 'scenegraphs')
+  let files = []
+  try {
+    files = (await readdir(sgDir)).filter((file) => file.endsWith('.json'))
+  } catch {
+    continue
+  }
+  for (const name of files) {
+    sgTotal++
+    const file = join(sgDir, name)
+    try {
+      const parsed = JSON.parse(await readFile(file, 'utf8'))
+      const errors = validateScenegraph(parsed, name)
+      if (errors.length > 0) throw new Error(errors.join('；'))
+      console.log(`  ✔ ${pkg.name}/scenegraphs/${name}`)
+    } catch (error) {
+      sgFailed++
+      console.error(`  ✘ ${pkg.name}/scenegraphs/${name}：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+console.log(`\n清单校验：${total - failed}/${total} 通过；卡片包：${packTotal - packFailed}/${packTotal} 通过；场景图谱：${sgTotal - sgFailed}/${sgTotal} 通过`)
+process.exit(failed + packFailed + sgFailed > 0 ? 1 : 0)

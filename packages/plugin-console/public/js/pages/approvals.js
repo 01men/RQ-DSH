@@ -187,11 +187,15 @@ function kindLabel(kind) {
     'agent.online': 'Agent 上线', 'agent.offline': 'Agent 下线',
     'app.online': '应用发布', 'app.offline': '应用下架',
     'mcp.offline': 'MCP 下线',
+    'industry.activation': '行业授权激活',
+    'panel.card-action': '面板卡片动作',
   }[kind] ?? kind
 }
 function kindIcon(kind) {
   if (kind.startsWith('agent')) return 'bot'
   if (kind.startsWith('app')) return 'app'
   if (kind.startsWith('mcp')) return 'plug'
+  if (kind === 'industry.activation') return 'layers'
+  if (kind.startsWith('panel.')) return 'zap'
   return 'checkSquare'
 }

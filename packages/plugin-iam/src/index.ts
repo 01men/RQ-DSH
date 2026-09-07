@@ -261,6 +261,14 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'connect.manage', label: '管理平台接入（接入码/远程客户端）', group: '平台接入' },
   { point: 'platform.update.read', label: '查看/触发平台更新检查', group: '平台维护' },
   { point: 'platform.update.apply', label: '执行平台升级（git pull + npm install）', group: '平台维护' },
+  // 部门面板（review-dsh-agent-panel-v2 Phase 0：D3 裁决——无 dingtalk.* 事件权限点、总线订阅不需权限点）
+  { point: 'panel.read', label: '查看部门面板（会话/看板/知识/图谱）', group: '部门面板' },
+  { point: 'panel.write', label: '面板协作（发消息/建频道/卡片动作/激活申请）', group: '部门面板' },
+  { point: 'panel.task.write', label: '面板任务流转（创建/泳道迁移）', group: '部门面板' },
+  { point: 'panel.config.write', label: '面板配置（widget/KPI 布局/图谱重载）', group: '部门面板' },
+  { point: 'scenegraph.read', label: '查看行业场景图谱', group: '部门面板' },
+  { point: 'scenegraph.activate', label: '管理行业授权激活（审批执行）', group: '部门面板' },
+  { point: 'dingtalk.message.send', label: '钉钉桥接消息投递（群桥绑定/推送/回决回调）', group: '部门面板' },
 ]
 
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [
@@ -268,7 +276,7 @@ export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedA
   { code: 'org_admin', name: '组织管理员', builtin: true, description: '管理本组织账号与用户组', permissions: ['console.login', 'iam.*', 'approval.read'] },
   { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS/连接器资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'connector.*', 'approval.read'] },
   { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'agent.write', 'app.read', 'app.write', 'nas.read', 'connector.catalog.read', 'connector.connection.read', 'connector.invoke'] },
-  { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read'] },
+  { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read', 'panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read'] },
   { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'authn.oidc.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'nas.read', 'audit.read', 'approval.read', 'connector.runs.read', 'connector.connection.read'] },
 ]
 
@@ -280,9 +288,13 @@ export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedA
 export const BUILTIN_ROLE_MIGRATION: Record<string, string[]> = {
   resource_admin: ['connector.gateway.write', 'connector.catalog.read', 'connector.connection.read', 'connector.connection.write', 'connector.invoke', 'connector.permgroup.write', 'connector.runs.read'],
   // developer 补 agent.write：与 app.write 对称——开发者应能注册/提报更新 Agent（2026-08 修复"总是报没有 agent.write 权限"）
-  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke', 'agent.write'],
+  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke', 'agent.write', 'panel.read', 'scenegraph.read'],
   // auditor 补 nas.authz.read：审计员可查看 NAS 数据权限规则与判定留痕（dev-plan-nas-authz §2.3）
-  auditor: ['connector.runs.read', 'connector.connection.read', 'nas.authz.read'],
+  auditor: ['connector.runs.read', 'connector.connection.read', 'nas.authz.read', 'panel.read', 'scenegraph.read'],
+  // 部门面板（review-dsh-agent-panel-v2 Phase 0）：业务成员=member 直用面板；org_admin 增配置与行业激活；
+  // 存量库经迁移补点，新装库直接来自 BuiltinRoles 定义（两处必须同步）
+  member: ['panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read'],
+  org_admin: ['panel.read', 'panel.write', 'panel.task.write', 'panel.config.write', 'scenegraph.read', 'scenegraph.activate'],
 }
 
 /** 兼容别名：迁移通道创建时的历史命名（仅 connector 批次）。 */

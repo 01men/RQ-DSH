@@ -68,6 +68,12 @@
     # 控制台 REST 网关 + SPA（Bearer 鉴权/工具桥/MCP 端点/静态托管）
     - id: ops-console
       name: '<PROJECT_ROOT>/packages/plugin-console/src/index.ts'
+    # 部门 Agent 工作台面板（/panel 静态 + /api/panel/* REST）：REST 鉴权依赖 console 中间件，须在其后装配
+    - id: ops-panel-core
+      name: '<PROJECT_ROOT>/packages/plugin-panel-core/src/index.ts'
+    # 钉钉桥接（群桥/出向投递/审批推送/告警通道）：订阅 panel.message.created / audit.alert.fired
+    - id: ops-dingtalk-bridge
+      name: '<PROJECT_ROOT>/packages/plugin-dingtalk-bridge/src/index.ts'
     # 单进程单入口：把榕器数据面挂进 dsh webServer（/rq 前缀），必须在 console 之后装配
     - id: ops-dsh-bridge
       name: '<PROJECT_ROOT>/packages/plugin-dsh-bridge/src/index.ts'

@@ -1,0 +1,9 @@
+# 权限点声明（注册进统一 RBAC，控制台/CLI/工具共用）
+plugin: dsh-plugin-panel-core
+points:
+  - panel.read
+  - panel.write
+  - panel.task.write
+  - panel.config.write
+  - scenegraph.read
+  - scenegraph.activate

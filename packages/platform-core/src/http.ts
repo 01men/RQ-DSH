@@ -76,6 +76,12 @@ export class HttpServerService extends Service {
   readonly host: string
   /** 对外挂载前缀：'' 或形如 '/rq'（无尾斜杠）。见 HttpServerConfig.externalBase。 */
   readonly externalBase: string
+  /**
+   * 路由×权限矩阵（跨插件共享登记处）。console 的 guarded() 是第一登记方；
+   * 插件自注册 REST（如 plugin-panel-core）也必须把 {method, path, permission} 推入此处，
+   * 否则逃出 selftest「RBAC 端点矩阵 100% 越权断言网」（review-dsh-agent-panel-v2 Phase 0）。
+   */
+  readonly routeMatrix: Array<{ method: string; path: string; permission: string }> = []
 
   constructor(ctx: Context, config: HttpServerConfig = {}) {
     super(ctx, 'httpServer')

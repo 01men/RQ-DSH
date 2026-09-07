@@ -428,6 +428,9 @@ export class UsageService extends Service {
       { pattern: 'kb:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09' },
       // WP-07（feedback 回传）：宿主数字员工作为可观测资源——零费率起步，运营可调价
       { pattern: 'agent:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09' },
+      // 部门面板（review-dsh-agent-panel-v2 D1 裁决）：计量键格式 panel:<dept>.<行业code>（如 panel:mfg.qb01），
+      // 双冒号/@ 形态过不了 record() 的 resource 硬校验；零费率起步，运营按行业包调价
+      { pattern: 'panel:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09' },
     ]
     for (const entry of defaults) {
       if (!this.priceBook().findOne((item) => item.pattern === entry.pattern)) this.upsertPrice(entry)

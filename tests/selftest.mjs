@@ -31,6 +31,8 @@ import * as connect from '../packages/plugin-connect/src/index.ts'
 import * as update from '../packages/plugin-update/src/index.ts'
 import * as portal from '../packages/plugin-portal/src/index.ts'
 import * as consolePlugin from '../packages/plugin-console/src/index.ts'
+import * as panelCore from '../packages/plugin-panel-core/src/index.ts'
+import * as dingtalkBridge from '../packages/plugin-dingtalk-bridge/src/index.ts'
 import * as dshBridge from '../packages/plugin-dsh-bridge/src/index.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { createServer, request as httpRequest } from 'node:http'
@@ -3976,6 +3978,282 @@ try {
   const portalPost = await rawReq('POST', '/api/portal/apps', { headers: { 'content-type': 'application/json', origin: portalOrigin }, body: '{}' })
   check('写方法被拒 405（契约全只读）', portalPost.status === 405)
 
+  // ================================================================ 部门面板（review-dsh-agent-panel-v2 Phase 1/2）
+  section('部门面板（plugin-panel-core：数据面 / 图谱 / 激活 / 计量 / 运行时）')
+  {
+    const panelAdmin = admin
+    const rootOrgId = (await api('GET', '/api/iam/orgs', { token: panelAdmin })).data.find((org) => org.parentId === null).id
+
+    // -- 部门骨架与总览 ------------------------------------------------------
+    const depts = await api('GET', '/api/panel/depts', { token: panelAdmin })
+    check('面板：五部门骨架（一套骨架五种皮肤的数据底座）',
+      depts.ok && depts.data.depts.length === 5 && depts.data.depts.some((dept) => dept.id === 'mfg' && dept.colors?.accent === '#0f766e'),
+      JSON.stringify(depts.data?.depts?.map((dept) => dept.id)))
+    const overview = await api('GET', '/api/panel/mfg/overview', { token: panelAdmin })
+    check('面板：制造部总览（行业激活 + 频道 + 阵容 + KPI/widget 来源徽标）',
+      overview.ok && overview.data.industry?.code === 'qb01' && overview.data.channels.length >= 3
+      && overview.data.agents.length === 4 && overview.data.kpis.length >= 3
+      && overview.data.widgets.length >= 3 && overview.data.widgets.every((widget) => !widget.degraded && widget.source === '模拟数据'),
+      JSON.stringify({ industry: overview.data?.industry, widgets: overview.data?.widgets?.length }))
+    const overviewNoAuth = await api('GET', '/api/panel/mfg/overview')
+    check('面板：未认证访问被拒（401）', overviewNoAuth.status === 401)
+
+    // -- 消息闭环：发消息 / 卡片动作走纯平台链（task.create + 幂等） ----------------
+    const channels = await api('GET', '/api/panel/mfg/channels', { token: panelAdmin })
+    const mainChannel = channels.data.channels[0]
+    const posted = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '自测：协作消息链路', ddSync: false } })
+    check('面板：发消息落库（人 × 频道归属校验）', posted.ok && posted.data.message.dept === 'mfg')
+    const msgList = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}`, { token: panelAdmin })
+    const cardMsg = msgList.data.messages.find((m) => m.card?.title?.includes('WX-0912'))
+    check('面板：演示卡片消息在库（Agent 操作卡片）', Boolean(cardMsg) && cardMsg.card.ops.length === 3)
+    const cardAct = await api('POST', `/api/panel/messages/${cardMsg.id}/card-action`, { token: panelAdmin, body: { opId: cardMsg.card.ops[0].id } })
+    check('面板：卡片动作「确认派单」→ 生成任务（纯平台链）',
+      cardAct.ok && /已生成任务/.test(cardAct.data.result), JSON.stringify(cardAct.data?.result ?? cardAct.error))
+    const cardActReplay = await api('POST', `/api/panel/messages/${cardMsg.id}/card-action`, { token: panelAdmin, body: { opId: cardMsg.card.ops[0].id } })
+    check('面板：卡片动作幂等保护（重复执行被拒）', !cardActReplay.ok && /已执行/.test(cardActReplay.error.message))
+
+    // -- 任务看板（泳道状态机） ------------------------------------------------
+    const taskCreated = await api('POST', '/api/panel/mfg/tasks', { token: panelAdmin, body: { title: '自测任务：M-2207 缺口复勘', lane: 'doing', sceneCode: 'QB01-G-4-1' } })
+    check('面板：任务创建（泳道 + 场景引用）', taskCreated.ok && taskCreated.data.task.lane === 'doing')
+    const taskMoved = await api('POST', `/api/panel/tasks/${taskCreated.data.task.id}/transition`, { token: panelAdmin, body: { lane: 'done' } })
+    check('面板：任务泳道迁移（doing → done）', taskMoved.ok && taskMoved.data.task.lane === 'done')
+    const badLane = await api('POST', `/api/panel/tasks/${taskCreated.data.task.id}/transition`, { token: panelAdmin, body: { lane: 'archived' } })
+    check('面板：非法泳道被拒', !badLane.ok)
+
+    // -- 部门知识 ---------------------------------------------------------------
+    const artCreated = await api('POST', '/api/panel/mfg/artifacts', { token: panelAdmin, body: { kind: 'diagnosis', title: '自测诊断卡', content: '四清单框架自测沉淀' } })
+    const artList = await api('GET', '/api/panel/mfg/artifacts', { token: panelAdmin })
+    check('面板：部门知识沉淀与列表', artCreated.ok && artList.ok && artList.data.artifacts.some((art) => art.title === '自测诊断卡'))
+
+    // -- 场景图谱：装载 / 未激活拒绝 ----------------------------------------------
+    const graph = await api('GET', '/api/panel/scenegraph?industry=QB01', { token: panelAdmin })
+    const qb01SceneCount = Object.values(graph.data?.pack?.activities ?? {}).reduce((sum, list) => sum + list.length, 0)
+    check('面板：QB01 场景图谱下发（一图四清单全字段）',
+      graph.ok && qb01SceneCount >= 24 && graph.data.pack.activities.mfg.every((scene) => scene.tools.length > 0 && scene.models.length > 0 && scene.data.length > 0 && scene.talent.length > 0),
+      `scenes=${qb01SceneCount}`)
+    const graphLocked = await api('GET', '/api/panel/scenegraph?industry=JQR', { token: panelAdmin })
+    check('面板：未装载图谱 honest 400（不冒充数据）', !graphLocked.ok && /未装载/.test(graphLocked.error.message))
+
+    // -- 行业三态 + 激活审批链（申请 → 审批（高风险二次确认）→ 激活生效） -------------
+    const industries = await api('GET', '/api/panel/industries', { token: panelAdmin })
+    check('面板：行业三态（QB01/GCJX 已激活，JQR/NEV/PCB 待授权）',
+      industries.ok
+      && industries.data.industries.filter((ind) => ind.state === 'active').map((ind) => ind.code).sort().join(',') === 'GCJX,QB01'
+      && industries.data.industries.filter((ind) => ind.state === 'locked').length === 3,
+      JSON.stringify(industries.data?.industries?.map((ind) => `${ind.code}:${ind.state}`)))
+    const actReq = await api('POST', '/api/panel/industries/NEV/activate-requests', { token: panelAdmin })
+    check('面板：激活申请进入审批中心（industry.activation · high）',
+      actReq.ok && actReq.data.approval.kind === 'industry.activation' && actReq.data.approval.riskLevel === 'high',
+      JSON.stringify(actReq.error ?? actReq.data?.approval?.id))
+    const actPending = (await api('GET', '/api/panel/industries', { token: panelAdmin })).data.industries.find((ind) => ind.code === 'NEV')
+    check('面板：申请后行业显示审批中（pending 三态）', actPending.state === 'pending')
+    const decideNoConfirm = await api('POST', `/api/approvals/${actReq.data.approval.id}/decide`, { token: panelAdmin, body: { decision: 'approve' } })
+    check('面板：高风险审批未二次确认被拒（fail-closed）', !decideNoConfirm.ok)
+    const decideOk = await api('POST', `/api/approvals/${actReq.data.approval.id}/decide`, { token: panelAdmin, body: { decision: 'approve', confirmed: true, opinion: '新能源汽车图谱启用' } })
+    check('面板：审批通过 → 激活执行器生效（active + grantCapabilities）',
+      decideOk.ok && decideOk.data.status === 'executed', JSON.stringify(decideOk.data?.execution ?? decideOk.error))
+    const industriesAfter = await api('GET', '/api/panel/industries', { token: panelAdmin })
+    check('面板：激活后 NEV 三态转 active', industriesAfter.data.industries.find((ind) => ind.code === 'NEV').state === 'active')
+    const dupActivate = await api('POST', '/api/panel/industries/NEV/activate-requests', { token: panelAdmin })
+    check('面板：重复激活申请被拒（已是激活态）', !dupActivate.ok && /已是激活态/.test(dupActivate.error.message))
+
+    // -- panelAgentRuntime：诚实降级 + 真实模型调用 + panel:* 计量（D1 键格式） -------
+    const mentionFallback = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '@设备运维 Agent 自测：请巡检 3# 冲床', ddSync: false } })
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const afterFallback = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=10`, { token: panelAdmin })
+    const fallbackReply = afterFallback.data.messages.find((m) => m.agentName === '设备运维 Agent' && /暂不能自主应答/.test(m.text))
+    check('面板：@Agent 未绑定资产 → 诚实降级回包（不造假回复）', Boolean(fallbackReply), JSON.stringify(afterFallback.data?.messages?.at(-1)?.text ?? '').slice(0, 120))
+    const fallbackTasks = await api('GET', '/api/panel/mfg/tasks', { token: panelAdmin })
+    check('面板：降级转人工待办落看板', fallbackTasks.ok && fallbackTasks.data.tasks.some((task) => task.createdBy.startsWith('agent:') && task.lane === 'todo'))
+
+    // stub 模型 + Agent 资产 + 阵容绑定 → 真实单轮调用
+    const panelModelStub = createServer((req, res) => {
+      if ((req.url ?? '').endsWith('/chat/completions')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ choices: [{ message: { content: '质检结论：一次装机合格率 93.2%（±0.4pp），无异常波动。' } }], usage: { prompt_tokens: 100, completion_tokens: 40 } }))
+        return
+      }
+      res.writeHead(404).end('{}')
+    })
+    await new Promise((resolve) => panelModelStub.listen(0, '127.0.0.1', resolve))
+    try {
+      // agent 资产的 model 属性受资源 schema 枚举约束（deepseek-*），故覆盖登记 deepseek-chat 指向 stub
+      const modelReg = await api('POST', '/api/modelgw/models', { token: panelAdmin, body: { slug: 'deepseek-chat', displayName: 'DeepSeek Chat（面板自测 stub）', provider: 'deepseek', endpoint: `http://127.0.0.1:${panelModelStub.address().port}/v1`, apiKey: 'stub-key', listCentsPerKTokens: 1, costCentsPerKTokens: 0 } })
+      const agentAsset = await api('POST', '/api/agents', { token: panelAdmin, body: { name: '面板质检员', slug: 'panel-qc', attrs: { description: '部门面板质检数字同事（自测）', avatar: '🔍', model: 'deepseek-chat', systemPrompt: '你是制造部质检数字同事。', riskLevel: 'low', dataClass: 'internal' } } })
+      check('面板：stub 模型 + Agent 资产就绪', modelReg.ok && agentAsset.ok, JSON.stringify({ modelReg: modelReg.error, agent: agentAsset.error }))
+      const roster = await api('PUT', '/api/panel/mfg/agents', { token: panelAdmin, body: { agents: [
+        { name: '排产优化 Agent', desc: 'APS 齐套排产 / 插单重排', icon: '📅' },
+        { name: '设备运维 Agent', desc: '点检提醒 / 故障预判 / 维修工单', icon: '⚙️' },
+        { name: '面板质检员', desc: 'SPC 监控 / 合格率追溯', icon: '🔍', agentRef: `agent:${agentAsset.data.agent?.slug ?? agentAsset.data.agent?.id ?? 'panel-qc'}` },
+      ] } })
+      check('面板：阵容绑定 agentRef（panel.config.write）', roster.ok, JSON.stringify(roster.error))
+      const mentionReal = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '@面板质检员 今天一次装机合格率有波动吗？', ddSync: false } })
+      check('面板：@面板质检员 消息已发', mentionReal.ok)
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      const afterReal = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=10`, { token: panelAdmin })
+      const realReply = afterReal.data.messages.find((m) => m.agentName === '面板质检员')
+      check('面板：panelAgentRuntime 单轮真实调用（modelgw → 回包落库）',
+        Boolean(realReply) && /一次装机合格率 93.2%/.test(realReply.text),
+        JSON.stringify(realReply?.text ?? afterReal.data?.messages?.at(-1)?.text ?? '').slice(0, 160))
+      const recentUsage = await api('GET', '/api/usage/recent?limit=5', { token: panelAdmin })
+      check('面板：协作计量落账（D1 键格式 panel:mfg.qb01，价格簿零费率放行）',
+        recentUsage.ok && recentUsage.data.items.some((item) => item.resource === 'panel:mfg.qb01'),
+        JSON.stringify(recentUsage.data?.items?.map((item) => item.resource)))
+    } finally {
+      panelModelStub.close()
+    }
+
+    // -- widget 求值：connector 源诚实降级 + 配置抽屉 ------------------------------
+    const widgetsPut = await api('PUT', '/api/panel/mfg/widgets', { token: panelAdmin, body: { widgets: [
+      { id: 'w1', type: 'bars', title: '📊 产线实时状态', live: true, source: 'mock', rows: [['冲压一线', 92, '']] },
+      { id: 'w2', type: 'bars', title: '📈 设备联网率（ERP）', source: 'connector', ref: 'erp.oee-line', rows: [] },
+    ] } })
+    check('面板：widget 布局写入（含来源徽标声明）', widgetsPut.ok && widgetsPut.data.widgets.length === 2)
+    const boardAfter = await api('GET', '/api/panel/mfg/board', { token: panelAdmin })
+    const degradedWidget = boardAfter.data.widgets.find((widget) => widget.id === 'w2')
+    check('面板：connector 源 widget 显式降级（绝不冒充真实业务面）',
+      Boolean(degradedWidget) && degradedWidget.degraded === true && /连接器/.test(degradedWidget.source),
+      JSON.stringify(degradedWidget))
+    const widgetsRestore = await api('PUT', '/api/panel/mfg/widgets', { token: panelAdmin, body: { widgets: [
+      { id: 'w1', type: 'bars', title: '📊 产线实时状态', live: true, source: 'mock', rows: [['冲压一线', 92, ''], ['组装二线', 76, 'warn'], ['包装三线 · 换型中', 41, 'danger']] },
+      { id: 'w2', type: 'alerts', title: '🚨 异常告警', source: 'mock', rows: [['r', '停机', '冲压一线 3# 冲床油温过高，已待机 12 分钟'], ['y', '缺料', '组装二线 M-2207 物料 16:00 后缺口 800pcs']] },
+      { id: 'w3', type: 'todos', title: '📋 今日工单', source: 'mock', rows: [['WO-2607 电机外壳 ×5000', '87%'], ['WO-2611 风扇组件 ×3200', '62%'], ['WO-2615 控制板 ×1800', '23%']] },
+    ] } })
+    check('面板：widget 布局复原', widgetsRestore.ok && widgetsRestore.data.widgets.length === 3)
+
+    // -- SSE + 降级轮询（钉钉 webview 双通道铁律） -----------------------------------
+    const sseEvents = []
+    const sseController = new AbortController()
+    const sseWorker = (async () => {
+      const response = await fetch(`${BASE}/api/panel/stream?dept=mfg&token=${encodeURIComponent(panelAdmin)}`, { signal: sseController.signal })
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      // 持续读取直到抓到 panel.message.created（SSE 分块到达，首块只有 retry）
+      for (let i = 0; i < 12; i++) {
+        const { value, done } = await reader.read()
+        if (done) break
+        sseEvents.push(decoder.decode(value))
+        if (sseEvents.join('').includes('panel.message.created')) break
+      }
+    })().catch(() => sseEvents.push('sse-failed'))
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: 'SSE 推流自测', ddSync: false } })
+    await Promise.race([sseWorker, new Promise((resolve) => setTimeout(resolve, 4000))])
+    sseController.abort()
+    check('面板：SSE 通道建立且事件推送（公开路径 + ?token= 自校验）',
+      sseEvents[0]?.includes('retry:') && sseEvents.join('').includes('panel.message.created'),
+      JSON.stringify(sseEvents.map((chunk) => chunk.slice(0, 80))))
+    const sseNoToken = await fetch(`${BASE}/api/panel/stream?dept=mfg`)
+    check('面板：SSE 无 token 被拒（fail-closed）', sseNoToken.status === 401)
+    const poll = await api('GET', `/api/panel/mfg/poll?since=${new Date(Date.now() - 60_000).toISOString()}`, { token: panelAdmin })
+    check('面板：降级轮询端点（消息/任务/未读）',
+      poll.ok && Array.isArray(poll.data.messages) && Array.isArray(poll.data.tasks) && Array.isArray(poll.data.unread),
+      JSON.stringify(poll.error ?? ''))
+
+    // -- RBAC 行为抽检（矩阵网全覆盖之外的业务语义） ----------------------------------
+    const memberRole = (await api('GET', '/api/iam/roles', { token: panelAdmin })).data.roles.find((role) => role.code === 'member')
+    const memberUser = await api('POST', '/api/iam/users', { token: panelAdmin, body: { username: 'panel_member', displayName: '面板成员', orgId: rootOrgId, roleIds: [memberRole.id] } })
+    const memberLogin = await api('POST', '/api/auth/login', { body: { username: 'panel_member', password: memberUser.data.initialPassword } })
+    const memberToken = memberLogin.data.token
+    const memberRead = await api('GET', '/api/panel/mfg/overview', { token: memberToken })
+    const memberConfig = await api('PUT', '/api/panel/mfg/kpis', { token: memberToken, body: { kpis: [] } })
+    check('面板：成员可读总览（panel.read 迁移生效）但改配置被拒（403）',
+      memberRead.ok && memberConfig.status === 403, `read=${memberRead.status} config=${memberConfig.status}`)
+  }
+
+  // ================================================================ 钉钉桥接（review-dsh-agent-panel-v2 Phase 3）
+  section('钉钉桥接（plugin-dingtalk-bridge：群桥 / 出向投递 / 审批推送 / 告警通道 / 回决 fail-closed）')
+  {
+    const ddSends = []
+    const bridgeStub = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://stub')
+      const raw = await readBody(req)
+      if (url.pathname === '/v1.0/oauth2/accessToken') {
+        const body = JSON.parse(raw || '{}')
+        if (body.appKey === 'bridge-key' && body.appSecret === 'bridge-secret') {
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ accessToken: 'bridge-token', expireIn: 7200 }))
+          return
+        }
+        res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ code: 'invalid.credentials' }))
+        return
+      }
+      if (url.pathname === '/v1.0/robot/groupMessages/send') {
+        ddSends.push({ chatId: JSON.parse(raw || '{}').openConversationId, at: Date.now() })
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ errcode: 0, errmsg: 'ok' }))
+        return
+      }
+      res.writeHead(404).end('{}')
+    })
+    await new Promise((resolve) => bridgeStub.listen(0, '127.0.0.1', resolve))
+    const bridgePort = bridgeStub.address().port
+
+    const putReal = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-bridge', appKey: 'bridge-key', appSecret: 'bridge-secret', mode: 'real', apiBase: `http://127.0.0.1:${bridgePort}`, oapiBase: `http://127.0.0.1:${bridgePort}`, enabled: true, conflictStrategy: 'manual' } })
+    check('桥接：连接器切 real（凭证单一来源=iam 连接器）', putReal.ok)
+    const ddStatus = await api('GET', '/api/dingtalk/status', { token: admin })
+    check('桥接：状态胶囊（连接器 real / 入向 R-SPIKE 停用声明 / 扫码绑定事实源）',
+      ddStatus.ok && ddStatus.data.connector.mode === 'real'
+      && ddStatus.data.inbound.enabled === false && /R-SPIKE/.test(ddStatus.data.inbound.reason)
+      && /sso\/bind/.test(ddStatus.data.bindPath),
+      JSON.stringify(ddStatus.data))
+
+    const mfgChannels = await api('GET', '/api/panel/mfg/channels', { token: admin })
+    const syncChannel = mfgChannels.data.channels.find((channel) => channel.name === '异常快速响应群') ?? mfgChannels.data.channels[0]
+    const bindBridge = await api('POST', `/api/dingtalk/channels/${syncChannel.id}/bridge`, { token: admin, body: { chatId: 'cid-mfg-001', robotCode: 'rb-001' } })
+    check('桥接：频道群桥绑定（dingtalk.message.send）', bindBridge.ok && bindBridge.data.bridge.chatId === 'cid-mfg-001', JSON.stringify(bindBridge.error ?? bindBridge.data))
+    const bindAlerts = await api('POST', '/api/dingtalk/channels/alerts-ops/bridge', { token: admin, body: { chatId: 'cid-alerts', robotCode: 'rb-001', purpose: 'alerts' } })
+    check('桥接：运维告警群桥绑定（purpose=alerts）', bindAlerts.ok && bindAlerts.data.bridge.purpose === 'alerts', JSON.stringify(bindAlerts.error ?? bindAlerts.data))
+    const bridges = await api('GET', '/api/dingtalk/bridges?dept=mfg', { token: admin })
+    check('桥接：群桥列表可查', bridges.ok && bridges.data.bridges.length >= 1, JSON.stringify(bridges.error ?? bridges.data))
+
+    // 出向投递：面板消息（ddSync）→ 桥接 → stub 收到 → 回执回写 ddSync=sent
+    const ddMsg = await api('POST', '/api/panel/mfg/messages', { token: admin, body: { channelId: syncChannel.id, text: '桥接出向自测：换模窗口确认', ddSync: true } })
+    check('桥接：消息带钉钉同步意图（ddSync=pending）', ddMsg.ok && ddMsg.data.message.ddSync === 'pending')
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    const ddMsgAfter = await api('GET', `/api/panel/mfg/messages?channelId=${syncChannel.id}&limit=5`, { token: admin })
+    const sentMsg = ddMsgAfter.data.messages.find((m) => m.id === ddMsg.data.message.id)
+    check('桥接：出向投递成功且回执回写（ddSync=sent）', sentMsg.ddSync === 'sent' && ddSends.some((send) => send.chatId === 'cid-mfg-001'),
+      JSON.stringify({ ddSync: sentMsg.ddSync, sends: ddSends.length }))
+
+    // 卡片/场景卡推送（panel.card.action dd.push 路径）
+    const sendsBeforeScene = ddSends.length
+    const sceneSync = await api('POST', '/api/panel/mfg/scenes/QB01-A-2-5/sync-dingtalk', { token: admin })
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    check('桥接：场景卡同步钉钉（dd.push → 群投递）', sceneSync.ok && ddSends.length > sendsBeforeScene, JSON.stringify({ ok: sceneSync.ok, sends: ddSends.length }))
+
+    // 告警 dingtalk 通道坐实：usage 对账不平 → audit.alert.fired → alerts 群桥投递
+    const sendsBeforeAlert = ddSends.length
+    const reconcile = await api('POST', '/api/usage/reconcile', { token: admin })
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    check('桥接：告警经 purpose=alerts 群桥投递（补齐 channels:[dingtalk] 欠账）',
+      reconcile.ok && ddSends.filter((send) => send.chatId === 'cid-alerts').length >= 1,
+      JSON.stringify({ reconcileOk: reconcile.ok, alertSends: ddSends.filter((send) => send.chatId === 'cid-alerts').length, total: ddSends.length, before: sendsBeforeAlert }))
+
+    // 审批推送
+    const pcbReq = await api('POST', '/api/panel/industries/PCB/activate-requests', { token: admin })
+    const approvalPush = await api('POST', `/api/dingtalk/approvals/${pcbReq.data.approval.id}/push`, { token: admin })
+    check('桥接：审批单推送钉钉', approvalPush.ok && approvalPush.data.delivered === true, JSON.stringify(approvalPush.data ?? approvalPush.error))
+
+    // 回决写回：staffId 反查 fail-closed 三连
+    const cbNoLink = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'nobody-staff', approvalId: pcbReq.data.approval.id, decision: 'approve' } })
+    check('桥接：未绑定 staffId 回决被拒（fail-closed）', !cbNoLink.ok && /未绑定/.test(cbNoLink.error.message))
+    const adminUser = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('沈亦澜'), { token: admin })).data.users[0]
+    await api('POST', `/api/iam/users/${adminUser.id}/bindings`, { token: admin, body: { provider: 'dingtalk', unionId: 'selftest-staff-001', displayName: '沈亦澜' } })
+    const cbNoConfirm = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'selftest-staff-001', approvalId: pcbReq.data.approval.id, decision: 'approve' } })
+    check('桥接：高风险审批钉钉回决缺二次确认被拒（fail-closed）', !cbNoLink.ok && !cbNoConfirm.ok && /二次确认/.test(cbNoConfirm.error.message))
+    const cbOk = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'selftest-staff-001', approvalId: pcbReq.data.approval.id, decision: 'approve', confirmed: true, opinion: '钉钉侧回决（自测）' } })
+    check('桥接：合规回决写回（staffId↔identityLinks 反查 + confirmed）→ 审批执行',
+      cbOk.ok && cbOk.data.approval.status === 'executed', JSON.stringify(cbOk.data ?? cbOk.error))
+    const pcbAfter = (await api('GET', '/api/panel/industries', { token: admin })).data.industries.find((ind) => ind.code === 'PCB')
+    check('桥接：回决生效后 PCB 行业转 active', pcbAfter.state === 'active')
+
+    // 解绑 + 恢复 mock（不污染后续断言）
+    const unbind = await api('DELETE', `/api/dingtalk/channels/${syncChannel.id}/bridge`, { token: admin })
+    check('桥接：群桥解绑', unbind.ok && unbind.data.deleted === true, JSON.stringify(unbind.error ?? unbind.data))
+    const restoreMock = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-yuanbingke', appKey: 'demo-app-key', appSecret: 'demo-secret-do-not-use', mode: 'mock', enabled: true } })
+    check('桥接：连接器恢复 mock（自测收尾）', restoreMock.ok && restoreMock.data.mode === 'mock')
+    await new Promise((resolve) => bridgeStub.close(resolve))
+  }
+
   // ================================================================ dsh 宿主挂载（plugin-dsh-bridge，dev-plan-agent-host-unification M1）
   // 进程内构造最小插件树：platform-core（不监听）+ dsh-bridge（挂载半），
   // 用伪造 dsh webServer 捕获注册的 prefix 路由，再经真实 HTTP 端口模拟 dsh 侧分发。
@@ -4011,6 +4289,9 @@ try {
     // 先于 console：门户端点在其鉴权中间件之前截获 /api/portal/*
     await mountCtx.plugin(portal)
     await mountCtx.plugin(consolePlugin) // 基线初始化：内置角色 + 根组织 + admin
+    // 部门面板 + 钉钉桥接（review-dsh-agent-panel-v2）：与 boot-all 同序（console 之后）
+    await mountCtx.plugin(panelCore)
+    await mountCtx.plugin(dingtalkBridge)
     await mountCtx.plugin(dshBridge, { mountPath: '/rq' })
     mountCtx.httpServer.register('GET', '/api/__mount_probe', (exchange) => exchange.ok({ pong: exchange.path }))
     // 将伪造 webServer 提供给 ctx 后正常装配（等价 dsh 形态：inject 完成后 apply）
@@ -4064,6 +4345,8 @@ try {
     check('/rq/ 伺服控制台 index.html（SPA fallback）', spa.status === 200 && (await spa.text()).includes('<!doctype html>'))
     const asset = await simGet('/rq/js/app.js')
     check('/rq/js/* 控制台静态资源按前缀命中', asset.status === 200 && String(asset.headers.get('content-type') ?? '').includes('javascript'), `status=${asset.status}`)
+    const panelSpa = await simGet('/rq/panel/')
+    check('/rq/panel/ 面板 SPA 经前缀挂载可达（宿主 web diff=0）', panelSpa.status === 200 && (await panelSpa.text()).includes('部门 Agent 工作台'), `status=${panelSpa.status}`)
     const spaMiss = await simGet('/rq/anything-else')
     check('非 /api 未命中回落 SPA（与独立形态一致）', spaMiss.status === 200 && (await spaMiss.text()).includes('<!doctype html>'))
     const apiMiss = await simGet('/rq/api/definitely-missing', adminToken)

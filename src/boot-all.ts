@@ -22,6 +22,8 @@ import * as connect from '@dsh-ops/plugin-connect'
 import * as update from '@dsh-ops/plugin-update'
 import * as portal from '@dsh-ops/plugin-portal'
 import * as consolePlugin from '@dsh-ops/plugin-console'
+import * as panelCore from '@dsh-ops/plugin-panel-core'
+import * as dingtalkBridge from '@dsh-ops/plugin-dingtalk-bridge'
 
 export interface BootOptions {
   dataDir: string
@@ -58,4 +60,9 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   // 端点公开只读，必须先于 console 装配——在其鉴权中间件之前截获 /api/portal/* 请求
   await ctx.plugin(portal)
   await ctx.plugin(consolePlugin)
+  // 部门面板（review-dsh-agent-panel-v2）：REST 依赖 console 鉴权中间件先行注册（/api/* Bearer 面）；
+  // 自注册路由经 httpServer.routeMatrix 共享登记处汇入 RBAC 断言矩阵
+  await ctx.plugin(panelCore)
+  // 钉钉桥接（群桥/出向投递/审批推送/告警通道）：订阅 panel.message.created 与 audit.alert.fired
+  await ctx.plugin(dingtalkBridge)
 }

@@ -15,6 +15,7 @@ import { HttpServerService } from './http.ts'
 import { SqliteTxnService } from './sqlite.ts'
 import { BehaviorService } from './behavior.ts'
 import { CardpackService } from './cardpacks.ts'
+import { ScenegraphService } from './scenegraph.ts'
 
 export * from './storage.ts'
 export * from './bus.ts'
@@ -28,6 +29,7 @@ export * from './plugin-ctx.ts'
 export * from './version.ts'
 export * from './behavior.ts'
 export * from './cardpacks.ts'
+export * from './scenegraph.ts'
 
 export interface PlatformCoreConfig {
   dataDir?: string
@@ -56,6 +58,8 @@ export async function apply(ctx: Context, config: PlatformCoreConfig = {}) {
   ctx.plugin(BehaviorService)
   // 卡片包服务（WP-05）：JSON 配置装载（目录可经 CARDPACK_DIR 覆盖）；端点由 console 聚合注册
   ctx.plugin(CardpackService)
+  // 行业场景图谱服务（review-dsh-agent-panel-v2 Phase 2）：内置资产通道装载 + scenegraph.updated 热刷新
+  ctx.plugin(ScenegraphService)
   if (config.startHttp !== false) {
     void http.start().then(() => {
       ctx.logger('platform-core').info(`HTTP 服务已启动：http://${http.host}:${http.port}`)
