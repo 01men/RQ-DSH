@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "企业 AI 资源统一管理平台 —— 基于 DeepSeek Harness「一切皆插件」架构",
+  "license": "MIT",
   "workspaces": [
     "packages/*"
   ],
@@ -16,7 +17,8 @@
     "cordis.yml",
     "packages",
     "src",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {

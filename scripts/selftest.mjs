@@ -3992,6 +3992,31 @@ try {
     corsAuthorized.status === 200 && jsonBody(corsAuthorized).ok === true)
   const corsNoOrigin = await rawReq('OPTIONS', '/api/health')
   check('无 Origin 的 OPTIONS 不被预检分支劫持（同源行为不变）', corsNoOrigin.status === 404 && corsNoOrigin.headers['access-control-allow-origin'] === undefined)
+  // RQ 澄清第 1 条：令牌铸造/交换面 /api/auth/* 对 blanket '*' 永不发放（drive-by 凭证探测面关闭）
+  const authPreflight = await rawReq('OPTIONS', '/api/auth/login', { headers: { origin: connOrigin, 'access-control-request-method': 'POST' } })
+  check('CORS 收紧：/api/auth/* 预检在 blanket * 下无 ACAO（跨站登录探测被浏览器拦截）',
+    authPreflight.headers['access-control-allow-origin'] === undefined, JSON.stringify(authPreflight.headers))
+  const authDirect = await rawReq('GET', '/api/auth/providers', { headers: { origin: connOrigin } })
+  check('CORS 收紧：/api/auth/* 直跨域响应同样不挂放行头（未进预检分支头也不发放）',
+    authDirect.headers['access-control-allow-origin'] === undefined, JSON.stringify(authDirect.headers))
+  // 配置具体来源列表时 /api/auth/* 按精确来源放行（远程宿主在线登录 = B 侧显式配置，零信任默认）
+  {
+    const preciseDir = join(DATA_DIR, 'cors-precise')
+    await mkdir(preciseDir, { recursive: true })
+    const preciseCtx = new Context()
+    await preciseCtx.plugin(platformCore, { dataDir: preciseDir, http: { port: 7399, corsAllowOrigins: [connOrigin] }, startHttp: false })
+    await preciseCtx.httpServer.start()
+    try {
+      const pBase = `http://127.0.0.1:${preciseCtx.httpServer.port}`
+      const preciseAuth = await fetch(`${pBase}/api/auth/login`, { method: 'POST', headers: { origin: connOrigin, 'content-type': 'application/json' }, body: '{}' })
+      check('CORS 精确来源：/api/auth/login 按白名单回显放行（显式配置即放行，跨机器部署的正确姿势）',
+        preciseAuth.headers.get('access-control-allow-origin') === connOrigin, String(preciseAuth.headers.get('access-control-allow-origin')))
+      const preciseEvil = await fetch(`${pBase}/api/auth/login`, { method: 'POST', headers: { origin: 'http://evil.example.com' }, body: '{}' })
+      check('CORS 精确来源：未命中白名单的来源对 /api/auth/* 仍不发放', preciseEvil.headers.get('access-control-allow-origin') === null)
+    } finally {
+      await preciseCtx.httpServer.stop()
+    }
+  }
   // 前端接线：连接管理纯函数随包单测 + api.js 动态 BASE 不变量
   const connectionsTest = spawn(process.execPath, ['packages/plugin-console/public/js/connections.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => connectionsTest.on('close', resolve))

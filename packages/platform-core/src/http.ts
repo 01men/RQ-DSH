@@ -200,12 +200,17 @@ export class HttpServerService extends Service {
 
     // 跨域放行（宿主连接切换，docs/frontend-host-switching.md）：只覆盖平台 REST 数据面 /api/*，
     // 且豁免自管 CORS 的子面——门户通道 /api/portal/* 与 OIDC 协议的 /api/authn/oidc/* 自行按
-    // 来源精确放行，不得被放宽（/oauth/*、/.well-known/* 不在 /api 内，天然不受影响）。
+    // 来源精确放行，不得被放宽（/oauth/*、/.well-known/* 不在 /api 内，天然不受影响）；
+    // 令牌铸造/交换面 /api/auth/*（login/refresh/票据兑换等公开端点）对 blanket '*' 永不发放
+    // （RQ 澄清第 1 条：防任意网页跨站读取登录响应做 drive-by 凭证探测）——配置具体来源
+    // 列表时仍按精确来源放行（corsAllowOriginFor 返回具体 origin 不受此豁免），远程宿主
+    // 在线登录由 B 侧显式配置来源，符合零信任默认基调。
     // 先于鉴权中间件——浏览器预检 OPTIONS 不带 Bearer，不得被 401 拦截；放行头经 setHeader
     // 预挂，与后续 ok/fail/file 的 writeHead 自然合并（错误体跨域同样可读）。
-    const blanketCorsPath = url.pathname.startsWith('/api/')
-      && !url.pathname.startsWith('/api/portal/')
-      && !url.pathname.startsWith('/api/authn/oidc/')
+    const blanketCorsExempt = url.pathname.startsWith('/api/portal/')
+      || url.pathname.startsWith('/api/authn/oidc/')
+      || (this.corsAllowOrigins.includes('*') && url.pathname.startsWith('/api/auth/'))
+    const blanketCorsPath = url.pathname.startsWith('/api/') && !blanketCorsExempt
     const allowOrigin = blanketCorsPath ? corsAllowOriginFor(this.corsAllowOrigins, req.headers.origin) : undefined
     if (allowOrigin) {
       res.setHeader('access-control-allow-origin', allowOrigin)
