@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>企业 AI 资源管理平台 — 中小制造业数智化转型引擎</title>
+<style>
+:root{
+  --bg:#070b14; --bg2:#0b1220; --card:#0f1729; --line:rgba(120,160,255,.12);
+  --txt:#e8eefb; --sub:#93a3c4; --pri:#4f7cff; --pri2:#22d3ee; --grn:#34d399; --org:#fbbf24;
+  --grad:linear-gradient(120deg,#4f7cff,#22d3ee);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;background:var(--bg);color:var(--txt);line-height:1.7;overflow-x:hidden}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1200px;margin:0 auto;padding:0 32px}
+section{padding:110px 0;position:relative}
+.kicker{display:inline-block;font-size:13px;letter-spacing:.25em;color:var(--pri2);border:1px solid rgba(34,211,238,.3);padding:5px 16px;border-radius:99px;margin-bottom:22px;background:rgba(34,211,238,.06)}
+h2{font-size:38px;font-weight:700;margin-bottom:16px;letter-spacing:.02em}
+.lead{color:var(--sub);font-size:17px;max-width:760px;margin-bottom:56px}
+/* nav */
+nav{position:fixed;top:0;left:0;right:0;z-index:99;backdrop-filter:blur(16px);background:rgba(7,11,20,.75);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;justify-content:space-between;height:64px}
+.logo{font-size:20px;font-weight:800;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+nav ul{display:flex;gap:30px;list-style:none;font-size:14px;color:var(--sub)}
+nav ul a:hover{color:var(--txt)}
+.btn{display:inline-block;background:var(--grad);color:#fff;padding:10px 26px;border-radius:10px;font-size:14px;font-weight:600;box-shadow:0 8px 30px rgba(79,124,255,.35);transition:.25s}
+.btn:hover{transform:translateY(-2px);box-shadow:0 12px 40px rgba(79,124,255,.5)}
+.btn.ghost{background:transparent;border:1px solid var(--line);box-shadow:none;color:var(--txt)}
+/* hero */
+#hero{padding:190px 0 130px;text-align:center;background:radial-gradient(900px 500px at 50% -10%,rgba(79,124,255,.18),transparent 65%)}
+#hero h1{font-size:58px;font-weight:800;line-height:1.25;margin:26px 0 22px}
+#hero h1 .g{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+#hero p{color:var(--sub);font-size:19px;max-width:720px;margin:0 auto 42px}
+.hero-badges{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:52px}
+.hero-badges span{font-size:13px;color:var(--sub);border:1px solid var(--line);padding:8px 18px;border-radius:99px;background:rgba(255,255,255,.02)}
+/* stats */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:20px;margin-top:70px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:30px 20px;text-align:center}
+.stat b{display:block;font-size:36px;font-weight:800;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.stat span{font-size:14px;color:var(--sub)}
+/* pain */
+.pains{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+.pain{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:32px;transition:.3s}
+.pain:hover{border-color:rgba(79,124,255,.4);transform:translateY(-4px)}
+.pain .ic{font-size:30px;margin-bottom:16px}
+.pain h3{font-size:19px;margin-bottom:10px}
+.pain p{font-size:14px;color:var(--sub)}
+/* arch pills */
+.pillars{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-top:10px}
+.pillar{border:1px solid var(--line);border-radius:16px;padding:26px 22px;background:linear-gradient(180deg,rgba(79,124,255,.07),transparent)}
+.pillar b{font-size:17px;display:block;margin-bottom:8px}
+.pillar p{font-size:13.5px;color:var(--sub)}
+.pillar .tag{font-size:11px;color:var(--pri2);letter-spacing:.15em;display:block;margin-bottom:12px}
+/* feature grid */
+.feats{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+.feat{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:30px;position:relative;overflow:hidden;transition:.3s}
+.feat:hover{border-color:rgba(34,211,238,.45);transform:translateY(-4px)}
+.feat::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--grad);opacity:0;transition:.3s}
+.feat:hover::before{opacity:1}
+.feat h3{font-size:18px;margin:14px 0 10px}
+.feat p{font-size:14px;color:var(--sub)}
+.feat ul{margin-top:12px;padding-left:18px;font-size:13.5px;color:var(--sub)}
+.feat ul li{margin-bottom:5px}
+.feat .no{font-size:12px;color:var(--pri);letter-spacing:.2em;font-weight:700}
+/* mock console */
+.mock{background:#0a1120;border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 40px 100px rgba(0,0,0,.5);margin-top:20px}
+.mock-bar{display:flex;align-items:center;gap:8px;padding:13px 18px;background:#0d1526;border-bottom:1px solid var(--line)}
+.mock-bar i{width:11px;height:11px;border-radius:50%;display:block}
+.mock-bar .url{margin-left:14px;font-size:12px;color:var(--sub);background:rgba(255,255,255,.04);padding:4px 16px;border-radius:8px;flex:1;max-width:360px}
+.mock-body{display:grid;grid-template-columns:200px 1fr;min-height:420px}
+.mock-side{border-right:1px solid var(--line);padding:20px 0;font-size:13.5px;color:var(--sub)}
+.mock-side .lg{padding:0 22px 18px;font-weight:800;font-size:16px;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.mock-side a{display:block;padding:9px 22px;border-left:2px solid transparent}
+.mock-side a.on{color:var(--txt);border-color:var(--pri);background:rgba(79,124,255,.1)}
+.mock-main{padding:26px 30px}
+.mock-main h4{font-size:18px;margin-bottom:4px}
+.mock-main .sub{font-size:12.5px;color:var(--sub);margin-bottom:22px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+.kpi{background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:12px;padding:16px}
+.kpi b{font-size:24px;display:block}
+.kpi span{font-size:12px;color:var(--sub)}
+.kpi .up{color:var(--grn);font-size:11.5px}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;color:var(--sub);font-weight:500;padding:9px 12px;border-bottom:1px solid var(--line);font-size:12px}
+.tbl td{padding:10px 12px;border-bottom:1px solid rgba(120,160,255,.06)}
+.badge{font-size:11px;padding:2px 10px;border-radius:99px}
+.badge.g{background:rgba(52,211,153,.12);color:var(--grn)}
+.badge.b{background:rgba(79,124,255,.14);color:#8fb0ff}
+.badge.o{background:rgba(251,191,36,.12);color:var(--org)}
+.chart{display:flex;align-items:flex-end;gap:8px;height:110px;padding:10px 4px 0}
+.chart i{flex:1;background:linear-gradient(180deg,rgba(79,124,255,.85),rgba(34,211,238,.35));border-radius:5px 5px 0 0;min-height:8px}
+/* scenario */
+.scenes{display:grid;grid-template-columns:repeat(2,1fr);gap:26px}
+.scene{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:38px;position:relative}
+.scene .step{display:flex;gap:16px;margin-bottom:20px}
+.scene .step:last-child{margin-bottom:0}
+.scene .n{flex:0 0 34px;height:34px;border-radius:50%;background:rgba(79,124,255,.15);color:#8fb0ff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
+.scene h3{font-size:20px;margin-bottom:6px}
+.scene .tagline{font-size:13px;color:var(--pri2);margin-bottom:26px}
+.scene .step b{display:block;font-size:15px;margin-bottom:2px}
+.scene .step p{font-size:13.5px;color:var(--sub)}
+/* value */
+.values{display:grid;grid-template-columns:repeat(3,1fr);gap:22px}
+.value{text-align:center;padding:40px 26px;border:1px solid var(--line);border-radius:20px;background:var(--card)}
+.value b{display:block;font-size:44px;font-weight:800;background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:10px}
+.value h4{font-size:16px;margin-bottom:8px}
+.value p{font-size:13.5px;color:var(--sub)}
+/* invest */
+#invest .grid{display:grid;grid-template-columns:1.1fr 1fr;gap:40px;align-items:start}
+.invest-card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:28px;margin-bottom:18px}
+.invest-card h4{font-size:17px;margin-bottom:8px;color:#cfe0ff}
+.invest-card p{font-size:14px;color:var(--sub)}
+.invest-big{background:linear-gradient(160deg,rgba(79,124,255,.16),rgba(34,211,238,.08));border:1px solid rgba(79,124,255,.35);border-radius:24px;padding:44px}
+.invest-big h3{font-size:26px;margin-bottom:20px}
+.invest-big li{list-style:none;padding:12px 0;border-bottom:1px solid rgba(120,160,255,.12);font-size:15px;display:flex;gap:12px}
+.invest-big li:last-child{border:none}
+.invest-big li::before{content:"◆";color:var(--pri2);font-size:11px;margin-top:5px}
+/* cta */
+#cta{text-align:center;background:radial-gradient(700px 380px at 50% 120%,rgba(34,211,238,.14),transparent 70%)}
+#cta h2{font-size:42px}
+footer{border-top:1px solid var(--line);padding:36px 0;color:var(--sub);font-size:13px;text-align:center}
+@media(max-width:960px){
+  #hero h1{font-size:38px}h2{font-size:28px}
+  .pains,.feats,.values,.stats{grid-template-columns:1fr 1fr}
+  .pillars,.kpis{grid-template-columns:1fr 1fr}
+  .scenes,#invest .grid{grid-template-columns:1fr}
+  .mock-body{grid-template-columns:1fr}.mock-side{display:none}
+  nav ul{display:none}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <div class="logo">AIOS</div>
+    <ul>
+      <li><a href="#pain">行业痛点</a></li>
+      <li><a href="#arch">产品架构</a></li>
+      <li><a href="#features">核心功能</a></li>
+      <li><a href="#ui">产品界面</a></li>
+      <li><a href="#scene">落地场景</a></li>
+      <li><a href="#value">客户价值</a></li>
+      <li><a href="#invest">融资亮点</a></li>
+    </ul>
+    <a class="btn" href="#cta">预约演示</a>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section id="hero">
+  <div class="wrap">
+    <span class="kicker">企业级 AI 资源统一管理平台</span>
+    <h1>让每一家制造企业<br>都拥有<span class="g">自己的 AI 操作系统</span></h1>
+    <p>一套身份 · 一套权限 · 一套计量 · 一套审计 —— 将组织账号、AI 应用、智能体、技能、文件资产与算力成本全部纳入统一治理,帮助中小制造企业低成本完成数智化转型,构建 AI 原生组织,批量培养"超级个体"。</p>
+    <a class="btn" href="#features" style="font-size:16px;padding:14px 38px">了解产品能力</a>
+    &nbsp;&nbsp;<a class="btn ghost" href="#invest" style="font-size:16px;padding:14px 38px">查看融资亮点</a>
+    <div class="hero-badges">
+      <span>开箱即用 · 私有化部署</span>
+      <span>钉钉扫码免密登录</span>
+      <span>40+ 智能运维工具</span>
+      <span>全链路审计留痕</span>
+      <span>700+ 项端到端质量断言</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>6 类</b><span>企业资产统一纳管</span></div>
+      <div class="stat"><b>1 套</b><span>身份权限贯穿全平台</span></div>
+      <div class="stat"><b>40+</b><span>AI 智能体运维工具</span></div>
+      <div class="stat"><b>100%</b><span>高危操作审计留痕</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- PAIN -->
+<section id="pain" style="background:var(--bg2)">
+  <div class="wrap">
+    <span class="kicker">WHY NOW</span>
+    <h2>中小制造业的 AI 落地,卡在最后一公里</h2>
+    <p class="lead">AI 工具遍地都是,但企业真正用起来时,问题才刚刚开始。</p>
+    <div class="pains">
+      <div class="pain"><div class="ic">🧩</div><h3>工具碎片化,无法形成合力</h3><p>员工各自使用不同的 AI 工具,账号分散、数据割裂、经验无法沉淀,企业投入变成一盘散沙。</p></div>
+      <div class="pain"><div class="ic">🔐</div><h3>数据安全与权限失控</h3><p>图纸、工艺文件、客户资料是企业命脉。AI 时代文件谁在看、谁能看、看了什么,传统手段完全不可控。</p></div>
+      <div class="pain"><div class="ic">💸</div><h3>成本黑盒,投入产出不清晰</h3><p>模型调用费、订阅费逐月增长,却说不清花在了哪个部门、哪条产线、带来了多少效益。</p></div>
+      <div class="pain"><div class="ic">👤</div><h3>组织能力跟不上</h3><p>一人多岗、跨部门协作、班组管理是制造业常态,通用软件的组织模型根本无法表达,权限配置寸步难行。</p></div>
+      <div class="pain"><div class="ic">📉</div><h3>技能经验沉淀不下来</h3><p>老师傅的工艺诀窍、优秀员工的 AI 用法,随人员流动而流失,无法变成组织可复用的数字资产。</p></div>
+      <div class="pain"><div class="ic">🚪</div><h3>AI 应用上线没有门禁</h3><p>内部系统接入 AI 缺少统一的认证、审批与监控,安全合规风险随应用数量指数级放大。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ARCH -->
+<section id="arch">
+  <div class="wrap">
+    <span class="kicker">ARCHITECTURE</span>
+    <h2>一套平台,统一治理企业的全部 AI 资源</h2>
+    <p class="lead">插件化架构,按需启用;四类支柱构成企业 AI 原生化底座。</p>
+    <div class="pillars">
+      <div class="pillar"><span class="tag">IDENTITY</span><b>一套身份</b><p>人类员工与 AI 智能体双轨身份体系,统一 OIDC 认证,钉钉扫码免密登录,一人多岗、跨部门任职原生支持。</p></div>
+      <div class="pillar"><span class="tag">PERMISSION</span><b>一套权限</b><p>细粒度 RBAC 权限点体系,内置平台/资源/组织/开发/审计五类角色,每个操作、每个接口、每个文件都可独立授权。</p></div>
+      <div class="pillar"><span class="tag">METERING</span><b>一套计量</b><p>全资源统一计量管道,价格簿 + 三方对账 + 复式记账,每一分钱花在哪里清清楚楚,成本可穿透到部门与个人。</p></div>
+      <div class="pillar"><span class="tag">AUDIT</span><b>一套审计</b><p>状态变更必发事件,高危操作永久留痕,审批中心统一管理,满足企业合规与内控要求。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features" style="background:var(--bg2)">
+  <div class="wrap">
+    <span class="kicker">CAPABILITIES</span>
+    <h2>核心功能矩阵</h2>
+    <p class="lead">从组织到资产、从技能到成本,覆盖企业 AI 运营全生命周期。</p>
+    <div class="feats">
+      <div class="feat"><span class="no">01</span><h3>🏢 组织与账号 IAM</h3><p>真实还原制造业复杂组织形态。</p><ul><li>组织树 / 角色 / 用户组统一管理</li><li>钉钉通讯录自动同步</li><li>一人多岗、跨分支任职、多负责人</li><li>负责人悬空自动巡检告警</li></ul></div>
+      <div class="feat"><span class="no">02</span><h3>🔑 统一认证中心</h3><p>一个账号通行所有企业系统。</p><ul><li>标准 OIDC 身份提供方(强制 PKCE)</li><li>账密 + 钉钉扫码免密双通道</li><li>人机双轨身份,调用链全程可溯</li><li>令牌轮转、防重放、暴力破解锁定</li></ul></div>
+      <div class="feat"><span class="no">03</span><h3>🤖 智能体与 AI 应用</h3><p>让 AI 成为有身份、受管控的"数字员工"。</p><ul><li>智能体注册即获平台机器身份</li><li>生命周期联动,下线即吊销凭证</li><li>应用 PV/UV/DAU/留存指标</li><li>SSO 上线门禁:先纳管,再上线</li></ul></div>
+      <div class="feat"><span class="no">04</span><h3>🛒 技能市场 SkillHub</h3><p>把个人经验沉淀为组织资产。</p><ul><li>员工提交 → 安全扫描 → 两级审批上架</li><li>版本化管理,灰度发布</li><li>下载安装自动计量</li><li>技能热力图与使用效益分析</li></ul></div>
+      <div class="feat"><span class="no">05</span><h3>📁 文件资产权限管控</h3><p>图纸与工艺文件的"智能门禁"。</p><ul><li>按组织位置 + 角色层级自动判定权限</li><li>显式授权 / 拒绝,临时授权到期自动回收</li><li>共享申请在线审批</li><li>拒绝记录全量留痕,高危永久保存</li></ul></div>
+      <div class="feat"><span class="no">06</span><h3>⚡ MCP 服务与模型网关</h3><p>企业 AI 能力的统一出入口。</p><ul><li>MCP 服务部署、灰度、回滚、熔断</li><li>OpenAI 兼容模型网关,多模型统一接入</li><li>实测 token 计量,月度预算预检</li><li>40+ 运维工具,自然语言即可操作平台</li></ul></div>
+      <div class="feat"><span class="no">07</span><h3>💰 计量计费与成本穿透</h3><p>让 AI 投入产出第一次变得可量化。</p><ul><li>钱包 + 只追加流水 + 复式分账</li><li>试算平衡、红字冲正,账务可审计</li><li>成本穿透到资产、部门、主体</li><li>毛利与单位 DAU 成本效益分析</li></ul></div>
+      <div class="feat"><span class="no">08</span><h3>🛡️ 审计与审批中心</h3><p>企业内控合规的压舱石。</p><ul><li>四类审计日志全覆盖</li><li>破窗操作强制留痕</li><li>审批中心统一处理授权与上架</li><li>告警规则自定义,异常实时触达</li></ul></div>
+      <div class="feat"><span class="no">09</span><h3>🔌 远程接入与生态扩展</h3><p>开放架构,随企业成长而扩展。</p><ul><li>一次性接入码,远程设备安全纳管</li><li>第三方插件市场,签名验证 + 内容扫描</li><li>REST / MCP / CLI 三端同构 API</li><li>平台自更新,控制台一键升级</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<!-- UI -->
+<section id="ui">
+  <div class="wrap">
+    <span class="kicker">PRODUCT UI</span>
+    <h2>产品界面一览</h2>
+    <p class="lead">现代化管理控制台,一个工作台纵览企业全部 AI 资产与运营指标。</p>
+
+    <div class="mock">
+      <div class="mock-bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">console.company.local — 工作台</span></div>
+      <div class="mock-body">
+        <div class="mock-side">
+          <div class="lg">AIOS</div>
+          <a class="on">▦ 工作台</a><a>🛒 技能市场</a><a>🤖 智能体</a><a>📱 AI 应用</a><a>⚡ MCP 服务</a><a>📁 文件存储</a><a>🔐 文件权限</a><a>📊 资产运营</a><a>✅ 审批中心</a><a>🛡️ 审计告警</a><a>🏢 组织账号</a>
+        </div>
+        <div class="mock-main">
+          <h4>运营工作台</h4><div class="sub">企业 AI 资产总览 · 实时数据</div>
+          <div class="kpis">
+            <div class="kpi"><b>128</b><span>在线智能体</span><span class="up">▲ 12% 本月</span></div>
+            <div class="kpi"><b>36</b><span>已上架技能</span><span class="up">▲ 5 本周新增</span></div>
+            <div class="kpi"><b>4,209</b><span>今日 AI 调用</span><span class="up">▲ 31% 环比</span></div>
+            <div class="kpi"><b>¥ 3,862</b><span>本月模型成本</span><span class="up">预算内 62%</span></div>
+          </div>
+          <div class="chart"><i style="height:30%"></i><i style="height:45%"></i><i style="height:38%"></i><i style="height:60%"></i><i style="height:52%"></i><i style="height:74%"></i><i style="height:66%"></i><i style="height:88%"></i><i style="height:79%"></i><i style="height:95%"></i><i style="height:70%"></i><i style="height:100%"></i></div>
+          <div class="sub" style="margin:14px 0 8px">近 12 日 AI 调用趋势</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="mock" style="margin-top:36px">
+      <div class="mock-bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">console.company.local — 技能市场 / 审批中心</span></div>
+      <div class="mock-body">
+        <div class="mock-side">
+          <div class="lg">AIOS</div>
+          <a>▦ 工作台</a><a class="on">🛒 技能市场</a><a>🤖 智能体</a><a>📱 AI 应用</a><a>📁 文件存储</a><a>✅ 审批中心</a><a>🏢 组织账号</a>
+        </div>
+        <div class="mock-main">
+          <h4>技能市场 <span class="badge o" style="margin-left:8px">3 项待审批</span></h4>
+          <div class="sub">员工沉淀的 AI 技能,经安全扫描与两级审批后全厂复用</div>
+          <table class="tbl">
+            <tr><th>技能名称</th><th>提交人</th><th>版本</th><th>安装量</th><th>状态</th></tr>
+            <tr><td>CNC 加工程式智能校对</td><td>工艺部 · 王工</td><td>v2.3</td><td>86</td><td><span class="badge g">已上架</span></td></tr>
+            <tr><td>质检报告一键生成</td><td>质量部 · 李主管</td><td>v1.8</td><td>142</td><td><span class="badge g">已上架</span></td></tr>
+            <tr><td>供应商比价分析助手</td><td>采购部 · 陈经理</td><td>v1.2</td><td>37</td><td><span class="badge g">已上架</span></td></tr>
+            <tr><td>设备故障知识库问答</td><td>设备部 · 赵班长</td><td>v0.9</td><td>—</td><td><span class="badge o">二审中</span></td></tr>
+            <tr><td>生产排程冲突检测</td><td>计划部 · 周工</td><td>v1.0</td><td>—</td><td><span class="badge b">安全扫描</span></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="mock" style="margin-top:36px">
+      <div class="mock-bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="url">console.company.local — 文件权限 / 资产运营</span></div>
+      <div class="mock-body">
+        <div class="mock-side">
+          <div class="lg">AIOS</div>
+          <a>▦ 工作台</a><a class="on">🔐 文件权限</a><a class="on" style="border-color:var(--pri2);background:rgba(34,211,238,.08)">📊 资产运营</a><a>🛡️ 审计告警</a><a>🏢 组织账号</a>
+        </div>
+        <div class="mock-main">
+          <h4>文件权限判定留痕</h4>
+          <div class="sub">每一次访问按「组织位置 + 角色层级」自动判定,拒绝记录全量留痕</div>
+          <table class="tbl" style="margin-bottom:26px">
+            <tr><th>时间</th><th>访问人</th><th>路径</th><th>操作</th><th>判定</th></tr>
+            <tr><td>10:24</td><td>一车间 · 张班长</td><td>/工艺/一车间/铣削作业指导书</td><td>阅读</td><td><span class="badge g">放行 · 班组负责人</span></td></tr>
+            <tr><td>10:19</td><td>二车间 · 刘师傅</td><td>/工艺/一车间/夹具图纸</td><td>下载</td><td><span class="badge o">拒绝 · 跨班组</span></td></tr>
+            <tr><td>09:57</td><td>工艺部 · 王工</td><td>/工艺/通用/材料手册</td><td>阅读</td><td><span class="badge g">放行 · 临时授权</span></td></tr>
+          </table>
+          <h4>成本与效益穿透</h4>
+          <div class="sub" style="margin-bottom:14px">成本归集到部门与资产,投入产出可量化</div>
+          <table class="tbl">
+            <tr><th>部门</th><th>AI 月成本</th><th>活跃人数</th><th>人均成本</th><th>估算增效</th></tr>
+            <tr><td>质量部</td><td>¥ 1,204</td><td>18</td><td>¥ 67</td><td><span class="badge g">节省 214 工时</span></td></tr>
+            <tr><td>工艺部</td><td>¥ 986</td><td>12</td><td>¥ 82</td><td><span class="badge g">节省 158 工时</span></td></tr>
+            <tr><td>采购部</td><td>¥ 642</td><td>8</td><td>¥ 80</td><td><span class="badge g">节省 96 工时</span></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- SCENE -->
+<section id="scene" style="background:var(--bg2)">
+  <div class="wrap">
+    <span class="kicker">SCENARIOS</span>
+    <h2>从上线到见效,四步完成</h2>
+    <p class="lead">面向中小制造企业的标准化落地路径,无需专业 AI 团队。</p>
+    <div class="scenes">
+      <div class="scene">
+        <h3>🏭 制造企业 AI 原生化路径</h3><div class="tagline">以一家 300 人规模的精密制造企业为例</div>
+        <div class="step"><div class="n">1</div><div><b>第一周 · 组织上线</b><p>钉钉通讯录一键同步,组织架构、角色权限自动就位,员工扫码即可登录。</p></div></div>
+        <div class="step"><div class="n">2</div><div><b>第二周 · 资产纳管</b><p>图纸文档接入文件权限管控,AI 应用与智能体统一注册,SSO 门禁生效。</p></div></div>
+        <div class="step"><div class="n">3</div><div><b>第三周 · 技能沉淀</b><p>骨干员工将 AI 用法封装为技能上架市场,审批后全厂复用,经验变成资产。</p></div></div>
+        <div class="step"><div class="n">4</div><div><b>第四周 · 经营可视</b><p>成本穿透到部门,效益按工时量化,管理层第一次看清 AI 的投资回报。</p></div></div>
+      </div>
+      <div class="scene">
+        <h3>🦸 超级个体培养飞轮</h3><div class="tagline">让每一位骨干员工,都能撬动十倍产出</div>
+        <div class="step"><div class="n">学</div><div><b>用起来</b><p>免密登录,开箱即用的智能体与技能库,零门槛开始 AI 协作。</p></div></div>
+        <div class="step"><div class="n">创</div><div><b>造技能</b><p>把解决实际问题的提示词与流程封装成技能,提交市场,平台自动扫描。</p></div></div>
+        <div class="step"><div class="n">享</div><div><b>全厂复用</b><p>审批上架后同事一键安装,安装量、好评、效益数据实时可见。</p></div></div>
+        <div class="step"><div class="n">奖</div><div><b>价值兑现</b><p>技能贡献可计量、可排名,与激励挂钩,形成"使用 → 创造 → 分享"正循环。</p></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- VALUE -->
+<section id="value">
+  <div class="wrap">
+    <span class="kicker">VALUE</span>
+    <h2>企业推广效益</h2>
+    <p class="lead">为客户创造的三重可量化价值。</p>
+    <div class="values">
+      <div class="value"><b>90%</b><h4>AI 落地周期缩短</h4><p>从"选型试点大半年"到"四周见效",标准化产品 + 一键部署,告别定制开发泥潭。</p></div>
+      <div class="value"><b>10×</b><h4>骨干员工产出放大</h4><p>超级个体用智能体矩阵并行处理重复工作,质检、排程、文档效率成倍提升。</p></div>
+      <div class="value"><b>100%</b><h4>AI 支出透明可控</h4><p>每一笔模型调用、每一个订阅费用穿透到部门,预算预检杜绝成本失控。</p></div>
+      <div class="value"><b>0</b><h4>数据泄露盲区</h4><p>文件访问全量判定留痕,显式授权到期自动回收,核心图纸资产固若金汤。</p></div>
+      <div class="value"><b>N→1</b><h4>工具收敛为一套平台</h4><p>分散的 AI 账号与订阅统一纳管,采购成本立降,管理负担归零。</p></div>
+      <div class="value"><b>∞</b><h4>经验资产持续增值</h4><p>员工经验以技能形式沉淀、迭代、复用,组织智慧不再随人员流动而流失。</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- INVEST -->
+<section id="invest" style="background:var(--bg2)">
+  <div class="wrap">
+    <span class="kicker">FOR INVESTORS</span>
+    <h2>为什么这是一个值得投资的赛道与产品</h2>
+    <p class="lead">制造业数智化是国家战略级赛道,而"企业 AI 治理"是其中刚刚开启的蓝海。</p>
+    <div id="invest" class="grid">
+      <div>
+        <div class="invest-card"><h4>🌊 万亿级市场,渗透率极低</h4><p>中国中小制造企业超过 500 万家,AI 渗透率不足 5%。通用大模型解决不了企业治理问题,专用的 AI 资源管理平台是刚需空白。</p></div>
+        <div class="invest-card"><h4>🧱 高切换成本,强客户粘性</h4><p>组织、权限、技能、账务数据全部沉淀在平台上,一旦上线即成为企业的 AI 基础设施,续费率与扩展空间天然优秀。</p></div>
+        <div class="invest-card"><h4>📈 飞轮式增长模型</h4><p>客户内部"超级个体"创造的技能越多,平台价值越大;技能市场未来可跨企业流通,具备从工具到平台的网络效应潜力。</p></div>
+        <div class="invest-card"><h4>⚙️ 标准化产品,边际成本趋零</h4><p>插件化架构按需启用,私有化一键部署 + 演示模式开箱即用,无需为每个客户定制,交付效率远超项目制厂商。</p></div>
+        <div class="invest-card"><h4>💵 多元收入结构</h4><p>平台订阅费 + 模型转售网关分成 + 技能市场撮合 + 增值插件生态,四层收入叠加,LTV 持续提升。</p></div>
+      </div>
+      <div class="invest-big">
+        <h3>投资亮点速览</h3>
+        <ul>
+          <li><b>赛道卡位:</b>企业 AI 治理层 —— 大模型之上的确定性基础设施机会</li>
+          <li><b>产品成熟度:</b>20 个功能模块,700+ 项端到端质量断言,已在真实场景迭代五个大版本</li>
+          <li><b>技术壁垒:</b>人机双轨身份、组织级文件权限判定引擎、复式计量账务,均为自研核心</li>
+          <li><b>交付模式:</b>标准化 SaaS 化交付,私有化部署满足制造业数据安全要求</li>
+          <li><b>生态延展:</b>开放插件与技能市场,第三方开发者共建,平台属性随规模增强</li>
+          <li><b>政策东风:</b>中小企业数字化转型城市试点、制造业智能化改造政策持续加码</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section id="cta">
+  <div class="wrap">
+    <span class="kicker">GET STARTED</span>
+    <h2>让 AI 真正成为<br>企业的生产力</h2>
+    <p class="lead" style="margin:0 auto 40px">演示模式一键开启,欢迎预约产品演示或洽谈投资合作。</p>
+    <a class="btn" style="font-size:17px;padding:16px 46px">预约产品演示</a>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">AIOS · 企业 AI 资源统一管理平台 — 一套身份 · 一套权限 · 一套计量 · 一套审计</div>
+</footer>
+
+</body>
+</html>
