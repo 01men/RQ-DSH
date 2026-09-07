@@ -3952,6 +3952,46 @@ try {
   check('面板侧切换接线（管理控制台 data-landing 偏好 + 401 引导带 ?next= 回面板）',
     panelApp.includes('data-landing') && panelApp.includes('next='))
 
+  // ================================================================ 宿主服务连接切换（docs/frontend-host-switching.md）
+  section('宿主服务连接切换（前端多宿主 + 数据面跨域放行）')
+  // 决议纯函数（platform-core http 导出，selftest 直测）
+  check('CORS 决议：* 放行任意来源', platformCore.corsAllowOriginFor(['*'], 'http://192.168.0.5:7300') === '*')
+  check('CORS 决议：无 Origin（同源/curl）不放行', platformCore.corsAllowOriginFor(['*'], undefined) === undefined)
+  check('CORS 决议：白名单命中精确回显', platformCore.corsAllowOriginFor(['http://a:1', 'http://b:2'], 'http://b:2') === 'http://b:2')
+  check('CORS 决议：白名单未命中不发放', platformCore.corsAllowOriginFor(['http://a:1'], 'http://evil:2') === undefined)
+  check('CORS 决议：空列表=关闭', platformCore.corsAllowOriginFor([], 'http://a:1') === undefined)
+  check('CORS 决议：畸形 Origin 不发放', platformCore.corsAllowOriginFor(['http://a:1'], 'not-a-url') === undefined)
+  // 数据面端到端（隔离实例默认 corsAllowOrigins=['*']）
+  const connOrigin = 'http://192.168.0.5:7300'
+  const corsPreflightApi = await rawReq('OPTIONS', '/api/health', { headers: { origin: connOrigin, 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization,content-type' } })
+  check('API 预检 OPTIONS → 204 + allow-origin/methods/headers/max-age（先于鉴权中间件，不被 401 拦截）',
+    corsPreflightApi.status === 204
+    && corsPreflightApi.headers['access-control-allow-origin'] === '*'
+    && String(corsPreflightApi.headers['access-control-allow-methods']).includes('POST')
+    && String(corsPreflightApi.headers['access-control-allow-headers']).includes('authorization')
+    && String(corsPreflightApi.headers['access-control-allow-headers']).includes('content-type')
+    && corsPreflightApi.headers['access-control-max-age'] === '600')
+  const corsHealth = await rawReq('GET', '/api/health', { headers: { origin: connOrigin } })
+  check('公开端点跨域携带放行头（连接页测活可读）', corsHealth.status === 200 && corsHealth.headers['access-control-allow-origin'] === '*')
+  const corsUnauthorized = await rawReq('GET', '/api/overview', { headers: { origin: connOrigin } })
+  check('鉴权端点 401 错误体同样携带放行头（远端页面可读失败原因）',
+    corsUnauthorized.status === 401 && corsUnauthorized.headers['access-control-allow-origin'] === '*')
+  const corsAuthorized = await rawReq('GET', '/api/overview', { headers: { origin: connOrigin, authorization: `Bearer ${admin}` } })
+  check('携带 Bearer 的跨域业务请求正常返回（宿主切换后的主链路）',
+    corsAuthorized.status === 200 && jsonBody(corsAuthorized).ok === true)
+  const corsNoOrigin = await rawReq('OPTIONS', '/api/health')
+  check('无 Origin 的 OPTIONS 不被预检分支劫持（同源行为不变）', corsNoOrigin.status === 404 && corsNoOrigin.headers['access-control-allow-origin'] === undefined)
+  // 前端接线：连接管理纯函数随包单测 + api.js 动态 BASE 不变量
+  const connectionsTest = spawn(process.execPath, ['packages/plugin-console/public/js/connections.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => connectionsTest.on('close', resolve))
+  check('连接管理纯函数随包单测全绿（node --test）', connectionsTest.exitCode === 0, `exit=${connectionsTest.exitCode}`)
+  const apiSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'api.js'), 'utf8')
+  check('api.js 动态 BASE + 会话按连接隔离 + 桥接直通仅本机（连接切换的三个承重点）',
+    apiSrc.includes('activeConnection(localStorage, MOUNT)') && apiSrc.includes('TOKEN_NS') && apiSrc.includes('IS_LOCAL_HOST'))
+  const appConnSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'app.js'), 'utf8')
+  check('控制台接线：#/connections 会话前置独立渲染 + 外壳内 builders + 顶栏远程指示',
+    appConnSrc.includes("page === 'connections'") && appConnSrc.includes('connections: renderConnections') && appConnSrc.includes('conn-indicator'))
+
   // ================================================================ 门户数据通道（plugin-portal：外部拉取端点）
   section('门户数据通道（plugin-portal：企业门户拉取已发布应用/Agent，非核心）')
   const portalOrigin = 'http://192.168.0.4:8092'

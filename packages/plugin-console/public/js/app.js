@@ -1,6 +1,6 @@
 /** 应用外壳：路由 + 布局 + 侧边栏 + 顶栏 + ⌘K 命令面板。 */
 import { icon } from './icons.js'
-import { session, api, exchangeBridgeSession } from './api.js'
+import { session, api, exchangeBridgeSession, BASE, IS_LOCAL_HOST, CONNECTION_NAME } from './api.js'
 import { $, $$, h, toast, esc } from './ui.js'
 import { openCmdk } from './cmdk.js'
 import { replayPlatformTheme, PLATFORM_KEY } from './platform.js'
@@ -36,6 +36,7 @@ import { renderAssets } from './pages/assets.js'
 import { renderRegister } from './pages/register.js'
 import { renderPlatform } from './pages/platform.js'
 import { renderConnect } from './pages/connect.js'
+import { renderConnections } from './pages/connections.js'
 import { renderOauthAuthorize, renderOauthError, renderOauthLogout } from './pages/oauth.js'
 import { mountUpdateBadge, openUpdateDrawer } from './update.js'
 
@@ -69,6 +70,7 @@ const NAV = [
   ] },
   { section: '平台', items: [
     { path: '#/connect', label: '平台接入', icon: 'fingerprint', perm: 'connect.manage' },
+    { path: '#/connections', label: '宿主服务连接', icon: 'server', perm: 'console.login' },
     { path: '#/platform', label: '插件与工具', icon: 'puzzle', perm: 'console.login' },
   ] },
 ]
@@ -95,6 +97,12 @@ function navigate() {
   }
 
   if (!session.token) {
+    // 宿主连接页会话前置（docs/frontend-host-switching.md）：登录前就要能换目标宿主，
+    // 以极简独立形态渲染（不走控制台外壳）；有会话时走下方 builders 在外壳内渲染。
+    if (page === 'connections') {
+      renderConnections(app, params, { standalone: true })
+      return
+    }
     renderLogin(app)
     return
   }
@@ -117,6 +125,7 @@ function navigate() {
     approvals: renderApprovals,
     platform: renderPlatform,
     connect: renderConnect,
+    connections: renderConnections,
   }
   const builder = builders[page] ?? renderDashboard
   renderShell(page, params, builder)
@@ -144,6 +153,7 @@ function renderShell(page, params, builder) {
             <kbd>⌘K</kbd>
           </div>
           <div class="topbar-right">
+            ${IS_LOCAL_HOST ? '' : `<button class="badge badge-warn no-dot" id="conn-indicator" title="当前连接远程宿主服务，点击管理连接" style="cursor:pointer;border:0">${icon('server', 13)} ${esc(CONNECTION_NAME)}</button>`}
             <button class="icon-btn" id="btn-refresh" title="刷新数据">${icon('refresh')}</button>
             <div style="position:relative" id="update-host"></div>
             <div style="position:relative" id="alert-host"></div>
@@ -196,6 +206,7 @@ function renderShell(page, params, builder) {
     navigate()
   }
   $('#btn-refresh').onclick = () => { navigate(); toast('数据已刷新') }
+  $('#conn-indicator')?.addEventListener('click', () => { location.hash = '#/connections' })
   $('#cmdk-trigger').onclick = () => openCmdk()
   $('#avatar').onclick = () => openCmdk()
 

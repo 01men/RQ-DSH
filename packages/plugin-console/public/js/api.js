@@ -1,14 +1,30 @@
 /** API 客户端：令牌管理 + 统一请求封装。 */
 
-const TOKEN_KEY = 'heng_ops_token'
-const REFRESH_KEY = 'heng_ops_refresh'
-const USER_KEY = 'heng_ops_user'
+import { activeConnection, LOCAL_ID } from './connections.js'
 
 /**
  * 部署前缀：独立形态（根路径部署）为 ''；dsh 宿主挂载形态下页面位于 /rq/ 之下，
  * 由文档地址自动推导（SPA 全程 hash 路由，document URL 恒为目录形态）。
  */
-export const BASE = new URL('.', document.baseURI).pathname.replace(/\/$/, '')
+const MOUNT = new URL('.', document.baseURI).pathname.replace(/\/$/, '')
+
+/**
+ * 活动宿主连接（docs/frontend-host-switching.md）：默认本机（base = 部署前缀，同源）；
+ * 配置过远程宿主并切换后，base 为远程完整地址（含其挂载前缀），API 全部改发远程——
+ * BASE 在模块加载时定刻，切换连接后经整页刷新重新定刻。
+ */
+const CONNECTION = activeConnection(localStorage, MOUNT)
+
+export const BASE = CONNECTION.base
+export const CONNECTION_ID = CONNECTION.id
+export const CONNECTION_NAME = CONNECTION.name
+/** 是否连在本机宿主（本机独有语义——宿主 Cookie 直通、本机对话面入口——仅此态生效）。 */
+export const IS_LOCAL_HOST = CONNECTION.id === LOCAL_ID
+
+const TOKEN_NS = IS_LOCAL_HOST ? '' : `@${CONNECTION.id}`
+const TOKEN_KEY = `heng_ops_token${TOKEN_NS}`
+const REFRESH_KEY = `heng_ops_refresh${TOKEN_NS}`
+const USER_KEY = `heng_ops_user${TOKEN_NS}`
 
 export const session = {
   get token() { return localStorage.getItem(TOKEN_KEY) ?? '' },
@@ -123,8 +139,10 @@ export async function entryTicketSession(ticket) {
 /**
  * dsh-bridge 绑定自检（WP-04/A2）：cookie 面（rq_sid，非 Bearer 通道），不在 request() 内。
  * 独立形态（无宿主）404/异常 → 返回 null，由调用方静默处理。
+ * 远程宿主连接态恒返回 null：本机宿主 Cookie 换来的是本机会话，与远程数据面无关。
  */
 export async function bridgeStatus() {
+  if (!IS_LOCAL_HOST) return null
   let response
   try {
     response = await fetch('/dsh-bridge/status', { headers: { accept: 'application/json' } })
@@ -140,9 +158,10 @@ export async function bridgeStatus() {
  * 宿主 Cookie → 平台会话直通（控制台启动会话链第三级，与部门面板 boot 同款语义）：
  * rq_sid 已绑定宿主身份时免二次登录。路径必须根绝对（不带 BASE）——
  * /dsh-bridge/* 注册在 dsh webServer 根上，挂载形态不落 /rq 之内。
- * 独立形态（无宿主）404/HTML → null，静默跳过。
+ * 独立形态（无宿主）404/HTML → null，静默跳过；远程宿主连接态同理（见 bridgeStatus）。
  */
 export async function exchangeBridgeSession() {
+  if (!IS_LOCAL_HOST) return null
   const status = await fetch('/dsh-bridge/status', { headers: { accept: 'application/json' } })
     .then((r) => r.json()).catch(() => null)
   if (!status?.data?.bound) return null
@@ -162,6 +181,24 @@ export async function downloadBlob(path) {
   const response = await fetch(`${BASE}${path}`, { headers })
   if (!response.ok) throw new ApiError('HTTP_' + response.status, `下载失败（${response.status}）`, response.status)
   return response.blob()
+}
+
+/**
+ * 连接页测活（docs/frontend-host-switching.md）：探测任意宿主基址的 /api/health（公开端点）。
+ * 探测目标可以是「尚未切换」的连接，不能走 request()（其 PATH 恒落在活动连接上），故在 api.js
+ * 内单列（console 前端零裸 fetch 不变量的豁免边界即 api.js）。
+ */
+export async function probeHostBase(base) {
+  const started = Date.now()
+  let response
+  try {
+    response = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(5000) })
+  } catch {
+    return { ok: false, message: '不可达（地址错误，或目标宿主版本较早未放行跨域）' }
+  }
+  const payload = await response.json().catch(() => null)
+  if (!response.ok || payload?.ok === false) return { ok: false, message: `HTTP ${response.status}` }
+  return { ok: true, message: `${Date.now() - started}ms` }
 }
 
 export const api = {

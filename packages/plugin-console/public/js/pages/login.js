@@ -1,5 +1,5 @@
 /** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）/ 票据免登（?ticket= 一次性参数）。 */
-import { api, session, entryTicketSession, BASE } from '../api.js'
+import { api, session, entryTicketSession, BASE, CONNECTION_NAME, IS_LOCAL_HOST } from '../api.js'
 import { sanitizeNext, resolveLanding, LANDING_PREF_KEY } from '../landing.js'
 import { icon } from '../icons.js'
 import { h, $, esc, toast } from '../ui.js'
@@ -112,8 +112,17 @@ export function renderLogin(app) {
             <button class="btn btn-ghost btn-block mt-8" id="ding-pending-back">返回重试</button>
           </div>
         </form>
+
+        <div class="form-hint" style="margin-top:18px;display:flex;gap:6px;align-items:center">
+          ${icon('server', 13)}
+          <span>宿主服务：${esc(CONNECTION_NAME)}${IS_LOCAL_HOST ? '' : '（远程）'}</span>
+          <a id="login-conn-link" style="color:var(--brand-500);cursor:pointer">更换</a>
+        </div>
       </div>
     </div>`
+
+  // 登录前换宿主（docs/frontend-host-switching.md）：#/connections 无会话可用（独立形态渲染）
+  $('#login-conn-link').onclick = () => { location.hash = '#/connections' }
 
   const tabPassword = $('#login-form-password')
   const tabDing = $('#login-form-dingtalk')
