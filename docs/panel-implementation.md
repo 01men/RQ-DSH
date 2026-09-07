@@ -66,7 +66,46 @@
 - 冒烟实例（DEMO_SEED=1）+ 浏览器实测：登录引导页（过期 token 401 路径）→ 会话注入 → 面板完整渲染（截图核对：顶栏行业选择器/五部门 rail/主题切换/KPI/名册/频道未读/四类消息气泡/操作卡片/dd 徽标/widget 来源徽标+LIVE）→ 任务看板泳道推进 → 场景图谱（活动分组/评级统计/四清单 chips）→ 派 Agent 诊断联动（会话+任务+toast）→ @Agent 降级回包经 **SSE 实时上屏** → 绑定资产后走模型网关（模型缺失诚实报错转人工）
 - 独立发现的缺陷已在实现内修复：SSE 处理器缺 `authn` inject、@提及全名匹配、启动路径白屏（先渲染骨架+401 显式引导）、origin 徽标重复、行业按钮数据后刷新
 
-## 五、明确不做 / 后续项（对齐评审 C 节与 Phase 4）
+## 五、宿主侧深度打通（第二轮：登录 / 账号组织 / 权限控制）
+
+1. **登录打通——宿主会话直通**：dsh-bridge 新增 `POST /dsh-bridge/session`（同源收紧沿用 fence 语义）：
+   `rq_sid` Cookie 绑定身份 → `ensureHumanPrincipal + issueSessionPair` → 平台会话对（含 permissions），
+   与票据免登同安全语义（账号状态实时校验、审计留痕 `dsh_bridge.cookie.session`）。面板 boot 会话链升级为
+   **已有令牌 → ?entry_ticket= → 宿主 Cookie 直通** 三级：dsh 宿主内点入 `/rq/panel/` 零二次登录；
+   独立形态 `/dsh-bridge/*` 不存在时静默跳过。fail-closed：未绑定 401 NOT_BOUND / 账号停用 401。
+2. **账号组织打通——部门↔组织绑定**：`deptConfig.orgId`（基线种子按组织名与部门名同名自动绑定；
+   管理员经 `PUT /api/panel/:dept/config` 手工绑定/解绑，配置抽屉下发组织树选择器）。
+   总览随下发绑定组织名 + **部门名册**（组织子树 active 成员，最小 PII：姓名/职务/组织名），
+   输入区 @同事 chips 与 ⌘K 同事源即真实名册。
+3. **权限控制——部门范围权限（组织治理双通道）**：部门绑定组织后，除 `panel.read` 权限点外追加
+   组织子树归属校验（`'*'` 管理员、机器凭证、org_admin 角色豁免），未授权者 403 `部门范围受限`；
+   部门清单带 `allowed` 徽标，rail 对越界部门显式锁定。
+4. **Agent 阵容 × 资产底座联动**：名册卡实时解析 agentRef 指向的 Agent 资产（状态/模型），
+   在线状态点显色；运行时、面板、资源底座三方同一事实源。
+
+**selftest 新增 10 项**：宿主会话直通（兑换/直通面板 RBAC 面/无 Cookie 拒）+ 部门绑定组织、
+组织子树成员放行、组织外成员 403、allowed 徽标、'*' 豁免、解绑恢复、资产状态联动。合计 881/881。
+
+## 六、已上线宿主（192.168.0.7:7300）真实性测试现状
+
+实测（本会话，无凭据可达面）：
+- `GET /api/health` ✔；`GET /api/auth/providers` ✔ ——**两个真实钉钉企业连接器在案**：
+  杭州榕器创（`ding8e17…`）、金华聚杰电器（`ding9f3d…`）
+- 公开门户契约 ✔：真实资产盘点 = 2 个已上线 AI 应用（能耗与碳排管理系统、企业AI门户）、
+  8 名数字员工、3 个上架 Skill、1 个在线 MCP 服务
+- 演示账号口令已按部署清单全部轮换（`Ybk@2026` 全部失效——符合 `docs/deploy-enterprise.md` 凭证纪律），
+  仓内零真实口令/密钥（红线一 T-24 同款约束）
+
+**凭证面测试交接运维一步执行**（凭证不出运维环境）：
+```bash
+DSHCTL_URL=http://192.168.0.7:7300 DSHCTL_USER=admin DSHCTL_PASS='***' \
+  node scripts/verify-live-host.mjs
+```
+脚本依次验证：真钉钉 OpenAPI 健康检查（宿主内存凭证拉真实 accessToken+部门树）→ 真实资产/名册盘点 →
+面板侧就绪（/panel/ + 五部门 + 行业三态；宿主未部署本分支时如实报缺）。钉钉桥接出向真实发消息需在
+宿主部署本分支后，绑定真实群 openConversationId + robotCode 再验（脚本与面板 UI 均已就绪）。
+
+## 七、明确不做 / 后续项（对齐评审 C 节与 Phase 4）
 
 1. **入向钉钉 Stream**：R-SPIKE 未决（官方连接器暴露面 + 同 clientId 单连接约束），出向已可用，入向在 status 端点如实声明停用
 2. **Ed25519 license 签发链路**：激活走审批+能力授权，市场 license 资产化（content.scenegraph 契约扩展）留 Phase 4

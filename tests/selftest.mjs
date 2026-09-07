@@ -4159,6 +4159,33 @@ try {
     const memberConfig = await api('PUT', '/api/panel/mfg/kpis', { token: memberToken, body: { kpis: [] } })
     check('面板：成员可读总览（panel.read 迁移生效）但改配置被拒（403）',
       memberRead.ok && memberConfig.status === 403, `read=${memberRead.status} config=${memberConfig.status}`)
+
+    // -- 账号组织打通：部门↔组织绑定 + 部门范围权限 + 名册/资产联动 -------------------
+    const agentAssetOverview = await api('GET', '/api/panel/mfg/overview', { token: panelAdmin })
+    check('面板：Agent 阵容联动资产状态（asset.status/model 实时解析自资源底座）',
+      agentAssetOverview.data.agents.find((agent) => agent.name === '面板质检员')?.asset?.model === 'deepseek-chat',
+      JSON.stringify(agentAssetOverview.data?.agents?.map((agent) => ({ n: agent.name, asset: agent.asset?.status }))))
+    const boundOrg = await api('POST', '/api/iam/orgs', { token: panelAdmin, body: { name: '研发部（自测）' } })
+    const orgBind = await api('PUT', '/api/panel/rd/config', { token: panelAdmin, body: { orgId: boundOrg.data.id } })
+    check('面板：部门绑定组织（PUT config，账号组织打通管理动作）',
+      orgBind.ok && orgBind.data.dept.org?.name === '研发部（自测）', JSON.stringify(orgBind.error ?? orgBind.data?.dept?.org))
+    const rdUser = await api('POST', '/api/iam/users', { token: panelAdmin, body: { username: 'rd_scope_member', displayName: '研发部张工', orgId: boundOrg.data.id, roleIds: [memberRole.id] } })
+    const rdLogin = await api('POST', '/api/auth/login', { body: { username: 'rd_scope_member', password: rdUser.data.initialPassword } })
+    const rdOverview = await api('GET', '/api/panel/rd/overview', { token: rdLogin.data.token })
+    check('面板：组织子树成员可访问已绑定部门 + 成员名册随总览下发',
+      rdOverview.ok && rdOverview.data.org?.name === '研发部（自测）' && rdOverview.data.members.some((member) => member.name === '研发部张工'),
+      JSON.stringify({ ok: rdOverview.ok, org: rdOverview.data?.org, members: rdOverview.data?.members?.length }))
+    const outsiderDenied = await api('GET', '/api/panel/rd/overview', { token: memberToken })
+    check('面板：组织外成员被部门范围权限拒绝（403，组织治理双通道）',
+      outsiderDenied.status === 403 && /部门范围/.test(outsiderDenied.error?.message ?? ''), JSON.stringify(outsiderDenied.error))
+    const outsiderDepts = await api('GET', '/api/panel/depts', { token: memberToken })
+    check('面板：部门清单带 allowed 徽标（外部成员视角 rd 锁定/mfg 开放）',
+      outsiderDepts.ok && outsiderDepts.data.depts.find((dept) => dept.id === 'rd').allowed === false
+      && outsiderDepts.data.depts.find((dept) => dept.id === 'mfg').allowed === true)
+    const adminCrossDept = await api('GET', '/api/panel/rd/overview', { token: panelAdmin })
+    check("面板：'*' 管理员跨部门直通（治理豁免）", adminCrossDept.ok)
+    const orgUnbind = await api('PUT', '/api/panel/rd/config', { token: panelAdmin, body: { orgId: null } })
+    check('面板：解除组织绑定恢复开放', orgUnbind.ok && !orgUnbind.data.dept.org)
   }
 
   // ================================================================ 钉钉桥接（review-dsh-agent-panel-v2 Phase 3）
@@ -4304,7 +4331,7 @@ try {
     }))
     const bindingService = new dshBridge.IdentityBindingService(mountCtx, {})
     dshBridge.apply(
-      { webServer: fakeWebServer, httpServer: mountCtx.httpServer, entryTickets: mountCtx.entryTickets, oidc: mountCtx.oidc, logger: (name) => mountCtx.logger(name), identityBinding: bindingService },
+      { webServer: fakeWebServer, httpServer: mountCtx.httpServer, entryTickets: mountCtx.entryTickets, oidc: mountCtx.oidc, iam: mountCtx.iam, authn: mountCtx.authn, audit: mountCtx.audit, logger: (name) => mountCtx.logger(name), identityBinding: bindingService },
       { mountPath: '/rq', oidcCredentialFile: join(bridgeDataDir, 'dsh-agent-credential.json') },
     )
     check('bridge 向 webServer 注册挂载路由（/rq + /auth/entry + /dsh-bridge + /auth/oidc/*）',
@@ -4392,6 +4419,23 @@ try {
     mountCtx.iam.users().update(adminUser.id, { status: 'active' })
     const crossOrigin = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { origin: 'http://evil.example.com' } })
     check('绑定面同源收紧：跨站 Origin 403（对齐 dsh fence 语义）', crossOrigin.status === 403)
+
+    // -- 宿主会话直通（review-dsh-agent-panel-v2 宿主打通）：rq_sid → 平台会话 → 面板 RBAC 面 --
+    mountCtx.iam.users().update(adminUser.id, { status: 'active' })
+    const sessionRes = await fetch(`${simOrigin}/dsh-bridge/session`, { method: 'POST', headers: { 'content-type': 'application/json', cookie } })
+    const sessionBody = await sessionRes.json().catch(() => null)
+    check('宿主会话直通：Cookie 绑定身份兑换平台会话（token + user + permissions）',
+      sessionRes.status === 200 && sessionBody?.ok === true && Boolean(sessionBody.data?.token) && Array.isArray(sessionBody.data?.user?.permissions) && sessionBody.data.user.permissions.length > 0,
+      JSON.stringify(sessionBody?.error ?? sessionBody?.data?.user?.displayName))
+    const panelViaSession = await fetch(`${simOrigin}/rq/api/panel/depts`, { headers: { authorization: `Bearer ${sessionBody.data.token}` } })
+    const panelViaSessionBody = await panelViaSession.json().catch(() => null)
+    check('宿主会话直通：兑换令牌直通面板 RBAC 面（/rq/api/panel/depts 200）',
+      panelViaSession.status === 200 && panelViaSessionBody?.ok === true && Array.isArray(panelViaSessionBody.data?.depts) && panelViaSessionBody.data.depts.length === 5,
+      `status=${panelViaSession.status}`)
+    const sessionNoCookie = await fetch(`${simOrigin}/dsh-bridge/session`, { method: 'POST' })
+    const sessionNoCookieBody = await sessionNoCookie.json().catch(() => null)
+    check('宿主会话直通：无 Cookie 401（NOT_BOUND fail-closed，同源面统一收紧）',
+      sessionNoCookie.status === 401 && sessionNoCookieBody?.error?.code === 'NOT_BOUND')
 
     // -- behavior 消费语义（WP-03/D3，进程内直测：投递 / 死信 / 重放幂等） -----------
     const behaviorSeen = []

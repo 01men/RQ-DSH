@@ -73,6 +73,11 @@ export interface DeptConfigRecord extends RecordBase {
   agents: DeptAgent[]
   kpis: DeptKpi[]
   widgets: DeptWidget[]
+  /**
+   * 绑定的平台组织（账号组织打通）：设置后部门范围权限生效——仅该组织子树内的成员
+   * （及 '*' 管理员、机器凭证）可访问本部门面板；缺省=对持 panel.read 者开放。
+   */
+  orgId?: string
 }
 
 export interface ChannelRecord extends RecordBase {
@@ -236,6 +241,58 @@ export class PanelService extends Service {
     return { code: activation.code.toLowerCase(), name: registry?.name ?? activation.code }
   }
 
+  // -- 账号组织打通：部门 ↔ 平台组织 -----------------------------------------
+
+  /** 组织子树包含判定（orgId 沿 parentId 上溯到 rootId）。 */
+  orgSubtreeContains(rootId: string, orgId: string): boolean {
+    let current = this.ctx.iam.orgs().get(orgId)
+    let guard = 0
+    while (current && guard++ < 32) {
+      if (current.id === rootId) return true
+      current = current.parentId ? this.ctx.iam.orgs().get(current.parentId) : undefined
+    }
+    return false
+  }
+
+  /** 绑定组织信息（名称实时解析，组织改名不落陈旧数据）。 */
+  deptOrg(dept: DeptConfigRecord): { id: string; name: string } | undefined {
+    if (!dept.orgId) return undefined
+    const org = this.ctx.iam.orgs().get(dept.orgId)
+    return org ? { id: org.id, name: org.name } : undefined
+  }
+
+  /**
+   * 部门范围权限（权限控制 × 组织归属双通道）：'*' 管理员与机器凭证（经 scope 授权的集成面）
+   * 直通；绑定组织后，人必须属于该组织子树；未绑定部门对所有 panel.read 持有者开放。
+   * org_admin 角色跨部门治理豁免（与 iam.* 的治理语义一致）。
+   */
+  deptScopeAllowed(exchangeCaller: { kind: string; userId?: string; permissions: string[] }, dept: DeptConfigRecord): boolean {
+    if (exchangeCaller.permissions.includes('*')) return true
+    if (exchangeCaller.kind === 'machine') return true
+    if (!dept.orgId) return true
+    if (exchangeCaller.userId) {
+      const user = this.ctx.iam.users().get(exchangeCaller.userId)
+      if (user) {
+        const isOrgAdmin = user.roleIds.some((roleId) => this.ctx.iam.roles().get(roleId)?.code === 'org_admin')
+        if (isOrgAdmin) return true
+        return this.orgSubtreeContains(dept.orgId, user.orgId)
+      }
+    }
+    return false
+  }
+
+  /** 部门名册：绑定组织（或全组织兜底）子树内的成员（最小 PII：姓名/职务/组织名）。 */
+  deptMembers(dept: DeptConfigRecord, limit = 50): Array<{ id: string; name: string; title?: string; orgName?: string }> {
+    const orgRoot = dept.orgId ?? this.ctx.iam.orgs().find((org) => org.parentId === null).at(0)?.id
+    if (!orgRoot) return []
+    const inScope = (orgId: string): boolean => this.orgSubtreeContains(orgRoot, orgId)
+    const orgName = (orgId: string): string => this.ctx.iam.orgs().get(orgId)?.name ?? ''
+    return this.ctx.iam.users().all()
+      .filter((user) => user.status === 'active' && inScope(user.orgId))
+      .slice(0, limit)
+      .map((user) => ({ id: user.id, name: user.displayName, ...(user.title ? { title: user.title } : {}), orgName: orgName(user.orgId) }))
+  }
+
   /** 计量键（D1 裁决）：panel:<dept>.<行业code 小写>；无激活行业回落 panel:<dept>.core。 */
   meterResource(dept: string, orgId: string): string {
     const industry = this.activeIndustry(orgId)
@@ -274,6 +331,22 @@ export class PanelService extends Service {
       } catch { /* usage 缺失时不阻断激活（计费面独立降级） */ }
       this.ctx.platformBus.emit(PlatformEvents.PanelIndustryActivated, { code, orgId, activatedBy: approverId })
       return { code, orgId, status: 'active' }
+    }
+  }
+
+  /** Agent 阵容 × Agent 资产联动：绑定资产的存在性与生命周期状态实时解析（宿主数字员工在线面）。 */
+  agentWithAsset(agentCard: DeptAgent): DeptAgent & { asset?: { id: string; slug?: string; name: string; status: string; model?: string } } {
+    const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
+    if (!ref) return { ...agentCard }
+    const asset = this.ctx.resourceCore.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref)
+    if (!asset) return { ...agentCard }
+    const attrs = asset.attrs as Record<string, unknown> | undefined
+    return {
+      ...agentCard,
+      asset: {
+        id: asset.id, ...(asset.slug ? { slug: asset.slug } : {}), name: asset.name,
+        status: String(asset.status ?? 'draft'), ...(attrs?.model ? { model: String(attrs.model) } : {}),
+      },
     }
   }
 

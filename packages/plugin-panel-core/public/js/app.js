@@ -122,7 +122,9 @@ async function init() {
     const [deptsRes, indRes] = await Promise.all([api.get('/api/panel/depts'), api.get('/api/panel/industries')])
     state.depts = deptsRes.depts
     state.industries = indRes.industries
-    if (!state.depts.some((dept) => dept.id === state.dept)) state.dept = state.depts[0]?.id ?? 'mfg'
+    // 部门范围权限（账号组织打通）：无权限的部门不可作为当前部门
+    const allowedDepts = state.depts.filter((dept) => dept.allowed !== false)
+    if (!allowedDepts.some((dept) => dept.id === state.dept)) state.dept = allowedDepts[0]?.id ?? state.dept
     state.industry = state.industries.find((item) => item.state === 'active') ?? null
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
@@ -335,15 +337,22 @@ function renderLiveBadge() {
 
 function renderRail() {
   const rail = document.getElementById('rail')
-  rail.innerHTML = state.depts.map((dept) => `
-    <div class="rail-item ${dept.id === state.dept ? 'active' : ''}" data-dept="${esc(dept.id)}">
-      <div class="ico">${esc(dept.icon)}</div><div class="nm">${esc(dept.label)}</div>
-    </div>`).join('') + `
+  rail.innerHTML = state.depts.map((dept) => {
+    const locked = dept.allowed === false
+    return `<div class="rail-item ${dept.id === state.dept ? 'active' : ''}" data-dept="${esc(dept.id)}"
+      ${locked ? 'style="opacity:.45" title="部门范围受限（已绑定其他组织治理）"' : ''}>
+      <div class="ico">${locked ? '🔒' : esc(dept.icon)}</div><div class="nm">${esc(dept.label)}</div>
+    </div>`
+  }).join('') + `
     <div class="rail-spacer"></div>
     <a class="rail-console" href="${basePath() || '/'}" title="打开榕器管理控制台" style="text-decoration:none">
       <div class="ico">🧩</div><div>管理<br>控制台</div></a>`
   rail.querySelectorAll('.rail-item').forEach((el) => {
-    el.onclick = () => void switchDept(el.dataset.dept)
+    el.onclick = () => {
+      const dept = state.depts.find((item) => item.id === el.dataset.dept)
+      if (dept?.allowed === false) { void toast('部门范围受限：该部门已绑定其他组织治理', 'error'); return }
+      void switchDept(el.dataset.dept)
+    }
   })
 }
 
@@ -384,6 +393,7 @@ function renderDept() {
       <div class="dept-title">${esc(dept.icon)} ${esc(dept.label)}工作台
         <span class="tag">${esc(dept.theme)}</span>
         <span class="tag gray">协作模式：${esc(dept.collab)}</span>
+        ${state.overview.org ? `<span class="tag gray">🏷 ${esc(state.overview.org.name)}</span>` : ''}
         ${industry ? `<span class="tag gray">${esc(industry.name)} · 场景图谱已挂载</span>` : '<span class="tag gray">未激活行业（顶栏切换）</span>'}
       </div>
       <div class="dept-kpis">${state.overview.kpis.map((kpi) => `
@@ -412,11 +422,17 @@ function renderColLeft() {
   const bridgeIds = new Set(state.bridges.filter((b) => b.purpose === 'channel').map((b) => b.channelId))
   host.innerHTML = `
     <div class="col-title"><span>部门 AGENT</span><span title="阵容在面板配置中绑定 Agent 资产">＋</span></div>
-    ${dept.agents.map((agent) => `
-      <div class="agent-card" data-agent="${esc(agent.name)}">
-        <div class="agent-av">${esc(agent.icon)}<span class="st2 ${agent.busy ? 'busy' : ''}"></span></div>
+    ${dept.agents.map((agent) => {
+      const statusColor = agent.asset ? (agent.asset.status === 'online' ? '#22c55e' : '#94a3b8') : ''
+      const statusTitle = agent.asset
+        ? `Agent 资产：${agent.asset.name}（${agent.asset.status === 'online' ? '在线' : agent.asset.status}${agent.asset.model ? ` · ${agent.asset.model}` : ''}）`
+        : '未绑定 Agent 资产（面板配置中绑定后可真实调用）'
+      return `
+      <div class="agent-card" data-agent="${esc(agent.name)}" title="${esc(statusTitle)}">
+        <div class="agent-av">${esc(agent.icon)}<span class="st2 ${agent.busy ? 'busy' : ''}" ${statusColor ? `style="background:${statusColor}"` : ''}></span></div>
         <div class="agent-info"><div class="n">${esc(agent.name)}</div><div class="d">${esc(agent.desc)}</div></div>
-      </div>`).join('') || '<div class="sys-line"><span>本部门暂无 Agent 阵容（面板配置中添加）</span></div>'}
+      </div>`
+    }).join('') || '<div class="sys-line"><span>本部门暂无 Agent 阵容（面板配置中添加）</span></div>'}
     <div class="col-title" style="margin-top:14px"><span>协作频道</span><span id="addChannel">＋建群</span></div>
     ${state.overview.channels.map((channel) => `
       <div class="chan ${channel.id === state.channelId ? 'on' : ''}" data-channel="${esc(channel.id)}">
@@ -599,11 +615,13 @@ async function doCardAction(messageId, opId, btn) {
 function composerHtml() {
   const dept = state.overview.dept
   const bound = Boolean(state.ddStatus?.bound)
+  const members = (state.overview.members ?? []).slice(0, 6)
   return `
     <div class="composer">
       <div class="at-row">
         <span style="font-size:11px;color:var(--txt2)">@ 唤起：</span>
         ${dept.agents.map((agent) => `<span class="at-chip ag" data-at="${esc(agent.name)}">🤖 ${esc(agent.name)}</span>`).join('')}
+        ${members.map((member) => `<span class="at-chip" data-at="${esc(member.name)}" title="${esc(member.title ?? '')}${member.orgName ? ` · ${esc(member.orgName)}` : ''}">🧑 ${esc(member.name)}</span>`).join('')}
         ${bound ? '<span class="at-chip ddu" data-at="钉群·全员">⇄ 钉群·全员</span>'
           : '<span class="at-chip" id="bindHint">🔗 绑定钉钉后可 @ 钉钉同事</span>'}
         <span class="dd-toggle" id="ddToggle"><span class="sw ${state.ddSync && bound ? 'on' : ''} ${bound ? '' : 'disabled'}" id="ddSw"></span>钉钉同步</span>
@@ -906,13 +924,27 @@ async function showBind() {
 
 async function showConfig() {
   const dept = state.overview.dept
+  let orgs = null
+  try {
+    orgs = (await api.get('/api/panel/orgs')).orgs
+  } catch { /* 无 panel.config.write 或组织面不可用：隐藏绑定区 */ }
   showModal(`⚙ ${dept.label}面板配置`, `
-    <p class="note" style="margin-top:0">配置需 panel.config.write 权限。修改立即生效（PUT /api/panel/${esc(dept.id)}/…，全程审计）。</p>
+    <p class="note" style="margin-top:0">配置需 panel.config.write 权限。修改立即生效（全程审计）。</p>
+    ${orgs ? `
     <div style="margin:12px 0">
-      <div class="col-title"><span>AGENT 阵容（@唤起键 · 可绑定 Agent 资产）</span></div>
+      <div class="col-title"><span>组织绑定（账号组织打通：绑定后仅该组织子树成员可访问本部门）</span></div>
+      <div class="lic-row"><span class="lr-ic">🏷</span>
+        <select id="cfgOrg" style="flex:1;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px">
+          <option value="">（不绑定——对全部 panel.read 持有者开放）</option>
+          ${orgs.map((org) => `<option value="${esc(org.id)}" ${state.overview.org?.id === org.id ? 'selected' : ''}>${esc(org.name)}</option>`).join('')}
+        </select>
+      </div>
+    </div>` : ''}
+    <div style="margin:12px 0">
+      <div class="col-title"><span>AGENT 阵容（@唤起键 · 绑定 Agent 资产后可真实调用）</span></div>
       ${dept.agents.map((agent, index) => `
         <div class="lic-row"><span class="lr-ic">${esc(agent.icon)}</span>
-          <span style="flex:1">${esc(agent.name)}<span style="display:block;font-size:10px;color:var(--txt2)">${esc(agent.desc)}</span></span>
+          <span style="flex:1">${esc(agent.name)}${agent.asset ? `<span style="font-size:10px;color:${agent.asset.status === 'online' ? '#16a34a' : 'var(--txt2)'}"> · 资产 ${esc(agent.asset.name)}（${esc(agent.asset.status)}）</span>` : ''}<span style="display:block;font-size:10px;color:var(--txt2)">${esc(agent.desc)}</span></span>
           <input id="agentRef${index}" value="${esc(agent.agentRef ?? '')}" placeholder="agent:资产id/slug（可空）"
             style="border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11px;width:180px">
         </div>`).join('')}
@@ -922,24 +954,26 @@ async function showConfig() {
           <span class="lr-st" style="background:var(--bg);color:var(--txt2)">${esc(widget.source)}${widget.ref ? ` · ${esc(widget.ref)}` : ''}</span></div>`).join('')}
     </div>
     <div style="display:flex;gap:10px">
-      <button class="btn primary" id="cfgSave">保存 Agent 阵容绑定</button>
+      <button class="btn primary" id="cfgSave">保存配置</button>
       <button class="btn" id="cfgCancel">关闭</button>
     </div>`)
   document.getElementById('cfgCancel').onclick = hideModal
   document.getElementById('cfgSave').onclick = async (event) => {
     event.target.disabled = true
     try {
-      const agents = dept.agents.map((agent, index) => ({
-        ...agent,
-        ...(document.getElementById(`agentRef${index}`).value.trim()
-          ? { agentRef: document.getElementById(`agentRef${index}`).value.trim() }
-          : {}),
-      }))
-      const cleanAgents = agents.map(({ agentRef, ...rest }) => (agentRef ? { ...rest, agentRef } : rest))
-      await api.put(`/api/panel/${dept.id}/agents`, { agents: cleanAgents })
-      state.overview.dept.agents = cleanAgents
+      const agents = dept.agents.map((agent, index) => {
+        const ref = document.getElementById(`agentRef${index}`).value.trim()
+        const rest = { name: agent.name, desc: agent.desc, icon: agent.icon, ...(agent.busy ? { busy: true } : {}) }
+        return ref ? { ...rest, agentRef: ref } : rest
+      })
+      const orgSelect = document.getElementById('cfgOrg')
+      const promises = [api.put(`/api/panel/${dept.id}/agents`, { agents })]
+      if (orgSelect) promises.push(api.put(`/api/panel/${dept.id}/config`, { orgId: orgSelect.value || null }))
+      const [agentsRes] = await Promise.all(promises)
+      state.overview.dept.agents = agentsRes.agents
       hideModal()
-      void toast('阵容已保存（@唤起即可走模型网关真实调用）')
+      void toast('配置已保存（范围权限/阵容绑定立即生效）')
+      void refreshOverview()
     } catch (error) {
       event.target.disabled = false
       void toast(error.message, 'error')
@@ -1018,10 +1052,14 @@ async function openCmdk() {
     }
   } catch { /* 图谱不可用时跳过场景源 */ }
   let colleagues = []
-  try {
-    const roster = await api.get('/api/iam/roster')
-    colleagues = roster.users.slice(0, 200).map((user) => ({ group: '同事', icon: '🧑', label: user.displayName ?? user.name ?? user.id, sub: user.orgName ?? '', act: () => { mask.remove(); atMention(String(user.displayName ?? user.name ?? '')) } }))
-  } catch { /* 无 iam.roster.read 权限时诚实略过同事源 */ }
+  // 同事源：部门名册（账号组织打通，随总览下发、无额外权限要求）优先，roster 接口兜底
+  colleagues = (state.overview?.members ?? []).map((member) => ({ group: '同事', icon: '🧑', label: member.name, sub: member.title ?? member.orgName ?? '', act: () => { mask.remove(); atMention(member.name) } }))
+  if (colleagues.length === 0) {
+    try {
+      const roster = await api.get('/api/iam/roster')
+      colleagues = roster.users.slice(0, 200).map((user) => ({ group: '同事', icon: '🧑', label: user.displayName ?? user.name ?? user.id, sub: user.orgName ?? '', act: () => { mask.remove(); atMention(String(user.displayName ?? user.name ?? '')) } }))
+    } catch { /* 无 iam.roster.read 权限且部门名册为空时诚实略过 */ }
+  }
   sources.push(...colleagues)
 
   const render = () => {

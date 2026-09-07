@@ -64,8 +64,8 @@ export interface DshBridgeConfig {
 
 export const name = 'dsh-bridge'
 
-/** webServer/httpServer 由 dsh web profile 与 platform-core 提供；entryTickets/oidc 由 plugin-authn 提供。 */
-export const inject = ['webServer', 'httpServer', 'entryTickets', 'oidc', 'opsStorage', 'iam']
+/** webServer/httpServer 由 dsh web profile 与 platform-core 提供；entryTickets/oidc/authn/audit/iam 由 plugin-authn/iam/audit 装配。 */
+export const inject = ['webServer', 'httpServer', 'entryTickets', 'oidc', 'opsStorage', 'iam', 'authn', 'audit']
 // 注：identityBinding 由本插件内部的 IdentityBindingService 直挂提供（不经 inject 声明，
 // 避免「自提供自依赖」死锁）；identityBinding 之外的存储/身份依赖必须声明——
 // dsh loader 按此列表裁剪轻量 ctx 的能力面，漏声明会在 form B 装配期抛 without inject。
@@ -74,6 +74,32 @@ const BIND_TOKEN_PREFIX = 'rbs_'
 const DEFAULT_COOKIE = 'rq_sid'
 const DEFAULT_TTL_SECONDS = 24 * 3600
 const MAX_BINDINGS = 500
+
+/** 宿主会话直通端点所需的最小服务面（form B 轻量 ctx 防御式读取）。 */
+interface BridgeUserView {
+  id: string
+  username: string
+  displayName: string
+  orgId: string
+  roleIds: string[]
+  status?: string
+}
+
+interface BridgeSessionDeps {
+  authn?: {
+    ensureHumanPrincipal(userId: string, displayName: string): { id: string }
+    issueSessionPair(principalId: string, options: { issuedBy: string }): { token: string; refreshToken: string; access: { expiresAt: string } }
+  }
+  iam?: {
+    users(): { get(id: string): BridgeUserView | undefined }
+    roles(): { get(id: string): { name?: string } | undefined }
+    markLogin(id: string): void
+    userPermissions(id: string): string[]
+  }
+  audit?: {
+    record(entry: Record<string, unknown>): unknown
+  }
+}
 
 const base64url = (input: Buffer): string => input.toString('base64url')
 const originOf = (req: IncomingMessage): string => {
@@ -381,6 +407,51 @@ export function apply(ctx: Context, config: DshBridgeConfig = {}) {
           const okFlag = binding.bindSession(sessionId, req.headers.cookie)
           json(okFlag ? 200 : 401, { ok: okFlag, data: { bound: okFlag } })
         })
+        return
+      }
+      // 宿主 Cookie → 平台会话直通（部门面板/控制台 SPA 零二次登录，review-dsh-agent-panel-v2 宿主打通）：
+      // rq_sid 绑定身份 → ensureHumanPrincipal + issueSessionPair——与票据免登端点同安全语义
+      // （账号状态实时校验在 bindingStatus 内完成；同源收紧已在上方统一执行）
+      if (req.method === 'POST' && endpoint === 'session') {
+        void (async () => {
+          const status = binding.bindingStatus(req.headers.cookie)
+          if (!status.bound || !status.identity) {
+            json(401, { ok: false, error: { code: 'NOT_BOUND', message: `宿主会话未绑定（${status.reason ?? 'unknown'}）——请从 dsh 宿主入口进入或使用入场票据` } })
+            return
+          }
+          const deps = ctx as unknown as BridgeSessionDeps
+          if (!deps.authn || !deps.iam) {
+            json(503, { ok: false, error: { code: 'AUTHN_UNAVAILABLE', message: 'authn 服务不可用（挂载形态装配不完整）' } })
+            return
+          }
+          const user = deps.iam.users().get(String(status.identity.sub))
+          if (!user || (user.status !== undefined && user.status !== 'active')) {
+            json(401, { ok: false, error: { code: 'ACCOUNT_INACTIVE', message: '绑定账号已冻结或不存在（fail-closed）' } })
+            return
+          }
+          const principal = deps.authn.ensureHumanPrincipal(user.id, user.displayName)
+          const session = deps.authn.issueSessionPair(principal.id, { issuedBy: 'dsh-bridge:cookie' })
+          try { deps.iam.markLogin(user.id) } catch { /* 登录标记非关键路径 */ }
+          deps.audit?.record({
+            type: 'auth', actorType: 'human', actorId: user.id, actorName: user.displayName,
+            action: 'dsh_bridge.cookie.session', resourceType: 'dsh_bridge', resourceId: 'rq_sid',
+            resourceName: '宿主会话', result: 'ok', detail: '宿主 Cookie 绑定身份兑换平台会话（免登直达榕器数据面）',
+          })
+          json(200, {
+            ok: true,
+            data: {
+              token: session.token,
+              refreshToken: session.refreshToken,
+              expiresAt: session.access.expiresAt,
+              user: {
+                id: user.id, username: user.username, displayName: user.displayName,
+                orgId: user.orgId, roleIds: user.roleIds,
+                roles: user.roleIds.map((roleId) => deps.iam?.roles().get(roleId)?.name).filter(Boolean),
+                permissions: deps.iam.userPermissions(user.id),
+              },
+            },
+          })
+        })()
         return
       }
       json(404, { ok: false, error: { code: 'NOT_FOUND', message: `未知端点：${req.method} /dsh-bridge/${endpoint}` } })

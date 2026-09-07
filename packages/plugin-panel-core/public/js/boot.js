@@ -21,9 +21,32 @@ async function exchangeEntryTicket(ticket) {
   })
   const payload = await response.json().catch(() => null)
   if (!response.ok || payload?.ok === false) throw new Error(payload?.error?.message ?? '票据兑换失败')
-  localStorage.setItem(TOKEN_KEY, payload.data.token)
-  localStorage.setItem(USER_KEY, JSON.stringify(payload.data.user))
-  if (payload.data.refreshToken) localStorage.setItem(REFRESH_KEY, payload.data.refreshToken)
+  saveSession(payload.data)
+}
+
+function saveSession(data) {
+  localStorage.setItem(TOKEN_KEY, data.token)
+  localStorage.setItem(USER_KEY, JSON.stringify(data.user))
+  if (data.refreshToken) localStorage.setItem(REFRESH_KEY, data.refreshToken)
+}
+
+/**
+ * 宿主会话直通（登录打通）：dsh 宿主下 rq_sid Cookie 已绑定宿主身份时，
+ * 经 POST /dsh-bridge/session（同源收紧）兑换平台会话——零二次登录。
+ * 独立形态下 /dsh-bridge/* 不存在（回落 SPA HTML → json 为 null），静默跳过。
+ */
+async function bridgeSession() {
+  try {
+    const statusPayload = await fetch(`${BASE}/dsh-bridge/status`).then((r) => r.json()).catch(() => null)
+    if (!statusPayload?.data?.bound) return false
+    const payload = await fetch(`${BASE}/dsh-bridge/session`, { method: 'POST' })
+      .then((r) => r.json()).catch(() => null)
+    if (!payload?.ok) return false
+    saveSession(payload.data)
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function bootstrap() {
@@ -37,6 +60,10 @@ async function bootstrap() {
     params.delete('entry_ticket')
     const rest = params.toString()
     history.replaceState(null, '', `${path}${rest ? `?${rest}` : ''}${location.hash}`)
+  }
+  // 会话链：已有令牌 → 票据 → 宿主 Cookie 直通（dsh 宿主内点入面板零二次登录）
+  if (!localStorage.getItem(TOKEN_KEY)) {
+    await bridgeSession()
   }
   const app = await import('./app.js')
   document.getElementById('app').dataset.booted = '1'

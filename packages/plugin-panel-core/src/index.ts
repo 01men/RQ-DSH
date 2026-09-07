@@ -94,11 +94,16 @@ export function apply(ctx: Context) {
     })
   }
 
-  /** 部门参数解析 + 归属校验（人只能看自己组织激活范围内的部门面板；部门骨架全员可读）。 */
+  /** 部门参数解析 + 归属校验（部门范围权限：绑定组织后仅组织子树/管理员/机器凭证可访问）。 */
   const deptOf = (exchange: HttpExchange) => {
     const dept = String(exchange.params.dept ?? '')
     if (!DEPT_RE.test(dept)) throw new Error(`部门标识非法：${dept}`)
-    return panel.dept(dept)
+    const config = panel.dept(dept)
+    if (!panel.deptScopeAllowed(caller(exchange), config)) {
+      exchange.fail(403, 'FORBIDDEN', `部门范围受限：${config.label} 已绑定组织治理，仅该组织子树成员可访问`, { permission: 'panel.read', deptScope: config.orgId })
+      throw new Error('部门范围受限')
+    }
+    return config
   }
 
   const orgIdOf = (exchange: HttpExchange): string => {
@@ -110,7 +115,36 @@ export function apply(ctx: Context) {
 
   // -- 部门与总览 -------------------------------------------------------------
 
-  guarded('GET', '/api/panel/depts', 'panel.read', () => ({ depts: panel.deptConfigs().all() }))
+  guarded('GET', '/api/panel/depts', 'panel.read', (exchange) => {
+    const info = caller(exchange)
+    return {
+      depts: panel.deptConfigs().all().map((dept) => ({
+        ...dept,
+        allowed: panel.deptScopeAllowed(info, dept),
+        org: panel.deptOrg(dept),
+      })),
+    }
+  })
+
+  // 组织树（配置抽屉的部门↔组织绑定选择器；最小字段，panel.config.write 管理面）
+  guarded('GET', '/api/panel/orgs', 'panel.config.write', (exchange) => ({
+    orgs: ctx.iam.orgs().all().map((org) => ({ id: org.id, name: org.name, parentId: org.parentId })),
+  }))
+
+  /** 部门↔组织绑定（账号组织打通的管理动作）：设置后部门范围权限即刻生效。 */
+  guarded('PUT', '/api/panel/:dept/config', 'panel.config.write', (exchange) => {
+    const dept = panel.dept(String(exchange.params.dept ?? ''))
+    const input = body<{ orgId?: string | null }>(exchange)
+    if (input.orgId !== undefined && input.orgId !== null && input.orgId !== '') {
+      if (!ctx.iam.orgs().get(input.orgId)) throw new Error(`组织不存在：${input.orgId}`)
+      ctx.panel.deptConfigs().update(dept.id, { orgId: input.orgId })
+    } else {
+      ctx.panel.deptConfigs().update(dept.id, { orgId: undefined })
+    }
+    const updated = panel.dept(dept.id)
+    changeLog(exchange, 'panel.dept.bind_org', 'panel_dept', dept.id, dept.label, updated.orgId ?? '（解除绑定）')
+    return { dept: { ...updated, org: panel.deptOrg(updated) } }
+  })
 
   guarded('GET', '/api/panel/:dept/overview', 'panel.read', (exchange) => {
     const dept = deptOf(exchange)
@@ -122,9 +156,11 @@ export function apply(ctx: Context) {
     }))
     return {
       dept,
+      org: panel.deptOrg(dept),
+      members: panel.deptMembers(dept),
       industry: panel.activeIndustry(orgId),
       channels,
-      agents: dept.agents,
+      agents: dept.agents.map((agent) => panel.agentWithAsset(agent)),
       kpis: dept.kpis,
       widgets: panel.board(dept),
       pendingActivations: ctx.audit.approvals().find((item) => item.kind === 'industry.activation' && item.status === 'pending')
