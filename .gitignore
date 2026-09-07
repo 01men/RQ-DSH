@@ -8,3 +8,4 @@ boot.log
 service.log
 .zcode/
 .workbuddy/
+cordis.local.yml

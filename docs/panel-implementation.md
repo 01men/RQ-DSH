@@ -33,6 +33,7 @@
 - 工具 6 个：`panel_agents_list / panel_msg_send / panel_task_create / panel_task_transition / panel_scene_diag / panel_widget_data`
 - 行业激活执行器（audit approvals executor）+ DingtalkDelivered 回执联动（ddSync 状态回写）
 - 前端（零构建 vanilla ESM，`/panel` 静态挂载，对外 `/rq/panel/`）：顶栏（行业三态选择器/⌘K 动态源/钉钉状态胶囊/LIVE 徽标）+ 部门 rail + 三栏（名册频道 / 协作会话·任务看板·部门知识·场景图谱四 Tab / widget 看板）；`data-dept` 五主题；消息白名单渲染（esc 后仅放行 `<b>` 与 mention span）；票据免登（?entry_ticket=）+ 控制台同源会话复用；复用 console `ui.js`/`realtime.js`（同源动态 import，零代码复制）
+- **响应式布局**（实测修复）：`#app` 接管 100vh 高度链（此前工作区坍缩成内容自然高度——消息少时页面下方大片留白、内部滚动失效）；`#tabBody` 续接 flex 链（composer 贴底）；消息气泡限宽 780px（超宽屏阅读线）；三档断点——≤1360px 两翼收窄、≤1180px 右看板转抽屉（部门头 📊 开关）、≤980px 左名册转抽屉（👥 开关 + 选频道自动收起）+ 精简 KPI/隐藏全局搜索、≥1800px 两翼加宽；抽屉关闭钮仅在抽屉打开时出现。几何验证：2000/1720/1120 宽三档 .body/.composer 均贴满视口
 
 **`packages/plugin-dingtalk-bridge`**（出向优先，R-SPIKE 未决不入向）
 - 集合：`dingtalk:bridgeChannels`（purpose=channel/alerts）+ `dingtalk:bridgeMessages`（dedupKey 去重回执）
