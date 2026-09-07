@@ -14,9 +14,11 @@ import { existsSync, readdirSync, createReadStream } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
 import { createPluginContext, newId, platformVersionInfo, PlatformEvents } from '../../platform-core/src/index.ts'
+import { nonbillableUsage } from '../../plugin-usage/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import { ProviderAuthError } from '../../plugin-iam/src/providers.ts'
 import { AppRegistryService } from '../../plugin-app/src/index.ts'
+import { AgentRegistryService } from '../../plugin-agent/src/index.ts'
 import { RulesVersionConflictError } from '../../plugin-nas/src/authz.ts'
 import { seedAll } from './seed.ts'
 
@@ -40,7 +42,8 @@ interface CallerInfo {
   actChain: Array<{ name: string; type: string }>
 }
 
-const PUBLIC_PATHS = new Set([
+// 公开路径白名单（免鉴权）：导出供 selftest「rbac endpoint matrix」比对——清单变动即红
+export const PUBLIC_PATHS = new Set([
   '/api/auth/login',
   '/api/auth/sso',
   '/api/auth/sso/authorize',
@@ -59,6 +62,11 @@ const PUBLIC_PATHS = new Set([
   '/api/authn/entry-tickets/redeem',
   // 应用访客埋点 beacon（浏览器侧 PV/UV 上报）：1x1 GIF/JSON 免鉴权；响应恒定不泄露应用存在性
   '/api/apps/beacon',
+  // 票据免登控制台：redeem 通过后直接建立控制台会话（门户/钉钉「打开即工作台」，零二次登录）
+  '/api/auth/entry-ticket-session',
+  // 部门面板 SSE（review-dsh-agent-panel-v2 F13）：EventSource 无法携带 Bearer 头，
+  // 端点公开但内部强制 ?token= 自校验（authn.verify，失败 fail-closed 401），降级轮询端点仍走 guarded
+  '/api/panel/stream',
 ])
 
 /** 动态路径的公开前缀（OIDC 授权页查询：仅回显客户端名/scope，不泄露 redirect_uri）。 */
@@ -193,8 +201,12 @@ export function apply(ctx: Context) {
     return false
   }
 
-  /** 注册一条受权限保护的路由。 */
+  /** 注册一条受权限保护的路由。同时登记进路由×权限矩阵（WP-04/A1：矩阵驱动 RBAC 断言）。 */
+  const routeMatrix: Array<{ method: string; path: string; permission: string }> = []
   const guarded = (method: string, path: string, permission: string, handler: (exchange: HttpExchange) => unknown | Promise<unknown>): void => {
+    routeMatrix.push({ method, path, permission })
+    // 插件自注册路由（如 plugin-panel-core）经 httpServer.routeMatrix 共享登记处汇入同一矩阵
+    http.routeMatrix.push({ method, path, permission })
     http.register(method, path, async (exchange) => {
       if (!requirePermission(exchange, permission)) return
       try {
@@ -368,6 +380,7 @@ export function apply(ctx: Context) {
     const code = exchange.query.get('authCode') ?? exchange.query.get('code') ?? ''
     const state = exchange.query.get('state') ?? ''
     const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!)
+    const webBase = ctx.httpServer?.externalBase ?? ''
     const render = (title: string, bodyHtml: string, script = ''): void => {
       exchange.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
       exchange.res.end(`<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
@@ -391,15 +404,15 @@ export function apply(ctx: Context) {
           action: 'iam.user.bind', resourceType: 'user', resourceId: result.userId,
           resourceName: result.displayName, result: 'ok', detail: `${result.provider} 扫码授权绑定`,
         })
-        render('绑定成功', `<div class="ok">✓</div><h2>钉钉身份绑定成功</h2><p>已绑定：<b>${escapeHtml(result.displayName)}</b></p><p>即将自动返回控制台…</p><p><a href="/#/iam">立即返回</a></p>`,
-          '<script>setTimeout(()=>{location.href="/#/iam"},2000)</script>')
+        render('绑定成功', `<div class="ok">✓</div><h2>钉钉身份绑定成功</h2><p>已绑定：<b>${escapeHtml(result.displayName)}</b></p><p>即将自动返回控制台…</p><p><a href="${webBase}/#/iam">立即返回</a></p>`,
+          `<script>setTimeout(()=>{location.href=\`${webBase}/#/iam\`},2000)</script>`)
         return
       }
       const result = await ctx.authn.completeSso(peeked.provider, code, state)
       if (result.kind === 'pending') {
         // 未命中身份链接：回登录页走「绑定已有账号 / 注册新账号」分支
         render('首次登录', `<h2>首次使用该三方身份</h2><p>正在返回登录页完成绑定/注册…</p>`,
-          `<script>localStorage.setItem('heng_ops_sso_pending', JSON.stringify({ pendingTicket: ${JSON.stringify(result.pendingTicket)}, profileName: ${JSON.stringify(result.profileName)} })); location.replace('/#/login')</script>`)
+          `<script>localStorage.setItem('heng_ops_sso_pending', JSON.stringify({ pendingTicket: ${JSON.stringify(result.pendingTicket)}, profileName: ${JSON.stringify(result.profileName)} })); location.replace('${webBase}/#/login')</script>`)
         return
       }
       const user = ctx.iam.users().get(result.userId)!
@@ -415,7 +428,7 @@ export function apply(ctx: Context) {
         `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))});
 var resume=null;try{resume=JSON.parse(localStorage.getItem('heng_ops_sso_oidc_req')||'null')}catch(e){resume=null}
 localStorage.removeItem('heng_ops_sso_oidc_req');
-if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.req)&&Date.now()-(resume.ts||0)<300000){location.replace('/#/oauth/authorize?req='+resume.req)}else{location.replace('/#/dashboard')}</script>`)
+if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.req)&&Date.now()-(resume.ts||0)<300000){location.replace('${webBase}/#/oauth/authorize?req='+resume.req)}else{location.replace('${webBase}/#/dashboard')}</script>`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error('[sso-callback] 三方授权失败：', message)
@@ -2569,6 +2582,26 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     }
   })
 
+  /** Agent 详情页 SSO 配置块（不含 secret；含 discovery，供前端与 dsh 免登接入使用）。 */
+  const agentSsoView = (agentId: string) => {
+    const ssoClient = ctx.oidc.clientsForAgent(agentId)[0]
+    if (!ssoClient) return null
+    const { clientSecretHash: _hash, ...ssoSafe } = ssoClient
+    void _hash
+    return {
+      ...ssoSafe,
+      status: ssoSafe.status ?? 'active',
+      clientType: ssoSafe.clientType ?? 'confidential',
+      refAgentName: ctx.resourceCore.get('agent', ssoSafe.refId ?? '')?.name ?? undefined,
+      discovery: {
+        issuer: ctx.oidc.issuer(),
+        authorization_endpoint: `${ctx.oidc.issuer()}/oauth/authorize`,
+        token_endpoint: `${ctx.oidc.issuer()}/oauth/token`,
+        userinfo_endpoint: `${ctx.oidc.issuer()}/oauth/userinfo`,
+      },
+    }
+  }
+
   guarded('GET', '/api/agents/:id', 'agent.read', (exchange) => {
     const id = exchange.params['id']!
     const agent = ctx.resourceCore.get('agent', id)
@@ -2584,6 +2617,8 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       topology: enrichTopology(ctx.resourceCore.topology('agent', id, 2)),
       impact: ctx.resourceCore.impact('agent', id),
       audit: ctx.audit.query({ resourceType: 'agent', resourceId: id, limit: 30 }).items,
+      sso: agentSsoView(id),
+      ssoEnforceMode: AgentRegistryService.ssoEnforceMode(),
     }
   })
 
@@ -2766,6 +2801,46 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     }
   })
 
+  /**
+   * 票据免登控制台（公开端点，与 redeem 同安全语义）：一次性票据兑换 → 直接建立控制台会话，
+   * 门户/钉钉「打开即工作台」零二次登录。票据只进请求体与内存，不进常驻 URL、不进服务端日志；
+   * 签发侧授权语义已在领票端点定格（agent：owner/绑定用户/管理员；app：登录用户），此处仅消费。
+   */
+  http.register('POST', '/api/auth/entry-ticket-session', (exchange) => {
+    const input = body<{ ticket?: string }>(exchange)
+    const clientIp = String(exchange.raw.socket?.remoteAddress ?? 'unknown')
+    try {
+      const redeemed = ctx.entryTickets.redeem(String(input.ticket ?? ''), clientIp)
+      const user = ctx.iam.users().get(redeemed.identity.sub)
+      if (!user || user.status !== 'active') throw new Error('签发用户状态异常（冻结/离职联动失效）')
+      const principal = ctx.authn.ensureHumanPrincipal(user.id, user.displayName)
+      const session = ctx.authn.issueSessionPair(principal.id, { issuedBy: `entry-ticket:${redeemed.refType}:${redeemed.refId}` })
+      ctx.iam.markLogin(user.id)
+      ctx.audit.record({
+        type: 'auth', actorType: 'human', actorId: user.id, actorName: user.displayName,
+        action: `${redeemed.refType}.entry.ticket.session`, resourceType: redeemed.refType, resourceId: redeemed.refId,
+        resourceName: redeemed.refId, result: 'ok', detail: '入场票据兑换控制台会话（免登直达工作台）',
+      })
+      // 与 redeem 同源广播（plugin-app 订阅 → 应用 DAU 折算）：app 票据经免登通道兑换不丢到访计数
+      ctx.platformBus.emit(PlatformEvents.EntryTicketRedeemed, {
+        refType: redeemed.refType, refId: redeemed.refId, userId: user.id, userName: user.displayName,
+      })
+      exchange.ok({
+        token: session.token,
+        refreshToken: session.refreshToken,
+        expiresAt: session.access.expiresAt,
+        user: {
+          id: user.id, username: user.username, displayName: user.displayName,
+          orgId: user.orgId, roleIds: user.roleIds,
+          roles: user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.name).filter(Boolean),
+          permissions: ctx.iam.userPermissions(user.id),
+        },
+      })
+    } catch (error) {
+      exchange.fail(400, 'ENTRY_TICKET_INVALID', error instanceof Error ? error.message : String(error))
+    }
+  })
+
   // -- 应用访客埋点 beacon（公开端点：浏览器 PV/UV 上报，免机器鉴权） ----------------
   // 指标口径补全：应用页面在加载/路由切换时上报一次即可。GET 返回 1x1 GIF（<img>/fetch(no-cors) 均可跨域），
   // POST JSON 供 navigator.sendBeacon；匿名访客以 vid 去重（8-64 位 base64url，建议 localStorage 持久随机 ID），
@@ -2821,6 +2896,79 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     for (const [key, value] of Object.entries(beaconCorsHeaders)) exchange.res.setHeader(key, value)
     exchange.ok({ reported: true })
   })
+
+  // -- Agent SSO 客户端（OIDC-agent 关联；owner 自助，对齐 app 侧） ----------------
+
+  const ssoAgent = (exchange: HttpExchange): { id: string; name: string; ownerId: string } => {
+    const agent = ctx.resourceCore.get('agent', exchange.params['id']!)
+    if (!agent) throw new Error(`Agent 不存在：${exchange.params['id']}`)
+    return { id: agent.id, name: agent.name, ownerId: agent.ownerId }
+  }
+
+  /** owner 校验（human 且 agent.ownerId === userId，或持 authn.oidc.write）；机器一律 403。 */
+  const requireAgentSsoOwner = (exchange: HttpExchange): boolean => {
+    const agent = ssoAgent(exchange)
+    const info = caller(exchange)
+    const isOwner = info.kind === 'human' && Boolean(info.userId) && agent.ownerId === info.userId
+    const isAdmin = info.permissions.includes('*') || info.permissions.includes('authn.oidc.write')
+    if (info.kind !== 'human' || (!isOwner && !isAdmin)) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId ?? info.principalId,
+        actorName: info.name,
+        point: `agent.sso(owner:${agent.id})`,
+        path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', info.kind !== 'human'
+        ? 'SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作'
+        : `仅 Agent owner 或持有 authn.oidc.write 的管理员可管理「${agent.name}」的 SSO 客户端`)
+      return false
+    }
+    return true
+  }
+
+  guarded('POST', '/api/agents/:id/sso-client', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const input = body<{ redirectUris: string[]; clientType?: 'confidential' | 'public'; consentRequired?: boolean; postLogoutUris?: string[]; description?: string }>(exchange)
+    const created = ctx.agentRegistry.createSsoClient(agent.id, input)
+    changeLog(exchange, 'agent.sso.create', 'oidc_client', created.client.id, created.client.name, `Agent ${agent.name} 签发（${input.clientType ?? 'confidential'}）`)
+    return {
+      clientId: created.client.clientId,
+      clientSecret: created.clientSecret,
+      redirectUris: created.client.redirectUris,
+      note: created.client.clientType === 'public' ? 'public 客户端无 secret（强制 PKCE、不发 refresh）' : 'clientSecret 仅此一次返回',
+    }
+  })
+
+  guarded('PATCH', '/api/agents/:id/sso-client', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const input = body<{ redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    const updated = ctx.agentRegistry.updateSsoClient(agent.id, input)
+    changeLog(exchange, 'agent.sso.update', 'oidc_client', updated.id, updated.name)
+    return updated
+  })
+
+  guarded('POST', '/api/agents/:id/sso-client/rotate', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const rotated = ctx.agentRegistry.rotateSsoSecret(agent.id)
+    changeLog(exchange, 'agent.sso.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
+    return { clientId: rotated.client.clientId, clientSecret: rotated.clientSecret, note: '新 clientSecret 仅此一次返回，旧值立即失效' }
+  })
+
+  for (const action of ['disable', 'enable'] as const) {
+    guarded('POST', `/api/agents/:id/sso-client/${action}`, 'agent.write', (exchange) => {
+      if (!requireAgentSsoOwner(exchange)) return
+      const agent = ssoAgent(exchange)
+      const { reason } = body<{ reason?: string }>(exchange)
+      const client = action === 'disable'
+        ? ctx.agentRegistry.disableSsoClient(agent.id, reason ?? 'owner 手动禁用')
+        : ctx.agentRegistry.enableSsoClient(agent.id)
+      changeLog(exchange, `agent.sso.${action}`, 'oidc_client', client.id, client.name, reason ?? '')
+      return client
+    })
+  }
 
   // -- App ----------------------------------------------------------------
   guarded('GET', '/api/apps', 'app.read', () => ({
@@ -3158,6 +3306,37 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     return event
   })
 
+  /**
+   * 反馈回传（WP-07/D1）：👍/👎 薄端点 —— 落零价快照 usage 事件（D2：charge=0 + nonbillable，
+   * 不污染计费口径）。主体经 X-On-Behalf-User 归因（Agent 代用户回传），缺省取登录人；
+   * 幂等键=主体+资源+消息+评分，同键重放不重复计数。
+   */
+  guarded('POST', '/api/usage/feedback', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    const input = body<{ resource: string; messageId?: string; score: 'up' | 'down'; note?: string }>(exchange)
+    if (!input.resource?.trim() || (input.score !== 'up' && input.score !== 'down')) {
+      exchange.fail(400, 'BAD_REQUEST', 'resource 与 score（up/down）必填')
+      return
+    }
+    const onBehalf = String(exchange.headers['x-on-behalf-user'] ?? '').trim()
+    const subject = onBehalf ? `user:${onBehalf}` : (info.userId ? `user:${info.userId}` : '')
+    if (!subject) {
+      exchange.fail(403, 'FORBIDDEN', '机器主体回传反馈须携带 X-On-Behalf-User 归因到人')
+      return
+    }
+    const orgId = (info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined) ?? ''
+    const event = ctx.usage.record(nonbillableUsage({
+      org: orgId,
+      subject,
+      principal: orgId ? `org:${orgId}` : 'platform',
+      resource: input.resource,
+      idempotency_key: `feedback:${subject}:${input.resource}:${input.messageId ?? 'anon'}:${input.score}`,
+    }))
+    changeLog(exchange, 'usage.feedback', 'usage_event', event.event_id, input.resource,
+      `${input.score}${input.note ? `：${input.note}` : ''}（非计费零价快照，X-On-Behalf-User${onBehalf ? `=${onBehalf}` : '未用'}）`)
+    return { event_id: event.event_id, charge_cents: event.pricing.charge_cents, nonbillable: event.pricing.rate?.nonbillable === true }
+  })
+
   guarded('GET', '/api/usage/price-book', 'usage.admin', () => ({
     entries: ctx.usage.priceBook().all(),
   }))
@@ -3483,10 +3662,22 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   })
 
   // -- 平台信息与工具桥 -----------------------------------------------------
+  /** 路由×权限矩阵（WP-04/A1）：RBAC 端点覆盖的服务端事实源，selftest 据此驱动 100% 越权断言。
+   *  返回 = console 自身 guarded 矩阵 + 插件自注册路由（httpServer.routeMatrix 共享登记处，去重）。 */
+  guarded('GET', '/api/platform/route-matrix', 'audit.read', () => {
+    const seen = new Set(routeMatrix.map((route) => `${route.method} ${route.path}`))
+    const external = http.routeMatrix.filter((route) => !seen.has(`${route.method} ${route.path}`))
+    return {
+      guarded: [...routeMatrix, ...external],
+      public: [...PUBLIC_PATHS],
+      note: 'guarded=权限点保护端点（含插件自注册）；public=鉴权中间件白名单（免鉴权，变动须经评审）',
+    }
+  })
+
   guarded('GET', '/api/platform/info', 'console.login', () => {
     const versionInfo = platformVersionInfo()
     const plugins = [
-      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'nas', 'skillhub', 'agent', 'app', 'connect', 'update', 'console',
+      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'nas', 'skillhub', 'agent', 'app', 'connect', 'update', 'console', 'panel-core', 'dingtalk-bridge',
     ]
     return {
       name: '榕器|企业AI资源管理平台',

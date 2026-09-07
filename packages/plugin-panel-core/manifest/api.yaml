@@ -1,0 +1,23 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-panel-core
+base: /api
+endpoints:
+  - GET /api/panel/depts · GET /api/panel/:dept/overview · GET /api/panel/:dept/board（panel.read）
+  - GET/PUT /api/panel/:dept/widgets · GET/PUT /api/panel/:dept/kpis（读 panel.read / 写 panel.config.write）
+  - GET/POST /api/panel/:dept/channels · GET/POST /api/panel/:dept/messages · POST /api/panel/messages/:id/card-action
+  - GET/POST /api/panel/:dept/tasks · POST /api/panel/tasks/:id/transition（panel.task.write）
+  - GET /api/panel/:dept/artifacts · GET /api/panel/:dept/poll（降级轮询）
+  - GET /api/panel/stream?dept=&token=（SSE；EventSource 无法带 Bearer，端点内部自校验 fail-closed）
+  - GET /api/panel/industries（三态）· POST /api/panel/industries/:code/activate-requests
+  - GET /api/panel/scenegraph?industry=（scenegraph.read）· POST /api/panel/scenegraphs/reload（panel.config.write）
+tools:
+  - panel_agents_list
+  - panel_msg_send
+  - panel_task_create
+  - panel_task_transition
+  - panel_scene_diag
+  - panel_widget_data
+services:
+  - key: panel
+    access: ctx.panel
+    description: 部门面板域：deptConfigs/channels/messages/tasks/artifacts/readCursors/activations + panelAgentRuntime + widget 求值

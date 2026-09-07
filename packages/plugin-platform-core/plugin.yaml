@@ -9,5 +9,6 @@ provides:
     - platformBus
     - tools
     - httpServer
+    - scenegraphs
 permissions:
   - console.login

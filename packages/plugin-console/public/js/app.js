@@ -1,8 +1,9 @@
 /** 应用外壳：路由 + 布局 + 侧边栏 + 顶栏 + ⌘K 命令面板。 */
 import { icon } from './icons.js'
-import { session, api } from './api.js'
+import { session, api, exchangeBridgeSession, BASE, IS_LOCAL_HOST, CONNECTION_NAME } from './api.js'
 import { $, $$, h, toast, esc } from './ui.js'
 import { openCmdk } from './cmdk.js'
+import { resolveLanding, isBareLanding, LANDING_PREF_KEY } from './landing.js'
 
 import { renderLogin } from './pages/login.js'
 import { renderDashboard } from './pages/dashboard.js'
@@ -20,12 +21,15 @@ import { renderApprovals } from './pages/approvals.js'
 import { renderAssets } from './pages/assets.js'
 import { renderPlatform } from './pages/platform.js'
 import { renderConnect } from './pages/connect.js'
+import { renderConnections } from './pages/connections.js'
 import { renderOauthAuthorize, renderOauthError, renderOauthLogout } from './pages/oauth.js'
 import { mountUpdateBadge, openUpdateDrawer } from './update.js'
 
 const NAV = [
   { section: '总览', items: [
     { path: '#/dashboard', label: '工作台', icon: 'dashboard', perm: 'console.login' },
+    // 部门面板（review-dsh-agent-panel-v2）：独立零构建 SPA，经 ext 外链进入（/panel，挂载形态 /rq/panel/）
+    { ext: () => `${BASE}/panel/`, label: '部门面板', icon: 'users', perm: 'console.login', landing: 'panel' },
   ] },
   { section: 'AI 资源', items: [
     { path: '#/skills', label: 'Skill 市场', icon: 'sparkles', perm: 'skill.read', badge: 'skills' },
@@ -49,6 +53,7 @@ const NAV = [
   ] },
   { section: '平台', items: [
     { path: '#/connect', label: '平台接入', icon: 'fingerprint', perm: 'connect.manage' },
+    { path: '#/connections', label: '宿主服务连接', icon: 'server', perm: 'console.login' },
     { path: '#/platform', label: '插件与工具', icon: 'puzzle', perm: 'console.login' },
   ] },
 ]
@@ -75,6 +80,12 @@ function navigate() {
   }
 
   if (!session.token) {
+    // 宿主连接页会话前置（docs/frontend-host-switching.md）：登录前就要能换目标宿主，
+    // 以极简独立形态渲染（不走控制台外壳）；有会话时走下方 builders 在外壳内渲染。
+    if (page === 'connections') {
+      renderConnections(app, params, { standalone: true })
+      return
+    }
     renderLogin(app)
     return
   }
@@ -95,6 +106,7 @@ function navigate() {
     approvals: renderApprovals,
     platform: renderPlatform,
     connect: renderConnect,
+    connections: renderConnections,
   }
   const builder = builders[page] ?? renderDashboard
   renderShell(page, params, builder)
@@ -105,7 +117,7 @@ function renderShell(page, params, builder) {
     <div class="layout">
       <aside class="sidebar">
         <div class="sidebar-brand">
-          <img class="brand-mark brand-logo" src="/rongqi_ai.png" alt="榕器">
+          <img class="brand-mark brand-logo" src="rongqi_ai.png" alt="榕器">
           <div>
             <div class="brand-name" style="white-space:normal;font-size:13px;line-height:1.35">榕器|企业AI资源管理平台</div>
             <div class="brand-sub">DeepSeek Harness · 一切皆插件</div>
@@ -122,6 +134,7 @@ function renderShell(page, params, builder) {
             <kbd>⌘K</kbd>
           </div>
           <div class="topbar-right">
+            ${IS_LOCAL_HOST ? '' : `<button class="badge badge-warn no-dot" id="conn-indicator" title="当前连接远程宿主服务，点击管理连接" style="cursor:pointer;border:0">${icon('server', 13)} ${esc(CONNECTION_NAME)}</button>`}
             <button class="icon-btn" id="btn-refresh" title="刷新数据">${icon('refresh')}</button>
             <div style="position:relative" id="update-host"></div>
             <div style="position:relative" id="alert-host"></div>
@@ -139,9 +152,17 @@ function renderShell(page, params, builder) {
     if (!visible.length) continue
     const sec = h(`<div class="nav-section"><div class="nav-section-title">${esc(section.section)}</div></div>`)
     for (const item of visible) {
-      const active = currentHash().split('?')[0] === item.path
+      const active = item.path && currentHash().split('?')[0] === item.path
       const el = h(`<div class="nav-item ${active ? 'active' : ''}">${icon(item.icon)}<span>${esc(item.label)}</span><span class="nav-badge hidden"></span></div>`)
-      el.onclick = () => { location.hash = item.path }
+      el.onclick = () => {
+        // ext 外链项（部门面板独立 SPA）：整页跳转，不进 hash 路由；显式跨工作台切换记录落地偏好
+        if (item.ext) {
+          if (item.landing) { try { localStorage.setItem(LANDING_PREF_KEY, item.landing) } catch { /* 忽略 */ } }
+          location.assign(item.ext())
+          return
+        }
+        location.hash = item.path
+      }
       item._badgeEl = el.querySelector('.nav-badge')
       sec.appendChild(el)
     }
@@ -166,6 +187,7 @@ function renderShell(page, params, builder) {
     navigate()
   }
   $('#btn-refresh').onclick = () => { navigate(); toast('数据已刷新') }
+  $('#conn-indicator')?.addEventListener('click', () => { location.hash = '#/connections' })
   $('#cmdk-trigger').onclick = () => openCmdk()
   $('#avatar').onclick = () => openCmdk()
 
@@ -205,7 +227,29 @@ async function refreshBadges() {
 
 // 全局路由
 window.addEventListener('hashchange', navigate)
-navigate()
+
+// 启动链：会话就绪 → 落地分诊 → 首帧渲染（docs/entry-switching.md）。
+// 会话链与部门面板同款：已有令牌 → 宿主 Cookie 直通（独立形态 /dsh-bridge/* 不存在，静默跳过）；
+// ?ticket= 由登录页消费（仅未登录落到登录页时生效）。
+// 落地分诊：纯业务身份裸落地 → 进部门面板（一个入口按身份落地）；
+// 面板/控制台的显式切换入口会记录偏好（heng_ops_landing），偏好=console 时不参与分诊；
+// 深链（#/其他页面）与页内导航永不触发分诊。
+async function boot() {
+  if (!session.token) await exchangeBridgeSession()
+  const user = session.user
+  if (user && isBareLanding(location.hash) && resolveLanding(user) === 'panel') {
+    let pref = ''
+    try { pref = localStorage.getItem(LANDING_PREF_KEY) ?? '' } catch { /* 忽略 */ }
+    if (pref !== 'console') {
+      try { localStorage.setItem(LANDING_PREF_KEY, 'panel') } catch { /* 忽略 */ }
+      location.replace(`${BASE}/panel/`)
+      return
+    }
+  }
+  navigate()
+}
+
+boot()
 
 // ⌘K 快捷键
 window.addEventListener('keydown', (e) => {

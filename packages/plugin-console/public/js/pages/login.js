@@ -1,5 +1,6 @@
-/** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）。 */
-import { api, session } from '../api.js'
+/** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）/ 票据免登（?ticket= 一次性参数）。 */
+import { api, session, entryTicketSession, BASE, CONNECTION_NAME, IS_LOCAL_HOST } from '../api.js'
+import { sanitizeNext, resolveLanding, LANDING_PREF_KEY } from '../landing.js'
 import { icon } from '../icons.js'
 import { h, $, esc, toast } from '../ui.js'
 
@@ -9,7 +10,7 @@ export function renderLogin(app) {
       <div class="login-hero">
         <div class="login-hero-inner">
           <div style="display:flex;align-items:center;gap:14px">
-            <img class="brand-mark brand-logo" src="/rongqi_ai.png" alt="榕器" style="width:46px;height:46px;border-radius:12px">
+            <img class="brand-mark brand-logo" src="rongqi_ai.png" alt="榕器" style="width:46px;height:46px;border-radius:12px">
             <div style="font-size:19px;font-weight:600;letter-spacing:2px">榕器 · 企业AI资源管理平台</div>
           </div>
           <h1>让团队一起用 AI<br>把每一份资源都管起来</h1>
@@ -111,11 +112,67 @@ export function renderLogin(app) {
             <button class="btn btn-ghost btn-block mt-8" id="ding-pending-back">返回重试</button>
           </div>
         </form>
+
+        <div class="form-hint" style="margin-top:18px;display:flex;gap:6px;align-items:center">
+          ${icon('server', 13)}
+          <span>宿主服务：${esc(CONNECTION_NAME)}${IS_LOCAL_HOST ? '' : '（远程）'}</span>
+          <a id="login-conn-link" style="color:var(--brand-500);cursor:pointer">更换</a>
+        </div>
       </div>
     </div>`
 
+  // 登录前换宿主（docs/frontend-host-switching.md）：#/connections 无会话可用（独立形态渲染）
+  $('#login-conn-link').onclick = () => { location.hash = '#/connections' }
+
   const tabPassword = $('#login-form-password')
   const tabDing = $('#login-form-dingtalk')
+
+  // 登录回跳（docs/entry-switching.md）：?next= 显式目的地 > sessionStorage 暂存（api.js 401 打断处，
+  // 键 heng_ops_next 与 api.js 字面量同步）。读取即消费：参数与暂存只生效一次；
+  // 白名单仅同源绝对路径（sanitizeNext），防 open redirect。
+  const nextDestination = (() => {
+    const params = new URLSearchParams(location.search)
+    let next = sanitizeNext(params.get('next') ?? '')
+    if (!next) {
+      try { next = sanitizeNext(sessionStorage.getItem('heng_ops_next') ?? '') } catch { /* 忽略 */ }
+    }
+    try { sessionStorage.removeItem('heng_ops_next') } catch { /* 忽略 */ }
+    if (params.get('next')) {
+      params.delete('next')
+      const rest = params.toString()
+      history.replaceState(null, '', location.pathname + (rest ? `?${rest}` : '') + location.hash)
+    }
+    return next
+  })()
+
+  // 登录成功的统一出口：有回跳目的地整页跳转；无目的地时按落地分诊（与 app.js boot 同规则，
+  // docs/entry-switching.md）——纯业务身份直达部门面板，其余进控制台工作台
+  const finishLogin = (welcomeName) => {
+    toast(`欢迎回来，${welcomeName}`)
+    if (nextDestination) { location.assign(nextDestination); return }
+    if (resolveLanding(session.user) === 'panel') {
+      try { localStorage.setItem(LANDING_PREF_KEY, 'panel') } catch { /* 忽略 */ }
+      location.assign(`${BASE}/panel/`)
+      return
+    }
+    location.hash = '#/dashboard'
+    window.dispatchEvent(new Event('hashchange'))
+  }
+
+  // 票据免登：?ticket= 一次性参数（门户/钉钉入口复用平台领票模式）。
+  // 读取后立即清除 URL 参数（票据不常驻地址栏），兑换成功直达工作台；失败清参数后走常规登录。
+  {
+    const urlTicket = new URLSearchParams(location.search).get('ticket')
+    if (urlTicket) {
+      history.replaceState(null, '', location.pathname + location.hash)
+      entryTicketSession(urlTicket).then((user) => {
+        finishLogin(user.displayName)
+      }).catch((error) => {
+        toast(`免登失败：${error.message}，请常规登录`, 'error')
+      })
+    }
+  }
+
   // 上次使用的接入主体（多主体部署时保持入口视觉一致；身份归属最终以钉钉组织选择为准）
   const LAST_SSO_CONFIG_KEY = 'heng_ops_last_sso_config'
   let preferredConfigId = ''
@@ -183,8 +240,7 @@ export function renderLogin(app) {
       const result = await api.post(path, payload)
       session.save(result.token, result.user)
       if (result.refreshToken) session.saveRefresh(result.refreshToken)
-      toast(`欢迎回来，${result.user.displayName}`)
-      location.hash = '#/dashboard'
+      finishLogin(result.user.displayName)
     } catch (error) {
       toast(error.message, 'error')
     } finally {
@@ -231,7 +287,7 @@ export function renderLogin(app) {
         $('#ding-step-pending').style.display = ''
         return
       }
-      finishLogin(result)
+      finishSsoLogin(result)
     } catch (error) {
       toast(error.message, 'error')
     } finally {
@@ -239,10 +295,9 @@ export function renderLogin(app) {
     }
   }
 
-  const finishLogin = (result) => {
+  const finishSsoLogin = (result) => {
     session.save(result.token, result.user)
     if (result.refreshToken) session.saveRefresh(result.refreshToken)
-    toast(`欢迎回来，${result.user.displayName}`)
     // 承接回跳：从 OIDC 授权页发起的钉钉登录（含回调转本页完成首绑/注册的分支），
     // 登录后按暂存的授权请求（与授权请求同为 5 分钟有效）回授权页继续 consent，而非进控制台
     let resume = null
@@ -254,7 +309,7 @@ export function renderLogin(app) {
       location.hash = `#/oauth/authorize?req=${resume.req}`
       return
     }
-    location.hash = '#/dashboard'
+    finishLogin(result.user.displayName)
   }
 
   app.querySelectorAll('#login-form-dingtalk .tab[data-ptab]').forEach((el) => {
@@ -274,7 +329,7 @@ export function renderLogin(app) {
         username: $('#ding-bind-username').value.trim(),
         password: $('#ding-bind-password').value,
       })
-      finishLogin(result)
+      finishSsoLogin(result)
     } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
   }
   $('#ding-register-submit').onclick = async () => {
@@ -282,7 +337,7 @@ export function renderLogin(app) {
     btn.classList.add('btn-loading')
     try {
       const result = await api.post('/api/auth/sso/register', { pendingTicket: dingTicket })
-      finishLogin(result)
+      finishSsoLogin(result)
     } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
   }
   $('#ding-pending-back').onclick = () => {

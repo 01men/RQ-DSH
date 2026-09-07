@@ -1,0 +1,96 @@
+/** `rq-card` 命名空间词典（执行卡 + 反馈条的全部文案）。 */
+
+/** 简体中文词典（键集的权威来源）。 */
+export const zh = {
+  // ── 执行卡：状态徽标 ──
+  'card.state.calling': '调用中',
+  'card.state.executing': '执行中',
+  'card.state.done': '已完成',
+  'card.state.blocked': '已受阻',
+  'card.state.idle': '等待中',
+
+  // ── 执行卡：通用 ──
+  'card.args.summary': '调用参数',
+  'card.result.title': '执行结果',
+  'card.result.truncated': '（内容过长，已截断）',
+  'card.console.link': '到控制台查看',
+
+  // ── 执行卡：调用中（骨架 + 可取消占位）──
+  'card.cancel.button': '取消',
+  'card.cancel.hint': '取消通道待宿主半接线后启用',
+
+  // ── 执行卡：执行中（进度脉冲）──
+  'card.degraded.hint': '有点慢，已转后台处理',
+
+  // ── 执行卡：异常阻断（业务文案，原因码 = C3 js/errors.js 的键）──
+  'card.blocked.nas-authz-deny': '没有访问权限，请先申请授权',
+  'card.blocked.quota-exhausted': '钱包额度已耗尽，请申请追加',
+  'card.blocked.pdp-unreachable': '策略决策点暂不可达，已保护性暂停',
+  'card.blocked.breaker-open': '熔断保护生效中，待服务恢复后重试',
+  'card.blocked.down': '服务暂不可用，恢复后即可重试',
+  'card.blocked.binding-invalid': '身份绑定已失效，请重新绑定',
+  'card.blocked.invoke-error': '执行出错，详见结果信息',
+
+  // ── 执行卡：阻断行动按钮（跳 /rq 控制台对应页，同源带登录态）──
+  'card.action.nas-authz-deny': '申请访问',
+  'card.action.quota-exhausted': '申请额度',
+  'card.action.pdp-unreachable': '查看平台状态',
+  'card.action.breaker-open': '查看服务状态',
+  'card.action.down': '查看服务状态',
+  'card.action.binding-invalid': '重新绑定',
+  'card.action.invoke-error': '查看平台状态',
+
+  // ── 反馈条 ──
+  'fb.like': '有帮助',
+  'fb.dislike': '没帮助',
+  'fb.done': '已记录，感谢反馈',
+} satisfies Record<string, string>
+
+/** `rq-card` 命名空间键联合。 */
+export type RqCardKey = keyof typeof zh
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    /** 榕器执行卡与反馈条的文案。 */
+    'rq-card': RqCardKey
+  }
+}
+
+/** 英文词典，与 zh 键集逐键核对。 */
+export const en = {
+  'card.state.calling': 'Calling',
+  'card.state.executing': 'Running',
+  'card.state.done': 'Done',
+  'card.state.blocked': 'Blocked',
+  'card.state.idle': 'Waiting',
+
+  'card.args.summary': 'Arguments',
+  'card.result.title': 'Result',
+  'card.result.truncated': '(truncated)',
+  'card.console.link': 'Open in console',
+
+  'card.cancel.button': 'Cancel',
+  'card.cancel.hint': 'Cancellation becomes available once the host channel is wired',
+
+  'card.degraded.hint': 'Slow — moved to background',
+
+  'card.blocked.nas-authz-deny': 'No access permission — request authorization first',
+  'card.blocked.quota-exhausted': 'Wallet quota exhausted — request a top-up',
+  'card.blocked.pdp-unreachable': 'Policy decision point unreachable — paused protectively',
+  'card.blocked.breaker-open': 'Circuit breaker is open — retry after recovery',
+  'card.blocked.down': 'Service is down — retry once it recovers',
+  'card.blocked.binding-invalid': 'Identity binding expired — please re-bind',
+  'card.blocked.invoke-error': 'Execution failed — see result details',
+
+  'card.action.nas-authz-deny': 'Request access',
+  'card.action.quota-exhausted': 'Request quota',
+  'card.action.pdp-unreachable': 'Platform status',
+  'card.action.breaker-open': 'Service status',
+  'card.action.down': 'Service status',
+  'card.action.binding-invalid': 'Re-bind',
+  'card.action.invoke-error': 'Platform status',
+
+  'fb.like': 'Helpful',
+  'fb.dislike': 'Not helpful',
+  'fb.done': 'Recorded — thanks for the feedback',
+} satisfies Record<RqCardKey, string>

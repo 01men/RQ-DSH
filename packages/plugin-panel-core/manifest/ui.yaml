@@ -1,0 +1,9 @@
+# 前端路由 + 菜单声明（控制台按此注入导航；表单骨架由 api.yaml 的 schema 生成）
+plugin: dsh-plugin-panel-core
+routes:
+  - /panel/（独立零构建 SPA：顶栏/部门 rail/三栏/会话/任务看板/部门知识/场景图谱）
+menus:
+-
+  group: 总览
+  items:
+    - 部门面板（/panel/ 外链入口）

@@ -17,3 +17,6 @@ services:
   - key: httpServer
     access: ctx.httpServer
     description: HTTP 服务：REST 路由 + 静态资源
+  - key: scenegraphs
+    access: ctx.scenegraphs
+    description: 行业场景图谱装载（一图四清单；lint 与运行时同校验器，scenegraph.updated 热刷新）

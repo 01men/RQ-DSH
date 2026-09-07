@@ -4,3 +4,6 @@ events:
   - name: tools/change
     mode: emit
     description: 工具注册变更（lite 运行时）
+  - name: scenegraph.updated
+    mode: emit
+    description: 行业场景图谱重载完成（部门面板热刷新）

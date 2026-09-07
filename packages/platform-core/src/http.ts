@@ -38,6 +38,30 @@ interface Route {
 export interface HttpServerConfig {
   port?: number
   host?: string
+  /**
+   * 对外挂载前缀（默认 ''，即根路径）。挂载进完整 dsh 宿主（plugin-dsh-bridge）时设为 '/rq'：
+   * 平台侧所有「根绝对路径」构造（OIDC 授权页 302、SSO 回跳 HTML 等）据此拼接，
+   * 保证单入口（dsh web 端口）下 /rq 前缀内的链接自洽。
+   */
+  externalBase?: string
+  /**
+   * 跨域放行来源（docs/frontend-host-switching.md：控制台「宿主连接切换」——A 机页面直连 B 机数据面）。
+   * 默认 ['*']：数据面是纯 Bearer 通道，跨域请求不携带 Cookie（/dsh-bridge/* 注册在 dsh webServer
+   * 根上、不经本分发），放开不改变同源语义；传 [] 关闭；传具体来源列表则精确回显（配合 Vary: Origin）。
+   */
+  corsAllowOrigins?: string[]
+}
+
+/**
+ * CORS 放行决议（纯函数，selftest 直测）：返回应回写的 access-control-allow-origin 值，
+ * 未命中返回 undefined（不发放放行头）。
+ */
+export function corsAllowOriginFor(allowOrigins: readonly string[], originHeader: string | undefined): string | undefined {
+  if (!originHeader || allowOrigins.length === 0) return undefined
+  if (allowOrigins.includes('*')) return '*'
+  let origin = ''
+  try { origin = new URL(originHeader).origin } catch { return undefined }
+  return allowOrigins.includes(origin) ? origin : undefined
 }
 
 const MIME: Record<string, string> = {
@@ -68,11 +92,22 @@ export class HttpServerService extends Service {
   private server: Server | undefined
   readonly port: number
   readonly host: string
+  /** 对外挂载前缀：'' 或形如 '/rq'（无尾斜杠）。见 HttpServerConfig.externalBase。 */
+  readonly externalBase: string
+  private readonly corsAllowOrigins: string[]
+  /**
+   * 路由×权限矩阵（跨插件共享登记处）。console 的 guarded() 是第一登记方；
+   * 插件自注册 REST（如 plugin-panel-core）也必须把 {method, path, permission} 推入此处，
+   * 否则逃出 selftest「RBAC 端点矩阵 100% 越权断言网」（review-dsh-agent-panel-v2 Phase 0）。
+   */
+  readonly routeMatrix: Array<{ method: string; path: string; permission: string }> = []
 
   constructor(ctx: Context, config: HttpServerConfig = {}) {
     super(ctx, 'httpServer')
     this.port = config.port ?? 7300
     this.host = config.host ?? '0.0.0.0'
+    this.externalBase = (config.externalBase ?? '').replace(/\/+$/, '')
+    this.corsAllowOrigins = config.corsAllowOrigins ?? ['*']
     ctx.effect(() => () => {
       void this.stop()
     })
@@ -153,10 +188,38 @@ export class HttpServerService extends Service {
     return undefined
   }
 
-  private async dispatch(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  /**
+   * 请求入口（公开）。独立形态由 start() 的 listener 调用；挂载形态（plugin-dsh-bridge，
+   * 完整 dsh 宿主下的单进程单入口）由 dsh webServer 的前缀路由剥离对外前缀后直接调用。
+   * 调用方保证 req.url 已是平台内部路径（/api/*、/、/docs/* 等）。
+   */
+  async dispatch(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
     const pathSegments = url.pathname.split('/').filter(Boolean).map((s) => s)
     const method = (req.method ?? 'GET').toUpperCase()
+
+    // 跨域放行（宿主连接切换，docs/frontend-host-switching.md）：只覆盖平台 REST 数据面 /api/*，
+    // 且豁免自管 CORS 的子面——门户通道 /api/portal/* 与 OIDC 协议的 /api/authn/oidc/* 自行按
+    // 来源精确放行，不得被放宽（/oauth/*、/.well-known/* 不在 /api 内，天然不受影响）。
+    // 先于鉴权中间件——浏览器预检 OPTIONS 不带 Bearer，不得被 401 拦截；放行头经 setHeader
+    // 预挂，与后续 ok/fail/file 的 writeHead 自然合并（错误体跨域同样可读）。
+    const blanketCorsPath = url.pathname.startsWith('/api/')
+      && !url.pathname.startsWith('/api/portal/')
+      && !url.pathname.startsWith('/api/authn/oidc/')
+    const allowOrigin = blanketCorsPath ? corsAllowOriginFor(this.corsAllowOrigins, req.headers.origin) : undefined
+    if (allowOrigin) {
+      res.setHeader('access-control-allow-origin', allowOrigin)
+      res.setHeader('vary', 'Origin')
+      if (method === 'OPTIONS') {
+        res.writeHead(204, {
+          'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
+          'access-control-allow-headers': String(req.headers['access-control-request-headers'] ?? 'authorization, content-type'),
+          'access-control-max-age': '600',
+        })
+        res.end()
+        return
+      }
+    }
 
     let body: any
     if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
