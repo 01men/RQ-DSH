@@ -3926,6 +3926,32 @@ try {
   const spaStillOk = await rawReq('GET', '/')
   check('SPA 静态兜底不受影响（/ 仍返回控制台首页）', spaStillOk.status === 200 && String(spaStillOk.headers['content-type']).startsWith('text/html') && spaStillOk.body.includes('榕器'))
 
+  // ================================================================ 统一入口 · /panel 目录形态归一（docs/entry-switching.md）
+  section('统一入口：/panel 无尾斜杠 302 归一（相对资源解析防御）')
+  const panelBare = await rawReq('GET', '/panel')
+  check('/panel 302 → /panel/（独立形态；无归一时 index.html 的 ./js/* 会解析到 /js/* → 白屏）',
+    panelBare.status === 302 && panelBare.headers.location === '/panel/',
+    `status=${panelBare.status} location=${panelBare.headers.location}`)
+  const panelSlash = await rawReq('GET', '/panel/')
+  check('/panel/ 面板 SPA 正常伺服（归一目标可达）', panelSlash.status === 200 && panelSlash.body.includes('部门 Agent 工作台'))
+  // 落地分诊纯函数随包单测（landing.test.mjs：五内置角色决议/通配展开/裸落地/回跳白名单）
+  const landingTest = spawn(process.execPath, ['packages/plugin-console/public/js/landing.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => landingTest.on('close', resolve))
+  check('落地分诊随包单测全绿（node --test）', landingTest.exitCode === 0, `exit=${landingTest.exitCode}`)
+  // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
+  const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
+  check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',
+    panelBoot.includes("fetch('/dsh-bridge/status'") && !panelBoot.includes('${BASE}/dsh-bridge'))
+  const consoleBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'app.js'), 'utf8')
+  check('控制台启动链含宿主会话直通 + 落地分诊（exchangeBridgeSession/resolveLanding）',
+    consoleBoot.includes('exchangeBridgeSession') && consoleBoot.includes('resolveLanding'))
+  const loginSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'pages', 'login.js'), 'utf8')
+  check('登录回跳接线（?next= 与 401 暂存 heng_ops_next 消费 + 白名单 sanitizeNext）',
+    loginSrc.includes("params.get('next')") && loginSrc.includes('heng_ops_next') && loginSrc.includes('sanitizeNext'))
+  const panelApp = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'app.js'), 'utf8')
+  check('面板侧切换接线（管理控制台 data-landing 偏好 + 401 引导带 ?next= 回面板）',
+    panelApp.includes('data-landing') && panelApp.includes('next='))
+
   // ================================================================ 门户数据通道（plugin-portal：外部拉取端点）
   section('门户数据通道（plugin-portal：企业门户拉取已发布应用/Agent，非核心）')
   const portalOrigin = 'http://192.168.0.4:8092'
@@ -4374,6 +4400,10 @@ try {
     check('/rq/js/* 控制台静态资源按前缀命中', asset.status === 200 && String(asset.headers.get('content-type') ?? '').includes('javascript'), `status=${asset.status}`)
     const panelSpa = await simGet('/rq/panel/')
     check('/rq/panel/ 面板 SPA 经前缀挂载可达（宿主 web diff=0）', panelSpa.status === 200 && (await panelSpa.text()).includes('部门 Agent 工作台'), `status=${panelSpa.status}`)
+    const panelBareMounted = await simGet('/rq/panel')
+    check('/rq/panel 302 → /rq/panel/（externalBase 感知，与独立形态同语义）',
+      panelBareMounted.status === 302 && panelBareMounted.headers.get('location') === '/rq/panel/',
+      `status=${panelBareMounted.status} location=${panelBareMounted.headers.get('location')}`)
     const spaMiss = await simGet('/rq/anything-else')
     check('非 /api 未命中回落 SPA（与独立形态一致）', spaMiss.status === 200 && (await spaMiss.text()).includes('<!doctype html>'))
     const apiMiss = await simGet('/rq/api/definitely-missing', adminToken)

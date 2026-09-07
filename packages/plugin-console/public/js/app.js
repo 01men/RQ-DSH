@@ -1,9 +1,10 @@
 /** 应用外壳：路由 + 布局 + 侧边栏 + 顶栏 + ⌘K 命令面板。 */
 import { icon } from './icons.js'
-import { session, api } from './api.js'
+import { session, api, exchangeBridgeSession } from './api.js'
 import { $, $$, h, toast, esc } from './ui.js'
 import { openCmdk } from './cmdk.js'
 import { replayPlatformTheme, PLATFORM_KEY } from './platform.js'
+import { resolveLanding, isBareLanding, LANDING_PREF_KEY } from './landing.js'
 
 // 平台主题（WP-05/B3）：启动即回放记忆的平台（免闪默认色）；登录后由工作台按卡片包下发的 platform 校准。
 replayPlatformTheme()
@@ -43,7 +44,7 @@ const NAV = [
     { path: '#/dashboard', label: '工作台', icon: 'dashboard', perm: 'console.login' },
     { path: '#/board', label: '战略看板', icon: 'trending', perm: 'console.login' },
     // 部门面板（review-dsh-agent-panel-v2）：独立零构建 SPA，经 ext 外链进入（/panel，挂载形态 /rq/panel/）
-    { ext: () => `${BASE}/panel/`, label: '部门面板', icon: 'users', perm: 'console.login' },
+    { ext: () => `${BASE}/panel/`, label: '部门面板', icon: 'users', perm: 'console.login', landing: 'panel' },
   ] },
   { section: 'AI 资源', items: [
     { path: '#/register', label: '资产登记', icon: 'zap', perm: 'console.login' },
@@ -163,8 +164,12 @@ function renderShell(page, params, builder) {
       const active = item.path && currentHash().split('?')[0] === item.path
       const el = h(`<div class="nav-item ${active ? 'active' : ''}">${icon(item.icon)}<span>${esc(item.label)}</span><span class="nav-badge hidden"></span></div>`)
       el.onclick = () => {
-        // ext 外链项（部门面板独立 SPA）：整页跳转，不进 hash 路由
-        if (item.ext) { location.assign(item.ext()); return }
+        // ext 外链项（部门面板独立 SPA）：整页跳转，不进 hash 路由；显式跨工作台切换记录落地偏好
+        if (item.ext) {
+          if (item.landing) { try { localStorage.setItem(LANDING_PREF_KEY, item.landing) } catch { /* 忽略 */ } }
+          location.assign(item.ext())
+          return
+        }
         location.hash = item.path
       }
       item._badgeEl = el.querySelector('.nav-badge')
@@ -230,7 +235,29 @@ async function refreshBadges() {
 
 // 全局路由
 window.addEventListener('hashchange', navigate)
-navigate()
+
+// 启动链：会话就绪 → 落地分诊 → 首帧渲染（docs/entry-switching.md）。
+// 会话链与部门面板同款：已有令牌 → 宿主 Cookie 直通（独立形态 /dsh-bridge/* 不存在，静默跳过）；
+// ?ticket= 由登录页消费（仅未登录落到登录页时生效）。
+// 落地分诊：纯业务身份裸落地 → 进部门面板（一个入口按身份落地）；
+// 面板/控制台的显式切换入口会记录偏好（heng_ops_landing），偏好=console 时不参与分诊；
+// 深链（#/其他页面）与页内导航永不触发分诊。
+async function boot() {
+  if (!session.token) await exchangeBridgeSession()
+  const user = session.user
+  if (user && isBareLanding(location.hash) && resolveLanding(user) === 'panel') {
+    let pref = ''
+    try { pref = localStorage.getItem(LANDING_PREF_KEY) ?? '' } catch { /* 忽略 */ }
+    if (pref !== 'console') {
+      try { localStorage.setItem(LANDING_PREF_KEY, 'panel') } catch { /* 忽略 */ }
+      location.replace(`${BASE}/panel/`)
+      return
+    }
+  }
+  navigate()
+}
+
+boot()
 
 // ⌘K 快捷键
 window.addEventListener('keydown', (e) => {

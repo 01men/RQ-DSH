@@ -84,7 +84,11 @@ async function request(method, path, body, retried = false) {
     const err = payload?.error ?? {}
     if (response.status === 401 && !path.startsWith('/api/auth/') && !location.hash.startsWith('#/oauth')) {
       session.clear()
-      if (!location.hash.startsWith('#/login')) location.hash = '#/login'
+      if (!location.hash.startsWith('#/login')) {
+        // 暂存被 401 打断的目的地：登录成功后回跳（登录页消费一次），不再落在工作台让人自己找路
+        try { sessionStorage.setItem('heng_ops_next', location.pathname + location.hash) } catch { /* 忽略 */ }
+        location.hash = '#/login'
+      }
     }
     throw new ApiError(err.code ?? 'HTTP_' + response.status, err.message ?? `请求失败（${response.status}）`, response.status, err)
   }
@@ -130,6 +134,25 @@ export async function bridgeStatus() {
   if (!response.ok) return null
   const payload = await response.json().catch(() => null)
   return payload?.data ?? null
+}
+
+/**
+ * 宿主 Cookie → 平台会话直通（控制台启动会话链第三级，与部门面板 boot 同款语义）：
+ * rq_sid 已绑定宿主身份时免二次登录。路径必须根绝对（不带 BASE）——
+ * /dsh-bridge/* 注册在 dsh webServer 根上，挂载形态不落 /rq 之内。
+ * 独立形态（无宿主）404/HTML → null，静默跳过。
+ */
+export async function exchangeBridgeSession() {
+  const status = await fetch('/dsh-bridge/status', { headers: { accept: 'application/json' } })
+    .then((r) => r.json()).catch(() => null)
+  if (!status?.data?.bound) return null
+  const payload = await fetch('/dsh-bridge/session', { method: 'POST' })
+    .then((r) => r.json()).catch(() => null)
+  if (!payload?.ok) return null
+  const result = payload.data
+  session.save(result.token, result.user)
+  if (result.refreshToken) session.saveRefresh(result.refreshToken)
+  return result.user
 }
 
 /** Blob 下载（skill.zip 等二进制）：统一走 BASE 与 Bearer 头，页面不得自带裸 fetch。 */

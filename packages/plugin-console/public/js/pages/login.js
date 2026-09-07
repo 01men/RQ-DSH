@@ -1,5 +1,6 @@
 /** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）/ 票据免登（?ticket= 一次性参数）。 */
-import { api, session, entryTicketSession } from '../api.js'
+import { api, session, entryTicketSession, BASE } from '../api.js'
+import { sanitizeNext, resolveLanding, LANDING_PREF_KEY } from '../landing.js'
 import { icon } from '../icons.js'
 import { h, $, esc, toast } from '../ui.js'
 
@@ -117,6 +118,38 @@ export function renderLogin(app) {
   const tabPassword = $('#login-form-password')
   const tabDing = $('#login-form-dingtalk')
 
+  // 登录回跳（docs/entry-switching.md）：?next= 显式目的地 > sessionStorage 暂存（api.js 401 打断处，
+  // 键 heng_ops_next 与 api.js 字面量同步）。读取即消费：参数与暂存只生效一次；
+  // 白名单仅同源绝对路径（sanitizeNext），防 open redirect。
+  const nextDestination = (() => {
+    const params = new URLSearchParams(location.search)
+    let next = sanitizeNext(params.get('next') ?? '')
+    if (!next) {
+      try { next = sanitizeNext(sessionStorage.getItem('heng_ops_next') ?? '') } catch { /* 忽略 */ }
+    }
+    try { sessionStorage.removeItem('heng_ops_next') } catch { /* 忽略 */ }
+    if (params.get('next')) {
+      params.delete('next')
+      const rest = params.toString()
+      history.replaceState(null, '', location.pathname + (rest ? `?${rest}` : '') + location.hash)
+    }
+    return next
+  })()
+
+  // 登录成功的统一出口：有回跳目的地整页跳转；无目的地时按落地分诊（与 app.js boot 同规则，
+  // docs/entry-switching.md）——纯业务身份直达部门面板，其余进控制台工作台
+  const finishLogin = (welcomeName) => {
+    toast(`欢迎回来，${welcomeName}`)
+    if (nextDestination) { location.assign(nextDestination); return }
+    if (resolveLanding(session.user) === 'panel') {
+      try { localStorage.setItem(LANDING_PREF_KEY, 'panel') } catch { /* 忽略 */ }
+      location.assign(`${BASE}/panel/`)
+      return
+    }
+    location.hash = '#/dashboard'
+    window.dispatchEvent(new Event('hashchange'))
+  }
+
   // 票据免登：?ticket= 一次性参数（门户/钉钉入口复用平台领票模式）。
   // 读取后立即清除 URL 参数（票据不常驻地址栏），兑换成功直达工作台；失败清参数后走常规登录。
   {
@@ -124,9 +157,7 @@ export function renderLogin(app) {
     if (urlTicket) {
       history.replaceState(null, '', location.pathname + location.hash)
       entryTicketSession(urlTicket).then((user) => {
-        toast(`欢迎回来，${user.displayName}`)
-        location.hash = '#/dashboard'
-        window.dispatchEvent(new Event('hashchange'))
+        finishLogin(user.displayName)
       }).catch((error) => {
         toast(`免登失败：${error.message}，请常规登录`, 'error')
       })
@@ -194,8 +225,7 @@ export function renderLogin(app) {
       const result = await api.post(path, payload)
       session.save(result.token, result.user)
       if (result.refreshToken) session.saveRefresh(result.refreshToken)
-      toast(`欢迎回来，${result.user.displayName}`)
-      location.hash = '#/dashboard'
+      finishLogin(result.user.displayName)
     } catch (error) {
       toast(error.message, 'error')
     } finally {
@@ -242,7 +272,7 @@ export function renderLogin(app) {
         $('#ding-step-pending').style.display = ''
         return
       }
-      finishLogin(result)
+      finishSsoLogin(result)
     } catch (error) {
       toast(error.message, 'error')
     } finally {
@@ -250,11 +280,10 @@ export function renderLogin(app) {
     }
   }
 
-  const finishLogin = (result) => {
+  const finishSsoLogin = (result) => {
     session.save(result.token, result.user)
     if (result.refreshToken) session.saveRefresh(result.refreshToken)
-    toast(`欢迎回来，${result.user.displayName}`)
-    location.hash = '#/dashboard'
+    finishLogin(result.user.displayName)
   }
 
   app.querySelectorAll('#login-form-dingtalk .tab[data-ptab]').forEach((el) => {
@@ -274,7 +303,7 @@ export function renderLogin(app) {
         username: $('#ding-bind-username').value.trim(),
         password: $('#ding-bind-password').value,
       })
-      finishLogin(result)
+      finishSsoLogin(result)
     } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
   }
   $('#ding-register-submit').onclick = async () => {
@@ -282,7 +311,7 @@ export function renderLogin(app) {
     btn.classList.add('btn-loading')
     try {
       const result = await api.post('/api/auth/sso/register', { pendingTicket: dingTicket })
-      finishLogin(result)
+      finishSsoLogin(result)
     } catch (error) { toast(error.message, 'error') } finally { btn.classList.remove('btn-loading') }
   }
   $('#ding-pending-back').onclick = () => {

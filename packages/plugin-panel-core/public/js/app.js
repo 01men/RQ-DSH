@@ -44,6 +44,7 @@ const ART_KINDS = { report: '报告', order: '工单', quote: '报价', diagnosi
 // ---------------------------------------------------------------------------
 
 const state = {
+  hostBridge: false,
   depts: [],
   dept: localStorage.getItem('panel_dept') ?? 'mfg',
   overview: null,
@@ -82,9 +83,10 @@ function hideModal() {
 // 启动
 // ---------------------------------------------------------------------------
 
-export function start({ base }) {
+export function start({ base, hostBridge = false }) {
   apiSetBase(base)
   depsSetBase(base)
+  state.hostBridge = hostBridge
   if (!session.token) {
     renderLoginGuide()
     return
@@ -96,12 +98,14 @@ export function start({ base }) {
 }
 
 function renderLoginGuide() {
+  // 回跳语义：登录成功后带 ?next= 回到面板（登录页消费一次），不再让业务员落在控制台后自己找路
+  const here = encodeURIComponent(location.pathname + location.search + location.hash)
   document.getElementById('app').innerHTML = `
     <div class="login-guide">
       <h1>🌳 榕器 · 部门 Agent 工作台</h1>
       <p>当前浏览器没有有效的平台会话。<br>
       请从控制台登录后进入，或从钉钉/门户的「打开即工作台」入口点入（自动票据免登）。</p>
-      <a href="${basePath() || '/'}#/login"><button class="btn primary">去控制台登录</button></a>
+      <a href="${basePath() || '/'}?next=${here}#/login"><button class="btn primary">去控制台登录</button></a>
     </div>`
 }
 
@@ -345,7 +349,10 @@ function renderRail() {
     </div>`
   }).join('') + `
     <div class="rail-spacer"></div>
-    <a class="rail-console" href="${basePath() || '/'}" title="打开榕器管理控制台" style="text-decoration:none">
+    ${state.hostBridge ? `<a class="rail-console" href="/" title="打开 Agent 对话（dsh 宿主）" style="text-decoration:none">
+      <div class="ico">💬</div><div>Agent<br>对话</div></a>` : ''}
+    <a class="rail-console" href="${basePath() || '/'}" title="打开榕器管理控制台" style="text-decoration:none"
+      data-landing="console">
       <div class="ico">🧩</div><div>管理<br>控制台</div></a>`
   rail.querySelectorAll('.rail-item').forEach((el) => {
     el.onclick = () => {
@@ -353,6 +360,12 @@ function renderRail() {
       if (dept?.allowed === false) { void toast('部门范围受限：该部门已绑定其他组织治理', 'error'); return }
       void switchDept(el.dataset.dept)
     }
+  })
+  // 显式跨工作台切换：记住去向（控制台启动分诊尊重该偏好，不再把人拽回面板）
+  rail.querySelectorAll('[data-landing]').forEach((el) => {
+    el.addEventListener('click', () => {
+      try { localStorage.setItem('heng_ops_landing', el.dataset.landing) } catch { /* 忽略 */ }
+    })
   })
 }
 
@@ -400,6 +413,8 @@ function renderDept() {
         <div class="kpi" title="来源：${esc(kpi.source)}"><div class="v">${esc(kpi.value)}</div><div class="k">${esc(kpi.label)}</div></div>`).join('')}
       </div>
       <div class="head-actions">
+        <button class="btn only-compact toggle-left" id="btnLeftDrawer" title="名册/频道（窄窗抽屉）">👥</button>
+        <button class="btn only-compact toggle-right" id="btnRightDrawer" title="部门看板（窄窗抽屉）">📊</button>
         <button class="btn" id="btnConfig">⚙ 面板配置</button>
         <button class="btn primary" id="btnNewChannel">＋ 发起协作</button>
       </div>
@@ -411,6 +426,9 @@ function renderDept() {
     </div>`
   document.getElementById('btnConfig').onclick = () => showConfig()
   document.getElementById('btnNewChannel').onclick = () => showNewChannel()
+  const toggle = (cls) => document.body.classList.toggle(cls)
+  document.getElementById('btnLeftDrawer').onclick = () => toggle('left-open')
+  document.getElementById('btnRightDrawer').onclick = () => toggle('right-open')
   renderColLeft()
   renderColRight()
 }
@@ -421,6 +439,7 @@ function renderColLeft() {
   const dept = state.overview.dept
   const bridgeIds = new Set(state.bridges.filter((b) => b.purpose === 'channel').map((b) => b.channelId))
   host.innerHTML = `
+    <button class="drawer-close" id="leftClose">✕ 收起名册</button>
     <div class="col-title"><span>部门 AGENT</span><span title="阵容在面板配置中绑定 Agent 资产">＋</span></div>
     ${dept.agents.map((agent) => {
       const statusColor = agent.asset ? (agent.asset.status === 'online' ? '#22c55e' : '#94a3b8') : ''
@@ -448,11 +467,15 @@ function renderColLeft() {
   })
   const add = host.querySelector('#addChannel')
   if (add) add.onclick = () => showNewChannel()
+  const leftClose = host.querySelector('#leftClose')
+  if (leftClose) leftClose.onclick = () => document.body.classList.remove('left-open')
 }
 
 async function switchChannel(channelId) {
   state.channelId = channelId
   localStorage.setItem(`panel_channel_${state.dept}`, channelId)
+  // 窄窗抽屉态下选中频道即收起（移动端姿态）
+  document.body.classList.remove('left-open')
   renderColLeft()
   await loadTab()
   renderMain()
@@ -461,7 +484,9 @@ async function switchChannel(channelId) {
 function renderColRight() {
   const host = document.getElementById('colRight')
   if (!host) return
-  host.innerHTML = state.overview.widgets.map(renderWidget).join('')
+  host.innerHTML = `<button class="drawer-close" id="rightClose">✕ 收起看板</button>${state.overview.widgets.map(renderWidget).join('')}`
+  const rightClose = host.querySelector('#rightClose')
+  if (rightClose) rightClose.onclick = () => document.body.classList.remove('right-open')
 }
 
 function renderWidget(widget) {

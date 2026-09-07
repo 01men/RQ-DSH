@@ -489,7 +489,20 @@ export function apply(ctx: Context) {
   // -- 静态托管（/panel → 对外 /rq/panel/） ----------------------------------------
 
   const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public')
-  if (existsSync(publicDir)) http.serveStatic('/panel', publicDir, '/index.html')
+  if (existsSync(publicDir)) {
+    // 目录形态归一：/panel（无尾斜杠）伺服 index.html 后相对资源 ./js/* 会解析到 /js/*（404→SPA 兜底→白屏），
+    // 与 dsh-bridge 的 /rq→/rq/ 302 同语义；Location 带 externalBase（挂载形态 = /rq/panel/）。
+    // 注意路由按 split('/').filter(Boolean) 匹配，/panel 与 /panel/ 命中同一路由节点——
+    // 带尾斜杠的请求必须原地伺服 index.html，不得 302（自指循环）。
+    http.register('GET', '/panel', (exchange) => {
+      if (exchange.path.endsWith('/')) {
+        exchange.file(join(publicDir, 'index.html'))
+        return
+      }
+      exchange.res.writeHead(302, { location: `${http.externalBase}/panel/` }).end()
+    })
+    http.serveStatic('/panel', publicDir, '/index.html')
+  }
 
   // -- 种子（基线骨架 + DEMO_SEED=1 演示内容） ---------------------------------------
 

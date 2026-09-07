@@ -31,21 +31,25 @@ function saveSession(data) {
 }
 
 /**
- * 宿主会话直通（登录打通）：dsh 宿主下 rq_sid Cookie 已绑定宿主身份时，
+ * 宿主桥探测 + 宿主会话直通（登录打通）：dsh 宿主下 rq_sid Cookie 已绑定宿主身份时，
  * 经 POST /dsh-bridge/session（同源收紧）兑换平台会话——零二次登录。
+ * 路径必须根绝对（不带 BASE）：/dsh-bridge/* 注册在 dsh webServer 根上，挂载形态并不落在 /rq 之内
+ * （带 BASE 会请求 /rq/dsh-bridge/* → 剥前缀后无此路由 → 静默 miss）。
  * 独立形态下 /dsh-bridge/* 不存在（回落 SPA HTML → json 为 null），静默跳过。
+ * 返回 hostBridge 供面板侧栏决定是否展示「Agent 对话」入口（仅 dsh 宿主形态有对话面）。
  */
-async function bridgeSession() {
+async function hostBridgeSession() {
   try {
-    const statusPayload = await fetch(`${BASE}/dsh-bridge/status`).then((r) => r.json()).catch(() => null)
-    if (!statusPayload?.data?.bound) return false
-    const payload = await fetch(`${BASE}/dsh-bridge/session`, { method: 'POST' })
-      .then((r) => r.json()).catch(() => null)
-    if (!payload?.ok) return false
-    saveSession(payload.data)
-    return true
+    const statusPayload = await fetch('/dsh-bridge/status').then((r) => r.json()).catch(() => null)
+    if (!statusPayload?.data?.bound) return { hostBridge: false }
+    if (!localStorage.getItem(TOKEN_KEY)) {
+      const payload = await fetch('/dsh-bridge/session', { method: 'POST' })
+        .then((r) => r.json()).catch(() => null)
+      if (payload?.ok) saveSession(payload.data)
+    }
+    return { hostBridge: true }
   } catch {
-    return false
+    return { hostBridge: false }
   }
 }
 
@@ -62,12 +66,10 @@ async function bootstrap() {
     history.replaceState(null, '', `${path}${rest ? `?${rest}` : ''}${location.hash}`)
   }
   // 会话链：已有令牌 → 票据 → 宿主 Cookie 直通（dsh 宿主内点入面板零二次登录）
-  if (!localStorage.getItem(TOKEN_KEY)) {
-    await bridgeSession()
-  }
+  const { hostBridge } = await hostBridgeSession()
   const app = await import('./app.js')
   document.getElementById('app').dataset.booted = '1'
-  app.start({ base: BASE })
+  app.start({ base: BASE, hostBridge })
 }
 
 bootstrap().catch((error) => {
