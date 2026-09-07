@@ -3991,6 +3991,8 @@ try {
   const appConnSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'app.js'), 'utf8')
   check('控制台接线：#/connections 会话前置独立渲染 + 外壳内 builders + 顶栏远程指示',
     appConnSrc.includes("page === 'connections'") && appConnSrc.includes('connections: renderConnections') && appConnSrc.includes('conn-indicator'))
+  check('app.js 显式 import BASE（缺失时 NAV「部门面板」ext 点击 ReferenceError → 无响应，c0fca1a 回归守卫）',
+    /import\s*\{[^}]*\bBASE\b[^}]*\}\s*from\s*'\.\/api\.js'/.test(appConnSrc))
 
   // ================================================================ 门户数据通道（plugin-portal：外部拉取端点）
   section('门户数据通道（plugin-portal：企业门户拉取已发布应用/Agent，非核心）')
