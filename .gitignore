@@ -9,3 +9,7 @@ service.log
 .zcode/
 .workbuddy/
 cordis.local.yml
+
+# 进程内探针残留
+.tmp-probe-*
+tests/.probe-*
