@@ -1,0 +1,4 @@
+retry: 5000
+
+data: {"name":"panel.message.created","payload":{"messageId":"pmsg_mtsmz3wuidsf3zla","dept":"rd","channelId":"pchan_mtsmynzwids557mp","senderName":"平台管理员","text":"SECRET-CANARY-2-��֯�����û���Ӧ�յ�","ddSync":"none","title":""}}
+
