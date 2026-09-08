@@ -1,15 +1,26 @@
 # DSH-RQ 定制化项目说明
 
-1. 本目录要围绕仓库 https://github.com/01men/ybkk-AIOS.git 开发一条子分支，该分支为定制化项目，无需合并到主分支
+1. 本目录围绕仓库 https://github.com/01men/ybkk-AIOS.git 开发定制分支 `custom/dsh-rq`，
+   无需（也不得整分支）合并回主分支
 2. 本工作区备份推送仓库：01men/RQ-DSH
+
+## 双轨开发模型（2026-09 定版）
+
+- **宿主轨**（上游 `ybkk-AIOS` main）：宿主平台/控制台开发线——platform-core、console、
+  authn/oidc、agent、portal、iam、usage、skillhub、nas-authz、dsh-bridge 宿主桥；API/事件契约所有者。
+- **定制轨**（本分支 `custom/dsh-rq`）：dsh 前端交互插件/看板研发线——plugin-panel-core、
+  plugin-rq-card、plugin-dingtalk-bridge、scenegraphs 业务数据；dsh 部署装配（生产物理真相）。
+- 宿主面需求/缺陷一律去主分支做，定制分支通过 merge 吸收；定制→上游仅允许
+  「交接清单文档」受控回流（`docs/handoff-*-to-main.md`）。
+- 定版与路线：`docs/plan-dual-track-custom.md`（定制侧）/ `docs/plan-dual-track-host-main.md`（主分支侧）。
 
 ## ⛔ 仓库同步铁律（最高约束）
 
 **新会话/新开发者第一步：读完根目录 [AGENTS.md](AGENTS.md)。**
-铁律摘要（全文以 AGENTS.md 为准）：唯一开发分支 `custom/dsh-rq`；上游 ybkk-AIOS 只读不推
-（定制代码回流 main = 最严重事故，pre-push 钩子已硬拦截）；RQ-DSH 是唯一推送目标（push 即备份）；
-同步方向唯一（上游 main → 定制分支），冲突以主分支为准、定制特性必须保留；合并后 selftest
-全绿才能推送备份。
+铁律摘要（全文以 AGENTS.md 为准）：本仓库唯一开发分支 `custom/dsh-rq`；对上游只 fetch 不 push
+（整分支回流 main = 最严重事故，pre-push 钩子已硬拦截；受控回流走交接清单）；RQ-DSH 是唯一
+推送目标（push 即备份）；合并方向唯一（上游 main → 定制分支），冲突宿主面以主分支为准、
+定制面必须保留；合并后 selftest 全绿才能推送备份；推送前跑北极星 diff 收敛检查（见 AGENTS.md）。
 
 ## 环境布局（初始化于 2026-09-02）
 
