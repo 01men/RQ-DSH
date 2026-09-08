@@ -409,7 +409,24 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
     return finalize(base, ctx.rules, input)
   }
   if (derived.special === 'root-no-role') {
-    return denyAll(['org.root-no-role：挂根组织且非负责人，无数据权限（请落入部门/班组）'])
+    // 挂根默认全拒（推人落入部门/班组）；唯一出口是管理员显式授予的资源级 allow 例外——
+    // 平台服务账号（网关令牌绑定身份）对自有存储区的授权走这条通道，例外全量留痕可审计。
+    const verdicts = input.paths.map((path) => {
+      const rescue = ctx.rules.exceptions.find((exception) => exception.effect === 'allow'
+        && exception.nasId === input.nasId
+        && exception.ops.includes(input.op)
+        && !expired(exception, now)
+        && (!exception.userIds || exception.userIds.includes(user.id))
+        && matchExceptionPath(exception.path, path))
+      if (rescue) {
+        return { path, decision: 'allow' as const, reasons: [`exception.allow：显式授权规则 ${rescue.id} 救援挂根账号（root-no-role）${rescue.note ? `（${rescue.note}）` : ''}`], ruleId: rescue.id }
+      }
+      return { path, decision: 'deny' as const, reasons: ['org.root-no-role：挂根组织且非负责人，无数据权限（请落入部门/班组）'] }
+    })
+    base.decision = verdicts.every((verdict) => verdict.decision === 'allow') ? 'allow' : 'deny'
+    base.reasons = [...new Set(verdicts.flatMap((verdict) => verdict.reasons))]
+    base.perPath = verdicts
+    return finalize(base, ctx.rules, input)
   }
 
   const scope = deriveScope(user, ctx.nas, ctx.orgIndex)
@@ -440,6 +457,12 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
   const secondaryPrefixes = secondaryScope && secondaryScope.via !== 'none' ? secondaryScope.prefixes : []
   if (secondaryPrefixes.length > 0) base.scope = [...base.scope, ...secondaryPrefixes]
 
+  // 根目录只读列举（B 语义，2026-09-03 拍板）：在本 NAS 有任一作用域（主/跨分支领导/兼任挂靠）的用户，
+  // 放行对 NAS 根路径本身的只读操作（列目录/查元信息）——否则子树作用域用户浏览文件第一步列根即被拒。
+  // 显式 deny 例外仍优先（判定序②不变）；写类与根下越界路径不受影响；无任何作用域用户照常全拒。
+  const nasRoot = normalizePath(ctx.nas!.rootPath || '/')
+  const rootListingAllowed = scope.via !== 'none' || leaderScopes.length > 0 || secondaryPrefixes.length > 0
+
   const verdicts: EnginePathVerdict[] = input.paths.map((rawPath) => {
     const path = normalizePath(rawPath)
     // ② 资源级显式 deny（尾通配，可按人收敛）
@@ -461,6 +484,10 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
       && matchExceptionPath(exception.path, path))
     if (allowHit) {
       return { path, decision: 'allow', reasons: [`exception.allow：命中显式授权规则 ${allowHit.id}${allowHit.expiresAt ? `（${allowHit.expiresAt} 到期）` : ''}${allowHit.note ? `（${allowHit.note}）` : ''}`], ruleId: allowHit.id }
+    }
+    // 根目录只读列举（B 语义）：判定序在显式例外之后、作用域边界之前
+    if (rootListingAllowed && !WRITE_OPS.has(input.op) && path === nasRoot) {
+      return { path, decision: 'allow', reasons: ['org.root-listing：本 NAS 作用域内用户的根目录只读列举放行'] }
     }
 
     // ④ 角色矩阵 × 作用域边界（主作用域 / 跨分支领导层 / 兼任只读层 / C 跨域只读层）

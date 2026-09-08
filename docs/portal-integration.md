@@ -36,6 +36,19 @@
 门户契约要求**免鉴权 GET + 门户专用字段 + CORS**（api.md §3/§6），既有端点均不满足；
 门户通道读取的访问地址即各应用登记的 `attrs.url`（与控制台「打开应用」、SSO 接入同一数据源），无平行数据。
 
+### 门户侧访客指标上报（一行 beacon，可选）
+
+门户作为平台在册应用（`app_mtjl5anjiupainet`），页面加载/路由切换时向平台公开埋点端点上报一次，
+即可获得 PV/UV 统计（免鉴权、免 secret；SSO 打开/兑换已由平台自动折算 DAU，无需上报）：
+
+```js
+const vid = localStorage['rq:vid'] ??= crypto.randomUUID().replace(/-/g, '')
+navigator.sendBeacon?.('http://192.168.0.7:7300/api/apps/beacon',
+  new Blob([JSON.stringify({ app: 'app_mtjl5anjiupainet', vid })], { type: 'application/json' }))
+```
+
+详见 [app-sso-integration.md §十一](app-sso-integration.md#十一访客指标自动折算平台侧与-beacon-埋点应用侧)。
+
 ---
 
 ## 二、BASE URL 与端点（门户方回填 VITE_API_BASE 用）
@@ -62,7 +75,13 @@ BASE = http://192.168.0.7:7300/api/portal
 `launchDate` 口径：应用/Agent 取生命周期最近一次进入 `online` 的日期；Skill 取最近一次版本 `publishedAt`。
 应用 `tag` 优先取发布渠道 `channels[0]`，未登记渠道时用应用形态（Web/H5/小程序/桌面端/API）；
 `accent` 为平台按 id 稳定生成的卡片主题色（#RRGGBB）；`dept` 取归属组织名（组织未命名时回退空串/作者名）。
-`skills.downloadUrl` 暂为空串：Skill 包下载走平台鉴权通道，门户侧确定公开直链方案后回填。
+
+`skills.downloadUrl`：已上架技能包的**登录下载端点绝对地址**（`<对外基址>/api/portal/skills/:id/download`，
+zip 直出）。**api.md v1.1 起该端点必须携带门户登录令牌**：请求头 `Authorization: Bearer <token>`
+（门户 OIDC 登录换取的 access_token 或平台会话令牌均可），未带/无效令牌返回 401 契约错误
+（`{code:40100,...}`），登录后未上架/未知 id 返回 404。平台按解析出的登录用户登记下载计量与审计
+（`portal.skill.download`：谁、时间、下载了什么、来源 IP）；仅 `published` 状态技能可下载。
+配套 CORS：门户预检 `OPTIONS` 已放行 `authorization` 请求头（`Access-Control-Allow-Headers: authorization, content-type`）。
 
 ## 三、CORS（契约 §6，未放行则门户无法访问）
 
@@ -77,6 +96,7 @@ BASE = http://192.168.0.7:7300/api/portal
 |------|------|------|
 | `PORTAL_SYNC` | `on` | `off` 停用整个数据通道（门户自动降级样板） |
 | `PORTAL_API_PREFIX` | `/api/portal` | 端点前缀（变更后需同步告知门户方更新 VITE_API_BASE） |
+| `PORTAL_PUBLIC_BASE` | `http://192.168.0.7:7300` | 平台对外基址——`downloadUrl` 等绝对地址字段的拼装基准（反代/换址时覆盖） |
 | `PORTAL_CORS_ORIGINS` | （空） | 追加放行的门户来源，逗号分隔 |
 | `PORTAL_HIDE_CONFIDENTIAL` | （关） | `1` 时机密级（dataClass=confidential）应用不出现在门户 |
 

@@ -42,7 +42,7 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 ```bash
 npm run selftest      # 功能自测：隔离实例（DEMO_SEED）700 项端到端断言
 npm run lint:manifests  # 插件清单五面 YAML 校验（75 项）
-DSHCTL_USER=admin DSHCTL_PASS=*** node examples/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
+DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
 
 ### 平台自更新（v1.1+）
@@ -96,6 +96,11 @@ DSHCTL_USER=admin DSHCTL_PASS=*** node examples/dshctl.mjs help    # CLI 帮助�
   **运维工具**直接进入 dsh 原生 ToolRuntime、对模型可见可调用（`provideToolRuntime: false`），
   Agent 即可按自然语言运维整个平台（「列出所有 MCP 服务和健康状态」→ `mcp_service_list`，
   「Skill 市场里能装什么」→ `skill_search`）。
+- **单进程单入口（宿主挂载形态）**：`plugin-dsh-bridge` 把榕器数据面（REST/控制台 SPA/docs/MCP）
+  以 `/rq` 前缀挂进 dsh webServer，dsh web 端口即唯一入口；`startHttp: false` 关闭平台独立端口。
+  配套 `plugin-panel-core`（部门 Agent 工作台面板）、`plugin-dingtalk-bridge`（群桥/审批推送/告警通道）、
+  `plugin-rq-card`（会话内四态执行卡，dsh.client 双面插件）。升级与运维须知
+  （AGENT_SSO_ENFORCE 上线门禁 / CORS 行为 / SSE 日志脱敏）见 `docs/host-features-ops-notes.md`。
 
 **源码检出模式（本地开发）**——两条硬性要求，缺一不可：
 
@@ -118,7 +123,7 @@ pnpm dsh web --patch <本项目绝对路径>/cordis.yml
 「包名 + 子路径」声明（Node 从 profile 目录沿 node_modules 解析，无需感知安装位置）：
 
 ```bash
-dsh plugin --profile web add github:01men/RQ-DSH
+dsh plugin --profile web add github:01men/ybkk-AIOS
 # 验证：dsh --profile web --dump-config 应列出全部 ops-* entry；
 # 会话中问「列出所有 MCP 服务和健康状态」，模型应调用 mcp_service_list 而非静态作答。
 ```
@@ -315,6 +320,11 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
   跨机部署与中文 slug 兼容：skill 资源键用资产 ID（中文名 slug 含非 ASCII，过不了 resource 校验）。
 - **应用指标 PV/UV 口径**：`metrics-report` / `app_metrics_report` / `app report` 三端新增 `--pv/--uv`
   （同日 PV 累加、UV 取最大，与 DAU 同语义）；应用详情指标页展示 PV 柱图与 UV/DAU 双线。
+- **访客指标平台侧自动折算（指标口径补全）**：entry-ticket 兑换 / OIDC 发码经事件总线自动折算应用
+  **DAU**（按平台 `sub` 同日去重），零改造即有数据；新增**公开访客埋点 beacon** `GET/POST /api/apps/beacon`
+  （`?app=&vid=&uid=`，1x1 GIF / JSON，CORS `*`，未知应用不泄露存在性，IP+应用 60 次/分钟限流）——
+  应用一行埋点即得 **PV/UV**（PV 逐次累加、UV 按 `vid` 同日去重），与主动上报经 max/累加语义自然合并
+  （详见 [docs/app-sso-integration.md §十一](docs/app-sso-integration.md)）。
 - **效益分析**：`GET /api/assets/benefit`——按资产聚合 列表价收入/采购成本/**毛利**，应用类资产关联
   窗口 DAU 派生**单位 DAU 成本**（指标×成本首次打通）；「资产运营」页新增效益表 + 主体分摊
   （谁在花钱，byPrincipal 前端首次渲染）。
@@ -377,7 +387,7 @@ SaaS 数据面网关（roadmap 第 9 步之二「连接器市场」执行缺口�
 - **角色推导零名单**：P/D/T = 组织链负责人（钉钉连接器同步 `dept_manager_userid_list` → `OrgRecord.leaderUserIds`，多负责人 co-leader 全推导），M = 班组成员；C 叠加 = 动态用户组（组重算快照 + cGroupDrift 告警）。作用域映射表 `orgPathOverrides` 优先（组织改名不漂移，R1）+ 每日组织↔目录对账（dirOrphan/leaderVacant 告警）。
 - **REST 全套**（`/api/nas/authz/*`）：check/scope/rules/import/exceptions/decisions + 权限点 `nas.authz.check|read|write`；rules `ifVersion` 乐观锁（冲突 409）；share 审批闭环（T/M 申请 → 审批人沿组织链自动路由、resource_admin 兜底 → 通过写 7 天例外 → 到期自动拒绝，全程留痕）；破窗 `override=true` 强制留痕。
 - **身份硬约束（P0-2）**：平台调网关一律 `X-On-Behalf-User` 头透传真实用户（优先钉钉 userId），`nas_fs_*` 工具身份改 `exec.principal`（schema 零身份参数，缺失 fail-closed）。
-- **强制点改造件（仅产出代码未部署）**：网关 `docs/integrations/synology-filestation-mcp`（AuthzClient：读缓存 300s/写实判 + scope 快照→readonly→deny 三级降级 + 熔断 + on-behalf 防伪，authz-smoke 24/24）；hermes `docs/integrations/hermes-patch`（guard hook 化 + hash 锚点 + 幂等备份 py_compile，--selftest 通过）。DSM 原生权限为粗粒度兜底层（运维配置，零代码）。
+- **强制点改造件（仅产出代码未部署）**：网关 `integrations/synology-filestation-mcp`（AuthzClient：读缓存 300s/写实判 + scope 快照→readonly→deny 三级降级 + 熔断 + on-behalf 防伪，authz-smoke 24/24）；hermes `integrations/hermes-patch`（guard hook 化 + hash 锚点 + 幂等备份 py_compile，--selftest 通过）。DSM 原生权限为粗粒度兜底层（运维配置，零代码）。
 - **灰度**：rules 单例 `observeOnly`（缺省 true，G0 双通道同步观察）/`degradeAllToReadonly`（G3）+ 网关 `AUTHZ_ENFORCE` 全局 kill-switch + 逐令牌 enforce；任一阶段秒级回退。
 - **控制台 `#/nas-authz`**：灰度开关 / 矩阵（含覆盖项）/ 例外列表（过期倒计时）/ C 关联组 / NAS 锚点映射编辑 / check 试算 / 判定留痕 / 对账与悬空扫描。CLI：`dshctl nas authz check|scope|rules|decisions`。
 - 验收：selftest 658/658（新增「NAS 数据权限引擎」与「NAS 数据权限 API」两分节，覆盖 35 格矩阵/兼任/跨分支领导/改名不漂移/审批闭环/C 组漂移/伪造拒绝等 §四 全部用例）；lint:manifests 70/70。
@@ -422,9 +432,16 @@ packages/
     src/tools.ts            对模型暴露的工具（dsh ToolRuntime 契约）
   plugin-connect/           远程 dsh 接入插件（宿主端点 + 客户端代理 + 本机配置页，一份代码两种角色）
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
-examples/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
-skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-tests/selftest.mjs        功能自测（445 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
+  plugin-dsh-bridge/        宿主桥：榕器数据面以 /rq 前缀挂进 dsh webServer + 票据免登/Cookie 会话直通/OIDC 通道
+  plugin-panel-core/        部门 Agent 工作台面板（/panel SPA + /api/panel/* REST + SSE）
+  plugin-dingtalk-bridge/   钉钉桥接（群桥/出向投递/审批推送/告警通道/回决 fail-closed）
+  plugin-rq-card/           会话侧注入卡片（四态执行卡 + 反馈条；浏览器半需 node packages/plugin-rq-card/build.mjs 预构建）
+cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
+skills/dsh-ops-*/SKILL.md   9 个运维 Skill（含 dsh-ops-admin 总控索引）
+scripts/selftest.mjs        功能自测（931 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点、宿主挂载/面板/桥接等功能分节；隔离实例 + DEMO_SEED）
+scripts/verify-live-host.mjs  已上线宿主真实性验证（运维持凭据执行）
+tests/full-chain-drill.mjs  四类资产「登记→审批→上架→授权→调用→计量回传」全链路演练
+tests/morning-peak-entry.mjs  早高峰入口并发演练（50 并发领票/兑换）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口
@@ -465,23 +482,23 @@ cordis.patch.yml            dsh.bundle 安装补丁（dsh plugin add）
 
 ```bash
 # CLI（机器可读优先）
-node examples/dshctl.mjs mcp list --output json
-node examples/dshctl.mjs mcp deploy <id> --dry-run --changelog="优化召回"
-node examples/dshctl.mjs agent offline <id> --reason="连续异常"    # 生成 L4 审批单
-node examples/dshctl.mjs approval decide <id> --decision=approve --opinion="已确认"
-node examples/dshctl.mjs tool exec --name=agent_list --args='{"status":"online"}'
-node examples/dshctl.mjs plugin init --id=com.demo.hello --dir=./my-plugin   # 脚手架（契约五面 + 发布者密钥对）
-node examples/dshctl.mjs plugin sign --dir=./my-plugin && node examples/dshctl.mjs plugin submit --dir=./my-plugin
-node examples/dshctl.mjs nas import --config='{"mcpServers":{"synology-filestation":{"url":"http://192.168.0.7:3000/mcp","headers":{"Authorization":"Bearer <令牌>","X-NAS-IP":"192.168.0.196"}}}}'
-node examples/dshctl.mjs nas files <id> --path=/skillhub    # 文件浏览（shares/mkdir/upload/delete/search 同组）
-node examples/dshctl.mjs skill submit --name=<名> --content-file=SKILL.md --package=skill.zip
-node examples/dshctl.mjs skill storage set --mode=nas --nas-id=<id> --base-path=/skillhub
-node examples/dshctl.mjs app report <id> --pv=1200 --uv=320 --dau=280 --sessions=580 --retention7=0.45   # 应用指标主动上报（可 --date= 补录）
-node examples/dshctl.mjs usage record --org=<orgId> --subject=agent:<id> --principal=org:<orgId> \
+node cli/dshctl.mjs mcp list --output json
+node cli/dshctl.mjs mcp deploy <id> --dry-run --changelog="优化召回"
+node cli/dshctl.mjs agent offline <id> --reason="连续异常"    # 生成 L4 审批单
+node cli/dshctl.mjs approval decide <id> --decision=approve --opinion="已确认"
+node cli/dshctl.mjs tool exec --name=agent_list --args='{"status":"online"}'
+node cli/dshctl.mjs plugin init --id=com.demo.hello --dir=./my-plugin   # 脚手架（契约五面 + 发布者密钥对）
+node cli/dshctl.mjs plugin sign --dir=./my-plugin && node cli/dshctl.mjs plugin submit --dir=./my-plugin
+node cli/dshctl.mjs nas import --config='{"mcpServers":{"synology-filestation":{"url":"http://192.168.0.7:3000/mcp","headers":{"Authorization":"Bearer <令牌>","X-NAS-IP":"192.168.0.196"}}}}'
+node cli/dshctl.mjs nas files <id> --path=/skillhub    # 文件浏览（shares/mkdir/upload/delete/search 同组）
+node cli/dshctl.mjs skill submit --name=<名> --content-file=SKILL.md --package=skill.zip
+node cli/dshctl.mjs skill storage set --mode=nas --nas-id=<id> --base-path=/skillhub
+node cli/dshctl.mjs app report <id> --pv=1200 --uv=320 --dau=280 --sessions=580 --retention7=0.45   # 应用指标主动上报（可 --date= 补录）
+node cli/dshctl.mjs usage record --org=<orgId> --subject=agent:<id> --principal=org:<orgId> \
      --resource=skill:<skillId> --meter=calls:3:次,tokens:1200:token --idempotency-key=<业务单号>   # resource 亦支持 mcp:<slug> / nas:<id>；meter key 须与价格簿一致（mcp:*→tokens、model:*→output_tokens），不符 400 且报错给出期望键
-node examples/dshctl.mjs credential list                       # 机器凭证盘点（principalId/scopes/活跃令牌）
-node examples/dshctl.mjs credential scopes <principalId> --scopes=agent.read,usage.write   # 调整权限范围（存量令牌联动吊销）
-node examples/dshctl.mjs credential rotate <principalId>       # 轮换 clientSecret（clientId 不变、旧值立即失效、新值仅此一次）
+node cli/dshctl.mjs credential list                       # 机器凭证盘点（principalId/scopes/活跃令牌）
+node cli/dshctl.mjs credential scopes <principalId> --scopes=agent.read,usage.write   # 调整权限范围（存量令牌联动吊销）
+node cli/dshctl.mjs credential rotate <principalId>       # 轮换 clientSecret（clientId 不变、旧值立即失效、新值仅此一次）
 ```
 
 ```bash

@@ -40,6 +40,30 @@ import { createHash } from 'node:crypto'
 import { rm, mkdir } from 'node:fs/promises'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+// 进程内插件树（dsh 宿主挂载分节：伪造 webServer 模拟 dsh 前缀分发，不经子进程）
+import { Context } from '@deepseek-ai/cordis'
+import * as platformCore from '../packages/platform-core/src/index.ts'
+import * as resourceCore from '../packages/plugin-resource-core/src/index.ts'
+import * as iam from '../packages/plugin-iam/src/index.ts'
+import * as authn from '../packages/plugin-authn/src/index.ts'
+import * as usage from '../packages/plugin-usage/src/index.ts'
+import * as billing from '../packages/plugin-billing/src/index.ts'
+import * as audit from '../packages/plugin-audit/src/index.ts'
+import * as market from '../packages/plugin-market/src/index.ts'
+import * as agent from '../packages/plugin-agent/src/index.ts'
+import * as app from '../packages/plugin-app/src/index.ts'
+import * as connector from '../packages/plugin-connector/src/index.ts'
+import * as mcp from '../packages/plugin-mcp/src/index.ts'
+import * as nas from '../packages/plugin-nas/src/index.ts'
+import * as skillhub from '../packages/plugin-skillhub/src/index.ts'
+import * as modelgw from '../packages/plugin-modelgw/src/index.ts'
+import * as connect from '../packages/plugin-connect/src/index.ts'
+import * as update from '../packages/plugin-update/src/index.ts'
+import * as portal from '../packages/plugin-portal/src/index.ts'
+import * as consolePlugin from '../packages/plugin-console/src/index.ts'
+import * as panelCore from '../packages/plugin-panel-core/src/index.ts'
+import * as dingtalkBridge from '../packages/plugin-dingtalk-bridge/src/index.ts'
+import * as dshBridge from '../packages/plugin-dsh-bridge/src/index.ts'
 
 const readBody = (req) => new Promise((resolve) => {
   const chunks = []
@@ -552,13 +576,13 @@ const proc = spawn(process.execPath, ['src/main.ts', '--port', String(PORT), '--
     DSH_UPDATE_AUTO_CHECK: 'off',
     // OIDC 授权请求 TTL 压到 2 秒：过期路径可在自测内确定性验证（正常流程毫秒级完成不受影响）
     OIDC_AUTHREQ_TTL_SECONDS: '2',
+    // 门户 downloadUrl 生成基址指向自测实例：门户技能包下载断言可直连验证
+    PORTAL_PUBLIC_BASE: `http://127.0.0.1:${PORT}`,
   },
 })
-proc.stderr.on('data', (chunk) => process.stderr.write(`\x1b[90m[server] ${chunk}\x1b[0m`))
-// 服务端日志全量累积（stdout+stderr）：凭证/票据零日志类断言的扫描面
 const serverLogChunks = []
 proc.stdout.on('data', (chunk) => serverLogChunks.push(chunk))
-proc.stderr.on('data', (chunk) => serverLogChunks.push(chunk))
+proc.stderr.on('data', (chunk) => { serverLogChunks.push(chunk); process.stderr.write(`\x1b[90m[server] ${chunk}\x1b[0m`) })
 
 let booted = false
 for (let i = 0; i < 40; i++) {
@@ -1159,6 +1183,182 @@ try {
   }
 
   // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
+  section('usage 值域扩展（WP-03/D1：app:<id> 与 kb:<orgId>）')
+  {
+    const appMeter = await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: 'app:app-selftest-01', meters: [{ key: 'calls', value: 1, unit: 'call' }], idempotency_key: 'test-usage-app-001',
+    } })
+    check('app:<id> 事件入管道（默认零费率规则播种，charge=0）', appMeter.ok && appMeter.data.pricing.charge_cents === 0, JSON.stringify(appMeter.error))
+    check('零费率事件自动标非计费（rate.nonbillable=true，D2 统一零价快照）', appMeter.ok && appMeter.data.pricing.rate?.nonbillable === true)
+    const kbMeter = await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: `kb:${tenantOrg.data.id}`, meters: [{ key: 'calls', value: 3, unit: 'call' }], idempotency_key: 'test-usage-kb-001',
+    } })
+    check('kb:<orgId> 事件入管道（值域 additive，命中 kb:* 零费率）', kbMeter.ok && kbMeter.data.pricing.charge_cents === 0 && kbMeter.data.pricing.rate?.pattern === 'kb:*', JSON.stringify(kbMeter.error))
+    const kbWrongMeter = await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: `kb:${tenantOrg.data.id}`, meters: [{ key: 'tokens', value: 5, unit: 'token' }], idempotency_key: 'test-usage-kb-002',
+    } })
+    check('kb:* 计量键仍受价格簿硬校验（须 calls，不静默 0 计费）', !kbWrongMeter.ok && JSON.stringify(kbWrongMeter.error).includes('计量键不匹配'))
+  }
+  section('零价快照构造（WP-03/D2：nonbillableUsage 便捷入口）')
+  {
+    const constructed = usage.nonbillableUsage({
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: `kb:${tenantOrg.data.id}`, idempotency_key: 'test-usage-nbu-001',
+    })
+    check('nonbillableUsage 便捷构造（calls 计量 + nonbillable 标记）',
+      Array.isArray(constructed.meters) && constructed.meters[0]?.key === 'calls' && constructed.nonbillable === true, JSON.stringify(constructed))
+    const recorded = await api('POST', '/api/usage/record', { token: admin, body: constructed })
+    check('便捷构造事件直入 record（零价入账 + 标记在快照）', recorded.ok && recorded.data.pricing.charge_cents === 0 && recorded.data.pricing.rate?.nonbillable === true, JSON.stringify(recorded.error))
+    const nonbillableOnPaid = await api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`,
+      resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 100, unit: 'token' }], idempotency_key: 'test-usage-nb-001', nonbillable: true,
+    } })
+    check('nonbillable 标记配非零费率规则被拒（防计费口径漂移）', !nonbillableOnPaid.ok && JSON.stringify(nonbillableOnPaid.error).includes('非计费'))
+    const orgTotals = await api('GET', '/api/usage/totals?principal=' + encodeURIComponent(`org:${tenantOrg.data.id}`), { token: admin })
+    check('零价快照不污染计费总额（charge 只含计费事件 150+30）', orgTotals.ok && orgTotals.data.charge_cents === 180, JSON.stringify(orgTotals.data))
+  }
+  section('behavior 事件管道（WP-03/D3：采集 / 鉴权 / 幂等）')
+  {
+    const anon = await api('POST', '/api/behavior/events', { body: { type: 'card.exposed' } })
+    check('behavior 采集：未认证 401（write-only 门禁 fail-closed）', anon.status === 401, String(anon.status))
+    const evt = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'card.exposed', platform: 'rd', payload: { cardRef: 'c-001' }, idempotency_key: 'test-behavior-001' } })
+    check('behavior 采集：登录用户上报成功（主体强制取认证身份）',
+      evt.ok && evt.data.event?.idempotency_key === 'test-behavior-001' && evt.data.duplicated === false
+      && String(evt.data.event?.subject ?? '').startsWith('user:') && evt.data.event?.schema === 'behavior.recorded',
+      JSON.stringify(evt.error ?? evt.data))
+    const evtDup = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'card.exposed', platform: 'rd', payload: { cardRef: 'c-001' }, idempotency_key: 'test-behavior-001' } })
+    check('behavior 采集：幂等重放返回既有事件 + duplicated 标记', evtDup.ok && evtDup.data.duplicated === true && evtDup.data.event?.event_id === evt.data.event?.event_id)
+    const evtConflict = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'card.clicked', idempotency_key: 'test-behavior-001' } })
+    check('behavior 采集：同幂等键不同内容被拒', !evtConflict.ok)
+    const evtBadType = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'BAD TYPE' } })
+    check('behavior 采集：type 点分小写键校验', !evtBadType.ok)
+    const evtOversize = await api('POST', '/api/behavior/events', { token: dev, body: { type: 'card.exposed', payload: { blob: 'x'.repeat(5000) } } })
+    check('behavior 采集：payload 超 4KB 被拒', !evtOversize.ok && JSON.stringify(evtOversize.error).includes('超限'))
+    const devRead = await api('GET', '/api/behavior/events', { token: dev })
+    check('behavior 只读：无 audit.read 被拒 403', devRead.status === 403, String(devRead.status))
+    const adminRead = await api('GET', '/api/behavior/events?type=card.exposed', { token: admin })
+    check('behavior 只读：audit.read 可查且幂等不双计（total=1）', adminRead.ok && adminRead.data.total === 1, JSON.stringify(adminRead.data))
+  }
+  section('rbac endpoint matrix（WP-04/A1：普通成员直调管理端点 100% 被拒，矩阵驱动）')
+  {
+    const matrix = await api('GET', '/api/platform/route-matrix', { token: admin })
+    check('矩阵：服务端路由×权限矩阵可查询（端点覆盖面充足）',
+      matrix.ok && matrix.data.guarded.length >= 100 && matrix.data.public.length >= 5,
+      `guarded=${matrix.data?.guarded?.length} public=${matrix.data?.public?.length}`)
+    // 普通成员：member 角色仅 console.login + skill.read + agent.read + app.read
+    const roles = (await api('GET', '/api/iam/roles', { token: admin })).data.roles
+    const memberRole = roles.find((role) => role.code === 'member')
+    const memberInit = await api('POST', '/api/iam/users', { token: admin, body: { username: 'matrix_member', displayName: '矩阵探针', orgId: tenantOrg.data.id, roleIds: [memberRole.id] } })
+    const memberInitPassword = memberInit.data?.initialPassword ?? 'Ybk@2026'
+    const memberLogin = await api('POST', '/api/auth/login', { body: { username: 'matrix_member', password: memberInitPassword } })
+    check('矩阵：普通成员账号就绪', memberLogin.ok, JSON.stringify(memberLogin.error))
+    const member = memberLogin.data.token
+    const memberPerms = memberLogin.data.user.permissions
+    const denied = matrix.data.guarded.filter((route) => !route.permission.split(',').some((point) => memberPerms.includes(point)))
+    let rejectedCount = 0
+    const leaked = []
+    for (const route of denied) {
+      const probePath = route.path.replace(/:[a-zA-Z]+/g, 'selftest-probe')
+      try {
+        const probe = await api(route.method, probePath, { token: member, ...(route.method === 'GET' ? {} : { body: {} }) })
+        if (probe.status === 403) rejectedCount++
+        else leaked.push(`${route.method} ${route.path}(${route.permission}) → ${probe.status}`)
+      } catch (error) {
+        leaked.push(`${route.method} ${route.path} → 异常 ${error.message}`)
+      }
+    }
+    check(`矩阵：${denied.length} 个越权探针 100% 被拒 403（端点清单变动即红）`,
+      denied.length >= 50 && leaked.length === 0,
+      leaked.length ? `泄漏端点：${leaked.slice(0, 5).join('；')}` : `denied=${denied.length} rejected=${rejectedCount}`)
+    const expectedPublic = ['/api/auth/login', '/api/auth/refresh', '/api/health', '/api/authn/entry-tickets/redeem', '/api/auth/entry-ticket-session']
+    check('矩阵：公开白名单零意外扩张（变动须经评审后同步本清单）',
+      expectedPublic.every((path) => matrix.data.public.includes(path)),
+      JSON.stringify(matrix.data.public))
+    const bareFetch = []
+    const walkJs = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
+      entry.isDirectory() ? walkJs(join(dir, entry.name)) : [join(dir, entry.name)])
+    for (const file of walkJs(join(process.cwd(), 'packages', 'plugin-console', 'public'))) {
+      if (!file.endsWith('.js')) continue
+      if (file.replaceAll('\\', '/').endsWith('/js/api.js')) continue
+      if (file.replaceAll('\\', '/').endsWith('/js/pages/oauth.js')) continue // 协议页豁免（注释在案）
+      if (file.replaceAll('\\', '/').endsWith('/js/realtime.js')) continue // SSE/轮询运输层模块（api.js 同级豁免，注释在案）
+      const text = readFileSync(file, 'utf8')
+      if (/fetch\(|XMLHttpRequest|EventSource/.test(text)) bareFetch.push(file.split(/[\\/]/).pop())
+    }
+    check('走查不变量：console 前端除 api.js（与协议页豁免）外零裸 fetch/XHR/SSE',
+      bareFetch.length === 0, JSON.stringify(bareFetch))
+  }
+  section('feedback 回传（WP-07/D1：👍👎 落零价快照 + 归因 + 幂等不重复计数）')
+  {
+    const fb = await api('POST', '/api/usage/feedback', { token: dev, body: { resource: 'agent:dev-coder', messageId: 'msg-drill-1', score: 'up', note: '很准' } })
+    check('feedback：👍 落库为非计费零价快照（charge=0 + nonbillable）',
+      fb.ok && fb.data.charge_cents === 0 && fb.data.nonbillable === true, JSON.stringify(fb.error ?? fb.data))
+    const fbReplay = await api('POST', '/api/usage/feedback', { token: dev, body: { resource: 'agent:dev-coder', messageId: 'msg-drill-1', score: 'up' } })
+    check('feedback：同键重放幂等（同一 event_id，不重复计数）', fbReplay.ok && fbReplay.data.event_id === fb.data.event_id)
+    const devUserId = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('dev'), { token: admin })).data.users.find((user) => user.username === 'dev').id
+    const fbOnBehalf = await rawReq('POST', '/api/usage/feedback', {
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${admin}`, 'x-on-behalf-user': devUserId },
+      body: JSON.stringify({ resource: 'agent:dev-coder', messageId: 'msg-drill-2', score: 'down' }),
+    })
+    check('feedback：X-On-Behalf-User 归因到人（Agent 代用户回传）', fbOnBehalf.status === 200, String(fbOnBehalf.status))
+    const agentEvents = await api('GET', '/api/usage/events?resource=' + encodeURIComponent('agent:dev-coder') + '&limit=50', { token: admin })
+    const subjects = new Set(agentEvents.data.items.map((event) => event.subject))
+    check('feedback：事件主体归因正确（dev 本人 + OBO 归因均在列）', subjects.has(`user:${devUserId}`), JSON.stringify([...subjects]))
+    const fbBad = await api('POST', '/api/usage/feedback', { token: dev, body: { resource: 'agent:dev-coder', score: 'meh' } })
+    check('feedback：非法评分被拒 400', fbBad.status === 400, String(fbBad.status))
+  }
+  section('错误文案映射完整性（WP-06/C3：枚举全部对外原因码，漏配即红）')
+  {
+    const errors = await import(new URL('../packages/plugin-console/public/js/errors.js', import.meta.url).href)
+    const REQUIRED = ['nas-authz-deny', 'breaker-open', 'quota-exhausted', 'pdp-unreachable', 'degraded', 'binding-invalid', 'invoke-error']
+    const missing = REQUIRED.filter((code) => !errors.ERROR_CODES.includes(code))
+    check('文案：定版六条原因码 + 会话侧兜底码全部在册', missing.length === 0, `缺失：${missing.join(', ')}`)
+    const blank = REQUIRED.filter((code) => {
+      const copy = errors.errorCopy(code)
+      return !copy.title || !copy.message || (copy.action ? !copy.action.label || !copy.action.href : false)
+    })
+    check('文案：每条原因码均有标题/正文/行动按钮（无空文案）', blank.length === 0, `空配：${blank.join(', ')}`)
+    const bindingDetail = errors.errorCopy('binding-invalid', 'account_inactive')
+    check('文案：绑定失效细分原因出可读补充（冻结/离职联动语义）',
+      bindingDetail.message.includes('账号状态'), JSON.stringify(bindingDetail.message))
+    const fallback = errors.errorCopy('no-such-code-xyz')
+    check('文案：未知原因码回落通用兜底（永不裸奔技术错误）', fallback.title.includes('无法完成') || fallback.title.length > 0)
+    check('文案：绑定细分原因码在册（no_cookie/expired/account_inactive）',
+      ['no_cookie', 'expired', 'account_inactive'].every((reason) => errors.BINDING_REASONS.includes(reason)))
+  }
+  section('四态状态源映射（WP-06/C2：rq-card 纯函数，状态输入 → UI 态输出）')
+  {
+    const stateMod = await import(new URL('../packages/plugin-rq-card/src/client/state.ts', import.meta.url).href)
+    const derive = stateMod.deriveExecutionState
+    check('四态：调用中（invoke 发起中 → calling，骨架可取消）', derive({ invokePhase: 'calling', hasResult: false, resultIsError: false }).state === 'calling')
+    check('四态：执行中（healthy + 无结果 → executing）', derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, healthStatus: 'healthy' }).state === 'executing')
+    check('四态：执行中 degraded 附「有点慢」（degraded:true 附加信息）', (() => {
+      const result = derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, healthStatus: 'degraded' })
+      return result.state === 'executing' && result.degraded === true
+    })())
+    check('四态：已完成（调用返回 + 非 error → done，呈现 👍/👎）', derive({ invokePhase: 'idle', hasResult: true, resultIsError: false }).state === 'done')
+    check('四态：异常阻断优先级（authzDenied > quotaExceeded > pdpUnreachable > breakerOpen > down）',
+      derive({ invokePhase: 'idle', hasResult: true, resultIsError: false, authzDenied: true, quotaExceeded: true, breakerOpen: true, healthStatus: 'down' }).reason === 'nas-authz-deny'
+      && derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, quotaExceeded: true, breakerOpen: true, healthStatus: 'down' }).reason === 'quota-exhausted'
+      && derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, breakerOpen: true, healthStatus: 'down' }).reason === 'breaker-open'
+      && derive({ invokePhase: 'idle', hasResult: false, resultIsError: false, healthStatus: 'down' }).reason === 'down')
+    check('四态：阻断 fail-safe 优先于完成态（历史结果不误导当前可用性）',
+      derive({ invokePhase: 'idle', hasResult: true, resultIsError: false, breakerOpen: true }).state === 'blocked')
+    check('四态：工具报错兜底第七码 invoke-error（errors.js 文案在册）',
+      derive({ invokePhase: 'idle', hasResult: true, resultIsError: true }).reason === 'invoke-error')
+    check('四态：空闲基态（无结果无调用无健康 → idle）', derive({ invokePhase: 'idle', hasResult: false, resultIsError: false }).state === 'idle')
+    // 随包自证单测（测试随包走，不欠账）
+    const stateTest = spawn(process.execPath, ['packages/plugin-rq-card/src/client/state.test.mjs'], { stdio: 'pipe' })
+    await new Promise((resolve) => stateTest.on('close', resolve))
+    check('四态：rq-card 随包单测全绿（node --test）', stateTest.exitCode === 0, `exit=${stateTest.exitCode}`)
+  }
+
+  // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
+
+  // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
   section('第 3 步：契约五面 / 事件源校验 / 代理 ctx / L0 市场')
 
   const sandbox = await api('POST', '/api/market/sandbox-check', { token: admin, body: {} })
@@ -1264,6 +1464,38 @@ try {
   check('PV/UV 口径上报（首日写入）', appReportPv.ok && appReportPv.data.pv === 500 && appReportPv.data.uv === 260 && appReportPv.data.dau === 888)
   const appReportPv2 = await api('POST', `/api/apps/${anyApp.id}/metrics-report`, { token: admin, body: { pv: 120, uv: 300 } })
   check('PV 同日累加 / UV 同日取最大（DAU 800 不覆盖 888）', appReportPv2.ok && appReportPv2.data.pv === 620 && appReportPv2.data.uv === 300 && appReportPv2.data.dau === 888)
+
+  // 平台侧指标自动折算（指标口径补全）：浏览器 beacon → PV/UV；entry-ticket 兑换 / OIDC 发码 → DAU
+  section('平台侧指标自动折算（beacon PV/UV + SSO 到访 DAU）')
+  const autoAppCreate = await api('POST', '/api/apps', { token: admin, body: { name: '指标自动折算验收', attrs: { description: 'beacon PV/UV 与 SSO DAU 自动折算验收', appType: 'web', riskLevel: 'low', dataClass: 'internal' } } })
+  check('折算验收应用创建', autoAppCreate.ok && Boolean(autoAppCreate.data?.app?.id), JSON.stringify(autoAppCreate.error))
+  const autoAppId = autoAppCreate.data.app.id
+  const autoMetrics = async () => (await api('GET', `/api/apps/${autoAppId}`, { token: admin })).data.metrics
+  const vidA = 'selftest-vid-aaaa-0903'
+  const vidB = 'selftest-vid-bbbb-0903'
+  const beaconGif = await rawReq('GET', `/api/apps/beacon?app=${autoAppId}&vid=${vidA}`)
+  check('beacon GET 免鉴权：200 + 1x1 GIF + no-store', beaconGif.status === 200 && beaconGif.headers['content-type'].includes('image/gif') && String(beaconGif.headers['cache-control']).includes('no-store') && beaconGif.body.startsWith('GIF8'), JSON.stringify({ status: beaconGif.status, ct: beaconGif.headers['content-type'] }))
+  await rawReq('GET', `/api/apps/beacon?app=${autoAppId}&vid=${vidA}`)
+  await rawReq('GET', `/api/apps/beacon?app=${autoAppId}&vid=${vidB}`)
+  await rawReq('POST', '/api/apps/beacon', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ app: autoAppId, vid: vidA }) })
+  const beaconMetrics = await autoMetrics()
+  check('beacon PV 逐次累加 / UV 按 vid 去重（4 次上报 → pv=4 uv=2 dau=0）', beaconMetrics.pv === 4 && beaconMetrics.uv === 2 && beaconMetrics.dau === 0, JSON.stringify(beaconMetrics))
+  const ghostBeacon = await rawReq('GET', '/api/apps/beacon?app=app_ghost&vid=selftest-vid-cccc-0903')
+  check('未知应用 beacon 恒 200 GIF（不泄露应用存在性）', ghostBeacon.status === 200 && ghostBeacon.body === beaconGif.body && ghostBeacon.headers['content-type'] === beaconGif.headers['content-type'])
+  const autoTicket = await api('POST', `/api/apps/${autoAppId}/entry-ticket`, { token: admin, body: {} })
+  const autoRedeem = await rawReq('POST', '/api/authn/entry-tickets/redeem', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ticket: autoTicket.data.ticket }) })
+  check('entry-ticket 兑换 200（公开端点）', autoRedeem.status === 200)
+  const afterTicket = await autoMetrics()
+  check('entry-ticket 兑换自动折算 DAU（admin 新访客 → dau=1 uv=3）', afterTicket.dau === 1 && afterTicket.uv === 3 && afterTicket.pv === 4, JSON.stringify(afterTicket))
+  const autoSso = await api('POST', `/api/apps/${autoAppId}/sso-client`, { token: admin, body: { redirectUris: ['https://auto-check.example/cb'], consentRequired: false } })
+  check('折算验收应用自助签发 SSO 客户端', autoSso.ok && autoSso.data.clientId.startsWith('oc-'), JSON.stringify(autoSso.error))
+  const autoVerifier = 'selftest-auto-pkce-verifier-43-chars-aaaaaaaaaa'
+  const autoFirst = await rawReq('GET', `/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: autoSso.data.clientId, redirect_uri: 'https://auto-check.example/cb', state: 'st-auto', scope: 'openid profile', code_challenge: createHash('sha256').update(autoVerifier).digest('base64url'), code_challenge_method: 'S256' }).toString()}`)
+  const autoReqId = new URLSearchParams(String(autoFirst.headers.location).split('?')[1] ?? '').get('req')
+  const autoApprove = await authorizeConfirm(auditor, autoReqId, true)
+  check('OIDC 授权确认发码（auditor human）', autoApprove.status === 200 && String(autoApprove.result.location).includes('code='), JSON.stringify(autoApprove.result))
+  const afterOidc = await autoMetrics()
+  check('OIDC 发码自动折算 DAU（auditor 新访客 → dau=2 uv=4）', afterOidc.dau === 2 && afterOidc.uv === 4, JSON.stringify(afterOidc))
 
   // dshctl plugin init 脚手架（真实生成文件）
   const { execFile } = await import('node:child_process')
@@ -2036,6 +2268,33 @@ try {
   const heatRow = (heat.data?.skills ?? []).find((s) => s.id === skillId)
   check('技能热力图（skill × 日使用矩阵，含安装/下载/外部上报）', heat.ok && heatRow?.total >= 2 && Array.isArray(heatRow?.cells) && heatRow.cells.length === 30 && (heat.data.maxCell ?? 0) >= 1)
 
+  // —— 已上架 Skill 信息编辑与资源包重传（作者本人/管理员可操作，非作者开发者拒绝） ——
+  const otherDevLogin = await api('POST', '/api/auth/login', { body: { username: 'linxm', password: 'Ybk@2026' } })
+  const otherDev = otherDevLogin.data?.token
+  const editDenied = await api('PATCH', `/api/skills/${skillId}`, { token: otherDev, body: { summary: '越权改简介' } })
+  check('非作者且无管理权的开发者编辑被拒（403）', editDenied.status === 403)
+  const repkgDenied = await api('PUT', `/api/skills/${skillId}/package`, { token: otherDev, body: { packageBase64: Buffer.from('PK\x03\x04evil', 'latin1').toString('base64') } })
+  check('非作者重传资源包被拒（403）', repkgDenied.status === 403)
+
+  const editByAuthor = await api('PATCH', `/api/skills/${skillId}`, { token: dev, body: { summary: '生成自测报告（已更新）', tags: ['自测', '报告'], description: '更新后的详细描述', applicableModels: ['deepseek-chat', 'deepseek-reasoner'], visibility: 'all', authorName: '陈默（示范作者）' } })
+  check('作者编辑市场信息（slug 与版本不变，不重走审批）', editByAuthor.ok && editByAuthor.data.summary === '生成自测报告（已更新）' && editByAuthor.data.tags.join(',') === '自测,报告' && editByAuthor.data.status === 'published')
+  check('作者名称可改（仅展示署名，authorId 归属不变）', editByAuthor.ok && editByAuthor.data.authorName === '陈默（示范作者）' && editByAuthor.data.authorId === devLogin.data.user.id)
+  const editEmptyAuthor = await api('PATCH', `/api/skills/${skillId}`, { token: dev, body: { authorName: '  ' } })
+  check('编辑校验：作者名称不可为空白', !editEmptyAuthor.ok)
+  const editByAdmin = await api('PATCH', `/api/skills/${skillId}`, { token: admin, body: { category: '研发效能' } })
+  check('管理员（skill.publish）可编辑任意 Skill 信息', editByAdmin.ok && editByAdmin.data.category === '研发效能')
+  const editEmptyName = await api('PATCH', `/api/skills/${skillId}`, { token: dev, body: { name: '   ' } })
+  check('编辑校验：名称不可为空白', !editEmptyName.ok)
+
+  const skillZipBase64 = Buffer.from('PK\x03\x04skill-package-v2-content', 'latin1').toString('base64')
+  const repkgBadZip = await api('PUT', `/api/skills/${skillId}/package`, { token: dev, body: { packageBase64: Buffer.from('definitely-not-a-zip', 'latin1').toString('base64') } })
+  check('资源包校验：非 ZIP 内容被拒（PK 魔数）', !repkgBadZip.ok)
+  const repkg = await api('PUT', `/api/skills/${skillId}/package`, { token: dev, body: { packageBase64: skillZipBase64 } })
+  check('作者重传资源包（原地替换，版本号不变）', repkg.ok && repkg.data.skill.currentVersion === '1.0.0' && repkg.data.skill.status === 'published' && repkg.data.package?.sizeBytes === Buffer.from('PK\x03\x04skill-package-v2-content', 'latin1').length)
+  const repkgDetail = await api('GET', `/api/skills/${skillId}`, { token: admin })
+  const repkgVersion = repkgDetail.data?.versions?.find((v) => v.status === 'published')
+  check('资源包替换落库（已发布版本 packageBase64/登记同步更新）', repkgDetail.ok && repkgVersion?.packageBase64 === skillZipBase64 && !!repkgVersion?.package?.uploadedAt)
+
   const deprecateNoReason = await api('POST', `/api/skills/${skillId}/deprecate`, { token: admin, body: {} })
   check('弃用未填原因被拒（护栏，下架分析口径依赖）', !deprecateNoReason.ok)
 
@@ -2095,6 +2354,20 @@ try {
 
   const agentSelfMeter = await api('POST', '/api/usage/record', { token: selfAgentCc.data.token, body: { org: tenantOrg.data.id, subject: `agent:${selfAgent.id}`, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 100, unit: 'token' }], idempotency_key: 'test-usage-agent-self-1' } })
   check('Agent 机器令牌自推计量 200（usage.write 生效）', agentSelfMeter.ok && agentSelfMeter.data.pricing.charge_cents === 3)
+
+  // Agent 接入提示词（与 app 同构：rotate 轮换机器凭证携带完整凭证；首行含关键词「提示词」供 connector 触发）
+  const agentPrompt = await api('POST', `/api/agents/${selfAgent.id}/onboarding-prompt`, { token: selfAgentCc.data.token, body: { rotate: true } })
+  check('Agent 接入提示词：凭自身凭证 rotate 生成（含新 secret 与关键词「提示词」）',
+    agentPrompt.ok && agentPrompt.data.rotated === true && agentPrompt.data.prompt.includes('提示词')
+    && Boolean(agentPrompt.data.credential.clientSecret) && agentPrompt.data.prompt.includes(agentPrompt.data.credential.clientSecret),
+    JSON.stringify(agentPrompt.error))
+  const agentPromptCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: agentPrompt.data.credential.clientId, clientSecret: agentPrompt.data.credential.clientSecret } })
+  check('Agent 接入提示词：轮换后新 secret 可换牌', agentPromptCc.ok && Boolean(agentPromptCc.data?.token), JSON.stringify(agentPromptCc.error))
+  // 用换牌后的新令牌复核 agent.write 仍生效（自提报更新资料）
+  const agentPromptSelfPatch = await api('PATCH', `/api/agents/${selfAgent.id}`, { token: agentPromptCc.data.token, body: { attrs: { description: '自测用机器人（提示词轮换后仍可自更新）' } } })
+  check('Agent 接入提示词：轮换后凭新令牌 PATCH 资料 200', agentPromptSelfPatch.ok, JSON.stringify(agentPromptSelfPatch.error))
+  // 轮换已吊销旧令牌：就地刷新 selfAgentCc 的令牌，保证本段后续用例继续持有有效凭证
+  selfAgentCc.data.token = agentPromptCc.data.token
 
   // 调用统计口径补全（2026-08）：usage.recorded 回灌 + 防双计
   const agentMetricsAfterSelfMeter = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
@@ -2196,8 +2469,51 @@ try {
   check('下线后状态与凭证联动禁用', agentOffline.data.status === 'offline' && agentOffline.data.credential.status === 'disabled')
   void credBefore
 
-  // ================================================================ Agent ↔ SSO 打通（OIDC-agent 关联 / 门禁 / 生命周期联动）
-  // ================================================================ console ticket redeem
+  // ================================================================ AI 应用资料字段（头像 URL / 开发者 / 描述）
+  section('AI 应用资料字段（头像 URL / 开发者下拉 / 描述）')
+  const devOptions = await api('GET', '/api/apps/developer-options', { token: ops })
+  check('developer-options：资源管理员（app.* → app.write）可拉取在编用户瘦字段', devOptions.ok && Array.isArray(devOptions.data.options) && devOptions.data.options.length > 0 && devOptions.data.options[0].username !== undefined, JSON.stringify(devOptions.error))
+  const devOption = devOptions.data?.options?.find((u) => u.username === 'dev')
+  check('developer-options：包含演示开发者账号（dev / 陈默）', Boolean(devOption && devOption.name === '陈默'))
+  const appAvatarCreate = await api('POST', '/api/apps', { token: ops, body: { name: '资料字段自测应用', attrs: { description: '头像 / 开发者 / 描述字段验证', appType: 'web', icon: 'https://example.com/avatar.png', riskLevel: 'low', dataClass: 'internal', developerId: devOption.id } } })
+  check('注册应用：icon 接受图片 URL（头像）', appAvatarCreate.ok && appAvatarCreate.data.app.attrs['icon'] === 'https://example.com/avatar.png', JSON.stringify(appAvatarCreate.error))
+  check('注册应用：developerId 校验存在并回填 developerName（displayName 为准）', appAvatarCreate.ok && appAvatarCreate.data.app.attrs['developerId'] === devOption.id && appAvatarCreate.data.app.attrs['developerName'] === '陈默', JSON.stringify(appAvatarCreate.data?.app?.attrs))
+  const appAvatarBad = await api('POST', '/api/apps', { token: ops, body: { name: '非法开发者自测应用', attrs: { description: 'developerId 校验', appType: 'web', riskLevel: 'low', dataClass: 'internal', developerId: 'usr_ghost' } } })
+  check('注册应用：developerId 不存在被拒 400', !appAvatarBad.ok && String(appAvatarBad.error?.message ?? '').includes('开发者不存在'), JSON.stringify(appAvatarBad.error))
+  const appAvatarPatch = await api('PATCH', `/api/apps/${appAvatarCreate.data.app.id}`, { token: ops, body: { attrs: { icon: '🧩', developerId: '' } } })
+  check('更新应用：icon 可改；developerId 空串清除开发者', appAvatarPatch.ok && appAvatarPatch.data.attrs['icon'] === '🧩' && appAvatarPatch.data.attrs['developerName'] === '' && appAvatarPatch.data.attrs['developerId'] === '', JSON.stringify(appAvatarPatch.error ?? appAvatarPatch.data?.attrs))
+  const appAvatarNameOnly = await api('PATCH', `/api/apps/${appAvatarCreate.data.app.id}`, { token: ops, body: { attrs: { developerName: '外部协作开发者' } } })
+  check('更新应用：developerName 支持自由文本快照（外部开发者场景）', appAvatarNameOnly.ok && appAvatarNameOnly.data.attrs['developerName'] === '外部协作开发者', JSON.stringify(appAvatarNameOnly.error))
+
+  // 接入提示词（注册同款模板平台侧生成；rotate 轮换机器凭证携带完整凭证；外部推送方按关键词「提示词」触发）
+  const promptRotated = await api('POST', `/api/apps/${appAvatarCreate.data.app.id}/onboarding-prompt`, { token: ops, body: { rotate: true } })
+  check('接入提示词：rotate 生成完整提示词（含新 clientSecret 与关键词「提示词」）',
+    promptRotated.ok && promptRotated.data.rotated === true && promptRotated.data.prompt.includes('提示词')
+    && Boolean(promptRotated.data.credential.clientSecret) && promptRotated.data.prompt.includes(promptRotated.data.credential.clientSecret),
+    JSON.stringify(promptRotated.error))
+  const promptCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: promptRotated.data.credential.clientId, clientSecret: promptRotated.data.credential.clientSecret } })
+  check('接入提示词：轮换后的新 secret 可正常换牌（旧值已吊销）', promptCc.ok && Boolean(promptCc.data?.token), JSON.stringify(promptCc.error))
+  const promptPlain = await api('POST', `/api/apps/${appAvatarCreate.data.app.id}/onboarding-prompt`, { token: ops, body: {} })
+  check('接入提示词：不轮换生成（含 client_id 与占位说明，不含 secret 明文）',
+    promptPlain.ok && promptPlain.data.rotated === false && promptPlain.data.prompt.includes(promptPlain.data.credential.clientId)
+    && promptPlain.data.prompt.includes('重新生成密钥') && !promptPlain.data.prompt.includes('client_secret：cs_'),
+    JSON.stringify(promptPlain.error))
+
+  // MCP 服务注册：orgId 缺省回落根组织（外部推送方机器凭证无需 iam.org.read，与 /api/mcp/import 同口径）
+  const devOpts = await api('GET', '/api/apps/developer-options', { token: ops })
+  check('开发者选项：响应含钉钉 unionIds 绑定（表格人员字段解析用）',
+    devOpts.ok && Array.isArray(devOpts.data.options) && devOpts.data.options.every((o) => Array.isArray(o.unionIds)),
+    JSON.stringify(devOpts.error))
+
+  const mcpNoOrg = await api('POST', '/api/mcp/services', { token: ops, body: { name: 'orgId缺省自测MCP', description: 'orgId 缺省回落根组织验证', endpoint: 'https://mcp.example.com/mcp', transport: 'http', mode: 'external' } })
+  check('MCP 注册：orgId 缺省回落根组织', mcpNoOrg.ok && Boolean(mcpNoOrg.data?.orgId), JSON.stringify(mcpNoOrg.error))
+  // 清理：下线（viaApproval=false 免 L4 审批，自测资产）→ 删除
+  const mcpNoOrgOffline = await api('POST', `/api/mcp/services/${mcpNoOrg.data?.id}/offline`, { token: ops, body: { reason: '自测清理', viaApproval: false } })
+  check('MCP 注册：自测服务下线（viaApproval=false 直下）', mcpNoOrgOffline.ok, JSON.stringify(mcpNoOrgOffline.error))
+  const mcpNoOrgCleanup = await api('DELETE', `/api/mcp/services/${mcpNoOrg.data?.id}`, { token: ops })
+  check('MCP 注册：自测服务清理', mcpNoOrgCleanup.ok, JSON.stringify(mcpNoOrgCleanup.error))
+
+  // ================================================================ AI 应用 ↔ SSO 打通（MVP 闭环）
   section('console ticket redeem（WP-02：票据免登控制台，零二次登录）')
   {
     const issue = await api('POST', `/api/agents/${selfAgent.id}/entry-ticket`, { token: admin, body: {} })
@@ -2228,7 +2544,6 @@ try {
       auditSession.ok && (auditSession.data.items ?? []).some((log) => log.action === 'agent.entry.ticket.session' && !JSON.stringify(log).includes(issue.data.ticket)),
       JSON.stringify(auditSession.error ?? auditSession.data?.total))
   }
-
   section('Agent ↔ SSO 打通（OIDC-agent 关联，dev-plan-agent-host-unification M2）')
   const oidcAgentCreate = await api('POST', '/api/agents', { token: ops, body: { name: 'SSO 自测机器人', attrs: { description: 'OIDC-agent 关联自测', model: 'deepseek-chat', riskLevel: 'low', avatar: '🔑' } } })
   check('注册 SSO 自测 Agent（owner=资源管理员）', oidcAgentCreate.ok, JSON.stringify(oidcAgentCreate.error))
@@ -2273,6 +2588,8 @@ try {
   const oidcAfterOffline = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
   check('Agent 下线联动：关联 OIDC 客户端自动禁用（refresh 链一并吊销）',
     oidcOfflineOk.ok && oidcAfterOffline.data.status === 'offline' && oidcAfterOffline.data.sso?.status === 'disabled', JSON.stringify(oidcAfterOffline.data?.sso))
+
+  // ================================================================ AI 应用 ↔ SSO 打通（MVP 闭环）
 
   // ================================================================ AI 应用 ↔ SSO 打通（MVP 闭环）
   section('AI 应用 ↔ SSO 打通（注册 → 签发 → 门禁双点 → 跳转登录）')
@@ -2374,6 +2691,10 @@ try {
   check('钉钉身份完整浏览器流（sso 登录 → consent → token → userinfo 身份一致）',
     dingFirst.status === 302 && dingApprove.status === 200 && dingTokens.access_token?.split('.').length === 3
     && dingUserInfo.sub === dingSso.data.user.id && dingUserInfo.preferred_username === dingSso.data.user.username)
+
+  // 平台侧自动折算回归（真实链路汇点）：ticket 兑换（admin）+ OIDC 发码（ops、钉钉用户）→ 应用 DAU/UV 自动落账
+  const mvpMetrics = (await api('GET', `/api/apps/${ssoAppId}`, { token: admin })).data.metrics
+  check('SSO 到访自动折算（ticket admin + 发码 ops/钉钉 → dau=3 uv=3，同用户重复授权去重）', mvpMetrics.dau === 3 && mvpMetrics.uv === 3, JSON.stringify(mvpMetrics))
 
   // app.updated 联动：应用改名 → 客户端名称同步
   await api('PATCH', `/api/apps/${ssoAppId}`, { token: ops, body: { name: 'SSO 自测应用 v2' } })
@@ -2524,9 +2845,8 @@ try {
   }))
   check('public 客户端免 secret 换牌成功且不签发 refresh', pubTokens.access_token?.split('.').length === 3 && pubTokens.refresh_token === undefined)
 
-  // 授权事件审计留痕
-  // 合并后自测事件总量增大：窗口放宽到 500 并按 auth 类型过滤（断言语义不变：OIDC 授权双留痕）
-  const oidcAudit = await api('GET', '/api/audit/logs?type=auth&limit=500', { token: admin })
+  // 授权事件审计留痕（按 resourceType 过滤：断言只关心两类事件是否落账，不随全量日志体量漂移）
+  const oidcAudit = await api('GET', '/api/audit/logs?resourceType=oidc_client&limit=50', { token: admin })
   check('授权事件审计留痕（granted / denied）', oidcAudit.ok && oidcAudit.data.items.some((log) => log.action === 'oidc.authorize.granted') && oidcAudit.data.items.some((log) => log.action === 'oidc.authorize.denied'))
 
   // ================================================================ 审计
@@ -2725,6 +3045,14 @@ try {
       && run(u('e_p2', 'eo1'), [inScope], 'read').reasons.some((r) => r.includes('co-leader')))
     check('挂根组织非负责人 → 全 deny', run(u('e_root', 'eo1'), ['/智造平台/x'], 'read').decision === 'deny'
       && run(u('e_root', 'eo1'), ['/智造平台/x'], 'read').reasons.some((r) => r.includes('root-no-role')))
+    check('挂根组织 + 管理员显式 allow 例外 → 例外救援放行（平台服务账号存储区授权），例外路径外/未授权 op 仍 deny',
+      (() => {
+        const rules = { ...baseRules, observeOnly: false, exceptions: [{ id: 'exc_rescue', effect: 'allow', nasId: 'en1', path: '/智造平台/服务区', ops: ['read', 'write'], userIds: ['e_root'], note: '平台服务账号存储区' }] }
+        return run(u('e_root', 'eo1'), ['/智造平台/服务区/pkg.zip'], 'write', { rules }).decision === 'allow'
+          && run(u('e_root', 'eo1'), ['/智造平台/服务区/pkg.zip'], 'read', { rules }).decision === 'allow'
+          && run(u('e_root', 'eo1'), ['/智造平台/服务区/pkg.zip'], 'delete', { rules }).decision === 'deny'
+          && run(u('e_root', 'eo1'), ['/智造平台/其他/pkg.zip'], 'write', { rules }).decision === 'deny'
+      })())
     check('未落班组（部门根非负责人）→ 只读', run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], 'read').decision === 'allow'
       && run(u('e_d2', 'eo2'), ['/智造平台/生产部/x'], 'write').decision === 'deny')
     check('兼任：主归属正常写 + 兼任子树仅只读',
@@ -2748,6 +3076,14 @@ try {
       run(u('e_y', 'eo7'), ['/智造平台/品质部/检验标准.xlsx'], 'write').decision === 'allow'
       && run(u('e_y', 'eo7'), ['/外贸平台/合同.xlsx'], 'read').decision === 'deny',
       JSON.stringify(run(u('e_y', 'eo7'), ['/智造平台/品质部/检验标准.xlsx'], 'write')))
+    check('根目录只读列举（B 语义）：作用域内用户列根放行、写根仍拒、越界子路径不变、无作用域用户列根仍拒',
+      run(u('e_m', 'eo3'), ['/'], 'read').decision === 'allow'
+      && run(u('e_m', 'eo3'), ['/'], 'read').reasons.some((r) => r.includes('root-listing'))
+      && run(u('e_m', 'eo3'), ['/'], 'write').decision === 'deny'
+      && run(u('e_m', 'eo3'), ['/外部目录/x.txt'], 'read').decision === 'deny'
+      && run(u('e_z', 'eo7'), ['/'], 'read').decision === 'deny'
+      && run(u('e_y', 'eo7'), ['/'], 'read').decision === 'allow',
+      JSON.stringify({ mRootRead: run(u('e_m', 'eo3'), ['/'], 'read').decision, mRootWrite: run(u('e_m', 'eo3'), ['/'], 'write').decision, yRootRead: run(u('e_y', 'eo7'), ['/'], 'read').decision, zRootRead: run(u('e_z', 'eo7'), ['/'], 'read').decision }))
     check('负责人悬空检测：质检线在列', findVacantLeaderOrgs(idx, { withUserOrgIds: new Set(['eo3', 'eo4']) }).some((o) => o.id === 'eo4'))
 
     // 判定序：显式 deny > 显式 allow > 角色矩阵 > 默认 deny
@@ -3997,6 +4333,103 @@ try {
     /import\s*\{[^}]*\bBASE\b[^}]*\}\s*from\s*'\.\/api\.js'/.test(appConnSrc))
 
   // ================================================================ 门户数据通道（plugin-portal：外部拉取端点）
+  section('统一入口：/panel 无尾斜杠 302 归一（相对资源解析防御）')
+  const panelBare = await rawReq('GET', '/panel')
+  check('/panel 302 → /panel/（独立形态；无归一时 index.html 的 ./js/* 会解析到 /js/* → 白屏）',
+    panelBare.status === 302 && panelBare.headers.location === '/panel/',
+    `status=${panelBare.status} location=${panelBare.headers.location}`)
+  const panelSlash = await rawReq('GET', '/panel/')
+  check('/panel/ 面板 SPA 正常伺服（归一目标可达）', panelSlash.status === 200 && panelSlash.body.includes('部门 Agent 工作台'))
+  // 落地分诊纯函数随包单测（landing.test.mjs：五内置角色决议/通配展开/裸落地/回跳白名单）
+  const landingTest = spawn(process.execPath, ['packages/plugin-console/public/js/landing.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => landingTest.on('close', resolve))
+  check('落地分诊随包单测全绿（node --test）', landingTest.exitCode === 0, `exit=${landingTest.exitCode}`)
+  // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
+  const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
+  check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',
+    panelBoot.includes("fetch('/dsh-bridge/status'") && !panelBoot.includes('${BASE}/dsh-bridge'))
+  const consoleBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'app.js'), 'utf8')
+  check('控制台启动链含宿主会话直通 + 落地分诊（exchangeBridgeSession/resolveLanding）',
+    consoleBoot.includes('exchangeBridgeSession') && consoleBoot.includes('resolveLanding'))
+  const loginSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'pages', 'login.js'), 'utf8')
+  check('登录回跳接线（?next= 与 401 暂存 heng_ops_next 消费 + 白名单 sanitizeNext）',
+    loginSrc.includes("params.get('next')") && loginSrc.includes('heng_ops_next') && loginSrc.includes('sanitizeNext'))
+  const panelApp = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'app.js'), 'utf8')
+  check('面板侧切换接线（管理控制台 data-landing 偏好 + 401 引导带 ?next= 回面板）',
+    panelApp.includes('data-landing') && panelApp.includes('next='))
+  check('面板模型面接线（composer 模型切换 #chatModel + 模型配置界面 showModels + 回包模型徽标）',
+    panelApp.includes('#chatModel') && panelApp.includes('showModels') && panelApp.includes("role model"))
+
+  // ================================================================ 宿主服务连接切换（docs/frontend-host-switching.md）
+  section('宿主服务连接切换（前端多宿主 + 数据面跨域放行）')
+  // 决议纯函数（platform-core http 导出，selftest 直测）
+  check('CORS 决议：* 放行任意来源', platformCore.corsAllowOriginFor(['*'], 'http://192.168.0.5:7300') === '*')
+  check('CORS 决议：无 Origin（同源/curl）不放行', platformCore.corsAllowOriginFor(['*'], undefined) === undefined)
+  check('CORS 决议：白名单命中精确回显', platformCore.corsAllowOriginFor(['http://a:1', 'http://b:2'], 'http://b:2') === 'http://b:2')
+  check('CORS 决议：白名单未命中不发放', platformCore.corsAllowOriginFor(['http://a:1'], 'http://evil:2') === undefined)
+  check('CORS 决议：空列表=关闭', platformCore.corsAllowOriginFor([], 'http://a:1') === undefined)
+  check('CORS 决议：畸形 Origin 不发放', platformCore.corsAllowOriginFor(['http://a:1'], 'not-a-url') === undefined)
+  // 数据面端到端（隔离实例默认 corsAllowOrigins=['*']）
+  const connOrigin = 'http://192.168.0.5:7300'
+  const corsPreflightApi = await rawReq('OPTIONS', '/api/health', { headers: { origin: connOrigin, 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization,content-type' } })
+  check('API 预检 OPTIONS → 204 + allow-origin/methods/headers/max-age（先于鉴权中间件，不被 401 拦截）',
+    corsPreflightApi.status === 204
+    && corsPreflightApi.headers['access-control-allow-origin'] === '*'
+    && String(corsPreflightApi.headers['access-control-allow-methods']).includes('POST')
+    && String(corsPreflightApi.headers['access-control-allow-headers']).includes('authorization')
+    && String(corsPreflightApi.headers['access-control-allow-headers']).includes('content-type')
+    && corsPreflightApi.headers['access-control-max-age'] === '600')
+  const corsHealth = await rawReq('GET', '/api/health', { headers: { origin: connOrigin } })
+  check('公开端点跨域携带放行头（连接页测活可读）', corsHealth.status === 200 && corsHealth.headers['access-control-allow-origin'] === '*')
+  const corsUnauthorized = await rawReq('GET', '/api/overview', { headers: { origin: connOrigin } })
+  check('鉴权端点 401 错误体同样携带放行头（远端页面可读失败原因）',
+    corsUnauthorized.status === 401 && corsUnauthorized.headers['access-control-allow-origin'] === '*')
+  const corsAuthorized = await rawReq('GET', '/api/overview', { headers: { origin: connOrigin, authorization: `Bearer ${admin}` } })
+  check('携带 Bearer 的跨域业务请求正常返回（宿主切换后的主链路）',
+    corsAuthorized.status === 200 && jsonBody(corsAuthorized).ok === true)
+  const corsNoOrigin = await rawReq('OPTIONS', '/api/health')
+  check('无 Origin 的 OPTIONS 不被预检分支劫持（同源行为不变）', corsNoOrigin.status === 404 && corsNoOrigin.headers['access-control-allow-origin'] === undefined)
+  // RQ 澄清第 1 条：令牌铸造/交换面 /api/auth/* 对 blanket '*' 永不发放（drive-by 凭证探测面关闭）
+  const authPreflight = await rawReq('OPTIONS', '/api/auth/login', { headers: { origin: connOrigin, 'access-control-request-method': 'POST' } })
+  check('CORS 收紧：/api/auth/* 预检在 blanket * 下无 ACAO（跨站登录探测被浏览器拦截）',
+    authPreflight.headers['access-control-allow-origin'] === undefined, JSON.stringify(authPreflight.headers))
+  const authDirect = await rawReq('GET', '/api/auth/providers', { headers: { origin: connOrigin } })
+  check('CORS 收紧：/api/auth/* 直跨域响应同样不挂放行头（未进预检分支头也不发放）',
+    authDirect.headers['access-control-allow-origin'] === undefined, JSON.stringify(authDirect.headers))
+  // 配置具体来源列表时 /api/auth/* 按精确来源放行（远程宿主在线登录 = B 侧显式配置，零信任默认）
+  {
+    const preciseDir = join(DATA_DIR, 'cors-precise')
+    await mkdir(preciseDir, { recursive: true })
+    const preciseCtx = new Context()
+    await preciseCtx.plugin(platformCore, { dataDir: preciseDir, http: { port: 7399, corsAllowOrigins: [connOrigin] }, startHttp: false })
+    await preciseCtx.httpServer.start()
+    try {
+      const pBase = `http://127.0.0.1:${preciseCtx.httpServer.port}`
+      const preciseAuth = await fetch(`${pBase}/api/auth/login`, { method: 'POST', headers: { origin: connOrigin, 'content-type': 'application/json' }, body: '{}' })
+      check('CORS 精确来源：/api/auth/login 按白名单回显放行（显式配置即放行，跨机器部署的正确姿势）',
+        preciseAuth.headers.get('access-control-allow-origin') === connOrigin, String(preciseAuth.headers.get('access-control-allow-origin')))
+      const preciseEvil = await fetch(`${pBase}/api/auth/login`, { method: 'POST', headers: { origin: 'http://evil.example.com' }, body: '{}' })
+      check('CORS 精确来源：未命中白名单的来源对 /api/auth/* 仍不发放', preciseEvil.headers.get('access-control-allow-origin') === null)
+    } finally {
+      await preciseCtx.httpServer.stop()
+    }
+  }
+  // 前端接线：连接管理纯函数随包单测 + api.js 动态 BASE 不变量
+  const connectionsTest = spawn(process.execPath, ['packages/plugin-console/public/js/connections.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => connectionsTest.on('close', resolve))
+  check('连接管理纯函数随包单测全绿（node --test）', connectionsTest.exitCode === 0, `exit=${connectionsTest.exitCode}`)
+  const apiSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'api.js'), 'utf8')
+  check('api.js 动态 BASE + 会话按连接隔离 + 桥接直通仅本机（连接切换的三个承重点）',
+    apiSrc.includes('activeConnection(localStorage, MOUNT)') && apiSrc.includes('TOKEN_NS') && apiSrc.includes('IS_LOCAL_HOST'))
+  const appConnSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'app.js'), 'utf8')
+  check('控制台接线：#/connections 会话前置独立渲染 + 外壳内 builders + 顶栏远程指示',
+    appConnSrc.includes("page === 'connections'") && appConnSrc.includes('connections: renderConnections') && appConnSrc.includes('conn-indicator'))
+  check('app.js 显式 import BASE（缺失时 NAV「部门面板」ext 点击 ReferenceError → 无响应，c0fca1a 回归守卫）',
+    /import\s*\{[^}]*\bBASE\b[^}]*\}\s*from\s*'\.\/api\.js'/.test(appConnSrc))
+
+  // ================================================================ 门户数据通道（plugin-portal：外部拉取端点）
+
+  // ================================================================ 门户数据通道（plugin-portal：外部拉取端点）
   section('门户数据通道（plugin-portal：企业门户拉取已发布应用/Agent，非核心）')
   const portalOrigin = 'http://192.168.0.4:8092'
   const portalGet = async (path, headers = {}) => rawReq('GET', `/api/portal${path}`, { headers })
@@ -4031,16 +4464,30 @@ try {
     portalEmployees.status === 200 && portalEmployees.headers['access-control-allow-origin'] === 'http://192.168.0.8:8443'
     && Array.isArray(portalEmployees.body.data) && portalEmployees.body.data.some((item) => item.id === targetAgent.id && item.avatar && typeof item.skills === 'string'))
   const portalSkills = await portalJson('/skills')
-  check('/skills：已上架 Skill 契约（tag/version/downloadUrl 字段齐全）',
-    portalSkills.status === 200 && Array.isArray(portalSkills.body.data) && portalSkills.body.data.every((item) => typeof item.downloadUrl === 'string' && typeof item.version === 'string'))
+  check('/skills：已上架 Skill 契约（downloadUrl 为门户登录下载端点绝对地址）',
+    portalSkills.status === 200 && Array.isArray(portalSkills.body.data) && portalSkills.body.data.length >= 1
+    && portalSkills.body.data.every((item) => /^https?:\/\/.+\/api\/portal\/skills\/.+\/download$/.test(item.downloadUrl)))
+  const portalSkillDl = await rawReq('GET', new URL(portalSkills.body.data[0].downloadUrl).pathname)
+  check('downloadUrl 未登录被拒 401 契约错误（v1.1：必须登录）',
+    portalSkillDl.status === 401 && portalSkillDl.headers['content-type'].includes('json') && jsonBody(portalSkillDl).code === 40100, JSON.stringify({ status: portalSkillDl.status }))
+  const portalSkillDlBad = await rawReq('GET', new URL(portalSkills.body.data[0].downloadUrl).pathname, { headers: { authorization: 'Bearer dst1_forged_token' } })
+  check('无效令牌下载被拒 401（不泄露技能存在性）', portalSkillDlBad.status === 401 && jsonBody(portalSkillDlBad).code === 40100)
+  const portalSkillDlAuth = await rawReq('GET', new URL(portalSkills.body.data[0].downloadUrl).pathname, { headers: { authorization: `Bearer ${admin}` } })
+  check('携带登录令牌可下载（200 + zip 魔数 PK + attachment 头）',
+    portalSkillDlAuth.status === 200 && String(portalSkillDlAuth.headers['content-type']).includes('zip')
+    && portalSkillDlAuth.body.startsWith('PK') && String(portalSkillDlAuth.headers['content-disposition']).includes('attachment'), JSON.stringify({ status: portalSkillDlAuth.status, type: portalSkillDlAuth.headers['content-type'] }))
+  const portalDlUnknownAuth = await rawReq('GET', '/api/portal/skills/skl_not_exist/download', { headers: { authorization: `Bearer ${admin}` } })
+  check('未上架/未知技能下载 404 契约错误（登录后）', portalDlUnknownAuth.status === 404 && jsonBody(portalDlUnknownAuth).code === 40400)
+  const portalDownloadAudit = (await api('GET', '/api/audit/logs?action=portal.skill.download&limit=5', { token: admin })).data?.items ?? []
+  check('下载审计落账（谁在下载：actor=登录用户）', Array.isArray(portalDownloadAudit) && portalDownloadAudit.some((item) => item.actorId && item.actorId !== 'portal-feed' && String(item.detail ?? '').includes('via=')), JSON.stringify(portalDownloadAudit?.[0] ?? {}))
   const portalStats = await portalJson('/stats', { origin: portalOrigin })
   check('/stats：恰 4 卡且 value 为字符串（契约明确非数值）', portalStats.body.data.length === 4 && portalStats.body.data.every((item) => typeof item.value === 'string' && item.unit !== undefined && item.label !== undefined))
   check('/stats 口径：已上线应用计数与 /apps 一致', Number(portalStats.body.data[0].value) === portalAppsAfter.body.data.length)
   const portalSolutions = await portalJson('/solutions')
   const portalTools = await portalJson('/tools')
   check('/solutions、/tools：暂无数据源 → 空数组（门户契约 §5：降级展示内置样板）', portalSolutions.body.data?.length === 0 && portalTools.body.data?.length === 0)
-  const portalPreflight = await rawReq('OPTIONS', '/api/portal/apps', { headers: { origin: portalOrigin, 'access-control-request-method': 'GET' } })
-  check('OPTIONS 预检 204 + 放行方法/来源头', portalPreflight.status === 204 && portalPreflight.headers['access-control-allow-origin'] === portalOrigin && String(portalPreflight.headers['access-control-allow-methods']).includes('GET'))
+  const portalPreflight = await rawReq('OPTIONS', '/api/portal/apps', { headers: { origin: portalOrigin, 'access-control-request-method': 'GET', 'access-control-request-headers': 'authorization, content-type' } })
+  check('OPTIONS 预检 204 + 放行方法/来源/authorization 请求头', portalPreflight.status === 204 && portalPreflight.headers['access-control-allow-origin'] === portalOrigin && String(portalPreflight.headers['access-control-allow-methods']).includes('GET') && String(portalPreflight.headers['access-control-allow-headers']).includes('authorization'))
   const portalUnknown = await portalJson('/nope', { origin: portalOrigin })
   check('未知端点 404 契约错误（门户展示错误与重试，不影响其他端点）', portalUnknown.status === 404 && portalUnknown.body.code === 40400)
   const portalNoOrigin = await portalGet('/stats')
@@ -4601,6 +5048,531 @@ try {
     check('/auth/oidc/callback 坏 state 被拒 400（防 CSRF/重放）', oidcCallbackBad.status === 400)
     await new Promise((resolve) => sim.close(resolve))
   }
+
+  // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
+  section('部门面板（plugin-panel-core：数据面 / 图谱 / 激活 / 计量 / 运行时）')
+  {
+    const panelAdmin = admin
+    const rootOrgId = (await api('GET', '/api/iam/orgs', { token: panelAdmin })).data.find((org) => org.parentId === null).id
+
+    // -- 部门骨架与总览 ------------------------------------------------------
+    const depts = await api('GET', '/api/panel/depts', { token: panelAdmin })
+    check('面板：五部门骨架（一套骨架五种皮肤的数据底座）',
+      depts.ok && depts.data.depts.length === 5 && depts.data.depts.some((dept) => dept.id === 'mfg' && dept.colors?.accent === '#0f766e'),
+      JSON.stringify(depts.data?.depts?.map((dept) => dept.id)))
+    const overview = await api('GET', '/api/panel/mfg/overview', { token: panelAdmin })
+    check('面板：制造部总览（行业激活 + 频道 + 阵容 + KPI/widget 来源徽标）',
+      overview.ok && overview.data.industry?.code === 'qb01' && overview.data.channels.length >= 3
+      && overview.data.agents.length === 4 && overview.data.kpis.length >= 3
+      && overview.data.widgets.length >= 3 && overview.data.widgets.every((widget) => !widget.degraded && widget.source === '模拟数据'),
+      JSON.stringify({ industry: overview.data?.industry, widgets: overview.data?.widgets?.length }))
+    const overviewNoAuth = await api('GET', '/api/panel/mfg/overview')
+    check('面板：未认证访问被拒（401）', overviewNoAuth.status === 401)
+
+    // -- 消息闭环：发消息 / 卡片动作走纯平台链（task.create + 幂等） ----------------
+    const channels = await api('GET', '/api/panel/mfg/channels', { token: panelAdmin })
+    const mainChannel = channels.data.channels[0]
+    const posted = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '自测：协作消息链路', ddSync: false } })
+    check('面板：发消息落库（人 × 频道归属校验）', posted.ok && posted.data.message.dept === 'mfg')
+    const msgList = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}`, { token: panelAdmin })
+    const cardMsg = msgList.data.messages.find((m) => m.card?.title?.includes('WX-0912'))
+    check('面板：演示卡片消息在库（Agent 操作卡片）', Boolean(cardMsg) && cardMsg.card.ops.length === 3)
+    const cardAct = await api('POST', `/api/panel/messages/${cardMsg.id}/card-action`, { token: panelAdmin, body: { opId: cardMsg.card.ops[0].id } })
+    check('面板：卡片动作「确认派单」→ 生成任务（纯平台链）',
+      cardAct.ok && /已生成任务/.test(cardAct.data.result), JSON.stringify(cardAct.data?.result ?? cardAct.error))
+    const cardActReplay = await api('POST', `/api/panel/messages/${cardMsg.id}/card-action`, { token: panelAdmin, body: { opId: cardMsg.card.ops[0].id } })
+    check('面板：卡片动作幂等保护（重复执行被拒）', !cardActReplay.ok && /已执行/.test(cardActReplay.error.message))
+
+    // -- 任务看板（泳道状态机） ------------------------------------------------
+    const taskCreated = await api('POST', '/api/panel/mfg/tasks', { token: panelAdmin, body: { title: '自测任务：M-2207 缺口复勘', lane: 'doing', sceneCode: 'QB01-G-4-1' } })
+    check('面板：任务创建（泳道 + 场景引用）', taskCreated.ok && taskCreated.data.task.lane === 'doing')
+    const taskMoved = await api('POST', `/api/panel/tasks/${taskCreated.data.task.id}/transition`, { token: panelAdmin, body: { lane: 'done' } })
+    check('面板：任务泳道迁移（doing → done）', taskMoved.ok && taskMoved.data.task.lane === 'done')
+    const badLane = await api('POST', `/api/panel/tasks/${taskCreated.data.task.id}/transition`, { token: panelAdmin, body: { lane: 'archived' } })
+    check('面板：非法泳道被拒', !badLane.ok)
+
+    // -- 部门知识 ---------------------------------------------------------------
+    const artCreated = await api('POST', '/api/panel/mfg/artifacts', { token: panelAdmin, body: { kind: 'diagnosis', title: '自测诊断卡', content: '四清单框架自测沉淀' } })
+    const artList = await api('GET', '/api/panel/mfg/artifacts', { token: panelAdmin })
+    check('面板：部门知识沉淀与列表', artCreated.ok && artList.ok && artList.data.artifacts.some((art) => art.title === '自测诊断卡'))
+
+    // -- 场景图谱：装载 / 未激活拒绝 ----------------------------------------------
+    const graph = await api('GET', '/api/panel/scenegraph?industry=QB01', { token: panelAdmin })
+    const qb01SceneCount = Object.values(graph.data?.pack?.activities ?? {}).reduce((sum, list) => sum + list.length, 0)
+    check('面板：QB01 场景图谱下发（一图四清单全字段）',
+      graph.ok && qb01SceneCount >= 24 && graph.data.pack.activities.mfg.every((scene) => scene.tools.length > 0 && scene.models.length > 0 && scene.data.length > 0 && scene.talent.length > 0),
+      `scenes=${qb01SceneCount}`)
+    const graphLocked = await api('GET', '/api/panel/scenegraph?industry=JQR', { token: panelAdmin })
+    check('面板：未装载图谱 honest 400（不冒充数据）', !graphLocked.ok && /未装载/.test(graphLocked.error.message))
+
+    // -- 行业三态 + 激活审批链（申请 → 审批（高风险二次确认）→ 激活生效） -------------
+    const industries = await api('GET', '/api/panel/industries', { token: panelAdmin })
+    check('面板：行业三态（QB01/GCJX 已激活，JQR/NEV/PCB 待授权）',
+      industries.ok
+      && industries.data.industries.filter((ind) => ind.state === 'active').map((ind) => ind.code).sort().join(',') === 'GCJX,QB01'
+      && industries.data.industries.filter((ind) => ind.state === 'locked').length === 3,
+      JSON.stringify(industries.data?.industries?.map((ind) => `${ind.code}:${ind.state}`)))
+    const actReq = await api('POST', '/api/panel/industries/NEV/activate-requests', { token: panelAdmin })
+    check('面板：激活申请进入审批中心（industry.activation · high）',
+      actReq.ok && actReq.data.approval.kind === 'industry.activation',
+      JSON.stringify(actReq.error ?? actReq.data?.approval?.id))
+    const actPending = (await api('GET', '/api/panel/industries', { token: panelAdmin })).data.industries.find((ind) => ind.code === 'NEV')
+    check('面板：申请后行业显示审批中（pending 三态）', actPending.state === 'pending')
+    const decideOk = await api('POST', `/api/approvals/${actReq.data.approval.id}/decide`, { token: panelAdmin, body: { decision: 'approve', opinion: '新能源汽车图谱启用' } })
+    check('面板：审批通过 → 激活执行器生效（active + grantCapabilities）',
+      decideOk.ok && decideOk.data.status === 'executed', JSON.stringify(decideOk.data?.execution ?? decideOk.error))
+    const industriesAfter = await api('GET', '/api/panel/industries', { token: panelAdmin })
+    check('面板：激活后 NEV 三态转 active', industriesAfter.data.industries.find((ind) => ind.code === 'NEV').state === 'active')
+    const dupActivate = await api('POST', '/api/panel/industries/NEV/activate-requests', { token: panelAdmin })
+    check('面板：重复激活申请被拒（已是激活态）', !dupActivate.ok && /已是激活态/.test(dupActivate.error.message))
+
+    // -- panelAgentRuntime：诚实降级 + 真实模型调用 + panel:* 计量（D1 键格式） -------
+    const mentionFallback = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '@设备运维 Agent 自测：请巡检 3# 冲床', ddSync: false } })
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const afterFallback = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=10`, { token: panelAdmin })
+    const fallbackReply = afterFallback.data.messages.find((m) => m.agentName === '设备运维 Agent' && /暂不能自主应答/.test(m.text))
+    check('面板：@Agent 未绑定资产 → 诚实降级回包（不造假回复）', Boolean(fallbackReply), JSON.stringify(afterFallback.data?.messages?.at(-1)?.text ?? '').slice(0, 120))
+    const fallbackTasks = await api('GET', '/api/panel/mfg/tasks', { token: panelAdmin })
+    check('面板：降级转人工待办落看板', fallbackTasks.ok && fallbackTasks.data.tasks.some((task) => task.createdBy.startsWith('agent:') && task.lane === 'todo'))
+
+    // stub 模型 + Agent 资产 + 阵容绑定 → 真实单轮调用
+    const panelModelStub = createServer((req, res) => {
+      if ((req.url ?? '').endsWith('/chat/completions')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ choices: [{ message: { content: '质检结论：一次装机合格率 93.2%（±0.4pp），无异常波动。' } }], usage: { prompt_tokens: 100, completion_tokens: 40 } }))
+        return
+      }
+      res.writeHead(404).end('{}')
+    })
+    await new Promise((resolve) => panelModelStub.listen(0, '127.0.0.1', resolve))
+    try {
+      // agent 资产的 model 属性受资源 schema 枚举约束（deepseek-*），故覆盖登记 deepseek-chat 指向 stub
+      const modelReg = await api('POST', '/api/modelgw/models', { token: panelAdmin, body: { slug: 'deepseek-chat', displayName: 'DeepSeek Chat（面板自测 stub）', provider: 'deepseek', endpoint: `http://127.0.0.1:${panelModelStub.address().port}/v1`, apiKey: 'stub-key', listCentsPerKTokens: 1, costCentsPerKTokens: 0 } })
+      const agentAsset = await api('POST', '/api/agents', { token: panelAdmin, body: { name: '面板质检员', slug: 'panel-qc', attrs: { description: '部门面板质检数字同事（自测）', avatar: '🔍', model: 'deepseek-chat', systemPrompt: '你是制造部质检数字同事。', riskLevel: 'low', dataClass: 'internal' } } })
+      check('面板：stub 模型 + Agent 资产就绪', modelReg.ok && agentAsset.ok, JSON.stringify({ modelReg: modelReg.error, agent: agentAsset.error }))
+      const roster = await api('PUT', '/api/panel/mfg/agents', { token: panelAdmin, body: { agents: [
+        { name: '排产优化 Agent', desc: 'APS 齐套排产 / 插单重排', icon: '📅' },
+        { name: '设备运维 Agent', desc: '点检提醒 / 故障预判 / 维修工单', icon: '⚙️' },
+        { name: '面板质检员', desc: 'SPC 监控 / 合格率追溯', icon: '🔍', agentRef: `agent:${agentAsset.data.agent?.slug ?? agentAsset.data.agent?.id ?? 'panel-qc'}` },
+      ] } })
+      check('面板：阵容绑定 agentRef（panel.config.write）', roster.ok, JSON.stringify(roster.error))
+      const mentionReal = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '@面板质检员 今天一次装机合格率有波动吗？', ddSync: false } })
+      check('面板：@面板质检员 消息已发', mentionReal.ok)
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      const afterReal = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=10`, { token: panelAdmin })
+      const realReply = afterReal.data.messages.find((m) => m.agentName === '面板质检员')
+      check('面板：panelAgentRuntime 单轮真实调用（modelgw → 回包落库）',
+        Boolean(realReply) && /一次装机合格率 93.2%/.test(realReply.text),
+        JSON.stringify(realReply?.text ?? afterReal.data?.messages?.at(-1)?.text ?? '').slice(0, 160))
+      const recentUsage = await api('GET', '/api/usage/events?resource=' + encodeURIComponent('panel:mfg.qb01') + '&limit=50', { token: panelAdmin })
+      check('面板：协作计量落账（D1 键格式 panel:mfg.qb01，价格簿零费率放行）',
+        recentUsage.ok && recentUsage.data.items.some((item) => item.resource === 'panel:mfg.qb01'),
+        JSON.stringify(recentUsage.data?.items?.map((item) => item.resource)))
+
+      // -- 面板模型目录面（与 dsh 服务共用 modelgw 唯一事实源）+ 对话框模型切换 -----------
+      const panelModelsList = await api('GET', '/api/panel/models', { token: panelAdmin })
+      check('面板：模型目录读取（GET /api/panel/models，直填 apiKey 脱敏不回显）',
+        panelModelsList.ok && panelModelsList.data.models.some((item) => item.slug === 'deepseek-chat')
+        && !JSON.stringify(panelModelsList.data).includes('stub-key'),
+        JSON.stringify(panelModelsList.error ?? panelModelsList.data?.models?.map((item) => item.slug)))
+      const panelModelUpsert = await api('POST', '/api/panel/models', { token: panelAdmin, body: { slug: 'qwen-plus', displayName: 'Qwen Plus（面板登记）', provider: 'aliyun', endpoint: `http://127.0.0.1:${panelModelStub.address().port}/v1`, apiKey: 'panel-stub-key', listCentsPerKTokens: 2, costCentsPerKTokens: 1 } })
+      check('面板：模型登记 upsert（POST /api/panel/models，panel.config.write；回显脱敏）',
+        panelModelUpsert.ok && panelModelUpsert.data.slug === 'qwen-plus' && panelModelUpsert.data.apiKey === '***',
+        JSON.stringify(panelModelUpsert.error ?? panelModelUpsert.data?.apiKey))
+      const panelModelKeepKey = await api('POST', '/api/panel/models', { token: panelAdmin, body: { slug: 'qwen-plus', displayName: 'Qwen Plus（面板登记·改）', endpoint: `http://127.0.0.1:${panelModelStub.address().port}/v1`, listCentsPerKTokens: 2 } })
+      check('面板：编辑模型留空 apiKey 保持既有密钥（不被默认 env 引用覆盖）',
+        panelModelKeepKey.ok && panelModelKeepKey.data.displayName === 'Qwen Plus（面板登记·改）', JSON.stringify(panelModelKeepKey.error))
+      const panelModelTest = await api('POST', '/api/panel/models/qwen-plus/test', { token: panelAdmin })
+      check('面板：模型连通性测试（真实走 modelgw.invoke 全链，失败如实回传不造假成功）',
+        panelModelTest.ok && panelModelTest.data.ok === true && panelModelTest.data.content.length > 0,
+        JSON.stringify(panelModelTest.data ?? panelModelTest.error))
+      const switchMsg = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '@面板质检员 切换模型后再答一次：合格率波动结论？', model: 'qwen-plus', ddSync: false } })
+      check('面板：对话框指定模型发送（POST messages 带 model）', switchMsg.ok, JSON.stringify(switchMsg.error))
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      const afterSwitch = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=10`, { token: panelAdmin })
+      const switchReply = afterSwitch.data.messages.find((m) => m.agentName === '面板质检员' && m.model === 'qwen-plus')
+      check('面板：对话框模型切换生效（modelOverride 优先于资产 model，回包记录实际所用模型）', Boolean(switchReply),
+        JSON.stringify(afterSwitch.data?.messages?.filter((m) => m.agentName)?.map((m) => ({ t: String(m.text).slice(0, 30), model: m.model }))))
+      const badModelMsg = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '未登记模型应被拒', model: 'no-such-model', ddSync: false } })
+      check('面板：对话框指定未登记模型被拒（400，诚实报错）', badModelMsg.status === 400, JSON.stringify(badModelMsg.error))
+      const panelModelDel = await api('DELETE', `/api/panel/models/${panelModelUpsert.data.id}`, { token: panelAdmin })
+      check('面板：模型删除（DELETE /api/panel/models/:id，登记移除后目录不含）',
+        panelModelDel.ok && panelModelDel.data.deleted === true
+        && !(await api('GET', '/api/panel/models', { token: panelAdmin })).data.models.some((item) => item.slug === 'qwen-plus'),
+        JSON.stringify(panelModelDel.error))
+    } finally {
+      panelModelStub.close()
+    }
+
+    // -- widget 求值：connector 源诚实降级 + 配置抽屉 ------------------------------
+    const widgetsPut = await api('PUT', '/api/panel/mfg/widgets', { token: panelAdmin, body: { widgets: [
+      { id: 'w1', type: 'bars', title: '📊 产线实时状态', live: true, source: 'mock', rows: [['冲压一线', 92, '']] },
+      { id: 'w2', type: 'bars', title: '📈 设备联网率（ERP）', source: 'connector', ref: 'erp.oee-line', rows: [] },
+    ] } })
+    check('面板：widget 布局写入（含来源徽标声明）', widgetsPut.ok && widgetsPut.data.widgets.length === 2)
+    const boardAfter = await api('GET', '/api/panel/mfg/board', { token: panelAdmin })
+    const degradedWidget = boardAfter.data.widgets.find((widget) => widget.id === 'w2')
+    check('面板：connector 源 widget 显式降级（绝不冒充真实业务面）',
+      Boolean(degradedWidget) && degradedWidget.degraded === true && /连接器/.test(degradedWidget.source),
+      JSON.stringify(degradedWidget))
+    const widgetsRestore = await api('PUT', '/api/panel/mfg/widgets', { token: panelAdmin, body: { widgets: [
+      { id: 'w1', type: 'bars', title: '📊 产线实时状态', live: true, source: 'mock', rows: [['冲压一线', 92, ''], ['组装二线', 76, 'warn'], ['包装三线 · 换型中', 41, 'danger']] },
+      { id: 'w2', type: 'alerts', title: '🚨 异常告警', source: 'mock', rows: [['r', '停机', '冲压一线 3# 冲床油温过高，已待机 12 分钟'], ['y', '缺料', '组装二线 M-2207 物料 16:00 后缺口 800pcs']] },
+      { id: 'w3', type: 'todos', title: '📋 今日工单', source: 'mock', rows: [['WO-2607 电机外壳 ×5000', '87%'], ['WO-2611 风扇组件 ×3200', '62%'], ['WO-2615 控制板 ×1800', '23%']] },
+    ] } })
+    check('面板：widget 布局复原', widgetsRestore.ok && widgetsRestore.data.widgets.length === 3)
+
+    // -- SSE + 降级轮询（钉钉 webview 双通道铁律） -----------------------------------
+    const sseEvents = []
+    const sseController = new AbortController()
+    const sseWorker = (async () => {
+      const response = await fetch(`${BASE}/api/panel/stream?dept=mfg&token=${encodeURIComponent(panelAdmin)}`, { signal: sseController.signal })
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      // 持续读取直到抓到 panel.message.created（SSE 分块到达，首块只有 retry）
+      for (let i = 0; i < 12; i++) {
+        const { value, done } = await reader.read()
+        if (done) break
+        sseEvents.push(decoder.decode(value))
+        if (sseEvents.join('').includes('panel.message.created')) break
+      }
+    })().catch(() => sseEvents.push('sse-failed'))
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: 'SSE 推流自测', ddSync: false } })
+    await Promise.race([sseWorker, new Promise((resolve) => setTimeout(resolve, 4000))])
+    sseController.abort()
+    check('面板：SSE 通道建立且事件推送（公开路径 + ?token= 自校验）',
+      sseEvents[0]?.includes('retry:') && sseEvents.join('').includes('panel.message.created'),
+      JSON.stringify(sseEvents.map((chunk) => chunk.slice(0, 80))))
+    const sseNoToken = await fetch(`${BASE}/api/panel/stream?dept=mfg`)
+    check('面板：SSE 无 token 被拒（fail-closed）', sseNoToken.status === 401)
+    const poll = await api('GET', `/api/panel/mfg/poll?since=${new Date(Date.now() - 60_000).toISOString()}`, { token: panelAdmin })
+    check('面板：降级轮询端点（消息/任务/未读）',
+      poll.ok && Array.isArray(poll.data.messages) && Array.isArray(poll.data.tasks) && Array.isArray(poll.data.unread),
+      JSON.stringify(poll.error ?? ''))
+
+    // -- RBAC 行为抽检（矩阵网全覆盖之外的业务语义） ----------------------------------
+    const memberRole = (await api('GET', '/api/iam/roles', { token: panelAdmin })).data.roles.find((role) => role.code === 'member')
+    const memberUser = await api('POST', '/api/iam/users', { token: panelAdmin, body: { username: 'panel_member', displayName: '面板成员', orgId: rootOrgId, roleIds: [memberRole.id] } })
+    const memberLogin = await api('POST', '/api/auth/login', { body: { username: 'panel_member', password: memberUser.data.initialPassword } })
+    const memberToken = memberLogin.data.token
+    const memberRead = await api('GET', '/api/panel/mfg/overview', { token: memberToken })
+    const memberConfig = await api('PUT', '/api/panel/mfg/kpis', { token: memberToken, body: { kpis: [] } })
+    check('面板：成员可读总览（panel.read 迁移生效）但改配置被拒（403）',
+      memberRead.ok && memberConfig.status === 403, `read=${memberRead.status} config=${memberConfig.status}`)
+
+    // -- 账号组织打通：部门↔组织绑定 + 部门范围权限 + 名册/资产联动 -------------------
+    const agentAssetOverview = await api('GET', '/api/panel/mfg/overview', { token: panelAdmin })
+    check('面板：Agent 阵容联动资产状态（asset.status/model 实时解析自资源底座）',
+      agentAssetOverview.data.agents.find((agent) => agent.name === '面板质检员')?.asset?.model === 'deepseek-chat',
+      JSON.stringify(agentAssetOverview.data?.agents?.map((agent) => ({ n: agent.name, asset: agent.asset?.status }))))
+    const boundOrg = await api('POST', '/api/iam/orgs', { token: panelAdmin, body: { name: '研发部（自测）' } })
+    const orgBind = await api('PUT', '/api/panel/rd/config', { token: panelAdmin, body: { orgId: boundOrg.data.id } })
+    check('面板：部门绑定组织（PUT config，账号组织打通管理动作）',
+      orgBind.ok && orgBind.data.dept.org?.name === '研发部（自测）', JSON.stringify(orgBind.error ?? orgBind.data?.dept?.org))
+    const rdUser = await api('POST', '/api/iam/users', { token: panelAdmin, body: { username: 'rd_scope_member', displayName: '研发部张工', orgId: boundOrg.data.id, roleIds: [memberRole.id] } })
+    const rdLogin = await api('POST', '/api/auth/login', { body: { username: 'rd_scope_member', password: rdUser.data.initialPassword } })
+    const rdOverview = await api('GET', '/api/panel/rd/overview', { token: rdLogin.data.token })
+    check('面板：组织子树成员可访问已绑定部门 + 成员名册随总览下发',
+      rdOverview.ok && rdOverview.data.org?.name === '研发部（自测）' && rdOverview.data.members.some((member) => member.name === '研发部张工'),
+      JSON.stringify({ ok: rdOverview.ok, org: rdOverview.data?.org, members: rdOverview.data?.members?.length }))
+    const outsiderDenied = await api('GET', '/api/panel/rd/overview', { token: memberToken })
+    check('面板：组织外成员被部门范围权限拒绝（403，组织治理双通道）',
+      outsiderDenied.status === 403 && /部门范围/.test(outsiderDenied.error?.message ?? ''), JSON.stringify(outsiderDenied.error))
+    const outsiderDepts = await api('GET', '/api/panel/depts', { token: memberToken })
+    check('面板：部门清单带 allowed 徽标（外部成员视角 rd 锁定/mfg 开放）',
+      outsiderDepts.ok && outsiderDepts.data.depts.find((dept) => dept.id === 'rd').allowed === false
+      && outsiderDepts.data.depts.find((dept) => dept.id === 'mfg').allowed === true)
+    const adminCrossDept = await api('GET', '/api/panel/rd/overview', { token: panelAdmin })
+    check("面板：'*' 管理员跨部门直通（治理豁免）", adminCrossDept.ok)
+    const orgUnbind = await api('PUT', '/api/panel/rd/config', { token: panelAdmin, body: { orgId: null } })
+    check('面板：解除组织绑定恢复开放', orgUnbind.ok && !orgUnbind.data.dept.org)
+  }
+
+  // ================================================================ 钉钉桥接（review-dsh-agent-panel-v2 Phase 3）
+  section('钉钉桥接（plugin-dingtalk-bridge：群桥 / 出向投递 / 审批推送 / 告警通道 / 回决 fail-closed）')
+  {
+    const ddSends = []
+    const bridgeStub = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://stub')
+      const raw = await readBody(req)
+      if (url.pathname === '/v1.0/oauth2/accessToken') {
+        const body = JSON.parse(raw || '{}')
+        if (body.appKey === 'bridge-key' && body.appSecret === 'bridge-secret') {
+          res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ accessToken: 'bridge-token', expireIn: 7200 }))
+          return
+        }
+        res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ code: 'invalid.credentials' }))
+        return
+      }
+      if (url.pathname === '/v1.0/robot/groupMessages/send') {
+        ddSends.push({ chatId: JSON.parse(raw || '{}').openConversationId, at: Date.now() })
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ errcode: 0, errmsg: 'ok' }))
+        return
+      }
+      res.writeHead(404).end('{}')
+    })
+    await new Promise((resolve) => bridgeStub.listen(0, '127.0.0.1', resolve))
+    const bridgePort = bridgeStub.address().port
+
+    const putReal = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-bridge', appKey: 'bridge-key', appSecret: 'bridge-secret', mode: 'real', apiBase: `http://127.0.0.1:${bridgePort}`, oapiBase: `http://127.0.0.1:${bridgePort}`, enabled: true, conflictStrategy: 'manual' } })
+    check('桥接：连接器切 real（凭证单一来源=iam 连接器）', putReal.ok)
+    const ddStatus = await api('GET', '/api/dingtalk/status', { token: admin })
+    check('桥接：状态胶囊（连接器 real / 入向 R-SPIKE 停用声明 / 扫码绑定事实源）',
+      ddStatus.ok && ddStatus.data.connector.mode === 'real'
+      && ddStatus.data.inbound.enabled === false && /R-SPIKE/.test(ddStatus.data.inbound.reason)
+      && /sso\/bind/.test(ddStatus.data.bindPath),
+      JSON.stringify(ddStatus.data))
+
+    const mfgChannels = await api('GET', '/api/panel/mfg/channels', { token: admin })
+    const syncChannel = mfgChannels.data.channels.find((channel) => channel.name === '异常快速响应群') ?? mfgChannels.data.channels[0]
+    const bindBridge = await api('POST', `/api/dingtalk/channels/${syncChannel.id}/bridge`, { token: admin, body: { chatId: 'cid-mfg-001', robotCode: 'rb-001' } })
+    check('桥接：频道群桥绑定（dingtalk.message.send）', bindBridge.ok && bindBridge.data.bridge.chatId === 'cid-mfg-001', JSON.stringify(bindBridge.error ?? bindBridge.data))
+    const bindAlerts = await api('POST', '/api/dingtalk/channels/alerts-ops/bridge', { token: admin, body: { chatId: 'cid-alerts', robotCode: 'rb-001', purpose: 'alerts' } })
+    check('桥接：运维告警群桥绑定（purpose=alerts）', bindAlerts.ok && bindAlerts.data.bridge.purpose === 'alerts', JSON.stringify(bindAlerts.error ?? bindAlerts.data))
+    const bridges = await api('GET', '/api/dingtalk/bridges?dept=mfg', { token: admin })
+    check('桥接：群桥列表可查', bridges.ok && bridges.data.bridges.length >= 1, JSON.stringify(bridges.error ?? bridges.data))
+
+    // 出向投递：面板消息（ddSync）→ 桥接 → stub 收到 → 回执回写 ddSync=sent
+    const ddMsg = await api('POST', '/api/panel/mfg/messages', { token: admin, body: { channelId: syncChannel.id, text: '桥接出向自测：换模窗口确认', ddSync: true } })
+    check('桥接：消息带钉钉同步意图（ddSync=pending）', ddMsg.ok && ddMsg.data.message.ddSync === 'pending')
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    const ddMsgAfter = await api('GET', `/api/panel/mfg/messages?channelId=${syncChannel.id}&limit=5`, { token: admin })
+    const sentMsg = ddMsgAfter.data.messages.find((m) => m.id === ddMsg.data.message.id)
+    check('桥接：出向投递成功且回执回写（ddSync=sent）', sentMsg.ddSync === 'sent' && ddSends.some((send) => send.chatId === 'cid-mfg-001'),
+      JSON.stringify({ ddSync: sentMsg.ddSync, sends: ddSends.length }))
+
+    // 卡片/场景卡推送（panel.card.action dd.push 路径）
+    const sendsBeforeScene = ddSends.length
+    const sceneSync = await api('POST', '/api/panel/mfg/scenes/QB01-A-2-5/sync-dingtalk', { token: admin })
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    check('桥接：场景卡同步钉钉（dd.push → 群投递）', sceneSync.ok && ddSends.length > sendsBeforeScene, JSON.stringify({ ok: sceneSync.ok, sends: ddSends.length }))
+
+    // 告警 dingtalk 通道坐实：usage 对账不平 → audit.alert.fired → alerts 群桥投递
+    const sendsBeforeAlert = ddSends.length
+    const reconcile = await api('POST', '/api/usage/reconcile', { token: admin })
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    check('桥接：告警经 purpose=alerts 群桥投递（补齐 channels:[dingtalk] 欠账）',
+      reconcile.ok && ddSends.filter((send) => send.chatId === 'cid-alerts').length >= 1,
+      JSON.stringify({ reconcileOk: reconcile.ok, alertSends: ddSends.filter((send) => send.chatId === 'cid-alerts').length, total: ddSends.length, before: sendsBeforeAlert }))
+
+    // 审批推送
+    const pcbReq = await api('POST', '/api/panel/industries/PCB/activate-requests', { token: admin })
+    const approvalPush = await api('POST', `/api/dingtalk/approvals/${pcbReq.data.approval.id}/push`, { token: admin })
+    check('桥接：审批单推送钉钉', approvalPush.ok && approvalPush.data.delivered === true, JSON.stringify(approvalPush.data ?? approvalPush.error))
+
+    // 回决写回：staffId 反查 fail-closed 三连
+    const cbNoLink = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'nobody-staff', approvalId: pcbReq.data.approval.id, decision: 'approve' } })
+    check('桥接：未绑定 staffId 回决被拒（fail-closed）', !cbNoLink.ok && /未绑定/.test(cbNoLink.error.message))
+    const adminUser = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('沈亦澜'), { token: admin })).data.users[0]
+    await api('POST', `/api/iam/users/${adminUser.id}/bindings`, { token: admin, body: { provider: 'dingtalk', unionId: 'selftest-staff-001', displayName: '沈亦澜' } })
+    const cbOk = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'selftest-staff-001', approvalId: pcbReq.data.approval.id, decision: 'approve', opinion: '钉钉侧回决（自测）' } })
+    check('桥接：合规回决写回（staffId↔identityLinks 反查 + confirmed）→ 审批执行',
+      cbOk.ok && cbOk.data.approval.status === 'executed', JSON.stringify(cbOk.data ?? cbOk.error))
+    const pcbAfter = (await api('GET', '/api/panel/industries', { token: admin })).data.industries.find((ind) => ind.code === 'PCB')
+    check('桥接：回决生效后 PCB 行业转 active', pcbAfter.state === 'active')
+
+    // 解绑 + 恢复 mock（不污染后续断言）
+    const unbind = await api('DELETE', `/api/dingtalk/channels/${syncChannel.id}/bridge`, { token: admin })
+    check('桥接：群桥解绑', unbind.ok && unbind.data.deleted === true, JSON.stringify(unbind.error ?? unbind.data))
+    const restoreMock = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-yuanbingke', appKey: 'demo-app-key', appSecret: 'demo-secret-do-not-use', mode: 'mock', enabled: true } })
+    check('桥接：连接器恢复 mock（自测收尾）', restoreMock.ok && restoreMock.data.mode === 'mock')
+    await new Promise((resolve) => bridgeStub.close(resolve))
+  }
+
+  // ================================================================ dsh 宿主挂载（plugin-dsh-bridge，dev-plan-agent-host-unification M1）
+  // 进程内构造最小插件树：platform-core（不监听）+ dsh-bridge（挂载半），
+  // 用伪造 dsh webServer 捕获注册的 prefix 路由，再经真实 HTTP 端口模拟 dsh 侧分发。
+  section('dsh 宿主挂载（单进程单入口 /rq 前缀）')
+  {
+    const captured = []
+    const taps = []
+    const fakeWebServer = {
+      register: (route) => { captured.push(route); return () => {} },
+      tapIndex: (transform) => { taps.push(transform); return () => {} },
+    }
+    const bridgeDataDir = join(DATA_DIR, 'bridge-mount')
+    await mkdir(bridgeDataDir, { recursive: true })
+    const mountCtx = new Context()
+    await mountCtx.plugin(platformCore, { dataDir: bridgeDataDir, http: { port: 0, externalBase: '/rq' }, startHttp: false })
+    // 完整业务树（等价 boot-all 依赖序；startHttp=false → 数据面经 bridge 挂载）：
+    await mountCtx.plugin(resourceCore)
+    await mountCtx.plugin(iam)
+    await mountCtx.plugin(authn)
+    await mountCtx.plugin(usage)
+    await mountCtx.plugin(billing)
+    await mountCtx.plugin(audit)
+    await mountCtx.plugin(market)
+    await mountCtx.plugin(connector)
+    await mountCtx.plugin(mcp)
+    await mountCtx.plugin(nas)
+    await mountCtx.plugin(skillhub)
+    await mountCtx.plugin(agent)
+    await mountCtx.plugin(app)
+    await mountCtx.plugin(modelgw)
+    await mountCtx.plugin(connect, { role: 'host' })
+    await mountCtx.plugin(update)
+    // 先于 console：门户端点在其鉴权中间件之前截获 /api/portal/*
+    await mountCtx.plugin(portal)
+    await mountCtx.plugin(consolePlugin) // 基线初始化：内置角色 + 根组织 + admin
+    // 部门面板 + 钉钉桥接（review-dsh-agent-panel-v2）：与 boot-all 同序（console 之后）
+    await mountCtx.plugin(panelCore)
+    await mountCtx.plugin(dingtalkBridge)
+    await mountCtx.plugin(dshBridge, { mountPath: '/rq' })
+    mountCtx.httpServer.register('GET', '/api/__mount_probe', (exchange) => exchange.ok({ pong: exchange.path }))
+    // 将伪造 webServer 提供给 ctx 后正常装配（等价 dsh 形态：inject 完成后 apply）
+    // 绑定服务显式构造（注册在真实 mountCtx 上，供 plugin-nas 出站归因读取）；
+    // apply 以「服务视图」调用——等价 dsh 形态下 inject 完成后的装配
+    // OIDC 授权码通道凭证（register-dsh-agent.mjs 产物形态）
+    writeFileSync(join(bridgeDataDir, 'dsh-agent-credential.json'), JSON.stringify({
+      agentId: 'agt_mount_test',
+      oidc: { clientId: 'oc-selftest-bridge', clientSecret: 'ocs_selftest_secret' },
+    }))
+    const bindingService = new dshBridge.IdentityBindingService(mountCtx, {})
+    dshBridge.apply(
+      { webServer: fakeWebServer, httpServer: mountCtx.httpServer, entryTickets: mountCtx.entryTickets, oidc: mountCtx.oidc, iam: mountCtx.iam, authn: mountCtx.authn, audit: mountCtx.audit, logger: (name) => mountCtx.logger(name), identityBinding: bindingService },
+      { mountPath: '/rq', oidcCredentialFile: join(bridgeDataDir, 'dsh-agent-credential.json') },
+    )
+    check('bridge 向 webServer 注册挂载路由（/rq + /auth/entry + /dsh-bridge + /auth/oidc/*）',
+      captured.some((r) => r.kind === 'prefix' && r.path === '/rq') && captured.some((r) => r.kind === 'exact' && r.path === '/auth/entry')
+      && captured.some((r) => r.kind === 'prefix' && r.path === '/dsh-bridge') && captured.some((r) => r.kind === 'exact' && r.path === '/auth/oidc/start')
+      && captured.some((r) => r.kind === 'exact' && r.path === '/auth/oidc/callback'),
+      JSON.stringify(captured.map((r) => `${r.kind}:${r.path}`)))
+    check('externalBase 配置生效（/rq）', mountCtx.httpServer.externalBase === '/rq')
+    // 模拟 dsh webserver 分发：命中 /rq 前缀即交给 bridge handler，其余 404
+    const sim = createServer((req, res) => {
+      const exact = captured.find((r) => r.kind === 'exact' && (req.url ?? '').split('?')[0] === r.path)
+      if (exact) { exact.handler(req, res); return }
+      const route = captured.find((r) => r.kind === 'prefix' && (req.url === r.path || (req.url ?? '').startsWith(`${r.path}/`)))
+      if (route) { route.handler(req, res); return }
+      res.writeHead(404).end('sim-miss')
+    })
+    await new Promise((resolve) => sim.listen(0, '127.0.0.1', resolve))
+    // 完整树下数据面带 console 鉴权中间件：先经 /rq/api/auth/login 换 Bearer（基线初始口令文件）
+    const pwFile = join(bridgeDataDir, 'admin-initial-password.txt')
+    const adminPassword = existsSync(pwFile)
+      ? (readFileSync(pwFile, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('平台管理员'))[0] ?? '')
+      : ''
+    const loginRes = await fetch(`http://127.0.0.1:${sim.address().port}/rq/api/auth/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ username: 'admin', password: adminPassword || '自测兜底口令' }),
+    })
+    const adminToken = (await loginRes.json().catch(() => null))?.data?.token
+    check('/rq/api/auth/login 可用（单入口下登录链路通）', Boolean(adminToken), `status=${loginRes.status}`)
+    const simGet = async (path, token) => fetch(`http://127.0.0.1:${sim.address().port}${path}`, {
+      redirect: 'manual', headers: token ? { authorization: `Bearer ${token}` } : {},
+    })
+    const probe = await simGet('/rq/api/__mount_probe', adminToken)
+    const probeBody = await probe.json().catch(() => null)
+    check('/rq/api/* 剥前缀后与独立形态路由等价（含 Bearer 鉴权链）', probe.status === 200 && probeBody?.data?.pong === '/api/__mount_probe', `status=${probe.status} body=${JSON.stringify(probeBody)}`)
+    const redir = await simGet('/rq')
+    check('/rq 302 归一到 /rq/（SPA 相对引用可解析）', redir.status === 302 && redir.headers.get('location') === '/rq/')
+    const spa = await simGet('/rq/')
+    check('/rq/ 伺服控制台 index.html（SPA fallback）', spa.status === 200 && (await spa.text()).includes('<!doctype html>'))
+    const asset = await simGet('/rq/js/app.js')
+    check('/rq/js/* 控制台静态资源按前缀命中', asset.status === 200 && String(asset.headers.get('content-type') ?? '').includes('javascript'), `status=${asset.status}`)
+    const panelSpa = await simGet('/rq/panel/')
+    check('/rq/panel/ 面板 SPA 经前缀挂载可达（宿主 web diff=0）', panelSpa.status === 200 && (await panelSpa.text()).includes('部门 Agent 工作台'), `status=${panelSpa.status}`)
+    const panelBareMounted = await simGet('/rq/panel')
+    check('/rq/panel 302 → /rq/panel/（externalBase 感知，与独立形态同语义）',
+      panelBareMounted.status === 302 && panelBareMounted.headers.get('location') === '/rq/panel/',
+      `status=${panelBareMounted.status} location=${panelBareMounted.headers.get('location')}`)
+    const spaMiss = await simGet('/rq/anything-else')
+    check('非 /api 未命中回落 SPA（与独立形态一致）', spaMiss.status === 200 && (await spaMiss.text()).includes('<!doctype html>'))
+    const apiMiss = await simGet('/rq/api/definitely-missing', adminToken)
+    const apiMissBody = await apiMiss.json().catch(() => null)
+    check('未匹配 API 404 JSON 不落静态（DEF-01）', apiMiss.status === 404 && apiMissBody?.error?.code === 'NOT_FOUND')
+    const simMiss = await fetch(`http://127.0.0.1:${sim.address().port}/outside`)
+    check('前缀外请求不进榕器数据面（dsh 侧自有路由域不受影响）', simMiss.status === 404 && (await simMiss.text()) === 'sim-miss')
+
+    // -- 身份半：票据兑换 → Cookie 绑定 → 状态 → 会话归因 → 实时失效（M4/M5） ----
+    check('免登引导脚本经 tapIndex 注入', taps.length === 1 && taps[0]('<html><head></head></html>').includes('entry_ticket'))
+    const simOrigin = `http://127.0.0.1:${sim.address().port}`
+    const adminUser = mountCtx.iam.users().findOne((u) => u.username === 'admin')
+    check('基线初始化（挂载形态最小树）产出 admin', Boolean(adminUser))
+    const entryIssue = mountCtx.entryTickets.issue({ refType: 'agent', refId: 'agt_mount_test', userId: adminUser.id, userName: '平台管理员' })
+    const entryRes = await fetch(`${simOrigin}/auth/entry?entry_ticket=${encodeURIComponent(entryIssue.ticket)}`, { redirect: 'manual' })
+    const setCookie = entryRes.headers.get('set-cookie') ?? ''
+    check('/auth/entry 兑换 → 302 / + Set-Cookie rq_sid（HttpOnly/SameSite=Lax）',
+      entryRes.status === 302 && entryRes.headers.get('location') === '/' && setCookie.includes('rq_sid=rbs_') && setCookie.includes('HttpOnly') && setCookie.includes('SameSite=Lax'),
+      `${entryRes.status} ${setCookie}`)
+    const cookie = setCookie.split(';')[0] ?? ''
+    const statusRes = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { cookie } })
+    const statusBody = await statusRes.json()
+    check('/dsh-bridge/status 读 Cookie 返回绑定身份', statusBody?.data?.bound === true && statusBody.data.identity?.sub === adminUser.id, JSON.stringify(statusBody))
+    const statusAnon = await fetch(`${simOrigin}/dsh-bridge/status`)
+    const statusAnonBody = await statusAnon.json()
+    check('无 Cookie 状态查询 → 未绑定（不作身份推断）', statusAnonBody?.data?.bound === false)
+    check('绑定自检原因码：无 Cookie → no_cookie（WP-04/A2 文案映射依据）', statusAnonBody?.data?.reason === 'no_cookie', JSON.stringify(statusAnonBody))
+    const entryReplay = await fetch(`${simOrigin}/auth/entry?entry_ticket=${encodeURIComponent(entryIssue.ticket)}`, { redirect: 'manual' })
+    check('票据重放被拒（一次性消费，redeem 抛错→400）', entryReplay.status === 400)
+    const bindRes = await fetch(`${simOrigin}/dsh-bridge/bind-session`, {
+      method: 'POST', headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ sessionId: 'sess-mount-1' }),
+    })
+    check('会话绑定 200（Cookie 定身份 → sessionId 关联）', bindRes.status === 200, JSON.stringify(await bindRes.json()))
+    const boundViaSession = mountCtx.identityBinding.identityForSession('sess-mount-1')
+    const boundFallback = mountCtx.identityBinding.identityForSession('sess-unknown')
+    check('工具出站归因解析：会话绑定优先 / 未绑定回落最近绑定', boundViaSession?.userId === adminUser.id && boundFallback?.userId === adminUser.id, JSON.stringify({ boundViaSession, boundFallback }))
+    mountCtx.iam.users().update(adminUser.id, { status: 'suspended' })
+    const statusFrozen = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { cookie } })
+    const statusFrozenBody = await statusFrozen.json()
+    check('账号停用 → 绑定实时失效（兑换面已校验 + 读取面再校验）', statusFrozenBody?.data?.bound === false)
+    check('绑定自检原因码：停用账号 → account_inactive（可识别、可出文案）', statusFrozenBody?.data?.reason === 'account_inactive', JSON.stringify(statusFrozenBody))
+    mountCtx.iam.users().update(adminUser.id, { status: 'active' })
+    const crossOrigin = await fetch(`${simOrigin}/dsh-bridge/status`, { headers: { origin: 'http://evil.example.com' } })
+    check('绑定面同源收紧：跨站 Origin 403（对齐 dsh fence 语义）', crossOrigin.status === 403)
+
+    // -- 宿主会话直通（review-dsh-agent-panel-v2 宿主打通）：rq_sid → 平台会话 → 面板 RBAC 面 --
+    mountCtx.iam.users().update(adminUser.id, { status: 'active' })
+    const sessionRes = await fetch(`${simOrigin}/dsh-bridge/session`, { method: 'POST', headers: { 'content-type': 'application/json', cookie } })
+    const sessionBody = await sessionRes.json().catch(() => null)
+    check('宿主会话直通：Cookie 绑定身份兑换平台会话（token + user + permissions）',
+      sessionRes.status === 200 && sessionBody?.ok === true && Boolean(sessionBody.data?.token) && Array.isArray(sessionBody.data?.user?.permissions) && sessionBody.data.user.permissions.length > 0,
+      JSON.stringify(sessionBody?.error ?? sessionBody?.data?.user?.displayName))
+    const panelViaSession = await fetch(`${simOrigin}/rq/api/panel/depts`, { headers: { authorization: `Bearer ${sessionBody.data.token}` } })
+    const panelViaSessionBody = await panelViaSession.json().catch(() => null)
+    check('宿主会话直通：兑换令牌直通面板 RBAC 面（/rq/api/panel/depts 200）',
+      panelViaSession.status === 200 && panelViaSessionBody?.ok === true && Array.isArray(panelViaSessionBody.data?.depts) && panelViaSessionBody.data.depts.length === 5,
+      `status=${panelViaSession.status}`)
+    const sessionNoCookie = await fetch(`${simOrigin}/dsh-bridge/session`, { method: 'POST' })
+    const sessionNoCookieBody = await sessionNoCookie.json().catch(() => null)
+    check('宿主会话直通：无 Cookie 401（NOT_BOUND fail-closed，同源面统一收紧）',
+      sessionNoCookie.status === 401 && sessionNoCookieBody?.error?.code === 'NOT_BOUND')
+
+    // -- behavior 消费语义（WP-03/D3，进程内直测：投递 / 死信 / 重放幂等） -----------
+    const behaviorSeen = []
+    const offBehavior = mountCtx.behavior.consume('selftest-observer', (event) => { behaviorSeen.push(event.event_id) })
+    const bFirst = mountCtx.behavior.record({ subject: 'user:usr-behavior-test', type: 'funnel.step', platform: 'rd', payload: { step: 1 }, idempotency_key: 'b-selftest-001' })
+    check('behavior 投递：先写后发（消费方收到首投）', bFirst.duplicated === false && behaviorSeen.includes(bFirst.event.event_id))
+    const bDup = mountCtx.behavior.record({ subject: 'user:usr-behavior-test', type: 'funnel.step', platform: 'rd', payload: { step: 1 }, idempotency_key: 'b-selftest-001' })
+    check('behavior 投递：幂等重放不重发（消费水位跳过 + duplicated 标记）',
+      bDup.duplicated === true && behaviorSeen.filter((id) => id === bFirst.event.event_id).length === 1)
+    mountCtx.behavior.consume('selftest-broken', () => { throw new Error('自测故障消费方') })
+    const bFail = mountCtx.behavior.record({ subject: 'user:usr-behavior-test', type: 'card.clicked', idempotency_key: 'b-selftest-002' })
+    check('behavior 投递：消费方连续 3 次失败入死信', mountCtx.behavior.deadLetters().all().some((letter) => letter.event_id === bFail.event.event_id && letter.consumer === 'selftest-broken'))
+    check('behavior 投递：死信触发 critical 告警（audit.alert.fired）',
+      mountCtx.platformBus.recent(50).some((event) => event.name === 'audit.alert.fired' && JSON.stringify(event.payload).includes('behavior 消费死信')))
+    const behaviorBeforeReplay = behaviorSeen.length
+    mountCtx.behavior.replay(new Date(0).toISOString())
+    check('behavior 投递：replay 幂等（已消费事件不重投）', behaviorSeen.length === behaviorBeforeReplay)
+    const retriedBehavior = mountCtx.behavior.retryDeadLetters()
+    check('behavior 投递：死信重投（故障消费方仍失败则保留死信）', retriedBehavior.remaining >= 1 && mountCtx.behavior.deadLetters().all().some((letter) => letter.consumer === 'selftest-broken'))
+    offBehavior()
+
+    // -- OIDC 授权码通道（start 302 → PKCE；callback 坏 state 拒绝） -----------------
+    const oidcStart = await fetch(`${simOrigin}/auth/oidc/start`, { redirect: 'manual' })
+    const oidcLocation = oidcStart.headers.get('location') ?? ''
+    check('/auth/oidc/start 302 平台授权页（client_id + PKCE S256 + state）',
+      oidcStart.status === 302 && oidcLocation.startsWith(`${mountCtx.oidc.issuer()}/oauth/authorize`)
+      && oidcLocation.includes('client_id=oc-selftest-bridge') && oidcLocation.includes('code_challenge_method=S256') && oidcLocation.includes('state='),
+      `${oidcStart.status} ${oidcLocation}`)
+    const oidcCallbackBad = await fetch(`${simOrigin}/auth/oidc/callback?code=x&state=bogus`, { redirect: 'manual' })
+    check('/auth/oidc/callback 坏 state 被拒 400（防 CSRF/重放）', oidcCallbackBad.status === 400)
+    await new Promise((resolve) => sim.close(resolve))
+  }
+
+  // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
 
   // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
   section('凭证零进平台（红线一 · T-24 全目录扫描）')

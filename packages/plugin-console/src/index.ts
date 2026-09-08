@@ -8,13 +8,15 @@
  *   - 首次启动种子数据（演示环境）
  */
 import { join, dirname, extname } from 'node:path'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { existsSync, readdirSync, createReadStream } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
-import { createPluginContext, newId, platformVersionInfo, CARD_PLATFORMS, filterCards, type CardPlatform } from '../../platform-core/src/index.ts'
+import { createPluginContext, newId, platformVersionInfo, CARD_PLATFORMS, filterCards, type CardPlatform, PlatformEvents } from '../../platform-core/src/index.ts'
 import { nonbillableUsage } from '../../plugin-usage/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
+import { ProviderAuthError } from '../../plugin-iam/src/providers.ts'
 import { AppRegistryService } from '../../plugin-app/src/index.ts'
 import { AgentRegistryService } from '../../plugin-agent/src/index.ts'
 import { RulesVersionConflictError } from '../../plugin-nas/src/authz.ts'
@@ -57,6 +59,8 @@ export const PUBLIC_PATHS = new Set([  '/api/auth/login',
   '/api/connect/enroll',
   // 平台授权直达：一次性短时票据回平台换取身份（票据本身即临时凭证）
   '/api/authn/entry-tickets/redeem',
+  // 应用访客埋点 beacon（浏览器侧 PV/UV 上报）：1x1 GIF/JSON 免鉴权；响应恒定不泄露应用存在性
+  '/api/apps/beacon',
   // 票据免登控制台：redeem 通过后直接建立控制台会话（门户/钉钉「打开即工作台」，零二次登录）
   '/api/auth/entry-ticket-session',
   // 部门面板 SSE（review-dsh-agent-panel-v2 F13）：EventSource 无法携带 Bearer 头，
@@ -417,10 +421,40 @@ export function apply(ctx: Context) {
         roles: user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.name).filter(Boolean),
         permissions: ctx.iam.userPermissions(user.id),
       }
-      render('登录成功', `<div class="ok">✓</div><h2>欢迎回来，${escapeHtml(user.displayName)}</h2><p>正在进入控制台…</p>`,
-        `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))}); location.replace('${webBase}/#/dashboard')</script>`)
+      // 登录成功落库后按暂存的 OIDC 授权请求（heng_ops_sso_oidc_req，与授权请求同为 5 分钟有效）回到
+      // 授权页继续 consent——AI 应用发起的「先登录再授权」流才能闭环；无暂存则进控制台
+      render('登录成功', `<div class="ok">✓</div><h2>欢迎回来，${escapeHtml(user.displayName)}</h2><p>正在继续…</p>`,
+        `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))});
+var resume=null;try{resume=JSON.parse(localStorage.getItem('heng_ops_sso_oidc_req')||'null')}catch(e){resume=null}
+localStorage.removeItem('heng_ops_sso_oidc_req');
+if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.req)&&Date.now()-(resume.ts||0)<300000){location.replace('${webBase}/#/oauth/authorize?req='+resume.req)}else{location.replace('${webBase}/#/dashboard')}</script>`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      console.error('[sso-callback] 三方授权失败：', message)
+      // 自动兜底：应用新增权限点后，老用户历史授权快照不含新 scope（钉钉 403 AccessTokenPermissionDenied）。
+      // 自动重发一次带 prompt=consent 的授权跳转刷新授权快照；一次性 cookie 防重试循环，再失败才展示错误页。
+      const retried = (exchange.headers.cookie ?? '').split(';').some((item) => item.trim() === 'heng_ops_sso_consent_retry=1')
+      if (!retried && error instanceof ProviderAuthError && error.code === 'PROVIDER_SCOPE_DENIED') {
+        try {
+          const record = ctx.authn.peekOAuthState(state)
+          const retry = await ctx.authn.beginSso(record.provider, 'web_qr', requestOrigin(exchange), {
+            purpose: record.purpose,
+            ...(record.userId !== undefined ? { userId: record.userId } : {}),
+            ...(record.configId !== undefined ? { configId: record.configId } : {}),
+            promptConsent: true,
+          })
+          if (retry.authorizeUrl) {
+            exchange.res.writeHead(302, {
+              location: retry.authorizeUrl,
+              'set-cookie': 'heng_ops_sso_consent_retry=1; Path=/api/auth; Max-Age=600; HttpOnly; SameSite=Lax',
+            })
+            exchange.res.end()
+            return
+          }
+        } catch (retryError) {
+          console.error('[sso-callback] 重授权发起失败：', retryError instanceof Error ? retryError.message : String(retryError))
+        }
+      }
       render('操作失败', `<div class="bad">✕</div><h2>三方授权失败</h2><p>${escapeHtml(message)}</p><p><a href="/">返回控制台</a></p>`)
     }
   }
@@ -1351,9 +1385,12 @@ export function apply(ctx: Context) {
   }))
 
   guarded('POST', '/api/mcp/services', 'mcp.service.write', (exchange) => {
-    const input = body<{ name: string; slug?: string; description?: string; icon?: string; endpoint?: string; transport?: 'stdio' | 'sse' | 'http'; mode?: 'hosted' | 'external'; orgId: string; headers?: Record<string, string>; tools?: Array<{ name: string; description: string; riskLevel?: 'read' | 'write' | 'admin'; inputSchema?: Record<string, unknown> }> }>(exchange)
+    const input = body<{ name: string; slug?: string; description?: string; icon?: string; endpoint?: string; transport?: 'stdio' | 'sse' | 'http'; mode?: 'hosted' | 'external'; orgId?: string; headers?: Record<string, string>; tools?: Array<{ name: string; description: string; riskLevel?: 'read' | 'write' | 'admin'; inputSchema?: Record<string, unknown> }> }>(exchange)
+    // orgId 缺省回落根组织（与 /api/mcp/import 同口径）：外部推送方（机器凭证）无需 iam.org.read 即可注册
+    const orgId = input.orgId ?? ctx.iam.orgs().findOne((org) => org.parentId === null)?.id
     const service = ctx.mcpRegistry.createService({
       ...input,
+      ...(orgId ? { orgId } : {}),
       owner: caller(exchange).name,
       ...(input.tools ? { tools: input.tools.map((tool) => ({
         name: tool.name,
@@ -1887,11 +1924,13 @@ export function apply(ctx: Context) {
     if (exchange.query.get('pending') === '1') {
       return { skills: ctx.skillHub.skills().find((skill) => ['pending_approval', 'scanning', 'rejected'].includes(skill.status)) }
     }
+    // 市场列表含在途项（待审批/扫描中，排最前带状态徽标）：审批人无需切页即可看到待办
     const skills = ctx.skillHub.search({
       q: exchange.query.get('q') ?? undefined,
       category: exchange.query.get('category') ?? undefined,
       tag: exchange.query.get('tag') ?? undefined,
       sort: (exchange.query.get('sort') ?? 'downloads') as 'downloads' | 'rating' | 'updated',
+      includePending: true,
     })
     return { skills, categories: ctx.skillHub.categories() }
   })
@@ -1928,9 +1967,43 @@ export function apply(ctx: Context) {
   guarded('POST', '/api/skills/:id/publish', 'skill.publish', async (exchange) => {
     const { version } = body<{ version?: string }>(exchange)
     const skill = ctx.skillHub.detail(exchange.params['id']!)
-    const result = await ctx.skillHub.publish(skill.id, version ?? skill.currentVersion, caller(exchange).name)
+    const info = caller(exchange)
+    // 真实账号标识（非显示名）：显示名（中文名）非账号，无法透传身份头，也会污染审计归属
+    const result = await ctx.skillHub.publish(skill.id, version ?? skill.currentVersion, { id: info.userId ?? info.principalId, name: info.name })
     changeLog(exchange, 'skill.publish', 'skill', skill.id, skill.name)
     return result
+  })
+
+  /** 编辑已上架 Skill 的市场信息：仅作者本人或持 skill.publish 的管理员。 */
+  guarded('PATCH', '/api/skills/:id', 'skill.submit', (exchange) => {
+    const input = body<{ name?: string; category?: string; tags?: string[]; summary?: string; description?: string; visibility?: 'all' | 'orgs' | 'groups'; targetOrgs?: string[]; applicableModels?: string[]; deps?: string[]; cover?: string; authorName?: string }>(exchange)
+    const info = caller(exchange)
+    const skill = ctx.skillHub.detail(exchange.params['id']!)
+    const asAdmin = info.permissions.includes('*') || info.permissions.includes('skill.publish')
+    if (skill.authorId !== (info.userId ?? info.principalId) && !asAdmin) {
+      exchange.fail(403, 'FORBIDDEN', '仅 Skill 作者或平台管理员可编辑该 Skill 信息')
+      return
+    }
+    const result = ctx.skillHub.update(skill.id, input, { id: info.userId ?? info.principalId, name: info.name }, { asAdmin })
+    changeLog(exchange, 'skill.update', 'skill', skill.id, result.name, `编辑字段：${Object.keys(input).filter((key) => input[key as keyof typeof input] !== undefined).join('、') || '无'}`)
+    return result
+  })
+
+  /** 重新手动上传当前已发布版本的 skill.zip 资源包（原地替换，版本号不变）。 */
+  guarded('PUT', '/api/skills/:id/package', 'skill.submit', async (exchange) => {
+    const { packageBase64 } = body<{ packageBase64?: string }>(exchange)
+    if (!packageBase64) throw new Error('packageBase64 必填')
+    const info = caller(exchange)
+    const skill = ctx.skillHub.detail(exchange.params['id']!)
+    const asAdmin = info.permissions.includes('*') || info.permissions.includes('skill.publish')
+    if (skill.authorId !== (info.userId ?? info.principalId) && !asAdmin) {
+      exchange.fail(403, 'FORBIDDEN', '仅 Skill 作者或平台管理员可更新该 Skill 资源包')
+      return
+    }
+    const result = await ctx.skillHub.replacePackage(skill.id, packageBase64, { id: info.userId ?? info.principalId, name: info.name }, { asAdmin })
+    const pkg = result.versions.find((item) => item.version === result.currentVersion)?.package
+    changeLog(exchange, 'skill.package.replace', 'skill', skill.id, skill.name, `v${result.currentVersion} 资源包重传（${pkg?.storage === 'nas' ? 'NAS' : '平台本地'}${pkg?.sizeBytes !== undefined ? ` · ${pkg.sizeBytes}B` : ''}）`)
+    return { skill: result, package: pkg }
   })
 
   guarded('POST', '/api/skills/:id/deprecate', 'skill.publish', (exchange) => {
@@ -2583,6 +2656,15 @@ export function apply(ctx: Context) {
     return agent
   })
 
+  // Agent 接入提示词（与 app 同构）：rotate=true 轮换机器凭证并随提示词返回完整凭证（旧值立即失效）。
+  guarded('POST', '/api/agents/:id/onboarding-prompt', 'agent.write', (exchange) => {
+    const { rotate } = body<{ rotate?: boolean }>(exchange)
+    const id = exchange.params['id']!
+    const result = ctx.agentRegistry.buildOnboardingPrompt(id, requestOrigin(exchange) ?? 'http://127.0.0.1:7300', { rotate: rotate === true })
+    changeLog(exchange, 'agent.onboarding-prompt', 'agent', id, result.agentName, result.rotated ? '轮换机器凭证并生成接入提示词（旧 secret 立即失效）' : '生成接入提示词（未轮换，不含 secret）')
+    return result
+  })
+
   // 运营数据提报（Agent 接入义务，与 AI 应用 metrics-report 同级）：dau 同日取最大、会话数累加、用户哈希去重并集
   guarded('POST', '/api/agents/:id/metrics-report', 'agent.write', (exchange) => {
     const id = exchange.params['id']!
@@ -2723,6 +2805,10 @@ export function apply(ctx: Context) {
         action: `${result.refType}.entry.ticket.redeem`, resourceType: result.refType, resourceId: result.refId,
         resourceName: result.refId, result: 'ok', detail: '平台授权直达票据兑换（身份已交付目标交互界面）',
       })
+      // 广播兑换事件（plugin-app 订阅 → 应用 DAU 自动折算；状态变更必发事件，跨插件联动不经直连）
+      ctx.platformBus.emit(PlatformEvents.EntryTicketRedeemed, {
+        refType: result.refType, refId: result.refId, userId: result.identity.sub, userName: result.identity.name,
+      })
       exchange.ok(result)
     } catch (error) {
       exchange.fail(400, 'ENTRY_TICKET_INVALID', error instanceof Error ? error.message : String(error))
@@ -2749,6 +2835,10 @@ export function apply(ctx: Context) {
         action: `${redeemed.refType}.entry.ticket.session`, resourceType: redeemed.refType, resourceId: redeemed.refId,
         resourceName: redeemed.refId, result: 'ok', detail: '入场票据兑换控制台会话（免登直达工作台）',
       })
+      // 与 redeem 同源广播（plugin-app 订阅 → 应用 DAU 折算）：app 票据经免登通道兑换不丢到访计数
+      ctx.platformBus.emit(PlatformEvents.EntryTicketRedeemed, {
+        refType: redeemed.refType, refId: redeemed.refId, userId: user.id, userName: user.displayName,
+      })
       exchange.ok({
         token: session.token,
         refreshToken: session.refreshToken,
@@ -2765,6 +2855,135 @@ export function apply(ctx: Context) {
     }
   })
 
+  // -- 应用访客埋点 beacon（公开端点：浏览器 PV/UV 上报，免机器鉴权） ----------------
+  // 指标口径补全：应用页面在加载/路由切换时上报一次即可。GET 返回 1x1 GIF（<img>/fetch(no-cors) 均可跨域），
+  // POST JSON 供 navigator.sendBeacon；匿名访客以 vid 去重（8-64 位 base64url，建议 localStorage 持久随机 ID），
+  // 缺失时以 IP+UA 哈希兜底；响应不区分应用存在性（防探测），按 IP+应用做轻量限流（超限静默不计数）。
+  const BEACON_GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64')
+  const beaconCorsHeaders: Record<string, string> = {
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, POST, OPTIONS',
+    'access-control-allow-headers': 'content-type',
+    'access-control-max-age': '600',
+  }
+  const beaconThrottle = new Map<string, number[]>()
+  const clientIpOf = (exchange: HttpExchange): string => String(exchange.raw.socket?.remoteAddress ?? 'unknown')
+  const beaconVidOf = (exchange: HttpExchange, raw: string | null | undefined): string => {
+    const vid = String(raw ?? '').trim()
+    if (/^[A-Za-z0-9_-]{8,64}$/.test(vid)) return vid
+    return createHash('sha256').update(`${clientIpOf(exchange)}|${String(exchange.headers['user-agent'] ?? '')}`).digest('base64url').slice(0, 24)
+  }
+  const beaconHit = (appId: string, vid: string, uid: string | undefined, ip: string): void => {
+    // 轻量限流：同 IP 同应用每分钟最多 60 次计数（正常浏览远低于此；超限响应照常但不计 PV）
+    const now = Date.now()
+    const key = `${ip}:${appId}`
+    const window = (beaconThrottle.get(key) ?? []).filter((ts) => now - ts < 60_000)
+    window.push(now)
+    beaconThrottle.set(key, window)
+    if (window.length > 60) {
+      if (beaconThrottle.size > 4096) {
+        for (const [staleKey, stamps] of beaconThrottle) if (stamps.every((ts) => now - ts >= 60_000)) beaconThrottle.delete(staleKey)
+      }
+      return
+    }
+    ctx.appRegistry.trackVisit(appId, { vid, ...(uid !== undefined && uid !== '' ? { userId: uid } : {}), pv: 1 })
+  }
+  // 须先于 GET /api/apps/:id 注册（路由先匹配先中，避免 beacon 被当作应用 ID）
+  http.register('OPTIONS', '/api/apps/beacon', (exchange) => {
+    if (!exchange.res.writableEnded) {
+      exchange.res.writeHead(204, beaconCorsHeaders)
+      exchange.res.end()
+    }
+  })
+  http.register('GET', '/api/apps/beacon', (exchange) => {
+    try {
+      beaconHit(String(exchange.query.get('app') ?? ''), beaconVidOf(exchange, exchange.query.get('vid')), exchange.query.get('uid') ?? undefined, clientIpOf(exchange))
+    } catch { /* 指标采集永不影响调用方页面 */ }
+    exchange.res.writeHead(200, { 'content-type': 'image/gif', 'cache-control': 'no-store, no-cache, must-revalidate, private', ...beaconCorsHeaders })
+    exchange.res.end(BEACON_GIF)
+  })
+  http.register('POST', '/api/apps/beacon', (exchange) => {
+    const input = (exchange.body !== null && typeof exchange.body === 'object' ? exchange.body : {}) as { app?: string; vid?: string; uid?: string }
+    try {
+      beaconHit(String(input.app ?? ''), beaconVidOf(exchange, input.vid), input.uid ?? undefined, clientIpOf(exchange))
+    } catch { /* 指标采集永不影响调用方页面 */ }
+    for (const [key, value] of Object.entries(beaconCorsHeaders)) exchange.res.setHeader(key, value)
+    exchange.ok({ reported: true })
+  })
+
+  // -- Agent SSO 客户端（OIDC-agent 关联；owner 自助，对齐 app 侧） ----------------
+
+  const ssoAgent = (exchange: HttpExchange): { id: string; name: string; ownerId: string } => {
+    const agent = ctx.resourceCore.get('agent', exchange.params['id']!)
+    if (!agent) throw new Error(`Agent 不存在：${exchange.params['id']}`)
+    return { id: agent.id, name: agent.name, ownerId: agent.ownerId }
+  }
+
+  /** owner 校验（human 且 agent.ownerId === userId，或持 authn.oidc.write）；机器一律 403。 */
+  const requireAgentSsoOwner = (exchange: HttpExchange): boolean => {
+    const agent = ssoAgent(exchange)
+    const info = caller(exchange)
+    const isOwner = info.kind === 'human' && Boolean(info.userId) && agent.ownerId === info.userId
+    const isAdmin = info.permissions.includes('*') || info.permissions.includes('authn.oidc.write')
+    if (info.kind !== 'human' || (!isOwner && !isAdmin)) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId ?? info.principalId,
+        actorName: info.name,
+        point: `agent.sso(owner:${agent.id})`,
+        path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', info.kind !== 'human'
+        ? 'SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作'
+        : `仅 Agent owner 或持有 authn.oidc.write 的管理员可管理「${agent.name}」的 SSO 客户端`)
+      return false
+    }
+    return true
+  }
+
+  guarded('POST', '/api/agents/:id/sso-client', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const input = body<{ redirectUris: string[]; clientType?: 'confidential' | 'public'; consentRequired?: boolean; postLogoutUris?: string[]; description?: string }>(exchange)
+    const created = ctx.agentRegistry.createSsoClient(agent.id, input)
+    changeLog(exchange, 'agent.sso.create', 'oidc_client', created.client.id, created.client.name, `Agent ${agent.name} 签发（${input.clientType ?? 'confidential'}）`)
+    return {
+      clientId: created.client.clientId,
+      clientSecret: created.clientSecret,
+      redirectUris: created.client.redirectUris,
+      note: created.client.clientType === 'public' ? 'public 客户端无 secret（强制 PKCE、不发 refresh）' : 'clientSecret 仅此一次返回',
+    }
+  })
+
+  guarded('PATCH', '/api/agents/:id/sso-client', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const input = body<{ redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    const updated = ctx.agentRegistry.updateSsoClient(agent.id, input)
+    changeLog(exchange, 'agent.sso.update', 'oidc_client', updated.id, updated.name)
+    return updated
+  })
+
+  guarded('POST', '/api/agents/:id/sso-client/rotate', 'agent.write', (exchange) => {
+    if (!requireAgentSsoOwner(exchange)) return
+    const agent = ssoAgent(exchange)
+    const rotated = ctx.agentRegistry.rotateSsoSecret(agent.id)
+    changeLog(exchange, 'agent.sso.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
+    return { clientId: rotated.client.clientId, clientSecret: rotated.clientSecret, note: '新 clientSecret 仅此一次返回，旧值立即失效' }
+  })
+
+  for (const action of ['disable', 'enable'] as const) {
+    guarded('POST', `/api/agents/:id/sso-client/${action}`, 'agent.write', (exchange) => {
+      if (!requireAgentSsoOwner(exchange)) return
+      const agent = ssoAgent(exchange)
+      const { reason } = body<{ reason?: string }>(exchange)
+      const client = action === 'disable'
+        ? ctx.agentRegistry.disableSsoClient(agent.id, reason ?? 'owner 手动禁用')
+        : ctx.agentRegistry.enableSsoClient(agent.id)
+      changeLog(exchange, `agent.sso.${action}`, 'oidc_client', client.id, client.name, reason ?? '')
+      return client
+    })
+  }
+
   // -- App ----------------------------------------------------------------
   guarded('GET', '/api/apps', 'app.read', () => ({
     apps: ctx.resourceCore.list('app').map((app) => ({
@@ -2775,6 +2994,43 @@ export function apply(ctx: Context) {
     schema: ctx.resourceCore.typeSpec('app')?.schema,
     lifecycle: ctx.resourceCore.typeSpec('app')?.lifecycle,
   }))
+
+  // 开发者选择器数据源（注册表单下拉/搜索用）：挂在 app.write 下——能注册应用即可枚举
+  // 在编用户的瘦字段（id/姓名/账号/部门/钉钉 unionId 绑定），不经 iam.user.read；须注册在 /api/apps/:id 之前（路由先匹配先中）
+  guarded('GET', '/api/apps/developer-options', 'app.write', () => ({
+    options: ctx.iam.users().find((user) => user.status === 'active')
+      .sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh-Hans-CN'))
+      .map((user) => ({
+        id: user.id,
+        name: user.displayName,
+        username: user.username,
+        orgName: ctx.iam.orgs().get(user.orgId)?.name ?? '',
+        // 钉钉身份绑定 unionId：供外部推送方把表格人员字段的 unionId 解析成平台账号（开发者字段落 developerId + 真实姓名）
+        unionIds: (user.bindings ?? []).filter((b) => b.provider === 'dingtalk').map((b) => b.unionId),
+      })),
+  }))
+
+  /** 开发者字段解析（attrs 原地修改）：developerId 须为在编平台用户，developerName 以 IAM displayName 为准；
+   *  空串语义：POST 时不落字段，PATCH（allowClear）时显式清除开发者。 */
+  const resolveDeveloperAttrs = (attrs: Record<string, unknown>, { allowClear = false } = {}): void => {
+    const raw = attrs['developerId']
+    const id = typeof raw === 'string' ? raw.trim() : ''
+    if (id) {
+      const user = ctx.iam.users().get(id)
+      if (!user) throw new Error(`开发者不存在：${id}（developerId 须为平台用户 ID）`)
+      if (user.status !== 'active') throw new Error(`开发者「${user.displayName}」非在编状态，不能登记为应用开发者`)
+      attrs['developerId'] = user.id
+      attrs['developerName'] = user.displayName
+      return
+    }
+    if (raw === undefined) return
+    if (allowClear) {
+      attrs['developerId'] = ''
+      attrs['developerName'] = ''
+    } else {
+      delete attrs['developerId']
+    }
+  }
 
   guarded('GET', '/api/apps/:id', 'app.read', (exchange) => {
     const id = exchange.params['id']!
@@ -2818,8 +3074,11 @@ export function apply(ctx: Context) {
     const input = body<{ name: string; slug?: string; attrs?: Record<string, unknown>; agentIds?: string[] }>(exchange)
     const info = caller(exchange)
     const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
+    const attrs = { ...(input.attrs ?? {}) }
+    resolveDeveloperAttrs(attrs)
     const result = ctx.appRegistry.register({
       ...input,
+      attrs,
       ownerId: info.userId ?? info.principalId,
       ownerName: info.name,
       orgId: user?.orgId ?? ctx.iam.orgs().all()[0]?.id ?? 'org_unknown',
@@ -2828,9 +3087,22 @@ export function apply(ctx: Context) {
   })
 
   guarded('PATCH', '/api/apps/:id', 'app.write', (exchange) => {
-    const app = ctx.appRegistry.updateApp(exchange.params['id']!, body(exchange))
+    const input = body<{ name?: string; attrs?: Record<string, unknown> }>(exchange)
+    const attrs = { ...(input.attrs ?? {}) }
+    resolveDeveloperAttrs(attrs, { allowClear: true })
+    const app = ctx.appRegistry.updateApp(exchange.params['id']!, { ...input, attrs })
     changeLog(exchange, 'app.update', 'app', app.id, app.name)
     return app
+  })
+
+  // 接入提示词（注册同款模板，平台侧生成）：rotate=true 轮换机器凭证 secret 并随提示词返回（旧值立即失效），
+  // rotate=false 仅含 client_id（secret 丢失场景必须 rotate 才能拿到可用凭证）。控制台详情页按钮与外部推送方共用。
+  guarded('POST', '/api/apps/:id/onboarding-prompt', 'app.write', (exchange) => {
+    const { rotate } = body<{ rotate?: boolean }>(exchange)
+    const id = exchange.params['id']!
+    const result = ctx.appRegistry.buildOnboardingPrompt(id, requestOrigin(exchange) ?? 'http://127.0.0.1:7300', { rotate: rotate === true })
+    changeLog(exchange, 'app.onboarding-prompt', 'app', id, result.appName, result.rotated ? '轮换机器凭证并生成接入提示词（旧 secret 立即失效）' : '生成接入提示词（未轮换，不含 secret）')
+    return result
   })
 
   /** 删除应用：草稿（从未上线）或已归档可删；级联清除依赖边、禁用 SSO 客户端与机器凭证（记录保留）。 */
