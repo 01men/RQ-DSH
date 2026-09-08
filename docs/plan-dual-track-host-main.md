@@ -42,7 +42,7 @@
 
 | 区 | 目录 | 规则 |
 |---|---|---|
-| 宿主面（main 拥有并演进） | platform-core、plugin-console、plugin-authn、plugin-agent、plugin-portal、plugin-iam、plugin-usage、plugin-skillhub、plugin-app、plugin-mcp、nas-authz、**plugin-dsh-bridge（宿主桥=宿主入口设施）**、src/boot-all.ts、cordis.yml、cordis.patch.yml | 自由演进；契约变更履行 §4 义务 |
+| 宿主面（main 拥有并演进） | platform-core、plugin-console、plugin-authn、plugin-agent、plugin-audit、plugin-portal、plugin-iam、plugin-usage、plugin-skillhub、plugin-app、plugin-mcp、nas-authz、**plugin-dsh-bridge（宿主桥=宿主入口设施）**、src/boot-all.ts、cordis.yml、cordis.patch.yml | 自由演进；契约变更履行 §4 义务 |
 | 定制面（定制分支拥有；main 侧接收性维护） | plugin-panel-core、plugin-rq-card、plugin-dingtalk-bridge、scenegraphs/*.json | 演进以定制分支为准；main 仅做安全修复并在发布说明通知，**不做主动重构**（避免与定制分叉、给下游 merge 造冲突） |
 | 治理/文档（定制侧所有） | AGENTS.md、PROJECT.md、scripts/hooks、docs/handoff-*、docs/plan-* | main 不消费 |
 

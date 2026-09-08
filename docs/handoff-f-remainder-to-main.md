@@ -13,18 +13,21 @@
 git diff ff1a8de custom/dsh-rq --stat -- packages/   # 本清单全部内容
 ```
 
-除下述功能余量外，其余差异均为**治理与布局类，不回流**：AGENTS.md / PROJECT.md / docs/plan-*、
-tests 目录布局（scripts→tests 迁移，澄清第 8 条已定版）、scripts/hooks/pre-push、
-package.json 的 selftest 路径与 dsh STORE 契约、examples/cli 布局。
+除下述功能余量外，其余差异均为**治理与布局类或定制自有面，不回流**：定制自有三包
+（plugin-panel-core 含 cardpacks 域 / plugin-rq-card / plugin-dingtalk-bridge）与 scenegraphs、
+AGENTS.md / PROJECT.md / docs/plan-*、tests 目录布局（scripts→tests 迁移，澄清第 8 条已定版）、
+scripts/hooks/pre-push、package.json 的 selftest 路径与 dsh STORE 契约、examples/cli 布局。
 
 ## A. 审批深化（WP-10/L1：高风险二次确认 + 公司级终审 + SLA 看板）——建议采纳
 
 | 文件 | 改动 |
 |---|---|
 | `packages/plugin-agent/src/index.ts` | +8：Agent 上线 L4 审批 riskLevel 统一标注 `high`（2 处，附注释） |
+| `packages/plugin-audit/src/index.ts` | +78/-1：WP-10/L1 底座——`ApprovalRecord` 增 `riskLevel`/`finalReview` 字段；`decideApproval` 高风险通过强制二次确认（`confirmed`，服务端 fail-closed）并落公司级终审标记（审计 `approval.final_review` 可追溯）；`slaReport()` SLA 报表（≤2 个工作日达成率+逾期清单） |
 | `packages/plugin-console/src/index.ts` | +69 中的审批部分：`POST /api/mcp/services/:id/final-review`（公司级终审标记端点）；`/api/approvals/sla`（SLA 达成率看板端点）；审批 decide 的 `confirmed` 强制二次确认（服务端 fail-closed） |
 
-说明：`plugin-audit` 的 finalReview/SLA 底座已在 main（两侧一致），本批只是 console 侧执行端点。
+说明：`plugin-audit` 的 WP-10 底座此前**未移植进 main**（对 ff1a8de 实测为定制侧增量），采纳 A 时
+须与 console 侧执行端点一并回流。
 selftest 对照分节：`审批 SLA 与公司级终审（WP-10）`（tests/selftest.mjs）。
 采纳方式：按文件 cherry-pick + main 底座重放；验收 = selftest 该分节全绿。
 
@@ -71,6 +74,16 @@ dashboard 改动，二选一：① 连同卡片包模型一并回流（platform-
 | `tests/walkthrough.mjs`、`tests/dingtalk-h5-smoke.mjs` | C（钉钉 H5 降级）——澄清第 7 条既定口径 |
 | `tests/dom-smoke.mjs`、`tests/full-chain-drill.mjs`、`tests/morning-peak-entry.mjs` | 布局随 tests/ 迁移（澄清第 8 条：行为等价，不强制） |
 
+## F. mcp/app riskLevel 水印（WP-10/L1）——建议采纳
+
+| 文件 | 改动 |
+|---|---|
+| `packages/plugin-app/src/index.ts` | +4：应用上/下线 L4 审批统一标注 `riskLevel: 'high'`（2 处，附注释） |
+| `packages/plugin-mcp/src/index.ts` | +5：`McpServiceRecord` 增 `finalReview` 终审标记字段；`McpCallRecord` 增调用水印字段——终审服务的全部调用附 `watermark`，审计可追溯 |
+
+依赖：A 的 `plugin-audit` 底座（`finalReview` 标记来源）。任何宿主部署都受益（双轨计划 §3 评估口径倾向采纳）。
+selftest 对照：`审批 SLA 与公司级终审（WP-10）` 分节水印断言。
+
 ## 决策回执（请 main 侧填写后回传）
 
 | 域 | 采纳？ | 备注 |
@@ -80,5 +93,6 @@ dashboard 改动，二选一：① 连同卡片包模型一并回流（platform-
 | C 五平台主题/钉钉H5/dashboard | | |
 | D 目录筛选/登记引导 | | |
 | E 测试资产 | | 随对应域 |
+| F mcp/app riskLevel 水印 | | 依赖 A（plugin-audit 底座） |
 
 未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）。

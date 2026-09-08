@@ -19,11 +19,14 @@
 **北极星（收敛判据）**：定制轨对宿主轨的**代码差异收敛为零**——
 
 ```bash
-git diff origin/main custom/dsh-rq -- \
+# 锚点=真上游 main 头（当前 ff1a8de；上游前进后更新锚点哈希）。
+# 不用 origin/main 追踪引用——它在 push/fetch 之间摇摆（见 AGENTS.md「已知无害怪象」），自比较会假绿。
+git diff ff1a8de custom/dsh-rq -- \
   packages/platform-core packages/plugin-console packages/plugin-portal \
-  packages/plugin-authn packages/plugin-agent packages/plugin-iam \
-  packages/plugin-usage packages/plugin-dsh-bridge src/boot-all.ts README.md \
-  cordis.yml cordis.patch.yml
+  packages/plugin-authn packages/plugin-agent packages/plugin-audit packages/plugin-iam \
+  packages/plugin-usage packages/plugin-skillhub packages/plugin-app \
+  packages/plugin-mcp packages/plugin-nas packages/plugin-dsh-bridge \
+  src/boot-all.ts README.md cordis.yml cordis.patch.yml
 ```
 
 输出应为空。全部差异集中于：定制自有三包、scenegraphs/*.json、docs/、治理文件（AGENTS.md / PROJECT.md / scripts/hooks）。
@@ -49,7 +52,8 @@ cordis.yml / cordis.patch.yml 属宿主面（装配清单随 main 演进）；�
    - **F 域保留定制**：cardpacks.ts + cardpacks/*.json、console board/register/asset-filters 及页面改动、
      portal board 端点、审批深化（audit 终审 + SLA）、nas-authz、integrations、AGENTS.md / PROJECT.md /
      hooks / .gitignore、docs。
-   - **README 以 main**；**cordis.patch.yml 以定制**（机器部署胶水），核对 main 侧新增条目。
+   - **README、cordis.yml、cordis.patch.yml 以 main**（宿主面；所有权修正后装配清单随 main 演进，
+     定制部署个性走 gitignore 的 cordis.local.yml），核对 main 侧新增装配条目。
 3. selftest 口径更新：CORS `*` 断言改为澄清第 1 条新口径（`*` 不作用于 `/api/auth/*`；精确来源配置可放行）。
 4. `npm run selftest && npm run lint:manifests` 全绿 → `git push` 备份。
 
@@ -67,7 +71,7 @@ cordis.yml / cordis.patch.yml 属宿主面（装配清单随 main 演进）；�
    定制分支不携带宿主面补丁」。
 3. 铁律 4「方向唯一」→ 保留（合并方向唯一），补唯一例外通道「受控回流」：
    交接清单文档 + 主分支侧 cherry-pick/重放；整分支反向 merge 仍然禁止；pre-push 钩子保留。
-4. 新增**目录所有权三区表**（宿主面 / 定制面 / 治理胶水，与主分支参考计划 §2 同一张表）。
+4. 新增**目录所有权三区表**（宿主面 / 定制面 / 治理/文档，与主分支参考计划 §2 同一张表）。
 5. 新增**修改纪律**：定制分支禁止修改宿主面文件；宿主面缺陷/需求 → `docs/handoff-*.md` 清单 →
    主分支落地 → merge 吸收。
 6. PROJECT.md 背景段同步双轨模型。
