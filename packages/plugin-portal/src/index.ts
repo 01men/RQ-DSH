@@ -38,7 +38,7 @@ export function portalPublicBase(): string {
   return (process.env.PORTAL_PUBLIC_BASE ?? 'http://192.168.0.7:7300').trim().replace(/\/+$/, '')
 }
 
-const ENDPOINTS = ['apps', 'employees', 'solutions', 'tools', 'skills', 'stats', 'board'] as const
+const ENDPOINTS = ['apps', 'employees', 'solutions', 'tools', 'skills', 'stats'] as const
 
 export class PortalFeedService extends Service {
   static readonly provide = 'portalFeed'
@@ -130,62 +130,6 @@ export class PortalFeedService extends Service {
     }
   }
 
-  /**
-   * 老板战略视图聚合（WP-12 看板 v1）：portal 只读端点扩展——不开特权接口、全聚合零 PII。
-   * 口径（D3）：漏斗=曝光/点击（behavior）→调用（usage）→完成（mcp ok 调用）；WAIC=usage 周聚合。
-   */
-  board(): Record<string, unknown> {
-    const weekAgo = new Date(Date.now() - 7 * 24 * 3600_000).toISOString()
-    const behaviorCount = (type: string): number => {
-      try { return this.ctx.behavior.query({ type, from: weekAgo }).total } catch { return 0 }
-    }
-    let usageCount = 0
-    let chargeCents = 0
-    let byDay: Array<{ day: string; count: number; charge_cents: number }> = []
-    try {
-      const totals = this.ctx.usage.totals({ from: weekAgo })
-      usageCount = totals.count
-      chargeCents = totals.charge_cents
-      byDay = this.ctx.usage.breakdown(weekAgo).byDay
-    } catch { /* usage 缺失时看板降级为资产视图 */ }
-    let completedCalls = 0
-    try {
-      completedCalls = this.ctx.mcpRegistry.calls().all()
-        .filter((call) => call.ok && call.at >= weekAgo).length
-    } catch { /* mcp 缺失时漏斗降级 */ }
-    return {
-      generatedAt: new Date().toISOString(),
-      windowDays: 7,
-      assets: {
-        appsOnline: this.ctx.resourceCore.list('app').filter((item) => item.status === 'online').length,
-        agentsOnline: this.ctx.resourceCore.list('agent').filter((item) => item.status === 'online').length,
-        skillsPublished: this.ctx.skillHub.skills().all().filter((item) => item.status === 'published').length,
-        mcpServing: this.ctx.mcpRegistry.services().all()
-          .filter((service) => service.status === 'online' || service.status === 'gray').length,
-      },
-      waic: { count: usageCount, chargeCents },
-      byDay,
-      funnel: {
-        exposed: behaviorCount('card.exposed'),
-        clicked: behaviorCount('card.clicked'),
-        invoked: usageCount,
-        completed: completedCalls,
-      },
-      // ROI 用工成本模型（WP-14）：usage 聚合 → 替代工时估算 → 人力成本对比平台成本。
-      // 系数可经环境变量校准（默认：每次调用替代 3 分钟人工，综合人力成本 50 元/小时）；
-      // 估算口径声明随响应下发，看板侧必须展示「估算」字样，避免误读为实测值。
-      roi: {
-        minutesPerCallEstimate: Number(process.env.ROI_MINUTES_PER_CALL ?? 3),
-        laborCostCentsPerHour: Number(process.env.ROI_LABOR_COST_CENTS_PER_HOUR ?? 5000),
-        callBase: completedCalls > 0 ? completedCalls : usageCount,
-        estimatedHoursSaved: Math.round(((completedCalls > 0 ? completedCalls : usageCount) * Number(process.env.ROI_MINUTES_PER_CALL ?? 3) / 60) * 100) / 100,
-        estimatedLaborCostCents: Math.round((completedCalls > 0 ? completedCalls : usageCount) * Number(process.env.ROI_MINUTES_PER_CALL ?? 3) / 60 * Number(process.env.ROI_LABOR_COST_CENTS_PER_HOUR ?? 5000)),
-        platformChargeCents: chargeCents,
-        note: '估算口径：替代工时 = 调用次数 × 单次替代分钟 ÷ 60；人力成本 = 替代工时 × 综合人力时薪。非实测值。',
-      },
-    }
-  }
-
   private mappingCtx(): PortalMappingContext {
     const prefix = portalPrefix()
     return {
@@ -249,7 +193,7 @@ function respond(exchange: HttpExchange, status: number, payload: unknown, heade
 }
 
 export const name = 'portal'
-export const inject = ['httpServer', 'platformBus', 'resourceCore', 'iam', 'skillHub', 'mcpRegistry', 'audit', 'authn', 'oidc', 'usage', 'behavior']
+export const inject = ['httpServer', 'platformBus', 'resourceCore', 'iam', 'skillHub', 'mcpRegistry', 'audit', 'authn', 'oidc']
 
 export function apply(ctx: Context) {
   const service = new PortalFeedService(ctx)
@@ -327,10 +271,6 @@ export function apply(ctx: Context) {
             generatedAt: new Date().toISOString(),
           },
         }, headers)
-        return true
-      }
-      if (tail === 'board') {
-        respond(exchange, 200, { code: 0, message: 'ok', data: service.board() }, headers)
         return true
       }
       if (!(ENDPOINTS as readonly string[]).includes(tail)) {

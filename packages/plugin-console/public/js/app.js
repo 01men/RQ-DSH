@@ -20,7 +20,6 @@ try {
 
 import { renderLogin } from './pages/login.js'
 import { renderDashboard } from './pages/dashboard.js'
-import { renderBoard } from './pages/board.js'
 import { renderIam } from './pages/iam.js'
 import { renderAuthn } from './pages/authn.js'
 import { renderMcp } from './pages/mcp.js'
@@ -43,7 +42,6 @@ import { mountUpdateBadge, openUpdateDrawer } from './update.js'
 const NAV = [
   { section: '总览', items: [
     { path: '#/dashboard', label: '工作台', icon: 'dashboard', perm: 'console.login' },
-    { path: '#/board', label: '战略看板', icon: 'trending', perm: 'console.login' },
     // 部门面板（review-dsh-agent-panel-v2）：独立零构建 SPA，经 ext 外链进入（/panel，挂载形态 /rq/panel/）
     { ext: () => `${BASE}/panel/`, label: '部门面板', icon: 'users', perm: 'console.login', landing: 'panel' },
   ] },
@@ -110,7 +108,6 @@ function navigate() {
 
   const builders = {
     dashboard: renderDashboard,
-    board: renderBoard,
     register: renderRegister,
     iam: renderIam,
     authn: renderAuthn,

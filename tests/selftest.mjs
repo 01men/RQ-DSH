@@ -1006,16 +1006,16 @@ try {
 
   section('卡片包与五平台主题（WP-05：角色×平台下发 / ref 存活 / 主题属性差）')
   {
-    const packsRd = await api('GET', '/api/platform/card-packs?platform=rd', { token: dev })
+    const packsRd = await api('GET', '/api/panel/board?platform=rd', { token: admin })
     check('卡片包：研发平台试点包下发（装载 + 首页 ≤6 张）',
       packsRd.ok && packsRd.data.totalPacks >= 1 && packsRd.data.cards.length >= 3 && packsRd.data.cards.length <= 6,
       JSON.stringify(packsRd.error ?? { totalPacks: packsRd.data?.totalPacks, cards: packsRd.data?.cards?.length }))
     check('卡片包：试点卡引用真实资产（agent:dev-coder / skill:sql-审查助手 存活命中）',
       packsRd.ok && packsRd.data.cards.some((card) => card.ref === 'agent:dev-coder') && packsRd.data.cards.some((card) => card.ref === 'skill:sql-审查助手'),
       JSON.stringify(packsRd.data?.cards?.map((card) => card.ref)))
-    const packsQuality = await api('GET', '/api/platform/card-packs?platform=quality', { token: dev })
+    const packsQuality = await api('GET', '/api/panel/board?platform=quality', { token: admin })
     check('卡片包：质量平台试点包下发', packsQuality.ok && packsQuality.data.cards.length >= 3, JSON.stringify(packsQuality.error))
-    const packsBad = await api('GET', '/api/platform/card-packs?platform=nope', { token: dev })
+    const packsBad = await api('GET', '/api/panel/board?platform=nope', { token: admin })
     check('卡片包：非法平台 400（枚举校验）', packsBad.status === 400, String(packsBad.status))
     const themeCss = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'css', 'base.css'), 'utf8')
     check('主题：五平台仅 data-platform 属性差（五块覆盖 + 定版色值在位，无 Tailwind 引入）',
@@ -3958,13 +3958,13 @@ try {
 
   section('战略看板与目录瘦身（WP-12：portal 只读聚合 / 漏斗可测 / 纯函数筛选）')
   {
+    // 双轨迁移回归：portal board 端点已拆除（看板聚合迁往 /api/panel/board），portal 收敛到上游原样
     const boardAnon = await rawReq('GET', '/api/portal/board', { headers: { origin: 'http://192.168.0.4:8092' } })
-    const boardBody = jsonBody(boardAnon)
-    check('看板：portal 只读端点公开可取（不开特权接口，CORS 与门户一致）',
-      boardAnon.status === 200 && boardBody.code === 0 && Boolean(boardBody.data?.assets) && Boolean(boardBody.data?.funnel),
-      `${boardAnon.status} ${JSON.stringify(boardBody).slice(0, 160)}`)
+    check('看板：portal board 端点已随双轨迁移拆除（404，portal 收敛到上游）',
+      boardAnon.status === 404, String(boardAnon.status))
+    const boardBody = { data: await (async () => { const r = await api('GET', '/api/panel/board', { token: admin }); return r.data })() }
     const behaviorAdmin = await api('GET', '/api/behavior/events?type=card.exposed', { token: admin })
-    check('看板：漏斗曝光级与 behavior 台账一致（behavior 全量口径）',
+    check('看板：漏斗曝光级与 behavior 台账一致（behavior 全量口径，/panel 板）',
       boardBody.data.funnel.exposed === behaviorAdmin.data.total,
       `funnel=${boardBody.data.funnel.exposed} ledger=${behaviorAdmin.data.total}`)
     check('看板：漏斗调用级 ≥1（usage 事件在册）且 WAIC 口径齐备',
@@ -4769,14 +4769,14 @@ try {
       cards: [{ id: 'tadm', title: '管理员专属', description: '仅管理员可见', badge: 'nas', href: '#/nas' }],
     }))
     writeFileSync(join(packDir, 'broken.json'), JSON.stringify({ platform: 'nope', roles: ['*'], cards: [] }))
-    // 独立 Context 构造（mountCtx 已由 platformCore 装配过 cardpacks 服务，重复 provide 会抛错）
+    // 独立 Context 构造（mountCtx 已由 panelCore 装配过 cardpacks 服务，重复 provide 会抛错）
     const packCtx = new Context()
-    const packSvc = new platformCore.CardpackService(packCtx, { dir: packDir })
+    const packSvc = new panelCore.CardpackService(packCtx, { dir: packDir })
     await packSvc.loadFromDir(packDir)
     check('卡片包装载：坏文件跳过不阻断启动（loadProblems 留痕，合法 2 包在册）',
       packSvc.all().length === 2 && packSvc.loadProblems().length >= 1,
       JSON.stringify({ packs: packSvc.all().length, errors: packSvc.loadProblems() }))
-    const devCards = platformCore.filterCards({ packs: packSvc.forPlatform('rd'), roles: ['developer'], refAlive: (ref) => ref !== 'app:no-such-app' })
+    const devCards = panelCore.filterCards({ packs: packSvc.forPlatform('rd'), roles: ['developer'], refAlive: (ref) => ref !== 'app:no-such-app' })
     check('卡片包过滤：死 ref 丢弃留痕 + 角色过滤生效 + 首页上限 6',
       devCards.cards.length === 6 && !devCards.cards.some((card) => card.id === 't2') && !devCards.cards.some((card) => card.id === 'tadm')
       && devCards.droppedDeadRefs.includes('app:no-such-app'),

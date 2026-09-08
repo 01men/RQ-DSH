@@ -146,7 +146,7 @@ async function mountSceneCards() {
   const host = $('#dash-scene-cards')
   if (!host) return
   try {
-    const pack = await api.get(`/api/platform/card-packs${currentPlatform() ? `?platform=${currentPlatform()}` : ''}`)
+    const pack = await api.get(`/api/panel/board${currentPlatform() ? `?platform=${currentPlatform()}` : ''}`)
     if (pack.platform) applyPlatformTheme(pack.platform)
     $('#dash-scene-label').textContent = pack.label || `${pack.cards.length} 个场景直达`
     host.innerHTML = pack.cards.map((card) => `

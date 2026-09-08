@@ -10,7 +10,7 @@ import { readdir, readFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseYaml } from '../packages/platform-core/src/yaml.ts'
-import { validateCardpack } from '../packages/platform-core/src/cardpacks.ts'
+import { validateCardpack } from '../packages/plugin-panel-core/src/cardpacks.ts'
 import { validateScenegraph } from '../packages/platform-core/src/scenegraph.ts'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')

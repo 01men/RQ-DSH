@@ -21,14 +21,15 @@ import type { HttpExchange } from '../../platform-core/src/index.ts'
 import { PlatformEvents } from '../../platform-core/src/bus.ts'
 import { newId } from '../../platform-core/src/ids.ts'
 import { PanelService, TASK_LANES, type TaskLane, type DeptWidget, type DeptKpi, type DeptAgent } from './service.ts'
-import { CARD_PLATFORMS, filterCards, type CardPlatform } from '../../platform-core/src/cardpacks.ts'
+import { CardpackService, CARD_PLATFORMS, filterCards, type CardPlatform } from './cardpacks.ts'
+export { CardpackService, CARD_PLATFORMS, filterCards } from './cardpacks.ts'
 import { seedPanel } from './seed/seed.ts'
 
 export const name = 'panel-core'
 export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'audit', 'usage', 'modelGateway', 'resourceCore', 'scenegraphs',
-  'behavior', 'mcpRegistry', 'skillHub', 'cardpacks',
+  'behavior', 'mcpRegistry', 'skillHub',
 ]
 // 注意：panel 服务不可自 inject（cordis 的 inject 是加载前硬依赖，自依赖=永久挂起）——
 // 本插件内部直接 new PanelService(ctx) 使用；类经 ctx.plugin 注册供 dingtalk-bridge 注入。
@@ -47,6 +48,9 @@ const DEPT_RE = /^[a-z]{2,12}$/
 export function apply(ctx: Context) {
   const http = ctx.httpServer
   ctx.plugin(PanelService)
+  // 卡片包服务（双轨迁移自 platform-core 装配）：面板是看板/卡片包域唯一消费方与宿主（不可自 inject，同 PanelService 惯例）
+  ctx.plugin(CardpackService)
+  const cardpacks = new CardpackService(ctx)
   const panel = new PanelService(ctx)
 
   const caller = (exchange: HttpExchange): CallerInfo => exchange.principal as CallerInfo
@@ -314,7 +318,7 @@ export function apply(ctx: Context) {
   guarded('GET', '/api/panel/board', 'panel.read', (exchange) => {
     const info = caller(exchange)
     // -- 卡片包面（原 console /api/platform/card-packs 语义） --
-    const available = [...new Set(ctx.cardpacks.all().map((pack) => pack.platform))]
+    const available = [...new Set(cardpacks.all().map((pack) => pack.platform))]
     const requested = exchange.query.get('platform') ?? process.env.RQ_PLATFORM
       ?? (available.includes('rd') ? 'rd' : available[0]) ?? 'strategy'
     if (!CARD_PLATFORMS.includes(requested as CardPlatform)) {
@@ -324,8 +328,8 @@ export function apply(ctx: Context) {
     const platform = requested as CardPlatform
     const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
     const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
-    ctx.cardpacks.setRefAliveResolver(refAlive)
-    const packs = ctx.cardpacks.forPlatform(platform)
+    cardpacks.setRefAliveResolver(refAlive)
+    const packs = cardpacks.forPlatform(platform)
     const { cards, droppedDeadRefs } = filterCards({ packs, roles, refAlive })
     if (droppedDeadRefs.length > 0) {
       ctx.platformBus.emit('audit.alert.fired', {

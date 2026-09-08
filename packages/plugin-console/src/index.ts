@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { existsSync, readdirSync, createReadStream } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
-import { createPluginContext, newId, platformVersionInfo, CARD_PLATFORMS, filterCards, type CardPlatform, PlatformEvents } from '../../platform-core/src/index.ts'
+import { createPluginContext, newId, platformVersionInfo, PlatformEvents } from '../../platform-core/src/index.ts'
 import { nonbillableUsage } from '../../plugin-usage/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
 import { ProviderAuthError } from '../../plugin-iam/src/providers.ts'
@@ -27,7 +27,7 @@ export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'oidc', 'entryTickets', 'audit', 'usage', 'billing', 'market', 'modelGateway',
   'mcpRegistry', 'nasRegistry', 'nasAuthz', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
-  'connectorHub', 'cardpacks',
+  'connectorHub',
 ]
 
 interface CallerInfo {
@@ -3723,51 +3723,6 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
 
   // -- 平台信息与工具桥 -----------------------------------------------------
   /**
-   * 卡片包下发（WP-05/B1）：按「角色 × 平台」过滤，首页上限 6 张；
-   * 资产 ref 存活性在此裁决（console 持有 iam/资源注册表），失效 ref 静默过滤并留审计告警。
-   */
-  guarded('GET', '/api/platform/card-packs', 'console.login', (exchange) => {
-    const info = caller(exchange)
-    // 平台解析链：显式 query > 部署环境 RQ_PLATFORM > rd 试点 > 首个有包平台 > strategy 兜底
-    const available = [...new Set(ctx.cardpacks.all().map((pack) => pack.platform))]
-    const requested = exchange.query.get('platform') ?? process.env.RQ_PLATFORM
-      ?? (available.includes('rd') ? 'rd' : available[0]) ?? 'strategy'
-    if (!CARD_PLATFORMS.includes(requested as CardPlatform)) {
-      exchange.fail(400, 'BAD_REQUEST', `platform 非法（应为 ${CARD_PLATFORMS.join('/')}）`)
-      return
-    }
-    const platform = requested as CardPlatform
-    const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
-    const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
-    const refAlive = (ref: string): boolean => {
-      const colon = ref.indexOf(':')
-      const type = ref.slice(0, colon)
-      const id = ref.slice(colon + 1)
-      const matches = (item: { id?: string; slug?: string }): boolean => item.id === id || item.slug === id
-      try {
-        if (type === 'agent' || type === 'app' || type === 'nas') {
-          return ctx.resourceCore.list(type).some(matches)
-        }
-        if (type === 'mcp') return ctx.mcpRegistry.services().all().some(matches)
-        if (type === 'skill') return ctx.skillHub.skills().all().some(matches)
-        if (type === 'kb') return ctx.iam.orgs().get(id) !== undefined
-        return true
-      } catch {
-        return true
-      }
-    }
-    ctx.cardpacks.setRefAliveResolver(refAlive)
-    const packs = ctx.cardpacks.forPlatform(platform)
-    const { cards, droppedDeadRefs } = filterCards({ packs, roles, refAlive })
-    if (droppedDeadRefs.length > 0) {
-      ctx.platformBus.emit('audit.alert.fired', {
-        id: newId('alt'), severity: 'warning', title: '卡片包含失效资产引用',
-        message: `平台 ${platform} 卡片包中 ${droppedDeadRefs.length} 个 ref 已失效被过滤：${droppedDeadRefs.join('、')}（请修正 cardpacks 配置）`,
-      })
-    }
-    return { platform, label: packs[0]?.label ?? '', roles, cards, totalPacks: packs.length, availablePlatforms: available, droppedDeadRefs }
-  })
-
   /** 路由×权限矩阵（WP-04/A1）：RBAC 端点覆盖的服务端事实源，selftest 据此驱动 100% 越权断言。
    *  返回 = console 自身 guarded 矩阵 + 插件自注册路由（httpServer.routeMatrix 共享登记处，去重）。 */
   guarded('GET', '/api/platform/route-matrix', 'audit.read', () => {
