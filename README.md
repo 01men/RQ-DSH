@@ -96,6 +96,11 @@ DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭
   **运维工具**直接进入 dsh 原生 ToolRuntime、对模型可见可调用（`provideToolRuntime: false`），
   Agent 即可按自然语言运维整个平台（「列出所有 MCP 服务和健康状态」→ `mcp_service_list`，
   「Skill 市场里能装什么」→ `skill_search`）。
+- **单进程单入口（宿主挂载形态）**：`plugin-dsh-bridge` 把榕器数据面（REST/控制台 SPA/docs/MCP）
+  以 `/rq` 前缀挂进 dsh webServer，dsh web 端口即唯一入口；`startHttp: false` 关闭平台独立端口。
+  配套 `plugin-panel-core`（部门 Agent 工作台面板）、`plugin-dingtalk-bridge`（群桥/审批推送/告警通道）、
+  `plugin-rq-card`（会话内四态执行卡，dsh.client 双面插件）。升级与运维须知
+  （AGENT_SSO_ENFORCE 上线门禁 / CORS 行为 / SSE 日志脱敏）见 `docs/host-features-ops-notes.md`。
 
 **源码检出模式（本地开发）**——两条硬性要求，缺一不可：
 
@@ -427,9 +432,16 @@ packages/
     src/tools.ts            对模型暴露的工具（dsh ToolRuntime 契约）
   plugin-connect/           远程 dsh 接入插件（宿主端点 + 客户端代理 + 本机配置页，一份代码两种角色）
   plugin-console/public/    控制台 SPA（原生 ES Modules，零构建）
+  plugin-dsh-bridge/        宿主桥：榕器数据面以 /rq 前缀挂进 dsh webServer + 票据免登/Cookie 会话直通/OIDC 通道
+  plugin-panel-core/        部门 Agent 工作台面板（/panel SPA + /api/panel/* REST + SSE）
+  plugin-dingtalk-bridge/   钉钉桥接（群桥/出向投递/审批推送/告警通道/回决 fail-closed）
+  plugin-rq-card/           会话侧注入卡片（四态执行卡 + 反馈条；浏览器半需 node packages/plugin-rq-card/build.mjs 预构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
-skills/dsh-ops-*/SKILL.md   8 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（445 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点；隔离实例 + DEMO_SEED）
+skills/dsh-ops-*/SKILL.md   9 个运维 Skill（含 dsh-ops-admin 总控索引）
+scripts/selftest.mjs        功能自测（931 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点、宿主挂载/面板/桥接等功能分节；隔离实例 + DEMO_SEED）
+scripts/verify-live-host.mjs  已上线宿主真实性验证（运维持凭据执行）
+tests/full-chain-drill.mjs  四类资产「登记→审批→上架→授权→调用→计量回传」全链路演练
+tests/morning-peak-entry.mjs  早高峰入口并发演练（50 并发领票/兑换）
 docs/roadmap.md             OS-skill 融合决策与演进路线
 scripts/gen-manifests.mjs   插件声明生成器
 src/main.ts                 独立宿主入口

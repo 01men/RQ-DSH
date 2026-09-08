@@ -142,11 +142,11 @@ await test('T5 注册 Agent 弹窗 取消/真实创建（agents.js:378 回归）
   const { renderAgents } = await P('pages/agents.js')
   await renderAgents(freshContent(), new URLSearchParams(), ctxOf())
   $('#agent-add').click()
-  assert($('.modal [data-cancel]'), '注册弹窗应打开且取消按钮可寻址')
+  assert(await waitFor(() => $('.modal [data-cancel]')), '注册弹窗应打开且取消按钮可寻址')
   $('.modal [data-cancel]').click()
   assert(await modalGone(), '取消按钮应关闭弹窗（此前 null.onclick 报错）')
   $('#agent-add').click()
-  const nameInput = $('.modal [name=name]')
+  const nameInput = await waitFor(() => $('.modal [name=name]')) && $('.modal [name=name]')
   assert(nameInput, '名称输入框应存在（缺失将导致服务端 slug 生成崩溃）')
   nameInput.value = '冒烟测试Agent-' + RUN_ID
   $('.modal [name=attr_description]').value = '冒烟测试描述'
@@ -256,12 +256,12 @@ await test('T11 IAM 新建组织 / 批量导入弹窗（iam.js:248/267 回归）
   const { renderIam } = await P('pages/iam.js')
   await renderIam(freshContent(), new URLSearchParams('tab=members'), ctxOf())
   $('#org-add').click()
-  assert($('.modal [data-ok]'), '新建组织弹窗应打开')
+  assert(await waitFor(() => $('.modal [data-ok]')), '新建组织弹窗应打开')
   $('.modal [name=name]').value = '冒烟测试组织-' + RUN_ID
   $('.modal [data-ok]').click()
   assert(await modalGone(), '创建后弹窗应关闭（此前 null.onclick 报错）')
   $('#user-import').click()
-  assert($('.modal [data-cancel]'), '批量导入弹窗应打开')
+  assert(await waitFor(() => $('.modal [data-cancel]')), '批量导入弹窗应打开')
   $('.modal [data-cancel]').click()
   assert(await modalGone(), '取消应关闭导入弹窗')
 })
