@@ -18,8 +18,6 @@ import { OidcService } from '../../plugin-authn/src/oidc.ts'
 import * as agentTools from './tools.ts'
 import { AGENT_TYPE_SPEC } from './schema.ts'
 import { buildAgentOnboardingPrompt, type AgentOnboardingCredential } from './onboarding.ts'
-import { AppRegistryService } from '../../plugin-app/src/index.ts'
-import { OidcService } from '../../plugin-authn/src/oidc.ts'
 
 // ---------------------------------------------------------------------------
 // 数据模型（Agent 专属扩展记录）

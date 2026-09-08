@@ -249,7 +249,7 @@ function respond(exchange: HttpExchange, status: number, payload: unknown, heade
 }
 
 export const name = 'portal'
-export const inject = ['httpServer', 'platformBus', 'resourceCore', 'iam', 'skillHub', 'mcpRegistry', 'audit', 'authn', 'oidc', 'behavior']
+export const inject = ['httpServer', 'platformBus', 'resourceCore', 'iam', 'skillHub', 'mcpRegistry', 'audit', 'authn', 'oidc', 'usage', 'behavior']
 
 export function apply(ctx: Context) {
   const service = new PortalFeedService(ctx)
