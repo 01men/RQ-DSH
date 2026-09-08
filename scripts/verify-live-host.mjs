@@ -85,6 +85,8 @@ const depts = await api('GET', '/api/panel/depts')
 check(`面板五部门骨架（${(depts.data?.depts ?? []).length} 个）`, depts.ok && depts.data.depts.length === 5, JSON.stringify(depts.error))
 const industries = await api('GET', '/api/panel/industries')
 check(`行业三态（${(industries.data?.industries ?? []).filter((ind) => ind.state === 'active').length} 已激活）`, industries.ok, JSON.stringify(industries.error))
+const board = await api('GET', '/api/panel/board')
+check('战略看板 /api/panel/board（聚合面+卡片包面下发）', board.ok && Boolean(board.data?.funnel) && Array.isArray(board.data?.cards), JSON.stringify(board.error ?? { platform: board.data?.platform, cards: board.data?.cards?.length }))
 
 const failed = results.filter((pass) => !pass).length
 console.log(`\n验证结果：${results.length - failed}/${results.length} 通过`)

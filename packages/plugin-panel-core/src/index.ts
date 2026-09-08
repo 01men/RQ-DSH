@@ -21,12 +21,14 @@ import type { HttpExchange } from '../../platform-core/src/index.ts'
 import { PlatformEvents } from '../../platform-core/src/bus.ts'
 import { newId } from '../../platform-core/src/ids.ts'
 import { PanelService, TASK_LANES, type TaskLane, type DeptWidget, type DeptKpi, type DeptAgent } from './service.ts'
+import { CARD_PLATFORMS, filterCards, type CardPlatform } from '../../platform-core/src/cardpacks.ts'
 import { seedPanel } from './seed/seed.ts'
 
 export const name = 'panel-core'
 export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'audit', 'usage', 'modelGateway', 'resourceCore', 'scenegraphs',
+  'behavior', 'mcpRegistry', 'skillHub', 'cardpacks',
 ]
 // 注意：panel 服务不可自 inject（cordis 的 inject 是加载前硬依赖，自依赖=永久挂起）——
 // 本插件内部直接 new PanelService(ctx) 使用；类经 ctx.plugin 注册供 dingtalk-bridge 注入。
@@ -288,6 +290,103 @@ export function apply(ctx: Context) {
     }
   })
 
+  // -- 战略看板（双轨迁移：原 portal board 聚合 + console /api/platform/card-packs 卡片包下发） --
+  // 读 panel.read；聚合面（漏斗/WAIC/ROI）与卡片包面（角色×平台×ref 存活）一套端点下发。
+  // 卡片包服务本体仍在 platform-core（与主分支逐字节一致），本插件是唯一消费方。
+  const refAlive = (ref: string): boolean => {
+    const colon = ref.indexOf(':')
+    const type = ref.slice(0, colon)
+    const id = ref.slice(colon + 1)
+    const matches = (item: { id?: string; slug?: string }): boolean => item.id === id || item.slug === id
+    try {
+      if (type === 'agent' || type === 'app' || type === 'nas') {
+        return ctx.resourceCore.list(type).some(matches)
+      }
+      if (type === 'mcp') return ctx.mcpRegistry.services().all().some(matches)
+      if (type === 'skill') return ctx.skillHub.skills().all().some(matches)
+      if (type === 'kb') return ctx.iam.orgs().get(id) !== undefined
+      return true
+    } catch {
+      return true
+    }
+  }
+
+  guarded('GET', '/api/panel/board', 'panel.read', (exchange) => {
+    const info = caller(exchange)
+    // -- 卡片包面（原 console /api/platform/card-packs 语义） --
+    const available = [...new Set(ctx.cardpacks.all().map((pack) => pack.platform))]
+    const requested = exchange.query.get('platform') ?? process.env.RQ_PLATFORM
+      ?? (available.includes('rd') ? 'rd' : available[0]) ?? 'strategy'
+    if (!CARD_PLATFORMS.includes(requested as CardPlatform)) {
+      exchange.fail(400, 'BAD_REQUEST', `platform 非法（应为 ${CARD_PLATFORMS.join('/')}）`)
+      return
+    }
+    const platform = requested as CardPlatform
+    const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
+    const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
+    ctx.cardpacks.setRefAliveResolver(refAlive)
+    const packs = ctx.cardpacks.forPlatform(platform)
+    const { cards, droppedDeadRefs } = filterCards({ packs, roles, refAlive })
+    if (droppedDeadRefs.length > 0) {
+      ctx.platformBus.emit('audit.alert.fired', {
+        id: newId('alt'), severity: 'warning', title: '卡片包含失效资产引用',
+        message: `平台 ${platform} 卡片包中 ${droppedDeadRefs.length} 个 ref 已失效被过滤：${droppedDeadRefs.join('、')}（请修正 cardpacks 配置）`,
+      })
+    }
+
+    // -- 聚合面（原 portal board 语义：漏斗=曝光/点击→调用→完成；WAIC=usage 周聚合） --
+    const weekAgo = new Date(Date.now() - 7 * 24 * 3600_000).toISOString()
+    const behaviorCount = (type: string): number => {
+      try { return ctx.behavior.query({ type, from: weekAgo }).total } catch { return 0 }
+    }
+    let usageCount = 0
+    let chargeCents = 0
+    let byDay: Array<{ day: string; count: number; charge_cents: number }> = []
+    try {
+      const totals = ctx.usage.totals({ from: weekAgo })
+      usageCount = totals.count
+      chargeCents = totals.charge_cents
+      byDay = ctx.usage.breakdown(weekAgo).byDay
+    } catch { /* usage 缺失时看板降级为资产视图 */ }
+    let completedCalls = 0
+    try {
+      completedCalls = ctx.mcpRegistry.calls().all()
+        .filter((call) => call.ok && call.at >= weekAgo).length
+    } catch { /* mcp 缺失时漏斗降级 */ }
+
+    return {
+      generatedAt: new Date().toISOString(),
+      windowDays: 7,
+      // 卡片包面（顶层平铺，控制台工作台卡片消费方零改动换端点即可用）
+      platform, label: packs[0]?.label ?? '', roles, cards, totalPacks: packs.length, availablePlatforms: available, droppedDeadRefs,
+      // 聚合面（战略看板）
+      assets: {
+        appsOnline: ctx.resourceCore.list('app').filter((item) => item.status === 'online').length,
+        agentsOnline: ctx.resourceCore.list('agent').filter((item) => item.status === 'online').length,
+        skillsPublished: ctx.skillHub.skills().all().filter((item) => item.status === 'published').length,
+        mcpServing: ctx.mcpRegistry.services().all()
+          .filter((service) => service.status === 'online' || service.status === 'gray').length,
+      },
+      waic: { count: usageCount, chargeCents },
+      byDay,
+      funnel: {
+        exposed: behaviorCount('card.exposed'),
+        clicked: behaviorCount('card.clicked'),
+        invoked: usageCount,
+        completed: completedCalls,
+      },
+      // ROI 用工成本模型（WP-14）：估算口径声明随响应下发，看板侧必须展示「估算」字样。
+      roi: {
+        minutesPerCallEstimate: Number(process.env.ROI_MINUTES_PER_CALL ?? 3),
+        laborCostCentsPerHour: Number(process.env.ROI_LABOR_COST_CENTS_PER_HOUR ?? 5000),
+        callBase: completedCalls > 0 ? completedCalls : usageCount,
+        estimatedHoursSaved: Math.round(((completedCalls > 0 ? completedCalls : usageCount) * Number(process.env.ROI_MINUTES_PER_CALL ?? 3) / 60) * 100) / 100,
+        estimatedLaborCostCents: Math.round((completedCalls > 0 ? completedCalls : usageCount) * Number(process.env.ROI_MINUTES_PER_CALL ?? 3) / 60 * Number(process.env.ROI_LABOR_COST_CENTS_PER_HOUR ?? 5000)),
+        platformChargeCents: chargeCents,
+        note: '估算口径：替代工时 = 调用次数 × 单次替代分钟 ÷ 60；人力成本 = 替代工时 × 综合人力时薪。非实测值。',
+      },
+    }
+  })
   // -- 频道与消息 ---------------------------------------------------------------
 
   guarded('GET', '/api/panel/:dept/channels', 'panel.read', (exchange) => {

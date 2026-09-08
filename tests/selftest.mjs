@@ -4463,6 +4463,23 @@ try {
     check("面板：'*' 管理员跨部门直通（治理豁免）", adminCrossDept.ok)
     const orgUnbind = await api('PUT', '/api/panel/rd/config', { token: panelAdmin, body: { orgId: null } })
     check('面板：解除组织绑定恢复开放', orgUnbind.ok && !orgUnbind.data.dept.org)
+
+    // -- 战略看板（双轨迁移：/panel 面自持看板，聚合面+卡片包面一套端点下发） -----------
+    const panelBoard = await api('GET', '/api/panel/board', { token: panelAdmin })
+    check('看板：/panel 面自持看板可取（panel.read；聚合面+卡片包面+平台清单齐备）',
+      panelBoard.ok && Boolean(panelBoard.data.assets) && Boolean(panelBoard.data.funnel)
+      && Array.isArray(panelBoard.data.cards) && Array.isArray(panelBoard.data.availablePlatforms)
+      && panelBoard.data.cards.length >= 3,
+      JSON.stringify(panelBoard.error ?? { cards: panelBoard.data?.cards?.length, platform: panelBoard.data?.platform, available: panelBoard.data?.availablePlatforms }))
+    check('看板：/panel 面聚合口径齐备（WAIC/ROI/估算声明随板下发）',
+      typeof panelBoard.data.waic?.chargeCents === 'number' && Array.isArray(panelBoard.data.byDay)
+      && Boolean(panelBoard.data.roi) && String(panelBoard.data.roi.note).includes('估算'),
+      JSON.stringify(panelBoard.data?.roi ?? panelBoard.error))
+    const panelBoardBad = await api('GET', '/api/panel/board?platform=nope', { token: panelAdmin })
+    check('看板：/panel 面非法平台 400（枚举校验）', panelBoardBad.status === 400, String(panelBoardBad.status))
+    const panelBoardAnon = await rawReq('GET', '/api/panel/board')
+    check('看板：/panel 面未登录被拒（panel.read 门禁，RBAC 矩阵在册）',
+      panelBoardAnon.status === 401 || panelBoardAnon.status === 403, String(panelBoardAnon.status))
   }
 
   // ================================================================ 钉钉桥接（review-dsh-agent-panel-v2 Phase 3）

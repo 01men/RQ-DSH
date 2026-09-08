@@ -2,6 +2,7 @@
 plugin: dsh-plugin-panel-core
 base: /api
 endpoints:
+  - GET /api/panel/board?platform=（panel.read；战略看板聚合+卡片包下发，双轨迁移自 portal/console）
   - GET /api/panel/depts · GET /api/panel/:dept/overview · GET /api/panel/:dept/board（panel.read）
   - GET/PUT /api/panel/:dept/widgets · GET/PUT /api/panel/:dept/kpis（读 panel.read / 写 panel.config.write）
   - GET /api/panel/models（panel.read）· POST /api/panel/models · DELETE /api/panel/models/:id · POST /api/panel/models/:slug/test（panel.config.write；与 dsh 服务共用 modelgw 模型目录）

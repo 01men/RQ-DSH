@@ -1,8 +1,8 @@
 # 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
 id: dsh-plugin-panel-core
-version: 1.1.0
+version: 1.2.0
 label: 部门 Agent 工作台面板（骨架+数据面）
-depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam', 'dsh-plugin-audit', 'dsh-plugin-usage', 'dsh-plugin-modelgw']
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam', 'dsh-plugin-audit', 'dsh-plugin-usage', 'dsh-plugin-modelgw', 'dsh-plugin-mcp', 'dsh-plugin-skillhub']
 provides:
   services:
     - panel

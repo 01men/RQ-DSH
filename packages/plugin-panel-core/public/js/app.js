@@ -45,6 +45,9 @@ const ART_KINDS = { report: '报告', order: '工单', quote: '报价', diagnosi
 
 const state = {
   hostBridge: false,
+  /** 双轨视图：workbench=部门工作台（三栏） / board=战略看板（/panel 面自持看板）。 */
+  view: location.hash === '#/board' ? 'board' : 'workbench',
+  boardPlatform: localStorage.getItem('panel_board_platform') ?? '',
   depts: [],
   dept: localStorage.getItem('panel_dept') ?? 'mfg',
   overview: null,
@@ -97,6 +100,10 @@ export function start({ base, hostBridge = false }) {
   // 先落外壳骨架（数据慢/失败时页面不再是白屏），数据加载失败显式提示
   renderShell()
   renderTopRight()
+  window.addEventListener('hashchange', () => {
+    state.view = location.hash === '#/board' ? 'board' : 'workbench'
+    applyView()
+  })
   void init()
 }
 
@@ -243,6 +250,10 @@ function renderShell() {
   document.getElementById('app').innerHTML = `
     <div class="topbar">
       <div class="logo">🌳 榕器 <span class="badge">部门工作台</span></div>
+      <div class="view-tabs">
+        <span class="view-tab" data-v="workbench">工作台</span>
+        <span class="view-tab" data-v="board">战略看板</span>
+      </div>
       <div class="ind-sel">
         <div class="ind-btn" id="indBtn">
           <span>${esc(activeIndustry?.icon ?? '🏢')}</span><span>${esc(activeIndustry?.name ?? '未激活行业')}</span>
@@ -256,11 +267,15 @@ function renderShell() {
     <div class="body">
       <div class="rail" id="rail"></div>
       <div class="dept" id="dept"></div>
+      <div class="board" id="board" style="display:none"></div>
     </div>`
   document.getElementById('indBtn').onclick = (event) => { event.stopPropagation(); renderIndMenu(); document.getElementById('indMenu').classList.toggle('show') }
   document.addEventListener('click', () => document.getElementById('indMenu')?.classList.remove('show'))
   document.getElementById('cmdkTrigger').onclick = () => openCmdk()
-  renderRail()
+  document.querySelectorAll('.view-tab').forEach((el) => {
+    el.onclick = () => { location.hash = el.dataset.v === 'board' ? '#/board' : '#/workbench' }
+  })
+  applyView()
   renderTopRight()
 }
 
@@ -1268,4 +1283,87 @@ async function openCmdk() {
   }
   input.oninput = render
   render()
+}
+
+// ---------------------------------------------------------------------------
+// 战略看板视图（双轨：/panel 面自持看板，数据面 /api/panel/board 一套端点下发）
+// ---------------------------------------------------------------------------
+
+/** 顶栏视图切换：工作台（rail+dept 三栏）与战略看板互斥显隐；看板首次进入才拉数据。 */
+function applyView() {
+  const rail = document.getElementById('rail')
+  const dept = document.getElementById('dept')
+  const board = document.getElementById('board')
+  if (!rail || !dept || !board) return
+  const isBoard = state.view === 'board'
+  rail.style.display = isBoard ? 'none' : ''
+  dept.style.display = isBoard ? 'none' : ''
+  board.style.display = isBoard ? '' : 'none'
+  document.querySelectorAll('.view-tab').forEach((el) => el.classList.toggle('active', el.dataset.v === state.view))
+  if (isBoard) void renderBoardView()
+}
+
+/** 战略看板：聚合面（资产/漏斗/趋势/WAIC/ROI）+ 卡片包面（角色×平台下发，上限 6 张）。 */
+async function renderBoardView() {
+  const host = document.getElementById('board')
+  if (!host) return
+  const stamp = `${state.boardPlatform}|${state.view}`
+  if (host.dataset.loaded === stamp) return
+  host.innerHTML = '<div class="board-loading">看板加载中…</div>'
+  try {
+    const q = state.boardPlatform ? `?platform=${encodeURIComponent(state.boardPlatform)}` : ''
+    const b = await api.get(`/api/panel/board${q}`)
+    host.dataset.loaded = stamp
+    const platforms = b.availablePlatforms ?? []
+    const funnel = b.funnel ?? {}
+    const days = b.byDay ?? []
+    const maxDay = Math.max(1, ...days.map((d) => d.count))
+    const cards = (b.cards ?? []).map((card) => (
+      `<a class="board-card" target="_blank" rel="noopener" href="${basePath() || ''}/${esc(card.href)}">` +
+      `<span class="bc-badge">${esc(card.badge)}</span>` +
+      `<div class="bc-title">${esc(card.title)}</div>` +
+      `<div class="bc-desc">${esc(card.description)}</div></a>`
+    )).join('')
+    host.innerHTML = `
+      <div class="board-head">
+        <div class="board-title">📈 战略看板<span class="tag">${esc(b.platform ?? '')}${b.label ? ' · ' + esc(b.label) : ''}</span></div>
+        <div class="board-plat">${platforms.map((pf) => `<span class="plat-chip${pf === b.platform ? ' active' : ''}" data-p="${esc(pf)}">${esc(pf)}</span>`).join('')}</div>
+        <span class="board-stamp">更新于 ${esc(String(b.generatedAt ?? '').slice(5, 16).replace('T', ' '))} · 近 ${esc(String(b.windowDays ?? 7))} 天</span>
+      </div>
+      <div class="board-grid">
+        <div class="board-blk"><h3>在线资产</h3><div class="board-row">
+          <div class="kpi"><div class="v">${b.assets?.appsOnline ?? 0}</div><div class="k">AI 应用</div></div>
+          <div class="kpi"><div class="v">${b.assets?.agentsOnline ?? 0}</div><div class="k">Agent 本体</div></div>
+          <div class="kpi"><div class="v">${b.assets?.skillsPublished ?? 0}</div><div class="k">已上架技能</div></div>
+          <div class="kpi"><div class="v">${b.assets?.mcpServing ?? 0}</div><div class="k">MCP 服务中</div></div>
+        </div></div>
+        <div class="board-blk"><h3>价值漏斗（曝光 → 点击 → 调用 → 完成）</h3><div class="board-funnel">
+          <div class="fn-step"><div class="v">${funnel.exposed ?? 0}</div><div class="k">曝光</div></div><span class="fn-arr">→</span>
+          <div class="fn-step"><div class="v">${funnel.clicked ?? 0}</div><div class="k">点击</div></div><span class="fn-arr">→</span>
+          <div class="fn-step"><div class="v">${funnel.invoked ?? 0}</div><div class="k">调用</div></div><span class="fn-arr">→</span>
+          <div class="fn-step"><div class="v">${funnel.completed ?? 0}</div><div class="k">完成</div></div>
+        </div></div>
+        <div class="board-blk"><h3>调用量趋势（近 7 天）</h3><div class="board-days">${days.map((d) => `<div class="day" style="height:${Math.round((d.count / maxDay) * 64) + 4}px" title="${esc(d.day)}：${d.count} 次"><i></i></div>`).join('') || '<span class="dim">暂无数据</span>'}</div></div>
+        <div class="board-blk"><h3>WAIC 口径（近 7 天）</h3><div class="board-row">
+          <div class="kpi"><div class="v">${b.waic?.count ?? 0}</div><div class="k">调用次数</div></div>
+          <div class="kpi"><div class="v">¥${(((b.waic?.chargeCents ?? 0)) / 100).toFixed(2)}</div><div class="k">平台费用</div></div>
+        </div></div>
+        <div class="board-blk"><h3>ROI 用工成本估算（WP-14）</h3><div class="board-row">
+          <div class="kpi"><div class="v">${b.roi?.estimatedHoursSaved ?? 0}h</div><div class="k">替代工时（估）</div></div>
+          <div class="kpi"><div class="v">¥${((b.roi?.estimatedLaborCostCents ?? 0) / 100).toFixed(0)}</div><div class="k">人力成本（估）</div></div>
+          <div class="kpi"><div class="v">¥${((b.roi?.platformChargeCents ?? 0) / 100).toFixed(2)}</div><div class="k">平台费用</div></div>
+        </div><p class="board-note">${esc(b.roi?.note ?? '')}</p></div>
+        <div class="board-blk"><h3>部门快捷入口（上限 6 张）</h3><div class="board-cards">${cards || '<span class="dim">当前平台暂无卡片</span>'}</div></div>
+      </div>`
+    host.querySelectorAll('.plat-chip').forEach((chip) => {
+      chip.onclick = () => {
+        state.boardPlatform = chip.dataset.p ?? ''
+        localStorage.setItem('panel_board_platform', state.boardPlatform)
+        host.dataset.loaded = ''
+        void renderBoardView()
+      }
+    })
+  } catch (error) {
+    host.innerHTML = `<div class="board-loading">看板加载失败：${esc(String(error?.message ?? error))}</div>`
+  }
 }
