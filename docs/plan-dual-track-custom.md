@@ -130,3 +130,25 @@ docs/、治理文件（AGENTS.md / PROJECT.md / scripts/hooks）。达成后，�
   迁移窗口内看板短暂双入口属预期。
 - **最大长期风险是修改纪律松懈**（定制侧顺手改宿主面文件）——护栏 = Phase 1 所有权表 +
   北极星 diff 检查命令入 push 前自检。
+
+---
+
+## 执行纪要（2026-09-08 收官）
+
+- **Phase 0 ✅** 收口合并 94bfa07：15 冲突文件按规则解决（含 selftest 导入区/分节区自动合并重复的语义修复）；
+  顺带修复 WP-10 水印测试的时刻彩票假红（种子演示调用带当天合成时间戳，查询窗口 5→200 全量）。
+- **Phase 1 ✅** AGENTS.md/PROJECT.md 双轨化（0cdb3c4）。
+- **Phase 2 ✅** 看板/卡片包域整体迁入 panel-core（197d173）：cardpacks 模型+5 份 JSON+下发端点归 /panel 面；
+  `/api/panel/board` 一套端点下发聚合面+卡片包面；portal/console/platform-core 看板接线拆除；
+  dashboard 卡片改源 /api/panel/board；selftest 965/965。
+- **Phase 3 ✅** `docs/handoff-f-remainder-to-main.md`（A 审批深化 / B usage-recent / C 主题与钉钉H5 / D 目录与登记 / E 测试资产）。
+- **北极星现状（对真上游 ff1a8de）**：宿主面剩余差异 = F 域余量（已登记，待主分支采纳/拆除闭环）；
+  packages/ 差异仅剩定制自有包（plugin-panel-core 增量 + cardpacks 域文件）。
+
+### ⚠ 踩坑记录：origin/main 追踪引用摆动（AGENTS.md「已知无害怪象」的实锤）
+
+push 之后 `origin/main` 追踪引用会指向**备份仓库的 main（= 本分支自己）**，此时所有
+`git diff origin/main` / `git show origin/main:*` / `git checkout origin/main --` 都是**自比较**，
+结论全部无效。本次执行中段一度据此误判「真上游已有卡片包域」，做出方向相反的收敛操作，
+随后 fetch 刷新 + 直接对 ff1a8de 哈希操作才纠正。**铁律：跨分支对拍前先 `git fetch origin main`，
+并以 `git ls-remote` 双仓库实测为准；关键对拍直接用提交哈希（如 ff1a8de），不用追踪引用。**

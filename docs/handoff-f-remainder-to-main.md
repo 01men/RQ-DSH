@@ -1,0 +1,84 @@
+# F 域余量 · 受控回流清单（custom/dsh-rq → 上游 main · 第二批）
+
+> 目标读者：ybkk-AIOS main 开发 Agent。生成：2026-09-08（双轨改造 Phase 3 交付物）。
+> 前置：宿主平台 A–E 域已于 2026-09 移植进 main；看板/卡片包域已由定制侧整体迁入
+> `plugin-panel-core`（/panel 面），定制分支对上游的宿主面差异已收敛至本清单所列余量。
+> 模板沿用 [handoff-host-features-to-main.md](handoff-host-features-to-main.md)。
+> 闭环规则（[plan-dual-track-custom.md](plan-dual-track-custom.md) Phase 3）：主分支采纳 → 定制侧 merge 吸收；
+> **不采纳 → 定制侧拆除该差异**（收敛优先，双方都不留长期分叉）。
+
+## 0. 当前残余差异基线（对 main `ff1a8de` 实测）
+
+```bash
+git diff ff1a8de custom/dsh-rq --stat -- packages/   # 本清单全部内容
+```
+
+除下述功能余量外，其余差异均为**治理与布局类，不回流**：AGENTS.md / PROJECT.md / docs/plan-*、
+tests 目录布局（scripts→tests 迁移，澄清第 8 条已定版）、scripts/hooks/pre-push、
+package.json 的 selftest 路径与 dsh STORE 契约、examples/cli 布局。
+
+## A. 审批深化（WP-10/L1：高风险二次确认 + 公司级终审 + SLA 看板）——建议采纳
+
+| 文件 | 改动 |
+|---|---|
+| `packages/plugin-agent/src/index.ts` | +8：Agent 上线 L4 审批 riskLevel 统一标注 `high`（2 处，附注释） |
+| `packages/plugin-console/src/index.ts` | +69 中的审批部分：`POST /api/mcp/services/:id/final-review`（公司级终审标记端点）；`/api/approvals/sla`（SLA 达成率看板端点）；审批 decide 的 `confirmed` 强制二次确认（服务端 fail-closed） |
+
+说明：`plugin-audit` 的 finalReview/SLA 底座已在 main（两侧一致），本批只是 console 侧执行端点。
+selftest 对照分节：`审批 SLA 与公司级终审（WP-10）`（tests/selftest.mjs）。
+采纳方式：按文件 cherry-pick + main 底座重放；验收 = selftest 该分节全绿。
+
+## B. 全员工作台最近调用（WP-04/A3）——建议采纳
+
+| 文件 | 改动 |
+|---|---|
+| `packages/plugin-console/src/index.ts` | +69 中的 usage 部分：`GET /api/usage/recent`（登录人自身计量事件 ≤5 条自见，只读不跨人） |
+
+依赖：无（usage 管道两侧一致）。selftest 对照：`usage 最近调用（WP-04/A3）` 分节。
+
+## C. 五平台主题 + 钉钉 H5 降级 + 工作台联动（WP-05/B3 + WP-11 + dashboard 联动）——成组评估
+
+| 文件 | 内容 | 依赖 |
+|---|---|---|
+| `packages/plugin-console/public/js/platform.js` | 平台主题回放（记忆平台免闪） | base.css 主题块 |
+| `packages/plugin-console/public/css/base.css` | 五平台 `data-platform` 定版色块（+88） | — |
+| `packages/plugin-console/public/js/app.js` | +17：主题回放启动 + 钉钉 webview 入口探测 + 登记引导 NAV | platform.js / register.js |
+| `packages/plugin-console/public/js/realtime.js` | +132：钉钉 webview UA 探测降级链路（30s 轮询兜底） | — |
+| `packages/plugin-console/public/js/pages/dashboard.js` | +126：场景卡片区 / 最近调用区 / 主题联动 | **见下方依赖警示** |
+| `packages/plugin-console/public/js/pages/approvals.js`、`pages/assets.js` | 审批终审展示 / 目录筛选联动 | A / D |
+
+⚠ **依赖警示（dashboard.js）**：场景卡片数据源已从 `/api/platform/card-packs`（main 无此端点）改为
+`/api/panel/board`——该端点属于**定制面板数据面**（plugin-panel-core，非宿主面）。主分支如采纳
+dashboard 改动，二选一：① 连同卡片包模型一并回流（platform-core 级 cardpacks.ts + cardpacks/*.json +
+下发端点，即原 WP-05/B1 全量，main 侧此前未移植）；② 不采纳 dashboard 卡片区块，仅采纳其余部分。
+定制侧建议：**暂缓**，待主分支对卡片包域是否有宿主面诉求表态后一并决策。
+
+## D. 目录筛选 + 资产登记引导（WP-12 + WP-08）——运营向，主分支自行取舍
+
+| 文件 | 内容 |
+|---|---|
+| `packages/plugin-console/public/js/asset-filters.js` | 纯函数目录筛选（类型/平台/关键词，1000 项 <50ms 有性能断言） |
+| `packages/plugin-console/public/js/pages/assets.js` | 资产目录接筛选（+86） |
+| `packages/plugin-console/public/js/pages/register.js` | 资产登记引导页（六磁贴分诊 + 描述 embedding 规范预检，+149） |
+
+不采纳则定制侧拆除对应页面与 NAV（不留分叉）。
+
+## E. 测试资产（随对应功能域决策）
+
+| 文件 | 随迁域 |
+|---|---|
+| `tests/selftest.mjs` 对应分节 | A/B/C/D 各分节随功能域一并搬（main 侧 scripts/selftest.mjs 布局） |
+| `tests/walkthrough.mjs`、`tests/dingtalk-h5-smoke.mjs` | C（钉钉 H5 降级）——澄清第 7 条既定口径 |
+| `tests/dom-smoke.mjs`、`tests/full-chain-drill.mjs`、`tests/morning-peak-entry.mjs` | 布局随 tests/ 迁移（澄清第 8 条：行为等价，不强制） |
+
+## 决策回执（请 main 侧填写后回传）
+
+| 域 | 采纳？ | 备注 |
+|---|---|---|
+| A 审批深化 | | |
+| B usage/recent | | |
+| C 五平台主题/钉钉H5/dashboard | | |
+| D 目录筛选/登记引导 | | |
+| E 测试资产 | | 随对应域 |
+
+未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）。
