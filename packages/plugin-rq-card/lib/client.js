@@ -1,3 +1,4 @@
+/* rq-card-build-id: 6fc9a0a21c920c49 */
 var module = { exports: {} }; var exports = module.exports;
 window.__ModuleLoader__.load({ id: "@dsh-ops/plugin-rq-card", factory: (require) => {
 var __defProp = Object.defineProperty;
@@ -26,7 +27,7 @@ __export(index_exports, {
   inject: () => inject
 });
 module.exports = __toCommonJS(index_exports);
-var import_react2 = require("react");
+var import_react3 = require("react");
 
 // src/client/state.ts
 function blocked(reason) {
@@ -54,9 +55,16 @@ var FEEDBACK_ENDPOINT = `${CONSOLE_BASE}/api/usage/feedback`;
 var SLOT_TOOLVIEW = "tool.call.toolview";
 var SLOT_ASSISTANT_ACTIONS = "conversation.chat.assistant-actions";
 var SLOT_OVERLAY = "shell.overlay";
+var SLOT_SETTINGS = "settings.section";
+var SLOT_VIEW = "conversation.view";
+var LINK_ENDPOINT = `${CONSOLE_BASE}/rqcard/link`;
+var PANEL_URL = `${CONSOLE_BASE}/panel/`;
+var PANEL_EMBED_URL = `${PANEL_URL}?embed=1`;
+var RQCARD_CALL_HEADER = "x-rqcard-call";
 var FEEDBACK_ENTRY_ID = "rq-feedback";
 var TOOLVIEW_ENTRY_PREFIX = "rq-tool-";
 var DEGRADED_BADGE_ID = "rq-card-degraded";
+var UNLINKED_BADGE_ID = "rq-card-unlinked";
 
 // src/client/controller.ts
 var INITIAL_VIEW = Object.freeze({
@@ -305,6 +313,72 @@ function RqFeedback(props) {
   ] });
 }
 
+// src/client/RqSettings.tsx
+var import_react2 = require("react");
+var import_jsx_runtime3 = require("react/jsx-runtime");
+function RqSettings({ open, refresh, t }) {
+  const [link, setLink] = (0, import_react2.useState)(void 0);
+  const reload = (0, import_react2.useCallback)(async () => {
+    setLink(await refresh());
+  }, [refresh]);
+  (0, import_react2.useEffect)(() => {
+    void reload();
+  }, [reload]);
+  const mode = link?.mode;
+  const modeText = mode === "remote" ? t("settings.mode.remote") : mode === "local" ? t("settings.mode.local") : mode === "none" ? t("settings.mode.none") : "\u2026";
+  const probeText = link?.mode === "remote" ? link.probe?.reachable === true ? t("settings.probe.ok") : t("settings.probe.fail") : null;
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "rq-set", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "rq-set-row", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: `rq-set-mode rq-set-mode-${mode ?? "unknown"}`, children: modeText }),
+      link?.mode === "remote" && link.hubBase ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "rq-set-hub", children: [
+        String(link.hubBase),
+        probeText ? ` \xB7 ${probeText}` : ""
+      ] }) : null,
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "rq-set-btn", onClick: () => void reload(), children: t("settings.refresh") })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("p", { className: "rq-set-hint", children: t("settings.hint") }),
+    /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "rq-set-row", children: mode === "none" ? /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "rq-set-btn rq-set-primary", onClick: () => open(PANEL_URL), children: t("settings.open.wizard") }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { type: "button", className: "rq-set-btn rq-set-primary", onClick: () => open(PANEL_URL), children: t("settings.open.panel") }) })
+  ] });
+}
+
+// src/client/RqWorkbench.tsx
+var import_jsx_runtime4 = require("react/jsx-runtime");
+function RqWorkbench({ t }) {
+  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "rq-wb", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "rq-wb-bar", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("span", { className: "rq-wb-title", children: [
+        "\u{1F333} ",
+        t("view.workbench")
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("a", { className: "rq-wb-link", href: PANEL_EMBED_URL.replace("?embed=1", ""), target: "_blank", rel: "noreferrer", children: [
+        t("view.open.external"),
+        " \u2197"
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+      "iframe",
+      {
+        className: "rq-wb-frame",
+        src: PANEL_EMBED_URL,
+        title: t("view.workbench"),
+        referrerPolicy: "same-origin"
+      }
+    )
+  ] });
+}
+
+// src/client/hostStatus.ts
+async function fetchHostLink() {
+  try {
+    const response = await fetch(LINK_ENDPOINT, { headers: { [RQCARD_CALL_HEADER]: "1" } });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || payload?.ok !== true) return null;
+    return payload?.data ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // src/client/locales.ts
 var zh = {
   // ── 执行卡：状态徽标 ──
@@ -342,7 +416,23 @@ var zh = {
   // ── 反馈条 ──
   "fb.like": "\u6709\u5E2E\u52A9",
   "fb.dislike": "\u6CA1\u5E2E\u52A9",
-  "fb.done": "\u5DF2\u8BB0\u5F55\uFF0C\u611F\u8C22\u53CD\u9988"
+  "fb.done": "\u5DF2\u8BB0\u5F55\uFF0C\u611F\u8C22\u53CD\u9988",
+  // ── 设置分区「榕器宿主」（M2）──
+  "settings.nav": "\u6995\u5668\u5BBF\u4E3B",
+  "settings.mode.local": "\u672C\u673A\u5373\u5BBF\u4E3B",
+  "settings.mode.remote": "\u5DF2\u8FDE\u63A5\u8FDC\u7AEF\u5BBF\u4E3B",
+  "settings.mode.none": "\u672A\u8FDE\u63A5\u5BBF\u4E3B",
+  "settings.probe.ok": "\u53EF\u8FBE",
+  "settings.probe.fail": "\u4E0D\u53EF\u8FBE",
+  "settings.refresh": "\u5237\u65B0\u72B6\u6001",
+  "settings.open.wizard": "\u6253\u5F00\u8FDE\u63A5\u5411\u5BFC",
+  "settings.open.panel": "\u6253\u5F00\u6995\u5668\u5DE5\u4F5C\u53F0",
+  "settings.hint": "\u8FDE\u63A5\u5BBF\u4E3B\uFF08\u9009\u62E9 IP\uFF09\u5E76\u5728\u9762\u677F\u5B8C\u6210\u9489\u9489/\u8D26\u53F7\u767B\u5F55\uFF1B\u9762\u677F\u5730\u5740 /rq/panel/\u3002",
+  // ── 会话视图 Tab「榕器工作台」（M3）──
+  "view.workbench": "\u6995\u5668\u5DE5\u4F5C\u53F0",
+  "view.open.external": "\u5728\u6D4F\u89C8\u5668\u6253\u5F00",
+  // ── 未连接角标（M3，shell.overlay）──
+  "overlay.unlinked": "\u6995\u5668\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC"
 };
 var en = {
   "card.state.calling": "Calling",
@@ -373,7 +463,20 @@ var en = {
   "card.action.invoke-error": "Platform status",
   "fb.like": "Helpful",
   "fb.dislike": "Not helpful",
-  "fb.done": "Recorded \u2014 thanks for the feedback"
+  "fb.done": "Recorded \u2014 thanks for the feedback",
+  "settings.nav": "RongQi host",
+  "settings.mode.local": "This machine is the host",
+  "settings.mode.remote": "Connected to remote host",
+  "settings.mode.none": "Host not linked",
+  "settings.probe.ok": "reachable",
+  "settings.probe.fail": "unreachable",
+  "settings.refresh": "Refresh",
+  "settings.open.wizard": "Open connect wizard",
+  "settings.open.panel": "Open RongQi workbench",
+  "settings.hint": "Link a host (pick an IP) and sign in with DingTalk/account on the panel; panel lives at /rq/panel/.",
+  "view.workbench": "RongQi workbench",
+  "view.open.external": "Open in browser",
+  "overlay.unlinked": "RongQi: host not linked \u2014 click to open the wizard"
 };
 
 // src/client/styles.ts
@@ -422,6 +525,31 @@ var SHEET = `
 
 .rq-badge{position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:4px 10px;border-radius:999px;
   background:#5b6472;color:#fff;font-size:11px;opacity:.75;pointer-events:none}
+
+.rq-set{display:flex;flex-direction:column;gap:8px;font-size:13px}
+.rq-set-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rq-set-mode{font-size:12px;padding:2px 10px;border-radius:999px;background:#eef1f6;color:#5b6472}
+.rq-set-mode-local{background:#e6f5ee;color:#177a4c}
+.rq-set-mode-remote{background:#e8f1fd;color:#2563c4}
+.rq-set-mode-none{background:#fdebec;color:#c62a2f}
+.rq-set-hub{color:#5b6472;font-size:12px}
+.rq-set-btn{padding:5px 14px;border-radius:8px;border:1px solid #c9cfda;background:#fff;
+  color:#252b35;font-size:12px;cursor:pointer}
+.rq-set-btn:hover{background:#f3f5f9}
+.rq-set-primary{border-color:#2563c4;color:#2563c4}
+.rq-set-hint{color:#8a92a0;font-size:12px;line-height:1.6;margin:0}
+
+.rq-wb{display:flex;flex-direction:column;height:100%;min-height:0;background:#fff}
+.rq-wb-bar{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;
+  border-bottom:1px solid #eef1f6;font-size:12px;color:#5b6472}
+.rq-wb-title{font-weight:600}
+.rq-wb-link{color:#2563c4;text-decoration:none}
+.rq-wb-link:hover{text-decoration:underline}
+.rq-wb-frame{flex:1;min-height:0;width:100%;border:none;background:#f3f4f6}
+
+.rq-unlinked{position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:5px 12px;border-radius:999px;
+  background:#c62a2f;color:#fff;font-size:11px;cursor:pointer;border:none;box-shadow:0 4px 12px rgba(198,42,47,.3)}
+.rq-unlinked:hover{filter:brightness(.94)}
 `;
 var injected = false;
 function ensureStyles() {
@@ -600,12 +728,80 @@ function apply(ctx) {
           id: DEGRADED_BADGE_ID,
           order: 90
         }, function RqCardDegradedBadge() {
-          return (0, import_react2.createElement)("span", { className: "rq-badge" }, "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u7EAF\u6587\u672C\u6A21\u5F0F\uFF09");
+          return (0, import_react3.createElement)("span", { className: "rq-badge" }, "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u7EAF\u6587\u672C\u6A21\u5F0F\uFF09");
         }));
       });
     }
     console.warn(`[rq-card] degraded mode with ${DEGRADED.length} reason(s); markdown fallback remains available`);
   }
+  const settingsSpec = probeSpec(ctx, SLOT_SETTINGS);
+  const t = (() => {
+    try {
+      return ctx.locale.bind(NS);
+    } catch {
+      return void 0;
+    }
+  })();
+  if (settingsSpec?.kind !== "list") {
+    markDegraded(`${SLOT_SETTINGS} spec missing or not list`, settingsSpec);
+  } else {
+    safely("settings-section", () => {
+      ctx.slots.inject(SLOT_SETTINGS, () => ctx.slots.register({
+        name: SLOT_SETTINGS,
+        id: "rq-hostlink",
+        order: 30,
+        ...t ? { label: () => t("settings.nav") } : {},
+        locale: NS,
+        inject: () => ({
+          open: (url) => {
+            try {
+              window.open(url, "_blank", "noopener");
+            } catch {
+            }
+          },
+          refresh: () => fetchHostLink()
+        })
+      }, RqSettings));
+    });
+  }
+  const viewSpec = probeSpec(ctx, SLOT_VIEW);
+  if (viewSpec?.kind !== "list") {
+    markDegraded(`${SLOT_VIEW} spec missing or not list`, viewSpec);
+  } else {
+    safely("workbench-view", () => {
+      ctx.slots.inject(SLOT_VIEW, () => ctx.slots.register({
+        name: SLOT_VIEW,
+        id: "rq-workbench",
+        order: 20,
+        ...t ? { label: () => t("view.workbench") } : {},
+        locale: NS,
+        inject: () => ({})
+      }, RqWorkbench));
+    });
+  }
+  safely("unlinked-badge", () => {
+    void fetchHostLink().then((link) => {
+      if (link?.mode !== "none") return;
+      const overlaySpec2 = probeSpec(ctx, SLOT_OVERLAY);
+      if (overlaySpec2?.kind !== "list") return;
+      ctx.slots.inject(SLOT_OVERLAY, () => ctx.slots.register({
+        name: SLOT_OVERLAY,
+        id: UNLINKED_BADGE_ID,
+        order: 80
+      }, function RqUnlinkedBadge() {
+        return (0, import_react3.createElement)("button", {
+          type: "button",
+          className: "rq-unlinked",
+          onClick: () => {
+            try {
+              window.open(PANEL_URL, "_blank", "noopener");
+            } catch {
+            }
+          }
+        }, "\u6995\u5668\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC");
+      }));
+    });
+  });
   console.info("[rq-card] client plugin applied:", PLUGIN_ID2);
 }
 return module.exports; } });

@@ -811,6 +811,103 @@ export function apply(ctx: Context) {
       return input.widget_id ? widgets.filter((widget) => widget.id === input.widget_id) : widgets
     },
   })
+
+  // -- M3 对话打通：dsh 标准对话点名调用面板 Agent 阵容（其他 Agent 协作的主通道） --
+  ctx.tools.register({
+    name: 'panel_agent_invoke',
+    description: '点名调用部门面板的某个 Agent 提问并同步取回应答（dsh 标准对话协作主通道）：按部门名册全名匹配，'
+      + '经面板 Agent 资产（agentRef/model/systemPrompt）+ 行业场景摘要组装上下文，单轮调用模型网关。'
+      + '应答不落频道消息；如需留痕请配合 panel_msg_send。失败诚实返回 ok:false（不造假回复）。',
+    permission: 'panel.write',
+    parameters: {
+      type: 'object',
+      properties: {
+        dept: { type: 'string', description: '部门标识（rd/mfg/sales/strategy/fin）' },
+        agent: { type: 'string', description: 'Agent 名册全名（可用 panel_agents_list 查询，如「质量分析 Agent」）' },
+        message: { type: 'string', description: '要问该 Agent 的问题/指令' },
+        context_note: { type: 'string', description: '附加上下文说明（可选，拼入系统提示）' },
+      },
+      required: ['dept', 'agent', 'message'],
+    },
+    output: { schema: { type: 'object' }, render: renderJson },
+    async execute(args, exec) {
+      const input = args as { dept: string; agent: string; message: string; context_note?: string }
+      return await panel.askAgent(input.dept, input.agent, input.message, {
+        userId: exec.principal?.userId,
+        ...(input.context_note ? { contextNote: input.context_note } : {}),
+      })
+    },
+  })
+
+  // -- M3 对话打通：战略看板聚合摘要（对话接地的轻量读法） --
+  ctx.tools.register({
+    name: 'panel_board_digest',
+    description: '读取战略看板聚合摘要（近 7 天）：资产在线数、调用漏斗（曝光→点击→调用→完成）、计量与 ROI 估算、'
+      + '指定平台卡片包标题清单。给对话/Agent 做看板接地的事实源（完整数据走 GET /api/panel/board）。',
+    permission: 'panel.read',
+    parameters: {
+      type: 'object',
+      properties: { platform: { type: 'string', description: `卡片包平台（${CARD_PLATFORMS.join('/')}），缺省 rd` } },
+    },
+    output: { schema: { type: 'object' }, render: renderJson },
+    async execute(args, exec) {
+      const input = args as { platform?: string }
+      const available = [...new Set(cardpacks.all().map((pack) => pack.platform))]
+      const requested = input.platform ?? process.env.RQ_PLATFORM ?? (available.includes('rd') ? 'rd' : available[0]) ?? 'strategy'
+      if (!CARD_PLATFORMS.includes(requested as CardPlatform)) {
+        throw new Error(`platform 非法（应为 ${CARD_PLATFORMS.join('/')}）`)
+      }
+      const platform = requested as CardPlatform
+      const info = exec.principal as { userId?: string } | undefined
+      const user = info?.userId ? ctx.iam.users().get(info.userId) : undefined
+      const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
+      cardpacks.setRefAliveResolver(refAlive)
+      const packs = cardpacks.forPlatform(platform)
+      const { cards } = filterCards({ packs, roles, refAlive })
+
+      const weekAgo = new Date(Date.now() - 7 * 24 * 3600_000).toISOString()
+      const behaviorCount = (type: string): number => {
+        try { return ctx.behavior.query({ type, from: weekAgo }).total } catch { return 0 }
+      }
+      let usageCount = 0
+      let chargeCents = 0
+      try {
+        const totals = ctx.usage.totals({ from: weekAgo })
+        usageCount = totals.count
+        chargeCents = totals.charge_cents
+      } catch { /* usage 缺失时降级为资产视图 */ }
+      let completedCalls = 0
+      try {
+        completedCalls = ctx.mcpRegistry.calls().all().filter((call) => call.ok && call.at >= weekAgo).length
+      } catch { /* mcp 缺失时漏斗降级 */ }
+      const minutesPerCall = Number(process.env.ROI_MINUTES_PER_CALL ?? 3)
+      const callBase = completedCalls > 0 ? completedCalls : usageCount
+      return {
+        generatedAt: new Date().toISOString(),
+        windowDays: 7,
+        platform,
+        assets: {
+          appsOnline: ctx.resourceCore.list('app').filter((item) => item.status === 'online').length,
+          agentsOnline: ctx.resourceCore.list('agent').filter((item) => item.status === 'online').length,
+          skillsPublished: ctx.skillHub.skills().all().filter((item) => item.status === 'published').length,
+          mcpServing: ctx.mcpRegistry.services().all().filter((service) => service.status === 'online' || service.status === 'gray').length,
+        },
+        funnel: {
+          exposed: behaviorCount('card.exposed'),
+          clicked: behaviorCount('card.clicked'),
+          invoked: usageCount,
+          completed: completedCalls,
+        },
+        waic: { count: usageCount, chargeCents },
+        roiEstimate: {
+          callBase,
+          estimatedHoursSaved: Math.round((callBase * minutesPerCall / 60) * 100) / 100,
+          note: '估算口径（非实测）：替代工时 = 调用次数 × 单次替代分钟 ÷ 60',
+        },
+        cards: cards.map((card) => ({ id: card.id, title: card.title, badge: card.badge })),
+      }
+    },
+  })
 }
 
 declare module '@deepseek-ai/cordis' {

@@ -56,6 +56,31 @@ const SHEET = `
 
 .rq-badge{position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:4px 10px;border-radius:999px;
   background:#5b6472;color:#fff;font-size:11px;opacity:.75;pointer-events:none}
+
+.rq-set{display:flex;flex-direction:column;gap:8px;font-size:13px}
+.rq-set-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.rq-set-mode{font-size:12px;padding:2px 10px;border-radius:999px;background:#eef1f6;color:#5b6472}
+.rq-set-mode-local{background:#e6f5ee;color:#177a4c}
+.rq-set-mode-remote{background:#e8f1fd;color:#2563c4}
+.rq-set-mode-none{background:#fdebec;color:#c62a2f}
+.rq-set-hub{color:#5b6472;font-size:12px}
+.rq-set-btn{padding:5px 14px;border-radius:8px;border:1px solid #c9cfda;background:#fff;
+  color:#252b35;font-size:12px;cursor:pointer}
+.rq-set-btn:hover{background:#f3f5f9}
+.rq-set-primary{border-color:#2563c4;color:#2563c4}
+.rq-set-hint{color:#8a92a0;font-size:12px;line-height:1.6;margin:0}
+
+.rq-wb{display:flex;flex-direction:column;height:100%;min-height:0;background:#fff}
+.rq-wb-bar{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;
+  border-bottom:1px solid #eef1f6;font-size:12px;color:#5b6472}
+.rq-wb-title{font-weight:600}
+.rq-wb-link{color:#2563c4;text-decoration:none}
+.rq-wb-link:hover{text-decoration:underline}
+.rq-wb-frame{flex:1;min-height:0;width:100%;border:none;background:#f3f4f6}
+
+.rq-unlinked{position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:5px 12px;border-radius:999px;
+  background:#c62a2f;color:#fff;font-size:11px;cursor:pointer;border:none;box-shadow:0 4px 12px rgba(198,42,47,.3)}
+.rq-unlinked:hover{filter:brightness(.94)}
 `
 
 /** 已注入标记（幂等：重复调用不重复插入）。 */

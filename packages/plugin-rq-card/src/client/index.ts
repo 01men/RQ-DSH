@@ -1,11 +1,17 @@
 /**
- * 浏览器半：slot 注册 + 降级探测（WP-06 交付物 1/3，spike §4.3 伪代码落地）。
+ * 浏览器半：slot 注册 + 降级探测（WP-06 交付物 1/3，spike §4.3 伪代码落地；M2/M3 扩展）。
  *
- * 【注入面】两条 slot：
+ * 【注入面】
  *   ① 四态执行卡：为榕器工具名（RQ_TOOL_NAMES）逐一注册 `tool.call.toolview`
  *      键位条目——加法式，未列名的工具回落 dsh 的 GenericToolCard；
  *   ② 👍/👎 反馈条：`conversation.chat.assistant-actions` list 条目
- *      （id 'rq-feedback'，与 dsh 自带 'feedback' 并存，order 20 排其后）。
+ *      （id 'rq-feedback'，与 dsh 自带 'feedback' 并存，order 20 排其后）；
+ *   ③ 设置分区「榕器宿主」（M2）：`settings.section` list 条目（id 'rq-hostlink'，
+ *      ui-auth 同款挂载位）——连接状态丸 + 打开向导/工作台；
+ *   ④ 会话视图 Tab「榕器工作台」（M3）：`conversation.view` list 条目
+ *      （id 'rq-workbench'，ui-trajectory 同款挂载位）——整页内嵌 /rq/panel/；
+ *   ⑤ 未连接宿主角标（M3「主动连接」）：宿主连接为 none 时 `shell.overlay`
+ *      挂可点击提醒，点击打开面板（未连接且未登录时面板首屏即连接向导）。
  *
  * 【降级预案（spike §5 的 1-4 条，本 apply 逐条落实）】
  *   1. 声明依赖全部走 ctx.slots.inject：目标槽未声明时回调永不执行、注入保持
@@ -32,12 +38,15 @@ import { deriveExecutionState } from './state.ts'
 import { RqFeedbackController } from './controller.ts'
 import { ExecutionCard } from './ExecutionCard.tsx'
 import { RqFeedback } from './RqFeedback.tsx'
+import { RqSettings } from './RqSettings.tsx'
+import { RqWorkbench } from './RqWorkbench.tsx'
+import { fetchHostLink } from './hostStatus.ts'
 import type { RqFeedbackInjected, RqToolviewInjected } from './slots.ts'
 import { en, zh } from './locales.ts'
 import { ensureStyles } from './styles.ts'
 import {
-  DEGRADED_BADGE_ID, FEEDBACK_ENTRY_ID, SLOT_ASSISTANT_ACTIONS, SLOT_OVERLAY,
-  SLOT_TOOLVIEW, TOOLVIEW_ENTRY_PREFIX,
+  DEGRADED_BADGE_ID, FEEDBACK_ENTRY_ID, PANEL_URL, SLOT_ASSISTANT_ACTIONS, SLOT_OVERLAY,
+  SLOT_SETTINGS, SLOT_TOOLVIEW, SLOT_VIEW, TOOLVIEW_ENTRY_PREFIX, UNLINKED_BADGE_ID,
 } from '../wire.ts'
 
 export type { ExecutionState, ExecutionStateInput, BlockedReason } from './state.ts'
@@ -199,6 +208,64 @@ export function apply(ctx: ClientContext): void {
     }
     console.warn(`[rq-card] degraded mode with ${DEGRADED.length} reason(s); markdown fallback remains available`)
   }
+
+  // ── ④ 设置分区「榕器宿主」（M2）：状态丸 + 打开向导/工作台（ui-auth 同款挂载位）──
+  const settingsSpec = probeSpec(ctx, SLOT_SETTINGS)
+  const t = (() => { try { return ctx.locale.bind(NS) } catch { return undefined } })()
+  if (settingsSpec?.kind !== 'list') {
+    markDegraded(`${SLOT_SETTINGS} spec missing or not list`, settingsSpec)
+  } else {
+    safely('settings-section', () => {
+      ctx.slots.inject(SLOT_SETTINGS, () => ctx.slots.register({
+        name: SLOT_SETTINGS,
+        id: 'rq-hostlink',
+        order: 30,
+        ...(t ? { label: () => t('settings.nav') } : {}),
+        locale: NS,
+        inject: (): object => ({
+          open: (url: string) => { try { window.open(url, '_blank', 'noopener') } catch { /* 拦截弹窗时静默 */ } },
+          refresh: () => fetchHostLink(),
+        }),
+      }, RqSettings))
+    })
+  }
+
+  // ── ⑤ 会话视图 Tab「榕器工作台」（M3）：整页内嵌 /rq/panel/（ui-trajectory 同款挂载位）──
+  const viewSpec = probeSpec(ctx, SLOT_VIEW)
+  if (viewSpec?.kind !== 'list') {
+    markDegraded(`${SLOT_VIEW} spec missing or not list`, viewSpec)
+  } else {
+    safely('workbench-view', () => {
+      ctx.slots.inject(SLOT_VIEW, () => ctx.slots.register({
+        name: SLOT_VIEW,
+        id: 'rq-workbench',
+        order: 20,
+        ...(t ? { label: () => t('view.workbench') } : {}),
+        locale: NS,
+        inject: (): object => ({}),
+      }, RqWorkbench))
+    })
+  }
+
+  // ── ⑥ 未连接角标（M3「主动连接」）：宿主连接为 none 时在全局浮层提醒，点击进向导 ──
+  safely('unlinked-badge', () => {
+    void fetchHostLink().then((link) => {
+      if (link?.mode !== 'none') return
+      const overlaySpec2 = probeSpec(ctx, SLOT_OVERLAY)
+      if (overlaySpec2?.kind !== 'list') return
+      ctx.slots.inject(SLOT_OVERLAY, () => ctx.slots.register({
+        name: SLOT_OVERLAY,
+        id: UNLINKED_BADGE_ID,
+        order: 80,
+      }, function RqUnlinkedBadge() {
+        return createElement('button', {
+          type: 'button',
+          className: 'rq-unlinked',
+          onClick: () => { try { window.open(PANEL_URL, '_blank', 'noopener') } catch { /* 静默 */ } },
+        }, '榕器：未连接宿主，点击打开向导')
+      }))
+    })
+  })
 
   // 【冒烟自证（spike 风险 R8 的首个联调里程碑）】boot 后可在控制台确认：
   //   window.__DSH_BOOT__ 含 { id: '@dsh-ops/plugin-rq-card', ... } 图行，

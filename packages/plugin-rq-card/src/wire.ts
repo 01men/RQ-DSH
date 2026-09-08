@@ -43,6 +43,20 @@ export type FeedbackResult =
 export const SLOT_TOOLVIEW = 'tool.call.toolview' as const
 export const SLOT_ASSISTANT_ACTIONS = 'conversation.chat.assistant-actions' as const
 export const SLOT_OVERLAY = 'shell.overlay' as const
+/** M2：设置页「榕器宿主」分区（ui-auth 的 AccountSection 同款挂载位）。 */
+export const SLOT_SETTINGS = 'settings.section' as const
+/** M3：会话视图 Tab 环（ui-trajectory 同款挂载位）——「榕器工作台」整页内嵌面板。 */
+export const SLOT_VIEW = 'conversation.view' as const
+
+/** 宿主连接状态端点（同源根绝对：/rq 挂载之下的免登向导命名空间）。 */
+export const LINK_ENDPOINT = `${CONSOLE_BASE}/rqcard/link` as const
+
+/** 榕器面板入口（同源；?embed=1 = 被 dsh 视图 Tab 内嵌形态，面板侧据此做嵌套防护）。 */
+export const PANEL_URL = `${CONSOLE_BASE}/panel/` as const
+export const PANEL_EMBED_URL = `${PANEL_URL}?embed=1` as const
+
+/** 向导端点调用头（服务端 CSRF 防线，hostlink.ts 文件头第 1 条）。 */
+export const RQCARD_CALL_HEADER = 'x-rqcard-call' as const
 
 /** 反馈条在 assistant-actions list 槽的条目 id：与 dsh 自带 'feedback'（order 10）并存。 */
 export const FEEDBACK_ENTRY_ID = 'rq-feedback' as const
@@ -52,3 +66,6 @@ export const TOOLVIEW_ENTRY_PREFIX = 'rq-tool-' as const
 
 /** 降级角标在 shell.overlay list 槽的条目 id（spike §5 第 6 条）。 */
 export const DEGRADED_BADGE_ID = 'rq-card-degraded' as const
+
+/** 未连接宿主角标在 shell.overlay list 槽的条目 id（M3「主动连接」提醒）。 */
+export const UNLINKED_BADGE_ID = 'rq-card-unlinked' as const

@@ -84,6 +84,23 @@ dashboard 改动，二选一：① 连同卡片包模型一并回流（platform-
 依赖：A 的 `plugin-audit` 底座（`finalReview` 标记来源）。任何宿主部署都受益（双轨计划 §3 评估口径倾向采纳）。
 selftest 对照：`审批 SLA 与公司级终审（WP-10）` 分节水印断言。
 
+## G. 远程 dsh 人类登录闭环 + 模型流式（dsh 插件化充分落地，2026-09-08）——建议采纳
+
+定制侧已完成「装好插件即可用」的连接向导与对话打通（定版设计：[plan-dsh-plugin-first.md](plan-dsh-plugin-first.md)）：
+免登 `/rqcard/*` 向导命名空间、LAN 扫描选宿主、账号密码经本机插件代理全闭环登录、dsh 会话
+「榕器工作台」视图 Tab 与面板「Agent 对话」双向内嵌、`panel_agent_invoke`/`panel_board_digest`
+协作工具族。以下为**远程形态（C）钉钉扫码登录闭环**的宿主侧增强建议——不采纳也能用
+（定制侧维持「跳宿主登录页 + 回导向导校验」降级），采纳后体验闭环：
+
+| # | 文件（main 侧） | 改动 | 价值 |
+|---|---|---|---|
+| G1-a | `packages/plugin-console/src/index.ts`（登录页/登录成功路径） | 登录页支持可信 `next` 参数：完成登录（含钉钉扫码）后按 `next` 回跳，fragment 携带一次性自助 `entry_ticket`；需新增 `POST /api/auth/entry-tickets/self`（已登录人类为自己签发短时票据，进 PUBLIC_PATHS） | 远程 dsh 面板向导发起 `next=<本地面板地址>`，钉钉扫码后自动回到本机 dsh、票据兑换即建立会话——零手工回导 |
+| G1-b | 同上（票据签发约束） | 自助票据 TTL ≤120s，复用 authn EntryTicket 既有一次性/防重放语义；`authn.entryticket.redeemed` 审计留痕 | 防票据扩散；审计闭环 |
+| G2（可选） | `packages/plugin-modelgw/src/index.ts` | `invoke` 增 `stream` 变体（SSE，OpenAI 兼容流式透传） | 面板内置协作会话与 dsh 侧富卡可升级流式输出（非必须；现状单轮非流式诚实工作） |
+
+定制侧对照降级路径：wizard.js「我已登录」回导校验（proxy `/api/auth/me`）。
+selftest 对照：`宿主连接向导` 分节（23 项）+ `panel_agent_invoke/board_digest`（4 项）+ `fresh-install 装机模拟`（13 项）。
+
 ## 决策回执（请 main 侧填写后回传）
 
 | 域 | 采纳？ | 备注 |
@@ -94,5 +111,7 @@ selftest 对照：`审批 SLA 与公司级终审（WP-10）` 分节水印断言�
 | D 目录筛选/登记引导 | | |
 | E 测试资产 | | 随对应域 |
 | F mcp/app riskLevel 水印 | | 依赖 A（plugin-audit 底座） |
+| G1 远程登录回跳闭环（next + 自助 entry_ticket） | | 采纳后定制侧向导自动升级闭环 |
+| G2 modelgw 流式化 | | 可选 |
 
 未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）。

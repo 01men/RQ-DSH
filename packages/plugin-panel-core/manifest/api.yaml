@@ -19,6 +19,8 @@ tools:
   - panel_task_transition
   - panel_scene_diag
   - panel_widget_data
+  - panel_agent_invoke
+  - panel_board_digest
 services:
   - key: panel
     access: ctx.panel

@@ -45,6 +45,8 @@ const ART_KINDS = { report: '报告', order: '工单', quote: '报价', diagnosi
 
 const state = {
   hostBridge: false,
+  /** 远端宿主连接（形态 C）：{ hubBase, hubMountPrefix }；null=本机/未连接。 */
+  remoteHub: null,
   /** 双轨视图：workbench=部门工作台（三栏） / board=战略看板（/panel 面自持看板）。 */
   view: location.hash === '#/board' ? 'board' : 'workbench',
   boardPlatform: localStorage.getItem('panel_board_platform') ?? '',
@@ -69,6 +71,18 @@ const state = {
   streamDept: '',
 }
 
+/** 嵌套防护（M3）：?embed=1（dsh「榕器工作台」视图 Tab 内嵌本面板）或自身已在 iframe 中 = 嵌入形态——
+ *  嵌入态不再内嵌 dsh 对话（防 iframe 递归），侧栏「Agent 对话」入口隐藏。 */
+const EMBEDDED = new URLSearchParams(location.search).has('embed') || (() => {
+  try { return window.self !== window.top } catch { return true }
+})()
+
+/** 「Agent 对话」默认内嵌 dsh 标准对话（默认 Agent 交互面，M3）：hostBridge=dsh 对话面在场；
+ *  用户可用「使用内置协作会话」退回（panel_chat_embed_off），退回后 at-row 提供「改用 dsh 对话」。 */
+function canEmbedDshChat() {
+  return state.hostBridge && !EMBEDDED && localStorage.getItem('panel_chat_embed_off') !== '1'
+}
+
 async function toast(message, type) {
   const mod = await uiDep()
   mod.toast(message, type)
@@ -89,10 +103,11 @@ function hideModal() {
 // 启动
 // ---------------------------------------------------------------------------
 
-export function start({ base, hostBridge = false }) {
+export function start({ base, hostBridge = false, remoteHub = null }) {
   apiSetBase(base)
   depsSetBase(base)
   state.hostBridge = hostBridge
+  state.remoteHub = remoteHub
   if (!session.token) {
     renderLoginGuide()
     return
@@ -108,6 +123,20 @@ export function start({ base, hostBridge = false }) {
 }
 
 function renderLoginGuide() {
+  // 远端连接态（形态 C）：会话失效时回到连接向导重连/重登，而不是误导向本机控制台
+  if (state.remoteHub) {
+    document.getElementById('app').innerHTML = `
+      <div class="login-guide">
+        <h1>🌳 榕器 · 部门 Agent 工作台</h1>
+        <p>与远端宿主（${esc(state.remoteHub.hubBase)}）的会话已失效。</p>
+        <button class="btn primary" id="reopenWizard">重新连接 / 登录</button>
+      </div>`
+    document.getElementById('reopenWizard').onclick = async () => {
+      const wizard = await import('./wizard.js')
+      wizard.start({ base: basePath(), hostBridge: state.hostBridge, localFirstRun: false })
+    }
+    return
+  }
   // 回跳语义：登录成功后带 ?next= 回到面板（登录页消费一次），不再让业务员落在控制台后自己找路
   const here = encodeURIComponent(location.pathname + location.search + location.hash)
   document.getElementById('app').innerHTML = `
@@ -377,8 +406,8 @@ function renderRail() {
     </div>`
   }).join('') + `
     <div class="rail-spacer"></div>
-    ${state.hostBridge ? `<a class="rail-console" href="/" title="打开 Agent 对话（dsh 宿主）" style="text-decoration:none">
-      <div class="ico">💬</div><div>Agent<br>对话</div></a>` : ''}
+    ${state.hostBridge && !EMBEDDED ? `<div class="rail-console" id="railChat" title="切到 Agent 对话（dsh 标准对话，默认 Agent 交互面）" style="cursor:pointer">
+      <div class="ico">💬</div><div>Agent<br>对话</div></div>` : ''}
     <a class="rail-console" href="${basePath() || '/'}" title="打开榕器管理控制台" style="text-decoration:none"
       data-landing="console">
       <div class="ico">🧩</div><div>管理<br>控制台</div></a>`
@@ -389,6 +418,16 @@ function renderRail() {
       void switchDept(el.dataset.dept)
     }
   })
+  // 「Agent 对话」＝切到内嵌 dsh 标准对话的会话 Tab（不再整页跳出；嵌入态无此入口）
+  const railChat = rail.querySelector('#railChat')
+  if (railChat) {
+    railChat.onclick = async () => {
+      state.tab = 'chat'
+      localStorage.setItem('panel_tab', 'chat')
+      await loadTab()
+      renderMain()
+    }
+  }
   // 显式跨工作台切换：记住去向（控制台启动分诊尊重该偏好，不再把人拽回面板）
   rail.querySelectorAll('[data-landing]').forEach((el) => {
     el.addEventListener('click', () => {
@@ -555,15 +594,16 @@ function renderMain() {
   const host = document.getElementById('colMain')
   if (!host) return
   const industry = state.overview.industry
+  const embedChat = state.tab === 'chat' && canEmbedDshChat()
   host.innerHTML = `
     <div class="tabs">
-      <div class="tab ${state.tab === 'chat' ? 'on' : ''}" data-tab="chat">💬 协作会话<span class="mini">人 × Agent × 钉钉</span></div>
+      <div class="tab ${state.tab === 'chat' ? 'on' : ''}" data-tab="chat">💬 ${embedChat ? 'Agent 对话' : '协作会话'}<span class="mini">${embedChat ? 'dsh 标准对话 · 默认交互面' : '人 × Agent × 钉钉'}</span></div>
       <div class="tab ${state.tab === 'tasks' ? 'on' : ''}" data-tab="tasks">📌 任务看板</div>
       <div class="tab ${state.tab === 'arts' ? 'on' : ''}" data-tab="arts">📁 部门知识</div>
       <div class="tab ${state.tab === 'scene' ? 'on' : ''}" data-tab="scene">🗺 场景图谱<span class="mini">${esc(industry?.code ?? '未激活')}</span></div>
     </div>
     <div id="tabBody"></div>
-    ${state.tab === 'chat' ? composerHtml() : ''}`
+    ${state.tab === 'chat' && !embedChat ? composerHtml() : ''}`
   host.querySelectorAll('.tab').forEach((el) => {
     el.onclick = async () => {
       state.tab = el.dataset.tab
@@ -573,10 +613,48 @@ function renderMain() {
     }
   })
   const body = host.querySelector('#tabBody')
-  if (state.tab === 'chat') { renderMessages(body); wireComposer(host) }
+  if (state.tab === 'chat') {
+    if (embedChat) renderChatEmbed(body)
+    else { renderMessages(body); wireComposer(host) }
+  }
   else if (state.tab === 'tasks') renderKanban(body)
   else if (state.tab === 'arts') renderArtifacts(body)
   else if (state.tab === 'scene') renderScenegraph(body)
+}
+
+/**
+ * 「Agent 对话」内嵌 dsh 标准对话（M3 双向打通的 panel 侧）：同源 iframe 挂 dsh 根 `/`。
+ * 上下文携带（MVP）：dsh 深链预填能力未经核实（spike 未覆盖），以剪贴板 + 聚焦兜底——
+ * 按钮把部门/行业上下文复制给用户，粘进对话；dsh 若支持预填深链再升级（诚实降级）。
+ */
+function renderChatEmbed(host) {
+  const dept = state.overview.dept
+  const industry = state.overview.industry
+  host.innerHTML = `
+    <div class="chat-embed">
+      <div class="ce-bar">
+        <span class="ce-title">🤖 dsh 标准对话<span class="ce-sub">默认 Agent 交互面 · 面板 Agent 阵容可被点名调用</span></span>
+        <span class="ce-acts">
+          <button class="ce-act" id="ceHandoff" title="把当前部门/行业上下文复制到剪贴板，粘进对话即可继续">📋 携带部门上下文</button>
+          <button class="ce-act" id="ceFallback">使用内置协作会话</button>
+          <a class="ce-act" href="/" target="_blank" rel="noreferrer">在 dsh 中打开 ↗</a>
+        </span>
+      </div>
+      <iframe class="ce-frame" src="/" title="dsh Agent 对话" referrerpolicy="same-origin"></iframe>
+    </div>`
+  document.getElementById('ceHandoff').onclick = async () => {
+    const context = `【榕器·${dept.label}】行业 ${industry?.code ?? '未激活'} · 请围绕该部门场景协作（面板：${location.origin}${basePath()}/panel/?dept=${state.dept}）`
+    try {
+      await navigator.clipboard.writeText(context)
+      void toast('上下文已复制——粘贴到对话即可让 Agent 进入该部门语境')
+    } catch {
+      void toast(context, 'info')
+    }
+  }
+  document.getElementById('ceFallback').onclick = () => {
+    localStorage.setItem('panel_chat_embed_off', '1')
+    renderMain()
+  }
 }
 
 async function loadTab() {
@@ -687,6 +765,7 @@ function composerHtml() {
         ${members.map((member) => `<span class="at-chip" data-at="${esc(member.name)}" title="${esc(member.title ?? '')}${member.orgName ? ` · ${esc(member.orgName)}` : ''}">🧑 ${esc(member.name)}</span>`).join('')}
         ${bound ? '<span class="at-chip ddu" data-at="钉群·全员">⇄ 钉群·全员</span>'
           : '<span class="at-chip" id="bindHint">🔗 绑定钉钉后可 @ 钉钉同事</span>'}
+        ${state.hostBridge && !EMBEDDED ? '<span class="at-chip" id="reembedHint" title="切回 dsh 标准对话（默认 Agent 交互面）">🤖 改用 dsh 对话</span>' : ''}
         <span class="dd-toggle" id="ddToggle"><span class="sw ${state.ddSync && bound ? 'on' : ''} ${bound ? '' : 'disabled'}" id="ddSw"></span>钉钉同步</span>
       </div>
       <div class="input-row">
@@ -728,6 +807,14 @@ function wireComposer(host) {
   }
   const modelHint = host.querySelector('#modelEmptyHint')
   if (modelHint) modelHint.onclick = () => void showModels()
+  // 退回内置会话后的「改用 dsh 对话」：清掉关闭标记并重渲染（内嵌为默认交互面）
+  const reembedHint = host.querySelector('#reembedHint')
+  if (reembedHint) {
+    reembedHint.onclick = () => {
+      localStorage.removeItem('panel_chat_embed_off')
+      renderMain()
+    }
+  }
 }
 
 function atMention(name, inputEl) {

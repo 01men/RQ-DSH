@@ -44,6 +44,25 @@ export const zh = {
   'fb.like': '有帮助',
   'fb.dislike': '没帮助',
   'fb.done': '已记录，感谢反馈',
+
+  // ── 设置分区「榕器宿主」（M2）──
+  'settings.nav': '榕器宿主',
+  'settings.mode.local': '本机即宿主',
+  'settings.mode.remote': '已连接远端宿主',
+  'settings.mode.none': '未连接宿主',
+  'settings.probe.ok': '可达',
+  'settings.probe.fail': '不可达',
+  'settings.refresh': '刷新状态',
+  'settings.open.wizard': '打开连接向导',
+  'settings.open.panel': '打开榕器工作台',
+  'settings.hint': '连接宿主（选择 IP）并在面板完成钉钉/账号登录；面板地址 /rq/panel/。',
+
+  // ── 会话视图 Tab「榕器工作台」（M3）──
+  'view.workbench': '榕器工作台',
+  'view.open.external': '在浏览器打开',
+
+  // ── 未连接角标（M3，shell.overlay）──
+  'overlay.unlinked': '榕器：未连接宿主，点击打开向导',
 } satisfies Record<string, string>
 
 /** `rq-card` 命名空间键联合。 */
@@ -93,4 +112,20 @@ export const en = {
   'fb.like': 'Helpful',
   'fb.dislike': 'Not helpful',
   'fb.done': 'Recorded — thanks for the feedback',
+
+  'settings.nav': 'RongQi host',
+  'settings.mode.local': 'This machine is the host',
+  'settings.mode.remote': 'Connected to remote host',
+  'settings.mode.none': 'Host not linked',
+  'settings.probe.ok': 'reachable',
+  'settings.probe.fail': 'unreachable',
+  'settings.refresh': 'Refresh',
+  'settings.open.wizard': 'Open connect wizard',
+  'settings.open.panel': 'Open RongQi workbench',
+  'settings.hint': 'Link a host (pick an IP) and sign in with DingTalk/account on the panel; panel lives at /rq/panel/.',
+
+  'view.workbench': 'RongQi workbench',
+  'view.open.external': 'Open in browser',
+
+  'overlay.unlinked': 'RongQi: host not linked — click to open the wizard',
 } satisfies Record<RqCardKey, string>

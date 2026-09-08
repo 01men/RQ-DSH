@@ -360,3 +360,47 @@ button { font-family:inherit; }
 .bc-title { font-size:13px; font-weight:600; margin-top:5px; }
 .bc-desc { font-size:11px; color:#6b7280; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .dim { color:#9ca3af; font-size:12px; }
+
+/* ===== 连接与登录向导（M2 fresh-install 首启体验） ===== */
+.wizard { margin:auto; width:min(920px, 94vw); padding:28px 0; overflow:auto; }
+.wz-head .wz-logo { font-weight:700; font-size:18px; margin-bottom:8px; }
+.wz-head .wz-logo .badge { background:var(--accent); color:#fff; font-size:10px; padding:2px 8px; border-radius:4px; margin-left:6px; }
+.wz-head p { color:var(--txt2); font-size:13px; line-height:1.7; max-width:720px; }
+.wz-cards { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:18px; }
+@media (max-width:760px) { .wz-cards { grid-template-columns:1fr; } }
+.wz-card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px 20px; box-shadow:var(--sh-md); }
+.wz-card h2 { font-size:14px; margin-bottom:4px; }
+.wz-sub { color:var(--txt2); font-size:12px; margin-bottom:12px; }
+.wz-ok { background:var(--accent-soft); color:var(--accent-deep); border-radius:8px; padding:8px 10px; font-size:12px; margin-bottom:10px; }
+.wz-form { display:flex; flex-direction:column; gap:8px; margin:10px 0; }
+.wz-form input { border:1px solid var(--line); border-radius:8px; padding:9px 11px; font-size:13px; }
+.wz-form input:focus { outline:2px solid var(--accent-soft); border-color:var(--accent); }
+.wz-hint { color:var(--txt2); font-size:11px; line-height:1.7; }
+.wz-err { color:var(--err); font-size:12px; min-height:16px; margin-top:6px; }
+.wz-scan, .wz-dd, .wz-back { margin-top:8px; width:100%; }
+.wz-history { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.wz-chip { border:1px dashed var(--line); background:#f9fafb; border-radius:14px; padding:3px 10px; font-size:11px; cursor:pointer; color:var(--txt2); }
+.wz-chip:hover { border-color:var(--accent); color:var(--accent-deep); }
+.wz-found { margin-top:10px; display:flex; flex-direction:column; gap:6px; }
+.wz-host { text-align:left; border:1px solid var(--line); background:#fff; border-radius:8px; padding:8px 10px; cursor:pointer; }
+.wz-host:hover { border-color:var(--accent); }
+.wz-host .sub { display:block; color:var(--txt2); font-size:11px; margin-top:2px; }
+.wz-details { margin-top:14px; border-top:1px dashed var(--line); padding-top:10px; }
+.wz-details summary { font-size:12px; color:var(--txt2); cursor:pointer; }
+.wz-ifaces { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+.wz-iface { border:1px solid var(--line); background:#fff; border-radius:8px; padding:5px 10px; font-size:12px; cursor:pointer; }
+.wz-iface .sub { color:var(--txt2); font-size:10px; margin-left:6px; }
+.wz-cmd { background:#111827; color:#e5e7eb; border-radius:8px; padding:10px; font-size:11px; white-space:pre-wrap; margin-top:8px; }
+.wz-foot { color:#9ca3af; font-size:11px; margin-top:16px; line-height:1.7; }
+
+/* ===== Agent 对话内嵌 dsh 标准对话（M3 双向打通） ===== */
+.chat-embed { display:flex; flex-direction:column; height:100%; min-height:0; }
+.ce-bar { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 12px;
+  border-bottom:1px solid var(--line); background:#fafbfc; flex-shrink:0; flex-wrap:wrap; }
+.ce-title { font-size:13px; font-weight:600; display:flex; align-items:center; gap:8px; }
+.ce-sub { font-size:11px; color:var(--txt2); font-weight:400; }
+.ce-acts { display:flex; align-items:center; gap:8px; }
+.ce-act { border:1px solid var(--line); background:#fff; border-radius:8px; padding:4px 10px;
+  font-size:11px; cursor:pointer; color:var(--txt); text-decoration:none; }
+.ce-act:hover { border-color:var(--accent); color:var(--accent-deep); }
+.ce-frame { flex:1; min-height:0; width:100%; border:none; background:#fff; }

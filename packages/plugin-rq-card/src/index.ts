@@ -1,17 +1,18 @@
 /**
- * @dsh-ops/plugin-rq-card —— dsh 会话侧注入插件，宿主半（WP-06）。
+ * @dsh-ops/plugin-rq-card —— dsh 会话侧注入插件，宿主半（WP-06 + M2 宿主连接）。
  *
- * 纯 UI 表面插件：宿主半不做任何行为注册（模式照抄 dsh ui-message-feedback
- * 的宿主半——空 apply 只为让插件出现在宿主 loader 图里）；浏览器半经
- * exports['./client']（lib/client.js）与 package.json 的 dsh.client 声明下发，
- * 由 client-modules 伺服于 /plugins/@dsh-ops/plugin-rq-card/client.js 并入
- * cordis 启动图（spike §2.1 证据 A1/A3）。
+ * 双面结构：
+ *   - 浏览器半（src/client/** → lib/client.js）：四态执行卡 + 👍/👎 反馈条 +（M2/M3）
+ *     设置分区「榕器宿主连接」、会话视图 Tab「榕器工作台」、未连接角标；
+ *   - 宿主半（本文件）：WP-06 时代是纯占位（空 apply）；M2 起承担「装好插件即可用」的
+ *     连接半部——HostLinkService 的免登向导端点 /rqcard/*（连接宿主/选 IP/本机初始化/
+ *     远端数据代理），详见 hostlink.ts 文件头。
  *
  * 【构建门禁（spike §4.4，硬约束）】激活期缺 bundle 会响亮抛错
  * （MissingClientBundleError → ClientPackageCompositionError → 宿主启动失败）。
  * 因此 `dsh web` 启动前必须先执行：
  *
- *     node packages/plugin-rq-card/build.mjs     # 产出 lib/client.js
+ *     node packages/plugin-rq-card/build.mjs     # 产出 lib/client.js（含 build-id 指纹）
  *
  * cordis.yml / cordis.patch.yml 的 loader 条目 name 必须是包名
  * '@dsh-ops/plugin-rq-card'（client-modules 用 require.resolve 解析包元数据，
@@ -25,7 +26,12 @@
  * 建议把摘要文本放在结果首块，富卡片与纯文本两个世界读同一份信息。
  */
 
+import { defineTool, type HttpExchange } from '../../platform-core/src/index.ts'
 import { CONSOLE_BASE } from './wire.ts'
+import { HostLinkService, RQCARD_CALL_HEADER } from './hostlink.ts'
+export { HostLinkService, RQCARD_CALL_HEADER } from './hostlink.ts'
+export type { HostLinkConfig, HubProbe, HostLinkOptions } from './hostlink.ts'
+export { normalizeHubBase, proxyPathAllowed } from './hostlink.ts'
 
 /** summarizeForToolResult 的输入。 */
 export interface ToolResultSummaryInput {
@@ -66,5 +72,140 @@ export function summarizeForToolResult(input: ToolResultSummaryInput): string {
   return lines.join('\n')
 }
 
-/** 宿主插件体 —— 本表面插件无宿主侧行为（浏览器半承担全部注入）。 */
-export function apply(): void {}
+export interface RqCardConfig {
+  /** 连接配置文件目录（默认与平台存储同目录）。 */
+  dataDir?: string
+  /** LAN 扫描候选端口（默认 [7300, 3080]；测试可注入）。 */
+  scanPorts?: number[]
+}
+
+export const name = 'rq-card'
+export const inject = ['httpServer', 'tools', 'opsStorage', 'authn', 'iam']
+
+/**
+ * 宿主插件体：装配 HostLinkService（/rqcard/* 免登向导端点 + 远端代理）与 rq_host_status 工具。
+ * 浏览器半的注入面全部在 src/client/（构建产物 lib/client.js）。
+ */
+export function apply(ctx: Context, config: RqCardConfig = {}) {
+  const http = ctx.httpServer
+  const link = new HostLinkService(ctx, { dataDir: config.dataDir, scanPorts: config.scanPorts })
+
+  /** 向导调用头校验（CSRF 防线，见 hostlink.ts 文件头「自带防线」第 1 条）。 */
+  const wizardGuard = (exchange: HttpExchange): boolean => {
+    const raw = exchange.headers[RQCARD_CALL_HEADER]
+    const value = String(Array.isArray(raw) ? raw[0] : (raw ?? ''))
+    if (value !== '1') {
+      exchange.fail(403, 'WIZARD_CALL_HEADER_REQUIRED', '向导端点要求 x-rqcard-call: 1 请求头（跨站防御）')
+      return false
+    }
+    return true
+  }
+
+  const json = <T extends Record<string, any>>(exchange: HttpExchange): T => (exchange.body ?? {}) as T
+  const fail = (exchange: HttpExchange, code: string, error: unknown): void => {
+    exchange.fail(400, code, error instanceof Error ? error.message : String(error))
+  }
+
+  // -- 连接状态与三通道（local / remote / reset）+ 局域网扫描 -------------------
+  http.register('GET', '/rqcard/link', async (exchange) => {
+    if (!wizardGuard(exchange)) return
+    const cfg = link.getConfig()
+    const probe = cfg.mode === 'remote' && cfg.hubBase ? await link.probeHub(cfg.hubBase).catch(() => null) : null
+    exchange.ok({
+      mode: cfg.mode,
+      hubBase: cfg.hubBase ?? null,
+      hubMountPrefix: cfg.hubMountPrefix ?? null,
+      label: cfg.label ?? null,
+      savedAt: cfg.savedAt ?? null,
+      probe,
+      localFirstRun: link.localFirstRun(),
+    })
+  })
+
+  http.register('POST', '/rqcard/link/local', (exchange) => {
+    if (!wizardGuard(exchange)) return
+    const input = json<{ label?: string }>(exchange)
+    exchange.ok({ config: link.setLocal(input.label) })
+  })
+
+  http.register('POST', '/rqcard/link/remote', async (exchange) => {
+    if (!wizardGuard(exchange)) return
+    const input = json<{ hubBase?: string; label?: string }>(exchange)
+    try {
+      exchange.ok(await link.setRemote(String(input.hubBase ?? ''), input.label))
+    } catch (error) {
+      fail(exchange, 'LINK_REMOTE_FAILED', error)
+    }
+  })
+
+  http.register('POST', '/rqcard/link/reset', (exchange) => {
+    if (!wizardGuard(exchange)) return
+    exchange.ok({ config: link.reset() })
+  })
+
+  http.register('POST', '/rqcard/link/scan', async (exchange) => {
+    if (!wizardGuard(exchange)) return
+    const input = json<{ candidates?: string[] }>(exchange)
+    try {
+      exchange.ok(await link.scan(input.candidates))
+    } catch (error) {
+      fail(exchange, 'LINK_SCAN_FAILED', error)
+    }
+  })
+
+  // -- 本机初始化（形态 B 首启：admin 口令 / 对外地址 / 监听指引） -------------
+  http.register('GET', '/rqcard/local-init', (exchange) => {
+    if (!wizardGuard(exchange)) return
+    exchange.ok({ firstRun: link.localFirstRun(), interfaces: link.localInterfaces() })
+  })
+
+  http.register('POST', '/rqcard/local-init/admin', (exchange) => {
+    if (!wizardGuard(exchange)) return
+    const input = json<{ username?: string; newPassword?: string }>(exchange)
+    try {
+      exchange.ok(link.localInitAdmin(String(input.newPassword ?? ''), input.username || 'admin'))
+    } catch (error) {
+      fail(exchange, 'LOCAL_INIT_FAILED', error)
+    }
+  })
+
+  http.register('POST', '/rqcard/local-init/listen-plan', (exchange) => {
+    if (!wizardGuard(exchange)) return
+    const input = json<{ ip?: string; port?: number }>(exchange)
+    const ip = String(input.ip ?? '').trim() || '0.0.0.0'
+    const port = Number.isFinite(Number(input.port)) && Number(input.port) > 0 ? Number(input.port) : 3080
+    exchange.ok({
+      ip,
+      port,
+      command: `--trusted-host ${ip}:${port}`,
+      note: 'dsh webServer 的监听地址须在 harness 配置直写 host（dsh CLI 刻意拒绝 --host 0.0.0.0），'
+        + `重启后局域网经 http://<本机IP>:${port}/ 访问；详见 docs/deploy-enterprise.md 形态 B。本插件不热改宿主监听。`,
+    })
+  })
+
+  // -- 远端数据代理：通配路径走中间件拦截（路由表按段精确匹配表达不了任意深度） --
+  http.use(async (exchange) => {
+    if (!exchange.path.startsWith('/rqcard/proxy')) return
+    if (!wizardGuard(exchange)) return // 已写 403 响应
+    await link.proxy(exchange)
+  })
+
+  // -- Agent 工具：会话里能问「连的哪个宿主」 ----------------------------------
+  ctx.tools.register(defineTool({
+    name: 'rq_host_status',
+    description: '查看榕器宿主连接状态：本机即宿主（local）/ 连接远端宿主（remote，含地址与面板入口）/ 未配置（none，打开面板会进入连接向导）。',
+    parameters: {},
+    output: { type: 'object', additionalProperties: true },
+    async execute() {
+      const cfg = link.getConfig()
+      return {
+        mode: cfg.mode,
+        hubBase: cfg.hubBase ?? null,
+        panelUrl: cfg.mode === 'remote' && cfg.hubBase
+          ? `${cfg.hubBase}${cfg.hubMountPrefix ?? ''}/panel/`
+          : `${CONSOLE_BASE}/panel/`,
+        ...(cfg.mode === 'none' ? { notice: '尚未配置宿主连接：打开面板 /panel/ 会进入连接向导（也可让使用者在浏览器完成配置）' } : {}),
+      }
+    },
+  }))
+}

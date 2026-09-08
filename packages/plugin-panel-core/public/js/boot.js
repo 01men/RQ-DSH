@@ -1,9 +1,16 @@
 /**
- * 面板启动引导：BASE 推导修正 + 票据免登 + 动态装载应用。
+ * 面板启动引导：BASE 推导修正 + 票据免登 + 宿主连接探测 + 动态装载应用。
  *
  * BASE 修正（review-dsh-agent-panel-v2 Phase 1 第 5 条）：console api.js 的
  * `new URL('.', baseURI)` 在 /rq/panel/ 下会推导成 /rq/panel（缺陷），这里改为
  * 「截取 /panel 前缀之前的部分」——独立形态 /panel/ → ''，挂载形态 /rq/panel/ → '/rq'。
+ *
+ * M2 宿主连接探测（fresh-install 铁律）：装好插件的全新 dsh 上，面板启动时向本机
+ * 插件的 /rqcard/link 问一次「连的哪个宿主」——
+ *   - remote：令牌作用域切到该宿主 + 全部 API 走本机远端代理（api.js setRemoteProxy）；
+ *   - none 且无会话：渲染连接向导（wizard.js）——选宿主/扫描 IP/本机初始化/登录；
+ *   - local / 探测失败（独立形态未装 rq-card）：维持既有行为。
+ * 向导端点在 /rq（非 /api）命名空间，须带 x-rqcard-call 头（服务端 CSRF 防线）。
  */
 const path = location.pathname
 const panelIdx = path.indexOf('/panel')
@@ -53,6 +60,21 @@ async function hostBridgeSession() {
   }
 }
 
+/**
+ * 宿主连接探测（M2）：GET /rqcard/link（免登命名空间 + 向导头）。
+ * 返回 null = 端点不存在（独立形态/旧版本插件），按本机模式继续。
+ */
+async function probeHostLink() {
+  try {
+    const response = await fetch(`${BASE}/rqcard/link`, { headers: { 'x-rqcard-call': '1' } })
+    const payload = await response.json().catch(() => null)
+    if (!response.ok || payload?.ok !== true) return null
+    return payload.data ?? null
+  } catch {
+    return null
+  }
+}
+
 async function bootstrap() {
   // 票据免登（dsh 宿主「打开即工作台」通道）：票据只进请求体，兑换后立即从地址栏清除
   const params = new URLSearchParams(location.search)
@@ -67,9 +89,26 @@ async function bootstrap() {
   }
   // 会话链：已有令牌 → 票据 → 宿主 Cookie 直通（dsh 宿主内点入面板零二次登录）
   const { hostBridge } = await hostBridgeSession()
+
+  // 宿主连接探测：remote 切换令牌作用域与代理；none 且无会话 → 连接向导（fresh-install 首启体验）
+  const hostLink = await probeHostLink()
+  const apiModule = await import('./api.js')
+  let remoteHub = null
+  if (hostLink?.mode === 'remote' && hostLink.hubBase) {
+    remoteHub = { hubBase: hostLink.hubBase, hubMountPrefix: hostLink.hubMountPrefix ?? '' }
+    apiModule.setConnectionScope(hostLink.hubBase)
+    apiModule.setRemoteProxy(true)
+  }
+  if (hostLink?.mode === 'none' && !apiModule.session.token) {
+    const wizard = await import('./wizard.js')
+    document.getElementById('app').dataset.booted = '1'
+    wizard.start({ base: BASE, hostBridge, localFirstRun: hostLink.localFirstRun === true })
+    return
+  }
+
   const app = await import('./app.js')
   document.getElementById('app').dataset.booted = '1'
-  app.start({ base: BASE, hostBridge })
+  app.start({ base: BASE, hostBridge, remoteHub })
 }
 
 bootstrap().catch((error) => {

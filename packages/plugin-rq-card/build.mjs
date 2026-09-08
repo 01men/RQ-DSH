@@ -37,6 +37,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { fileURLToPath } from 'node:url'
+import { BUILD_ID_HEADER, computeClientBuildId } from './build-id.mjs'
 
 const PKG_ROOT = fileURLToPath(new URL('.', import.meta.url))
 const PLUGIN_ID = '@dsh-ops/plugin-rq-card'
@@ -148,8 +149,11 @@ async function main() {
     },
     // closure-factory 形状（tsdown.client.ts 的 banner/intro/footer 等价物）：
     // loader 物化时执行一次工厂，返回 bundle 导出，require 解析平台模块表。
+    // 首行 build-id 指纹（fresh-install 装机门禁）：selftest 用 build-id.mjs 重算比对，
+    // 「改了 src/client 忘了重建」会在推送前被拦下。
     banner: {
       js: [
+        `/* ${BUILD_ID_HEADER}: ${computeClientBuildId(PKG_ROOT)} */`,
         'var module = { exports: {} }; var exports = module.exports;',
         `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
       ].join('\n'),
@@ -165,6 +169,10 @@ async function main() {
   const head = readFileSync(outfile, 'utf8').slice(0, 400)
   if (!head.includes('__ModuleLoader__') || !head.includes(PLUGIN_ID)) {
     console.error('[rq-card/build] 产物头部不含 closure-factory 形状，构建结果不可信。')
+    process.exit(1)
+  }
+  if (!head.includes(`${BUILD_ID_HEADER}: ${computeClientBuildId(PKG_ROOT)}`)) {
+    console.error('[rq-card/build] 产物头部 build-id 指纹缺失或不符，构建结果不可信。')
     process.exit(1)
   }
   const size = statSync(outfile).size

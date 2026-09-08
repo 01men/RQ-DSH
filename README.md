@@ -181,6 +181,33 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
 
 详细流程与验收清单见 [docs/deploy-enterprise.md](docs/deploy-enterprise.md) 第四节。
 
+### 装好插件即可用（fresh-install 体验 · 2026-09 定版）
+
+在**任何一台全新安装的 dsh** 上 `dsh plugin add` 装好本平台后，打开 `http://127.0.0.1:<端口>/rq/panel/`
+即进入**连接与登录向导**（定版设计见 [docs/plan-dsh-plugin-first.md](docs/plan-dsh-plugin-first.md)）：
+
+- **本机宿主（形态 B）**：首启可直接在向导里为 admin 设置登录口令（一次性初始口令全程不出服务端），
+  可选对外 IP 生成本机局域网监听指引，随后本机控制台登录（钉钉扫码 + 账号）；
+- **连接远端宿主（形态 C）**：向导**扫描局域网**（/24 × 7300/3080 端口探活，自动判定 dsh 挂载/独立
+  两种宿主形态）或手输 `http://宿主IP:端口` → 测试连接 → **账号密码登录经本机插件代理全闭环**
+  （令牌按连接隔离，浏览器零跨域）；钉钉扫码引导至宿主登录页（宿主侧 `next` 回跳增强见交接清单 G1）。
+  连接后面板/看板/卡片数据全量指向远端宿主——运维工具则由 plugin-connect 转发宿主执行。
+
+向导端点位于免登命名空间 `/rqcard/*`（console 鉴权中间件只拦 `/api/*`，选宿主/设口令必须发生在
+登录之前），自带三道防线：`x-rqcard-call` 向导头（挡跨站 drive-by CSRF）、代理白名单 + 只透传
+Authorization + `redirect: manual`（令牌不外泄）、SSE 不透传（前端走既有 30s 轮询降级）。
+
+**对话与看板双向打通**：dsh 会话内新增「榕器工作台」视图 Tab（同源内嵌 `/rq/panel/`）；面板
+「Agent 对话」默认内嵌 dsh 标准模式对话（作为默认 Agent 交互面；被内嵌/无 dsh 时自动回落内置
+协作会话，防 iframe 递归）；dsh 设置页新增「榕器宿主」分区、未连接宿主时全局角标主动提醒。
+其他 Agent 的协作调用：会话内 `panel_agent_invoke`（点名调用面板 Agent 阵容，同步取回应答）、
+`panel_board_digest`（战略看板聚合摘要）+ 既有 `panel_msg_send`/`panel_task_*` 写通道与 `POST /mcp`。
+
+**装机铁律（已写入 AGENTS.md 铁律 7）**：每次功能/面板更新必须保持本节体验成立——selftest 的
+「fresh-install 装机模拟」段自动断言装机链完整性（patch entry 逐个解析导入、cordis 三链一致、
+rq-card 浏览器半 build-id 新鲜度、files 覆盖）；改了 `src/client/**` 必须先
+`node packages/plugin-rq-card/build.mjs` 重建，忘重建推送前即红。
+
 ### 已融合 OS-skill 模块设计（v1.1）
 
 选择性吸收了 [01men/OS-skill](https://github.com/01men/OS-skill) 两个模块中具有长远价值的设计（决策全记录见 [docs/roadmap.md](docs/roadmap.md)）：

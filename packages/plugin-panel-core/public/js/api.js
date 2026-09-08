@@ -2,36 +2,60 @@
  * 面板 API 客户端：与 console api.js 同一套令牌存储键（同源复用控制台会话），
  * BASE 由 boot.js 传入（/rq/panel/ 挂载形态推导修正）。全部请求收口于此，
  * 页面代码零裸 fetch（RBAC 走查铁律同样适用于面板前端）。
+ *
+ * M2 远端连接（形态 C）：boot.js 探测到宿主连接为 remote 时调用 setRemoteProxy(true)——
+ * 全部 /api/* 请求改经本机插件的远端代理（/rqcard/proxy/*）转发宿主，浏览器零跨域；
+ * 令牌按连接隔离（setConnectionScope(hubBase)），本机/远端会话互不串台。
  */
+
 export let BASE = ''
 
 export function setBase(value) {
   BASE = value
 }
 
-const TOKEN_KEY = 'heng_ops_token'
-const REFRESH_KEY = 'heng_ops_refresh'
-const USER_KEY = 'heng_ops_user'
+/** 远端代理开关：true 时 /api/* 重写到 ${BASE}/rqcard/proxy/api/*。 */
+let remoteProxy = false
 
-export const session = {
-  get token() { return localStorage.getItem(TOKEN_KEY) ?? '' },
-  get refreshToken() { return localStorage.getItem(REFRESH_KEY) ?? '' },
-  saveRefresh(token) { localStorage.setItem(REFRESH_KEY, token) },
+export function setRemoteProxy(enabled) {
+  remoteProxy = Boolean(enabled)
+}
+
+/** 连接作用域：远端连接时传 hubBase，令牌键按连接命名空间隔离（对齐 console connections.js 语义）。 */
+let scope = ''
+
+export function setConnectionScope(value) {
+  scope = String(value ?? '')
+}
+
+const scopedKey = (baseKey) => (scope ? `${baseKey}@${scope}` : baseKey)
+
+/** 请求路径重写：远端模式把 /api/* 指向本机插件的宿主代理。 */
+const mapPath = (path) => (remoteProxy && path.startsWith('/api/')
+  ? `${BASE}/rqcard/proxy${path}`
+  : `${BASE}${path}`)
+
+const session = {
+  get token() { return localStorage.getItem(scopedKey('heng_ops_token')) ?? '' },
+  get refreshToken() { return localStorage.getItem(scopedKey('heng_ops_refresh')) ?? '' },
+  saveRefresh(token) { localStorage.setItem(scopedKey('heng_ops_refresh'), token) },
   get user() {
-    try { return JSON.parse(localStorage.getItem(USER_KEY) ?? 'null') } catch { return null }
+    try { return JSON.parse(localStorage.getItem(scopedKey('heng_ops_user')) ?? 'null') } catch { return null }
   },
   save(token, user) {
-    localStorage.setItem(TOKEN_KEY, token)
-    localStorage.setItem(USER_KEY, JSON.stringify(user))
+    localStorage.setItem(scopedKey('heng_ops_token'), token)
+    localStorage.setItem(scopedKey('heng_ops_user'), JSON.stringify(user))
   },
   clear() {
-    localStorage.removeItem(TOKEN_KEY)
-    localStorage.removeItem(REFRESH_KEY)
-    localStorage.removeItem(USER_KEY)
+    localStorage.removeItem(scopedKey('heng_ops_token'))
+    localStorage.removeItem(scopedKey('heng_ops_refresh'))
+    localStorage.removeItem(scopedKey('heng_ops_user'))
   },
   get permissions() { return this.user?.permissions ?? [] },
   can(point) { return this.permissions.includes('*') || this.permissions.includes(point) },
 }
+
+export { session }
 
 export class ApiError extends Error {
   constructor(code, message, status) {
@@ -48,15 +72,15 @@ async function tryRefresh() {
   if (!refreshing) {
     refreshing = (async () => {
       try {
-        const response = await fetch(`${BASE}/api/auth/refresh`, {
+        const response = await fetch(mapPath('/api/auth/refresh'), {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ refreshToken: session.refreshToken }),
         })
         const payload = await response.json().catch(() => null)
         if (!response.ok || payload?.ok === false) return false
-        localStorage.setItem(TOKEN_KEY, payload.data.token)
-        localStorage.setItem(REFRESH_KEY, payload.data.refreshToken)
+        localStorage.setItem(scopedKey('heng_ops_token'), payload.data.token)
+        localStorage.setItem(scopedKey('heng_ops_refresh'), payload.data.refreshToken)
         return true
       } catch {
         return false
@@ -71,7 +95,7 @@ async function tryRefresh() {
 async function request(method, path, body, retried = false) {
   const headers = { 'content-type': 'application/json' }
   if (session.token) headers.authorization = `Bearer ${session.token}`
-  const response = await fetch(`${BASE}${path}`, {
+  const response = await fetch(mapPath(path), {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),

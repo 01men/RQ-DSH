@@ -34,12 +34,14 @@ import * as consolePlugin from '../packages/plugin-console/src/index.ts'
 import * as panelCore from '../packages/plugin-panel-core/src/index.ts'
 import * as dingtalkBridge from '../packages/plugin-dingtalk-bridge/src/index.ts'
 import * as dshBridge from '../packages/plugin-dsh-bridge/src/index.ts'
+import * as rqCard from '../packages/plugin-rq-card/src/index.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { createServer, request as httpRequest } from 'node:http'
 import { createHash } from 'node:crypto'
 import { rm, mkdir } from 'node:fs/promises'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const readBody = (req) => new Promise((resolve) => {
   const chunks = []
@@ -591,6 +593,90 @@ for (let i = 0; i < 60; i++) {
 if (!seeded) console.log('[33m! 种子数据就绪超时，部分断言可能失败[0m')
 
 try {
+  // ================================================================ fresh-install 装机模拟（插件化铁律）
+  // 目标：把「全新 dsh 上 dsh plugin add → 安装、启动、完整体验」拆成可在推送前自动断言的
+  // 不变量——装机清单可解析可导入、三条装载链一致、浏览器半 bundle 新鲜、files 覆盖运行期资产。
+  section('fresh-install 装机模拟（dsh plugin add 装机链完整性）')
+  {
+    // 别名导入：文件后段存在同名顶层 const existsSync（TDZ 遮蔽 import 绑定），段内一律用 pathExists
+    const { existsSync: pathExists } = await import('node:fs')
+    const patchYaml = platformCore.parseYaml(readFileSync('cordis.patch.yml', 'utf8'))
+    const patchEntries = Array.isArray(patchYaml?.[0]?.insert) ? patchYaml[0].insert : []
+    check('cordis.patch.yml 解析出插件 entry ≥20', patchEntries.length >= 20, `entries=${patchEntries.length}`)
+
+    // -- 1. 逐 entry 解析到本地模块并导入（抓缺文件/坏导出——装机包里最致命的静默事故）--
+    const broken = []
+    for (const entry of patchEntries) {
+      const name = String(entry?.name ?? '')
+      let localPath = null
+      if (name.startsWith('dsh-enterprise-ops/')) {
+        // 形如 dsh-enterprise-ops/packages/<dir>/src/index.ts（相对本仓根）
+        localPath = name.slice('dsh-enterprise-ops/'.length)
+      } else if (name.startsWith('@dsh-ops/')) {
+        // 安装形态以包名解析（client-modules 走 require.resolve）；本仓等价物 = packages/<包目录>
+        const dir = name.slice('@dsh-ops/'.length)
+        try {
+          const pkg = JSON.parse(readFileSync(join('packages', dir, 'package.json'), 'utf8'))
+          const target = typeof pkg.exports?.['.'] === 'string' ? pkg.exports['.'] : pkg.exports?.['.']?.default
+          if (typeof target === 'string') localPath = join('packages', dir, target)
+        } catch { /* 包缺失/坏 package.json → localPath 保持 null */ }
+      }
+      if (!localPath || !pathExists(localPath)) { broken.push(`${entry?.id}:resolve`); continue }
+      try { await import(pathToFileURL(join(process.cwd(), localPath)).href) }
+      catch (error) { broken.push(`${entry?.id}:import(${error instanceof Error ? error.message : String(error)})`) }
+    }
+    check('patch 全部 entry 解析到本地模块并成功导入', broken.length === 0, broken.join(' | '))
+
+    // -- 2. 三链一致：cordis.patch.yml ↔ cordis.yml ↔ boot-all.ts（防「加了包漏登记」）--
+    const patchDirs = patchEntries.map((entry) => String(entry?.name ?? '')).flatMap((name) => {
+      if (name.startsWith('dsh-enterprise-ops/packages/')) return [name.slice('dsh-enterprise-ops/packages/'.length).split('/')[0]]
+      if (name.startsWith('@dsh-ops/')) return [name.slice('@dsh-ops/'.length)]
+      return []
+    })
+    const DSH_ONLY = new Set(['plugin-rq-card', 'plugin-dsh-bridge']) // dsh 宿主专属（客户端 bundle / webServer 挂载），独立形态不装配
+    const bootSource = readFileSync('src/boot-all.ts', 'utf8')
+    const bootDirs = [...bootSource.matchAll(/from '(@dsh-ops\/[\w-]+)'/g)].map((match) => match[1].slice('@dsh-ops/'.length))
+    const patchOnly = patchDirs.filter((dir) => !DSH_ONLY.has(dir) && !bootDirs.includes(dir))
+    const bootOnly = bootDirs.filter((dir) => !patchDirs.includes(dir))
+    check('三链一致：boot-all ↔ patch 服务面插件一一对应（dsh 专属条目豁免）',
+      patchOnly.length === 0 && bootOnly.length === 0, `patchOnly=${patchOnly} bootOnly=${bootOnly}`)
+    const cordisYaml = platformCore.parseYaml(readFileSync('cordis.yml', 'utf8'))
+    const cordisIds = new Set((Array.isArray(cordisYaml?.[0]?.insert) ? cordisYaml[0].insert : []).map((entry) => entry?.id))
+    const patchIds = new Set(patchEntries.map((entry) => entry?.id))
+    const idDrift = [...cordisIds].filter((id) => !patchIds.has(id)).concat([...patchIds].filter((id) => !cordisIds.has(id)))
+    check('三链一致：cordis.yml ↔ cordis.patch.yml 插件 id 集合相等', idDrift.length === 0 && patchIds.size >= 20, idDrift.join(','))
+
+    // -- 3. rq-card 浏览器半 bundle 新鲜度（改 src/client 忘重建 = 过期装机包）--
+    const { computeClientBuildId, readBuiltId } = await import('../packages/plugin-rq-card/build-id.mjs')
+    const cardPkg = join(process.cwd(), 'packages', 'plugin-rq-card')
+    const expectedId = computeClientBuildId(cardPkg)
+    const builtId = readBuiltId(cardPkg)
+    check('rq-card 浏览器半 bundle 新鲜（build-id 指纹一致）',
+      Boolean(builtId) && expectedId === builtId, `expected=${expectedId} built=${builtId}`)
+
+    // -- 4. 装机 files 覆盖：运行期资产必须落在根 package.json files 根之下 --
+    const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
+    const filesRoots = ['packages', 'src', 'cordis.patch.yml', 'cordis.yml', 'README.md', 'LICENSE']
+    check('根 package.json files 覆盖装机所需根', filesRoots.every((item) => rootPkg.files?.includes(item)))
+    check('dsh.bundle.patch 契约指向 cordis.patch.yml 且存在',
+      rootPkg.dsh?.bundle?.patch === './cordis.patch.yml' && pathExists('cordis.patch.yml'))
+    check('dsh.compatibility 声明在场（dsh 版本区间 + profiles）',
+      typeof rootPkg.dsh?.compatibility?.dsh === 'string' && Array.isArray(rootPkg.dsh?.compatibility?.profiles))
+    check('面板 SPA 静态资源在场（index.html / boot.js / app.js）',
+      pathExists('packages/plugin-panel-core/public/index.html')
+      && pathExists('packages/plugin-panel-core/public/js/boot.js')
+      && pathExists('packages/plugin-panel-core/public/js/app.js'))
+    check('卡片包数据在场（cardpacks/*.json ≥1）',
+      readdirSync('packages/plugin-panel-core/cardpacks').filter((file) => file.endsWith('.json')).length >= 1)
+    check('行业场景图谱在场（platform-core/scenegraphs/*.json ≥1）',
+      readdirSync('packages/platform-core/scenegraphs').filter((file) => file.endsWith('.json')).length >= 1)
+    check('rq-card bundle 产物在场（lib/client.js）', pathExists('packages/plugin-rq-card/lib/client.js'))
+    const declared = patchDirs.filter((dir) => pathExists(join('packages', dir, 'plugin.yaml')))
+    check('声明位插件 plugin.yaml 与 manifest/api.yaml 成对在场',
+      declared.length >= 15 && declared.every((dir) => pathExists(join('packages', dir, 'manifest', 'api.yaml'))),
+      declared.join(','))
+  }
+
   // ================================================================ 基础与认证
   section('平台健康与登录')
   const health = await api('GET', '/api/health')
@@ -4371,6 +4457,22 @@ try {
         JSON.stringify(afterSwitch.data?.messages?.filter((m) => m.agentName)?.map((m) => ({ t: String(m.text).slice(0, 30), model: m.model }))))
       const badModelMsg = await api('POST', '/api/panel/mfg/messages', { token: panelAdmin, body: { channelId: mainChannel.id, text: '未登记模型应被拒', model: 'no-such-model', ddSync: false } })
       check('面板：对话框指定未登记模型被拒（400，诚实报错）', badModelMsg.status === 400, JSON.stringify(badModelMsg.error))
+
+      // -- M3 对话打通：panel_agent_invoke（dsh 标准对话点名调用面板 Agent）+ board digest --
+      const invokeOk = await api('POST', '/api/tools/execute', { token: panelAdmin, body: { name: 'panel_agent_invoke', args: { dept: 'mfg', agent: '面板质检员', message: '点名调用：今天一次装机合格率？' } } })
+      check('panel_agent_invoke：点名调用面板 Agent（资产+场景摘要 → modelgw 单轮，同步取回应答）',
+        invokeOk.ok && invokeOk.data.isError === false && invokeOk.data.value?.ok === true && /93\.2%/.test(String(invokeOk.data.value?.reply ?? '')),
+        JSON.stringify(invokeOk.data?.value ?? invokeOk.error))
+      const invokeUnknown = await api('POST', '/api/tools/execute', { token: panelAdmin, body: { name: 'panel_agent_invoke', args: { dept: 'mfg', agent: '不存在 Agent', message: 'x' } } })
+      check('panel_agent_invoke：未知 Agent 诚实失败（可用阵容透出，不造假回复）',
+        invokeUnknown.ok && invokeUnknown.data.isError === false && invokeUnknown.data.value?.ok === false && /可用阵容/.test(String(invokeUnknown.data.value?.reason ?? '')),
+        JSON.stringify(invokeUnknown.data?.value))
+      const digest = await api('POST', '/api/tools/execute', { token: panelAdmin, body: { name: 'panel_board_digest', args: { platform: 'rd' } } })
+      check('panel_board_digest：战略看板聚合摘要（资产/漏斗/ROI 估算/卡片清单）',
+        digest.ok && digest.data.isError === false && digest.data.value?.assets && typeof digest.data.value?.funnel?.invoked === 'number' && Array.isArray(digest.data.value?.cards) && /估算/.test(String(digest.data.value?.roiEstimate?.note ?? '')),
+        JSON.stringify({ assets: digest.data?.value?.assets, err: digest.data?.error }))
+      const digestBad = await api('POST', '/api/tools/execute', { token: panelAdmin, body: { name: 'panel_board_digest', args: { platform: 'nope' } } })
+      check('panel_board_digest：非法 platform 诚实报错', digestBad.ok && digestBad.data.isError === true && /platform 非法/.test(JSON.stringify(digestBad.data)))
       const panelModelDel = await api('DELETE', `/api/panel/models/${panelModelUpsert.data.id}`, { token: panelAdmin })
       check('面板：模型删除（DELETE /api/panel/models/:id，登记移除后目录不含）',
         panelModelDel.ok && panelModelDel.data.deleted === true
@@ -4791,6 +4893,142 @@ try {
       `${oidcStart.status} ${oidcLocation}`)
     const oidcCallbackBad = await fetch(`${simOrigin}/auth/oidc/callback?code=x&state=bogus`, { redirect: 'manual' })
     check('/auth/oidc/callback 坏 state 被拒 400（防 CSRF/重放）', oidcCallbackBad.status === 400)
+
+    // ================================================================ M2/M3 宿主连接向导（plugin-rq-card hostlink + 注入面契约）
+    // 复用 mount 台架：本段全部经 sim（/rq 前缀 → bridge → 数据面分发），覆盖免登命名空间、
+    // 向导头防线、扫描发现、远端代理白名单、本机首启初始化、rq_host_status 工具与前端契约。
+    section('宿主连接向导（rq-card hostlink：免登命名空间 / 扫描 / 远端代理 / 本机初始化）')
+    {
+      await mountCtx.plugin(rqCard, {})
+      const wfetchSim = async (method, wpath, { headers = {}, body } = {}) => {
+        const response = await fetch(`${simOrigin}${wpath}`, {
+          method,
+          headers: { 'content-type': 'application/json', 'x-rqcard-call': '1', ...headers },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        })
+        return { status: response.status, body: await response.json().catch(() => null) }
+      }
+
+      // -- 免登命名空间 + 向导头防线（console 鉴权中间件只拦 /api/*，/rqcard/* 可达）--
+      const noHeader = await fetch(`${simOrigin}/rq/rqcard/link`)
+      check('hostlink：缺 x-rqcard-call 头 403（跨站 drive-by 防线）', noHeader.status === 403, `status=${noHeader.status}`)
+      const linkNone = await wfetchSim('GET', '/rq/rqcard/link')
+      check('hostlink：未配置态（mode=none + 本机首启标记，免登可达）',
+        linkNone.status === 200 && linkNone.body?.data?.mode === 'none' && linkNone.body.data.localFirstRun === true,
+        JSON.stringify(linkNone.body))
+
+      // -- stub 远端宿主 ×2：A=dsh 挂载形态（/rq 前缀），B=独立宿主形态（无前缀） --
+      const hubSeen = { authz: '', logins: 0, panelCalls: 0 }
+      const hubStubA = createServer(async (req, res) => {
+        const url = req.url ?? ''
+        const json = (status, payload) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)) }
+        if (req.method === 'GET' && (url === '/rq/api/health' || url === '/api/health')) return json(200, { ok: true, data: { version: '9.9.9-hubA' } })
+        if (req.method === 'POST' && url === '/rq/api/auth/login') {
+          hubSeen.logins += 1
+          hubSeen.authz = String(req.headers.authorization ?? '')
+          return json(200, { ok: true, data: { token: 'stub-hub-session', refreshToken: 'stub-hub-refresh', user: { id: 'u1', displayName: '远端管理员', permissions: ['*'] } } })
+        }
+        if (url.startsWith('/rq/api/panel/')) { hubSeen.panelCalls += 1; return json(200, { ok: true, data: { stub: 'panel', path: url } }) }
+        return json(404, { ok: false })
+      })
+      const hubStubB = createServer((req, res) => {
+        const url = req.url ?? ''
+        if (req.method === 'GET' && url === '/api/health') {
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ ok: true, data: { version: '8.8.8-hubB' } }))
+          return
+        }
+        res.writeHead(404).end('{}')
+      })
+      await new Promise((resolve) => hubStubA.listen(0, '127.0.0.1', resolve))
+      await new Promise((resolve) => hubStubB.listen(0, '127.0.0.1', resolve))
+      const hubA = `http://127.0.0.1:${hubStubA.address().port}`
+      const hubB = `http://127.0.0.1:${hubStubB.address().port}`
+      try {
+        const scanRes = await wfetchSim('POST', '/rq/rqcard/link/scan', { body: { candidates: [hubA, hubB, 'http://127.0.0.1:1'] } })
+        check('hostlink：扫描发现两类宿主（挂载前缀自动判定 /rq 与 空串）',
+          scanRes.status === 200 && scanRes.body.data.hosts.length === 2
+          && scanRes.body.data.hosts.some((host) => host.endpoint === hubA && host.mountPrefix === '/rq' && host.version === '9.9.9-hubA')
+          && scanRes.body.data.hosts.some((host) => host.endpoint === hubB && host.mountPrefix === ''),
+          JSON.stringify({ status: scanRes.status, body: scanRes.body }))
+        const linkRemote = await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: hubA, label: '自测宿主A' } })
+        check('hostlink：连接远端宿主（探测可达才落盘，mountPrefix=/rq）',
+          linkRemote.status === 200 && linkRemote.body.data.config.mode === 'remote' && linkRemote.body.data.config.hubMountPrefix === '/rq' && linkRemote.body.data.probe.reachable === true,
+          JSON.stringify(linkRemote.body))
+        const linkRemoteBad = await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: 'http://127.0.0.1:1' } })
+        check('hostlink：不可达宿主被拒（400，不落盘）', linkRemoteBad.status === 400 && /不可达/.test(String(linkRemoteBad.body?.error?.message ?? '')), JSON.stringify({ status: linkRemoteBad.status, body: linkRemoteBad.body }))
+
+        // -- 远端代理：白名单转发 + Authorization 透传 + 白名单外 403 --
+        const proxyLogin = await wfetchSim('POST', '/rq/rqcard/proxy/api/auth/login', {
+          body: { username: 'admin', password: 'whatever' },
+          headers: { authorization: 'Bearer proxied-token-abc' },
+        })
+        check('hostlink：代理白名单内转发（宿主收到 Authorization 透传，响应原样回浏览器）',
+          proxyLogin.status === 200 && hubSeen.logins === 1 && hubSeen.authz === 'Bearer proxied-token-abc' && proxyLogin.body?.data?.token === 'stub-hub-session',
+          JSON.stringify({ status: proxyLogin.status, hubSeen, body: proxyLogin.body }))
+        const proxyPanel = await wfetchSim('GET', '/rq/rqcard/proxy/api/panel/depts')
+        check('hostlink：面板 REST 全族经代理可达（形态 C 完整体验的数据面）',
+          proxyPanel.status === 200 && proxyPanel.body?.data?.stub === 'panel' && hubSeen.panelCalls === 1, JSON.stringify(proxyPanel.body))
+        const proxyDenied = await wfetchSim('GET', '/rq/rqcard/proxy/api/iam/users')
+        check('hostlink：代理白名单外 403（PROXY_PATH_DENIED）', proxyDenied.status === 403 && proxyDenied.body?.error?.code === 'PROXY_PATH_DENIED')
+        const proxyStream = await wfetchSim('GET', '/rq/rqcard/proxy/api/panel/stream')
+        check('hostlink：SSE 不透传（前端走既有 30s 轮询降级）', proxyStream.status === 403 && proxyStream.body?.error?.code === 'PROXY_PATH_DENIED')
+
+        // -- 断开：回到未配置，代理即拒 --
+        const resetRes = await wfetchSim('POST', '/rq/rqcard/link/reset')
+        check('hostlink：断开回到未配置', resetRes.status === 200 && resetRes.body?.data?.config?.mode === 'none', JSON.stringify({ status: resetRes.status, body: resetRes.body }))
+        const proxyAfterReset = await wfetchSim('GET', '/rq/rqcard/proxy/api/panel/depts')
+        check('hostlink：未连接时代理 409 NOT_REMOTE', proxyAfterReset.status === 409 && proxyAfterReset.body?.error?.code === 'NOT_REMOTE')
+
+        // -- 本机初始化（形态 B 首启：admin 口令设置，初始口令不出服务端）--
+        const initInfo = await wfetchSim('GET', '/rq/rqcard/local-init')
+        check('hostlink：本机首启检测 + 网卡清单', initInfo.status === 200 && initInfo.body?.data?.firstRun === true && Array.isArray(initInfo.body?.data?.interfaces), JSON.stringify({ status: initInfo.status, body: initInfo.body }))
+        mountCtx.iam.resetPassword(adminUser.id, 'InitKnown123')
+        writeFileSync(join(bridgeDataDir, 'admin-initial-password.txt'),
+          '平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\nInitKnown123\n')
+        const initWeak = await wfetchSim('POST', '/rq/rqcard/local-init/admin', { body: { newPassword: 'short' } })
+        check('hostlink：弱口令被拒（≥8 位）', initWeak.status === 400, JSON.stringify({ status: initWeak.status, body: initWeak.body }))
+        const initOk = await wfetchSim('POST', '/rq/rqcard/local-init/admin', { body: { newPassword: 'FreshPass123' } })
+        check('hostlink：首启 admin 口令初始化（返回与 console 登录同形会话：token + user.permissions）',
+          initOk.status === 200 && Boolean(initOk.body.data?.token) && Array.isArray(initOk.body.data?.user?.permissions),
+          JSON.stringify(initOk.body?.error))
+        check('hostlink：初始口令文件一次性消费（防重放）', !existsSync(join(bridgeDataDir, 'admin-initial-password.txt')))
+        const initAgain = await wfetchSim('POST', '/rq/rqcard/local-init/admin', { body: { newPassword: 'AnotherPass123' } })
+        check('hostlink：二次初始化被拒（仅首次启动可用）', initAgain.status === 400 && /仅首次启动/.test(String(initAgain.body?.error?.message ?? '')))
+        const reLogin = await fetch(`${simOrigin}/rq/api/auth/login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ username: 'admin', password: 'FreshPass123' }),
+        })
+        check('hostlink：新口令可正常登录（改密真实生效）', reLogin.status === 200, String(reLogin.status))
+        const listenPlan = await wfetchSim('POST', '/rq/rqcard/local-init/listen-plan', { body: { ip: '192.168.1.10' } })
+        check('hostlink：监听指引生成（trusted-host 命令 + 说明，不热改宿主监听）',
+          listenPlan.status === 200 && listenPlan.body?.data?.command.includes('--trusted-host 192.168.1.10:3080'), JSON.stringify({ status: listenPlan.status, body: listenPlan.body }))
+      } finally {
+        await new Promise((resolve) => hubStubA.close(resolve))
+        await new Promise((resolve) => hubStubB.close(resolve))
+      }
+
+      // -- 工具 rq_host_status（Agent 可答连接状态；此时已 reset → none）--
+      const hostTool = await mountCtx.tools.execute({ name: 'rq_host_status', arguments: {} })
+      check('工具 rq_host_status（连接状态 + 面板入口）',
+        hostTool.isError === false && hostTool.value?.mode === 'none' && typeof hostTool.value?.panelUrl === 'string',
+        JSON.stringify(hostTool.value ?? hostTool.error))
+
+      // -- 前端/注入面静态契约（改前端忘接线 = 这里红）--
+      const bootJs = readFileSync('packages/plugin-panel-core/public/js/boot.js', 'utf8')
+      check('前端契约：boot.js 探测 /rqcard/link 且带向导头、remote 切代理作用域',
+        bootJs.includes('/rqcard/link') && bootJs.includes('x-rqcard-call') && bootJs.includes('setRemoteProxy') && bootJs.includes('wizard.js'))
+      const appJsSource = readFileSync('packages/plugin-panel-core/public/js/app.js', 'utf8')
+      check('前端契约：Agent 对话内嵌 dsh（iframe + 嵌套防护 + 可退回内置）',
+        appJsSource.includes('canEmbedDshChat') && appJsSource.includes('ce-frame') && appJsSource.includes('panel_chat_embed_off') && appJsSource.includes('EMBEDDED'))
+      const wizardJs = readFileSync('packages/plugin-panel-core/public/js/wizard.js', 'utf8')
+      check('前端契约：连接向导（扫描/手输连接/本机初始化/钉钉引导）',
+        wizardJs.includes('link/scan') && wizardJs.includes('link/remote') && wizardJs.includes('local-init/admin') && wizardJs.includes('wzLoginDd'))
+      const cardClientSource = readFileSync('packages/plugin-rq-card/src/client/index.ts', 'utf8')
+      check('注入面契约：settings.section + conversation.view + 未连接角标',
+        cardClientSource.includes('SLOT_SETTINGS') && cardClientSource.includes('SLOT_VIEW') && cardClientSource.includes('UNLINKED_BADGE_ID'))
+    }
+
     await new Promise((resolve) => sim.close(resolve))
   }
 

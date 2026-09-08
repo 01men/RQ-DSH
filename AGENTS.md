@@ -37,6 +37,16 @@
    以上游实现为准吸收；定制面（定制自有包 + F 域余量）必须保留。
 6. **合并必须全量回归**：每次合并上游后跑 `npm run selftest`（当前 961+ 项）与
    `npm run lint:manifests`，全绿才能推送备份。
+7. **插件装机不变量（fresh-install 铁律）**：每一次功能、面板更新，都必须保持在
+   「**全新安装的 dsh** 上通过插件方式（`dsh plugin add`）安装、启动、完整体验本项目功能」
+   成立。推送备份前的硬性义务：
+   - rq-card 浏览器半（`src/client/**`、`src/wire.ts`、build.mjs、package.json）有任何改动，
+     必须先 `node packages/plugin-rq-card/build.mjs` 重建 `lib/client.js`——selftest
+     「fresh-install 装机模拟」段校验 build-id 指纹，忘重建即红；
+   - 面板静态资源/业务数据（public/、cardpacks/、scenegraphs）必须落在根 package.json
+     `files` 覆盖范围内（`packages` 根之下），否则装机包缺文件、全新 dsh 上静默缺功能；
+   - selftest「fresh-install 装机模拟」段（patch entry 逐个解析导入、cordis.patch.yml ↔
+     cordis.yml ↔ boot-all 三链一致、bundle 新鲜度、files 覆盖）必须全绿。
 
 ## 目录所有权（三区，双轨的边界线）
 

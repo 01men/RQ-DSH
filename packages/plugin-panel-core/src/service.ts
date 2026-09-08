@@ -536,6 +536,64 @@ export class PanelService extends Service {
     }
   }
 
+  /**
+   * 面板 Agent 点名问答（M3：panel_agent_invoke 工具的服务原语——dsh 标准对话协作主通道）。
+   * 与 invokeAgent 共享资产解析/模型取向/场景摘要组装，但同步返回应答文本、不落频道消息
+   * （调用方决定是否经 panel_msg_send 留痕）。失败诚实返回 ok:false + reason，不造假回复。
+   */
+  async askAgent(
+    deptId: string,
+    agentName: string,
+    question: string,
+    options: { userId?: string; modelOverride?: string; contextNote?: string } = {},
+  ): Promise<{ ok: true; reply: string; model: string } | { ok: false; reason: string }> {
+    const dept = this.dept(deptId)
+    const agentCard = dept.agents.find((card) => card.name === agentName)
+    if (!agentCard) {
+      const names = dept.agents.map((card) => card.name)
+      return { ok: false, reason: `部门 ${dept.id}（${dept.label}）名册无此 Agent。可用阵容：${names.join('、') || '（无）'}` }
+    }
+    const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
+    const asset = ref ? this.ctx.resourceCore.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
+    if (!asset) return { ok: false, reason: `Agent「${agentName}」未绑定 Agent 资产（agentRef），无法自主应答` }
+    const model = options.modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
+    if (!model) return { ok: false, reason: `Agent「${agentName}」未配置模型（model 属性为空），且本次未指定模型` }
+    const orgId = this.callerOrgId(options.userId)
+    const sceneSummary = this.sceneSummaryForDept(dept)
+    const systemPrompt = [
+      String((asset.attrs as Record<string, unknown> | undefined)?.systemPrompt ?? `你是企业部门协作面板中的数字同事「${agentCard.name}」（${agentCard.desc}）。`),
+      sceneSummary ? `本部门挂载的行业场景图谱要点：\n${sceneSummary}` : '',
+      options.contextNote ?? '',
+    ].filter(Boolean).join('\n\n')
+    try {
+      const result = await this.ctx.modelGateway.invoke({
+        model, orgId, subject: options.userId ? `user:${options.userId}` : 'panel:tool',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: question },
+        ],
+      })
+      return { ok: true, reply: result.content, model: result.model }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, reason: `模型网关调用失败（${message}）` }
+    } finally {
+      // 与 invokeAgent 同风格的协作计量（org 主键缺省跳过；失败不阻塞应答）
+      if (orgId) {
+        try {
+          this.ctx.usage.record({
+            org: orgId,
+            subject: options.userId ? `user:${options.userId}` : 'panel:tool',
+            principal: `org:${orgId}`,
+            resource: this.meterResource(dept.id, orgId),
+            meters: [{ key: 'calls', value: 1, unit: 'call' }],
+            idempotency_key: `panel:ask:${dept.id}:${agentName}:${newId('ask')}`,
+          })
+        } catch { /* 计量失败不阻塞问答 */ }
+      }
+    }
+  }
+
   /** 部门挂载活动的场景图谱摘要（注入 Agent 系统提示；图谱未装载则空串）。 */
   sceneSummaryForDept(dept: DeptConfigRecord): string {
     try {
