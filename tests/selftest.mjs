@@ -660,6 +660,9 @@ try {
     check('根 package.json files 覆盖装机所需根', filesRoots.every((item) => rootPkg.files?.includes(item)))
     check('dsh.bundle.patch 契约指向 cordis.patch.yml 且存在',
       rootPkg.dsh?.bundle?.patch === './cordis.patch.yml' && pathExists('cordis.patch.yml'))
+    check('rq-card 包名安装形态可解析（根包声明 file: 依赖 → profile node_modules 就位，真机 rq-smoke 实证）',
+      typeof rootPkg.dependencies?.['@dsh-ops/plugin-rq-card'] === 'string',
+      `dependencies=${JSON.stringify(rootPkg.dependencies ?? {})}`)
     check('dsh.compatibility 声明在场（dsh 版本区间 + profiles）',
       typeof rootPkg.dsh?.compatibility?.dsh === 'string' && Array.isArray(rootPkg.dsh?.compatibility?.profiles))
     check('面板 SPA 静态资源在场（index.html / boot.js / app.js）',

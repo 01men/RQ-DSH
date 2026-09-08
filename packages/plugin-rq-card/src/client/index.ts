@@ -84,6 +84,11 @@ const RQ_TOOL_NAMES: readonly string[] = [
   'connector_catalog_search', 'connector_connection_list', 'connector_execute', 'connector_run_list', 'connector_perm_group_list',
   'model_list', 'billing_wallet_balance', 'audit_logs', 'audit_alerts_list', 'audit_alerts_read_all',
   'audit_cost_report', 'market_plugin_list', 'approval_decide',
+  // 面板（部门工作台 + 战略看板）
+  'panel_agents_list', 'panel_msg_send', 'panel_task_create', 'panel_task_transition',
+  'panel_scene_diag', 'panel_widget_data', 'panel_agent_invoke', 'panel_board_digest',
+  // 宿主连接（M2）
+  'rq_host_status',
 ]
 
 /** 降级原因台账（spike §5 第 2/4 条的「降级标志」）。 */

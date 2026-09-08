@@ -103,10 +103,47 @@ git push                                  # 备份（origin push → RQ-DSH main
 
 ## 五、边界与后续
 
-- 宿主侧增强走交接清单 **G 节**（G1 登录回跳闭环 / G2 modelgw 流式化），未采纳前定制侧按降级路径运行。
+- 宿主侧增强走交接清单 **G 节**（G1 登录回跳闭环 / G2 modelgw 流式化 / G3 拷贝形态 TS 装载），未采纳前定制侧按降级路径运行。
 - LAN 扫描为有界探测（/24 × 双端口 × 350ms 超时，上限 600 候选）；防火墙/多网卡环境以手输兜底，
   扫描失败不阻断向导。
 - 远程形态的面板 SSE 不透传（代理不持流），由前端既有 30s 轮询降级承接（realtime.js 契约不变）。
 - dsh 客户端 slot（settings.section / conversation.view）实现对照 dsh rc.7 检出范本（ui-auth /
   ui-trajectory），全部走 specDynamic 探测 + safely 降级——上游升级改名时注入面静默消失、不崩宿主
   （spike §5 机制）。
+
+## 六、真机冒烟记录（2026-09-08，dsh rc.7 检出实测）
+
+### 6.1 源码/链接形态（web profile + `--patch overlay`）——8/8 全绿 ✅
+
+全新数据目录（`localFirstRun=true` 首启态）起服 `dsh --profile web --patch overlay.yml --port 3099`：
+
+| # | 检查 | 结果 |
+|---|---|---|
+| ① | `GET /` dsh web UI | 200 |
+| ② | `GET /plugins/@dsh-ops/plugin-rq-card/client.js` | 200，build-id 新鲜，新注入面（工作台 Tab/设置分区/未连接角标）标记 7 处命中 |
+| ③ | `GET /rq/panel/` 面板 SPA（经 dsh-bridge 挂载） | 200 |
+| ④ | `GET /rq/panel/js/wizard.js` 向导新文件 | 200 |
+| ⑤ | `GET /rq/api/health` | 200 ok |
+| ⑥ | `GET /rq/rqcard/link`（带向导头） | 200 `{mode:none, localFirstRun:true}`（首启向导态） |
+| ⑦ | 缺 `x-rqcard-call` 头 | 403（CSRF 防线生效） |
+| ⑧ | `POST /rq/rqcard/link/local` | 200（本机模式落盘） |
+
+### 6.2 真安装拷贝形态（`dsh plugin add file:` → 全新 profile）——已核实两处边界
+
+在全新 `rq-smoke` profile 上执行真实安装链 `dsh plugin --profile rq-smoke add file:D:/DSH-RQ`：
+
+- ✅ **装机链本身健康**：pnpm 安装成功；`dsh-enterprise-ops` 因 `dsh.bundle` 声明自动进 bundle 层；
+  装机包关键文件（cordis.patch.yml / lib/client.js / wizard.js / scenegraphs / src）全部在位。
+- ✅ **rq-card 包名解析已修复**：安装形态下 profile node_modules 原本解析不到 `@dsh-ops/plugin-rq-card`
+  （根包无 dependencies）——本补丁在根 package.json 声明
+  `"dependencies": { "@dsh-ops/plugin-rq-card": "file:packages/plugin-rq-card" }`，
+  重装后实测 `require.resolve('@dsh-ops/plugin-rq-card/package.json')` 通过、`./client` → `lib/client.js`。
+- ⚠ **已知边界（交接 G3，上游层面）**：拷贝安装把 TS 源码放进 `node_modules`，Node（≥22.6，含 24）
+  **拒绝对其做类型剥离**（`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`，实测
+  `--experimental-transform-types` 亦不解除）——所有 `…/src/index.ts` 形式的 loader entry 在拷贝
+  形态下不可执行。这是**全仓架构级**限制（宿主面包同样适用），非本插件化改造引入：
+  - 本地装机绕过：`dsh plugin --profile X add link:D:/DSH-RQ`（link: 符号链接的真实路径在
+    node_modules 之外，TS 正常装载）；
+  - registry/GitHub 拷贝形态的彻底解法需上游决策（G3）：dsh loader 预剥离 TS，或平台侧提供
+    预构建分发（构建 JS 镜像 + 指向 .js 的安装补丁）。
+  - 在 G3 落地前，「全新 dsh 装插件完整体验」以**源码/链接形态为准**（本文 §6.1 已闭环验证）。

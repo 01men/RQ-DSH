@@ -125,6 +125,9 @@ cordis.yml / cordis.patch.yml 属宿主面（装配清单随 main 演进）；�
   behavior 效果回传看板化、rq-card 卡片交互迭代。
 - **定制自有包回流**：rq-card 为双面插件（宿主形态也消费），panel-core/dingtalk-bridge 若宿主侧需要，
   按 Phase 3 清单节奏同步给 main；plugin-dsh-bridge 属宿主面，其演进需求走清单回流 main。
+- **Phase 4 首个专项（2026-09-08 交付）**：dsh 插件化充分落地——装机铁律门禁、B/C 双形态连接登录
+  向导、dsh 标准对话与看板双向打通；定版设计见 [plan-dsh-plugin-first.md](plan-dsh-plugin-first.md)，
+  其宿主侧增强余量并入交接清单 G 节（[handoff-f-remainder-to-main.md](handoff-f-remainder-to-main.md)）。
 
 ---
 

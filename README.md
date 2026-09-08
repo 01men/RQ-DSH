@@ -205,8 +205,14 @@ Authorization + `redirect: manual`（令牌不外泄）、SSE 不透传（前端
 
 **装机铁律（已写入 AGENTS.md 铁律 7）**：每次功能/面板更新必须保持本节体验成立——selftest 的
 「fresh-install 装机模拟」段自动断言装机链完整性（patch entry 逐个解析导入、cordis 三链一致、
-rq-card 浏览器半 build-id 新鲜度、files 覆盖）；改了 `src/client/**` 必须先
-`node packages/plugin-rq-card/build.mjs` 重建，忘重建推送前即红。
+rq-card 浏览器半 build-id 新鲜度、files 覆盖、rq-card 包名 file: 依赖就位）；改了 `src/client/**` 必须
+先 `node packages/plugin-rq-card/build.mjs` 重建，忘重建推送前即红。
+
+**装机形态边界（2026-09-08 真机实测，见 docs/plan-dsh-plugin-first.md §六）**：源码/链接形态
+（`--patch overlay` 或 `dsh plugin --profile X add link:<本仓路径>`，符号链接真实路径在 node_modules
+之外）完整体验 **8/8 验证通过**；**拷贝安装形态**（`add github:`/`add file:`，包实体落入
+node_modules）当前受 Node ≥22.6 限制——拒绝类型剥离 node_modules 内 TS，`src/index.ts` 形式的
+loader entry 不可执行（全仓架构级限制，解法走交接清单 **G3**：dsh loader 预剥离或平台预构建分发）。
 
 ### 已融合 OS-skill 模块设计（v1.1）
 

@@ -1,4 +1,4 @@
-/* rq-card-build-id: 6fc9a0a21c920c49 */
+/* rq-card-build-id: 86e8632fc2615825 */
 var module = { exports: {} }; var exports = module.exports;
 window.__ModuleLoader__.load({ id: "@dsh-ops/plugin-rq-card", factory: (require) => {
 var __defProp = Object.defineProperty;
@@ -635,7 +635,18 @@ var RQ_TOOL_NAMES = [
   "audit_alerts_read_all",
   "audit_cost_report",
   "market_plugin_list",
-  "approval_decide"
+  "approval_decide",
+  // 面板（部门工作台 + 战略看板）
+  "panel_agents_list",
+  "panel_msg_send",
+  "panel_task_create",
+  "panel_task_transition",
+  "panel_scene_diag",
+  "panel_widget_data",
+  "panel_agent_invoke",
+  "panel_board_digest",
+  // 宿主连接（M2）
+  "rq_host_status"
 ];
 var DEGRADED = [];
 function markDegraded(what, error) {

@@ -97,6 +97,7 @@ selftest 对照：`审批 SLA 与公司级终审（WP-10）` 分节水印断言�
 | G1-a | `packages/plugin-console/src/index.ts`（登录页/登录成功路径） | 登录页支持可信 `next` 参数：完成登录（含钉钉扫码）后按 `next` 回跳，fragment 携带一次性自助 `entry_ticket`；需新增 `POST /api/auth/entry-tickets/self`（已登录人类为自己签发短时票据，进 PUBLIC_PATHS） | 远程 dsh 面板向导发起 `next=<本地面板地址>`，钉钉扫码后自动回到本机 dsh、票据兑换即建立会话——零手工回导 |
 | G1-b | 同上（票据签发约束） | 自助票据 TTL ≤120s，复用 authn EntryTicket 既有一次性/防重放语义；`authn.entryticket.redeemed` 审计留痕 | 防票据扩散；审计闭环 |
 | G2（可选） | `packages/plugin-modelgw/src/index.ts` | `invoke` 增 `stream` 变体（SSE，OpenAI 兼容流式透传） | 面板内置协作会话与 dsh 侧富卡可升级流式输出（非必须；现状单轮非流式诚实工作） |
+| G3 | dsh 侧 `vendor/loader`（或 main 侧预构建分发） | 拷贝安装形态（`dsh plugin add github:`，pnpm 装入 node_modules）下 Node（≥22.6）拒绝类型剥离 node_modules 内 TS（实测 `--experimental-transform-types` 亦不解除）——全部 `src/index.ts` 形式 loader entry 不可执行，**全仓架构级**限制。解法二选一：① dsh loader 在 import 前自行剥离 TS（vendor/loader Entry._init 预处理）；② 平台提供预构建分发（构建 JS 镜像 + 指向 .js 的安装补丁）。定制侧已实证：源码/链接形态（`link:` 安装，真实路径在 node_modules 外）完整体验 8/8 绿 | 「全新 dsh 拷贝安装完整体验」的最后一公里；定制侧根包已补 `@dsh-ops/plugin-rq-card` file: 依赖使包名在安装形态可解析（该修复与 G3 无关、始终需要） |
 
 定制侧对照降级路径：wizard.js「我已登录」回导校验（proxy `/api/auth/me`）。
 selftest 对照：`宿主连接向导` 分节（23 项）+ `panel_agent_invoke/board_digest`（4 项）+ `fresh-install 装机模拟`（13 项）。
@@ -113,5 +114,6 @@ selftest 对照：`宿主连接向导` 分节（23 项）+ `panel_agent_invoke/b
 | F mcp/app riskLevel 水印 | | 依赖 A（plugin-audit 底座） |
 | G1 远程登录回跳闭环（next + 自助 entry_ticket） | | 采纳后定制侧向导自动升级闭环 |
 | G2 modelgw 流式化 | | 可选 |
+| G3 拷贝安装形态 TS 装载（dsh loader 预剥离 / 平台预构建分发） | | 「全新 dsh 拷贝安装完整体验」最后一公里；源码/链接形态已实证闭环 |
 
 未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）。
