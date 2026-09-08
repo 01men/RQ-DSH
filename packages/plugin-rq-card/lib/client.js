@@ -1,6 +1,33 @@
-/* rq-card-build-id: 86e8632fc2615825 */
-var module = { exports: {} }; var exports = module.exports;
-window.__ModuleLoader__.load({ id: "@dsh-ops/plugin-rq-card", factory: (require) => {
+/* rq-card-build-id: 7a706a83e602f93d */
+(function () {
+  var PLUGIN_ID = "@dsh-ops/plugin-rq-card";
+  var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };
+  var note = function (stage, error) {
+    var entry = { at: new Date().toISOString(), stage: stage };
+    if (error !== undefined) entry.error = String((error && error.message) || error);
+    DIAG.attempts.push(entry);
+    if (DIAG.attempts.length > 50) DIAG.attempts.shift();
+  };
+  var badge = function (text) {
+    try {
+      if (document.querySelector(".rq-card-diag-badge")) return;
+      var el = document.createElement("button");
+      el.type = "button";
+      el.className = "rq-card-diag-badge";
+      el.textContent = text;
+      el.title = "榕器卡片注入失败——诊断信息见 window.__RQ_CARD_DIAG__，请截图反馈给管理员。点击刷新重试。";
+      el.setAttribute("style", "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)");
+      el.onclick = function () { location.reload(); };
+      (document.body || document.documentElement).appendChild(el);
+    } catch (e) { /* 无 document 环境（Node 自测）忽略 */ }
+  };
+  var mount = function () {
+    var loader = window.__ModuleLoader__;
+    if (!loader || typeof loader.load !== "function") return false;
+    try {
+      loader.load({ id: PLUGIN_ID, factory: function (require) {
+        var module = { exports: {} }; var exports = module.exports;
+        try { var stale = document.querySelector(".rq-card-diag-badge"); if (stale && stale.parentNode) stale.parentNode.removeChild(stale); } catch (e) {}
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
@@ -742,6 +769,21 @@ function apply(ctx) {
           return (0, import_react3.createElement)("span", { className: "rq-badge" }, "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u7EAF\u6587\u672C\u6A21\u5F0F\uFF09");
         }));
       });
+    } else {
+      safely("degraded-dom-badge", () => {
+        if (typeof document === "undefined") return;
+        if (document.querySelector(".rq-card-dom-badge")) return;
+        const el = document.createElement("button");
+        el.type = "button";
+        el.className = "rq-card-dom-badge";
+        el.textContent = "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u90E8\u5206\u80FD\u529B\u4E0D\u53EF\u7528\uFF09";
+        el.title = `\u964D\u7EA7\u539F\u56E0\uFF1A${DEGRADED.join("\uFF1B")}\uFF08\u70B9\u51FB\u5237\u65B0\u91CD\u8BD5\uFF1B\u8BE6\u60C5\u89C1\u63A7\u5236\u53F0 [rq-card] \u65E5\u5FD7\uFF09`;
+        el.setAttribute("style", "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)");
+        el.onclick = () => {
+          location.reload();
+        };
+        document.body.appendChild(el);
+      });
     }
     console.warn(`[rq-card] degraded mode with ${DEGRADED.length} reason(s); markdown fallback remains available`);
   }
@@ -815,5 +857,32 @@ function apply(ctx) {
   });
   console.info("[rq-card] client plugin applied:", PLUGIN_ID2);
 }
-return module.exports; } });
+        DIAG.installed = true; // 工厂体完整执行成功才记安装（bundle 抛错不算）
+        return module.exports;
+      } });
+      note(DIAG.installed ? "installed" : "registered-not-materialized");
+      return true;
+    } catch (error) {
+      note("factory-threw", error);
+      return true;
+    }
+  };
+  if (mount()) {
+    // load() 被接受 ≠ 工厂被物化：5s 后仍未安装即亮角标（rc.7 消费链缺陷指纹）
+    if (!DIAG.installed) {
+      setTimeout(function () {
+        if (!DIAG.installed) { note("materialize-missing"); badge("榕器卡片未生效（宿主未装载插件）"); }
+      }, 5000);
+    }
+    return;
+  }
+  note("loader-missing");
+  var tries = 0;
+  var timer = setInterval(function () {
+    if (mount() || ++tries >= 40) {
+      clearInterval(timer);
+      if (!DIAG.installed) { note("loader-missing-persistent"); badge("榕器卡片未生效（装载器不可达）"); }
+    }
+  }, 250);
+})();
 //# sourceMappingURL=client.js.map

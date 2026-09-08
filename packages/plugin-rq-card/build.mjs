@@ -151,14 +151,80 @@ async function main() {
     // loader 物化时执行一次工厂，返回 bundle 导出，require 解析平台模块表。
     // 首行 build-id 指纹（fresh-install 装机门禁）：selftest 用 build-id.mjs 重算比对，
     // 「改了 src/client 忘了重建」会在推送前被拦下。
+    //
+    // 【装载防御与失效可见化（QA 2026-09-08 BUG-G-01 / T-14）】此前 banner 直接
+    // `window.__ModuleLoader__.load(...)`：装载器未就绪（脚本顺序竞态）即整脚本抛错、
+    // apply 永不执行、无任何用户可见信号——真实 dsh web 上四项会话侧能力全数静默消失。
+    // 现在三道防线：① 装载器未就绪 → 250ms×40 有界重试；② load() 被接受但工厂 5s 内
+    // 未被物化 → 记录 registered-not-materialized（rc.7 消费链缺陷的可判读指纹）；
+    // ③ 终局未安装 → 直接挂 DOM 诊断角标（不依赖 slots），并把台账留在
+    // window.__RQ_CARD_DIAG__ 供运维/宿主侧取证。
     banner: {
       js: [
         `/* ${BUILD_ID_HEADER}: ${computeClientBuildId(PKG_ROOT)} */`,
-        'var module = { exports: {} }; var exports = module.exports;',
-        `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
+        '(function () {',
+        '  var PLUGIN_ID = "@dsh-ops/plugin-rq-card";',
+        '  var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };',
+        '  var note = function (stage, error) {',
+        '    var entry = { at: new Date().toISOString(), stage: stage };',
+        '    if (error !== undefined) entry.error = String((error && error.message) || error);',
+        '    DIAG.attempts.push(entry);',
+        '    if (DIAG.attempts.length > 50) DIAG.attempts.shift();',
+        '  };',
+        '  var badge = function (text) {',
+        '    try {',
+        '      if (document.querySelector(".rq-card-diag-badge")) return;',
+        '      var el = document.createElement("button");',
+        '      el.type = "button";',
+        '      el.className = "rq-card-diag-badge";',
+        '      el.textContent = text;',
+        '      el.title = "榕器卡片注入失败——诊断信息见 window.__RQ_CARD_DIAG__，请截图反馈给管理员。点击刷新重试。";',
+        '      el.setAttribute("style", "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)");',
+        '      el.onclick = function () { location.reload(); };',
+        '      (document.body || document.documentElement).appendChild(el);',
+        '    } catch (e) { /* 无 document 环境（Node 自测）忽略 */ }',
+        '  };',
+        '  var mount = function () {',
+        '    var loader = window.__ModuleLoader__;',
+        '    if (!loader || typeof loader.load !== "function") return false;',
+        '    try {',
+        '      loader.load({ id: PLUGIN_ID, factory: function (require) {',
+        '        var module = { exports: {} }; var exports = module.exports;',
+        '        try { var stale = document.querySelector(".rq-card-diag-badge"); if (stale && stale.parentNode) stale.parentNode.removeChild(stale); } catch (e) {}',
       ].join('\n'),
     },
-    footer: { js: 'return module.exports; } });' },
+    footer: {
+      js: [
+        '        DIAG.installed = true; // 工厂体完整执行成功才记安装（bundle 抛错不算）',
+        '        return module.exports;',
+        '      } });',
+        '      note(DIAG.installed ? "installed" : "registered-not-materialized");',
+        '      return true;',
+        '    } catch (error) {',
+        '      note("factory-threw", error);',
+        '      return true;',
+        '    }',
+        '  };',
+        '  if (mount()) {',
+        '    // load() 被接受 ≠ 工厂被物化：5s 后仍未安装即亮角标（rc.7 消费链缺陷指纹）',
+        '    if (!DIAG.installed) {',
+        '      setTimeout(function () {',
+        '        if (!DIAG.installed) { note("materialize-missing"); badge("榕器卡片未生效（宿主未装载插件）"); }',
+        '      }, 5000);',
+        '    }',
+        '    return;',
+        '  }',
+        '  note("loader-missing");',
+        '  var tries = 0;',
+        '  var timer = setInterval(function () {',
+        '    if (mount() || ++tries >= 40) {',
+        '      clearInterval(timer);',
+        '      if (!DIAG.installed) { note("loader-missing-persistent"); badge("榕器卡片未生效（装载器不可达）"); }',
+        '    }',
+        '  }, 250);',
+        '})();',
+      ].join('\n'),
+    },
     plugins: [purityGate()],
     logLevel: 'info',
   })
@@ -166,7 +232,7 @@ async function main() {
 
   // ── 产物形状自检 ──
   const outfile = join(PKG_ROOT, 'lib', 'client.js')
-  const head = readFileSync(outfile, 'utf8').slice(0, 400)
+  const head = readFileSync(outfile, 'utf8').slice(0, 4000) // 装载防御 banner 变长：取前 4k 覆盖 mount() 定义
   if (!head.includes('__ModuleLoader__') || !head.includes(PLUGIN_ID)) {
     console.error('[rq-card/build] 产物头部不含 closure-factory 形状，构建结果不可信。')
     process.exit(1)

@@ -16,16 +16,27 @@ import { setConnectionScope, session } from './api.js'
 
 const esc = (text) => String(text ?? '')
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+  .replaceAll('"', '&quot;').replaceAll("'", '&#39;')
 
 const HISTORY_KEY = 'panel_hub_history'
 
-/** 向导端点请求：统一带向导头；非 2xx 抛错（error.message 透出）。 */
+/** 向导端点请求：统一带向导头；非 2xx 抛错（error.message 透出）。
+ *  超时与网络错误给中文可行动文案（QA BUG-U-03/U-04 同规）。 */
 async function wfetch(base, method, wpath, body) {
-  const response = await fetch(`${base}${wpath}`, {
-    method,
-    headers: { 'content-type': 'application/json', 'x-rqcard-call': '1' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
+  let response
+  try {
+    response = await fetch(`${base}${wpath}`, {
+      method,
+      headers: { 'content-type': 'application/json', 'x-rqcard-call': '1' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
+    })
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+      throw new Error('请求超时：服务响应过慢，请稍后重试')
+    }
+    throw new Error('网络连接失败：请确认服务已启动、地址正确后重试')
+  }
   const payload = await response.json().catch(() => null)
   if (!response.ok || payload?.ok === false) {
     throw new Error(payload?.error?.message ?? `请求失败（${response.status}）`)
@@ -48,24 +59,23 @@ export async function start({ base, hostBridge = false, localFirstRun = false })
   root.innerHTML = `
     <div class="wizard">
       <div class="wz-head">
-        <div class="wz-logo">🌳 榕器 <span class="badge">连接与登录向导</span></div>
-        <p>刚刚安装的 dsh 插件还未连接宿主服务。选择「把本机初始化为宿主」或「连接局域网内的宿主」，
-        连接并登录后即可完整使用部门工作台 / 战略看板 / Agent 协作。</p>
+        <div class="wz-logo">🌳 榕器 <span class="badge">开始使用</span></div>
+        <p>欢迎使用部门工作台！只需两步：选择「把这台电脑作为工作台」或「连接公司已有的服务器」，
+        完成后即可使用部门工作台、战略看板和 Agent 协作。不确定选哪个？问一下公司里负责系统的人。</p>
       </div>
       <div class="wz-cards">
         <section class="wz-card" id="wzLocal">
-          <h2>🖥 本机宿主（形态 B）</h2>
-          <p class="wz-sub">本机 dsh 即企业宿主：面板、控制台、对话面同进程单入口。</p>
+          <h2>🖥 把这台电脑作为工作台</h2>
+          <p class="wz-sub">适合第一次使用、或这台电脑就是公司唯一服务器的情况。数据和账号都保存在本机。</p>
           <div id="wzLocalBody"></div>
         </section>
         <section class="wz-card" id="wzRemote">
-          <h2>🔗 连接远端宿主（形态 C）</h2>
-          <p class="wz-sub">本机 dsh 作为客户端，连接局域网内已部署的宿主服务（选择 IP）。</p>
+          <h2>🔗 连接公司已有的服务器</h2>
+          <p class="wz-sub">适合公司已经部署了服务器、大家共用的情况。输入服务器的地址（可扫码）即可。</p>
           <div id="wzRemoteBody"></div>
         </section>
       </div>
-      <p class="wz-foot">向导端点位于免登命名空间（/rqcard/*，服务端校验向导头 + 代理白名单）；
-      钉钉扫码在宿主登录页完成（宿主侧回跳增强见交接清单 G1）。</p>
+      <p class="wz-foot">登录支持账号密码与钉钉扫码；使用中的问题请联系管理员。数据与权限统一由服务器管理。</p>
     </div>`
 
   renderLocalCard(root, base, { hostBridge, localFirstRun })
@@ -149,10 +159,10 @@ async function renderRemoteCard(root, base) {
   const body = root.querySelector('#wzRemoteBody')
   body.innerHTML = `
     <div class="wz-form">
-      <input type="text" id="wzHubInput" placeholder="宿主地址，如 http://192.168.1.5:3080" spellcheck="false">
+      <input type="text" id="wzHubInput" placeholder="服务器地址，如 http://192.168.1.5:7300" spellcheck="false">
       <button class="btn primary" id="wzHubConnect">测试并连接</button>
     </div>
-    <button class="btn wz-scan" id="wzHubScan">📡 扫描局域网宿主</button>
+    <button class="btn wz-scan" id="wzHubScan">📡 在局域网内自动查找服务器</button>
     <div class="wz-history" id="wzHubHistory"></div>
     <div class="wz-found" id="wzHubFound"></div>
     <div id="wzHubErr" class="wz-err"></div>`
@@ -180,9 +190,9 @@ async function renderRemoteCard(root, base) {
         ? result.hosts.map((host) => `
           <button class="wz-host" data-hub="${esc(host.endpoint)}">
             <b>${esc(host.endpoint)}</b>
-            <span class="sub">${host.mountPrefix === '/rq' ? 'dsh 挂载形态' : '独立宿主形态'}${host.version ? ` · v${esc(host.version)}` : ''}</span>
+            <span class="sub">榕器服务器${host.version ? ` · v${esc(host.version)}` : ''}</span>
           </button>`).join('')
-        : '<span class="wz-hint">未发现宿主——请确认宿主已启动、防火墙放行，或手输地址。</span>'
+        : '<span class="wz-hint">没有找到服务器——请确认服务器已开机、防火墙已放行，或直接输入地址。</span>'
       found.querySelectorAll('.wz-host').forEach((el) => {
         el.onclick = () => { body.querySelector('#wzHubInput').value = el.dataset.hub }
       })
@@ -190,7 +200,7 @@ async function renderRemoteCard(root, base) {
       found.innerHTML = `<span class="wz-err">${esc(error.message)}</span>`
     } finally {
       button.disabled = false
-      button.textContent = '📡 扫描局域网宿主'
+      button.textContent = '📡 在局域网内自动查找服务器'
     }
   }
 
@@ -220,16 +230,15 @@ async function renderRemoteCard(root, base) {
 function renderRemoteLogin(body, base, { hubBase, hubMountPrefix, version }) {
   const hubPanelBase = `${hubBase}${hubMountPrefix}`
   body.innerHTML = `
-    <div class="wz-ok">✅ 已连接宿主 <b>${esc(hubBase)}</b>${version ? `（v${esc(version)}）` : ''}</div>
+    <div class="wz-ok">✅ 已连接服务器 <b>${esc(hubBase)}</b>${version ? `（v${esc(version)}）` : ''}</div>
     <div class="wz-form">
       <input type="text" id="wzLoginUser" placeholder="账号" autocomplete="username" value="">
       <input type="password" id="wzLoginPass" placeholder="密码" autocomplete="current-password">
       <button class="btn primary" id="wzLoginGo">登录</button>
     </div>
-    <button class="btn wz-dd" id="wzLoginDd">💬 用钉钉扫码登录（在宿主登录页完成）</button>
-    <p class="wz-hint">账号登录经本机插件代理（令牌按连接隔离保存）；钉钉扫码会打开宿主登录页，
-    在宿主侧完成扫码后即可在宿主页使用全部功能（回跳自动带入见交接清单 G1）。</p>
-    <button class="btn wz-back" id="wzLoginBack">← 重选宿主</button>
+    <button class="btn wz-dd" id="wzLoginDd">💬 用钉钉扫码登录</button>
+    <p class="wz-hint">没有账号？请联系管理员开通。钉钉扫码会打开登录页，扫码后回到本页即可。</p>
+    <button class="btn wz-back" id="wzLoginBack">← 重新选择服务器</button>
     <div id="wzLoginErr" class="wz-err"></div>`
   body.querySelector('#wzLoginDd').onclick = () => {
     window.open(`${hubPanelBase}/#/login`, '_blank', 'noopener')

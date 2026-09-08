@@ -67,6 +67,10 @@ export class ApiError extends Error {
 
 let refreshing = null
 
+/** 默认请求超时（QA BUG-U-03）：车间 WiFi 半死不活时请求必须可失败、可感知，不许永远挂起。
+ *  个别慢端点（如模型连通性测试真实外呼）可用 timeoutMs 覆盖。 */
+export const DEFAULT_TIMEOUT_MS = 20_000
+
 async function tryRefresh() {
   if (!session.refreshToken) return false
   if (!refreshing) {
@@ -76,6 +80,7 @@ async function tryRefresh() {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ refreshToken: session.refreshToken }),
+          signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
         })
         const payload = await response.json().catch(() => null)
         if (!response.ok || payload?.ok === false) return false
@@ -92,18 +97,40 @@ async function tryRefresh() {
   return refreshing
 }
 
-async function request(method, path, body, retried = false) {
+/** 会话已不可恢复（刷新失败）：清场 + 广播（QA BUG-U-05）——此前只清 token 不广播，
+ *  页面继续以死会话操作、每次只弹错误 toast，与整页刷新后看到的「会话已失效」引导两条路径。 */
+function onSessionExpired() {
+  session.clear()
+  window.dispatchEvent(new CustomEvent('panel:session-expired'))
+}
+
+/** 网络层异常 → 中文可行动文案（QA BUG-U-04）：工人不该看到「Failed to fetch」原文。 */
+function networkError(error) {
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+    return new ApiError('TIMEOUT', '请求超时：网络响应过慢，请检查网络后重试', 0)
+  }
+  return new ApiError('NETWORK', '网络连接失败：请检查网络后重试（持续失败请联系管理员）', 0)
+}
+
+async function request(method, path, body, opts = {}, retried = false) {
   const headers = { 'content-type': 'application/json' }
   if (session.token) headers.authorization = `Bearer ${session.token}`
-  const response = await fetch(mapPath(path), {
-    method,
-    headers,
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
+  let response
+  try {
+    response = await fetch(mapPath(path), {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    })
+  } catch (error) {
+    throw networkError(error)
+  }
   let payload = null
   try { payload = await response.json() } catch { /* non-json */ }
-  if (response.status === 401 && !retried && await tryRefresh()) {
-    return request(method, path, body, true)
+  if (response.status === 401 && !retried) {
+    if (await tryRefresh()) return request(method, path, body, opts, true)
+    onSessionExpired()
   }
   if (!response.ok || payload?.ok === false) {
     const err = payload?.error ?? {}
@@ -113,9 +140,9 @@ async function request(method, path, body, retried = false) {
 }
 
 export const api = {
-  get: (path) => request('GET', path),
-  post: (path, body = {}) => request('POST', path, body),
-  put: (path, body = {}) => request('PUT', path, body),
-  patch: (path, body = {}) => request('PATCH', path, body),
-  delete: (path, body) => request('DELETE', path, body),
+  get: (path, opts) => request('GET', path, undefined, opts),
+  post: (path, body = {}, opts) => request('POST', path, body, opts),
+  put: (path, body = {}, opts) => request('PUT', path, body, opts),
+  patch: (path, body, opts) => request('PATCH', path, body, opts),
+  delete: (path, body, opts) => request('DELETE', path, body, opts),
 }

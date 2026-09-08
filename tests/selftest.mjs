@@ -4566,6 +4566,26 @@ try {
       && outsiderDepts.data.depts.find((dept) => dept.id === 'mfg').allowed === true)
     const adminCrossDept = await api('GET', '/api/panel/rd/overview', { token: panelAdmin })
     check("面板：'*' 管理员跨部门直通（治理豁免）", adminCrossDept.ok)
+
+    // -- QA 2026-09-08 BUG-A-01（T-01）回归：SSE 流必须执行与 REST 一致的部门范围校验 --------
+    // 旧根因：stream 端点经 http.register 注册、不进 routeMatrix，握手只做
+    // verify+requirePermission，从不调 deptScopeAllowed——组织受限用户可实时收到
+    // 受限部门全部消息（含正文）。回归断言：REST 403 的用户，SSE 同样 403 断流。
+    const sseOutsider = await fetch(`${BASE}/api/panel/stream?dept=rd&token=${encodeURIComponent(memberToken)}`)
+    const sseOutsiderBody = await sseOutsider.text().catch(() => '')
+    check('面板：SSE 流执行部门范围校验（组织受限用户 stream 403 断流，QA BUG-A-01/T-01 回归）',
+      sseOutsider.status === 403 && /部门范围/.test(sseOutsiderBody),
+      `status=${sseOutsider.status} body=${sseOutsiderBody.slice(0, 120)}`)
+    const sseInsider = await fetch(`${BASE}/api/panel/stream?dept=rd&token=${encodeURIComponent(rdLogin.data.token)}`)
+    const sseInsiderCt = sseInsider.headers.get('content-type') ?? ''
+    const insiderOk = sseInsider.status === 200 && sseInsiderCt.includes('text/event-stream')
+    check('面板：SSE 组织内成员正常建流（范围校验不误伤合法访问）', insiderOk, `status=${sseInsider.status} ct=${sseInsiderCt}`)
+    try { await sseInsider.body?.cancel() } catch { /* 已关闭 */ }
+    const sseUnknownDept = await fetch(`${BASE}/api/panel/stream?dept=zzzz&token=${encodeURIComponent(panelAdmin)}`)
+    const sseUnknownBody = await sseUnknownDept.text().catch(() => '')
+    check('面板：SSE 未知部门 404（不建立空订阅）',
+      sseUnknownDept.status === 404 && /部门不存在/.test(sseUnknownBody), `status=${sseUnknownDept.status}`)
+
     const orgUnbind = await api('PUT', '/api/panel/rd/config', { token: panelAdmin, body: { orgId: null } })
     check('面板：解除组织绑定恢复开放', orgUnbind.ok && !orgUnbind.data.dept.org)
 
@@ -4591,6 +4611,7 @@ try {
   section('钉钉桥接（plugin-dingtalk-bridge：群桥 / 出向投递 / 审批推送 / 告警通道 / 回决 fail-closed）')
   {
     const ddSends = []
+    let failNextMfgSend = false // QA BUG-A-02 回归开关：下一次 cid-mfg-001 投递模拟瞬时失败
     const bridgeStub = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://stub')
       const raw = await readBody(req)
@@ -4604,7 +4625,13 @@ try {
         return
       }
       if (url.pathname === '/v1.0/robot/groupMessages/send') {
-        ddSends.push({ chatId: JSON.parse(raw || '{}').openConversationId, at: Date.now() })
+        const chatId = JSON.parse(raw || '{}').openConversationId
+        ddSends.push({ chatId, at: Date.now() })
+        if (chatId === 'cid-mfg-001' && failNextMfgSend) {
+          failNextMfgSend = false
+          res.writeHead(500, { 'content-type': 'application/json' }).end(JSON.stringify({ errcode: 90001, errmsg: 'selftest 模拟瞬时网络抖动' }))
+          return
+        }
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ errcode: 0, errmsg: 'ok' }))
         return
       }
@@ -4659,6 +4686,24 @@ try {
     const approvalPush = await api('POST', `/api/dingtalk/approvals/${pcbReq.data.approval.id}/push`, { token: admin })
     check('桥接：审批单推送钉钉', approvalPush.ok && approvalPush.data.delivered === true, JSON.stringify(approvalPush.data ?? approvalPush.error))
 
+    // QA 2026-09-08 BUG-A-02（T-03）回归：失败投递不得毒化去重键——同键重推必须真实外呼。
+    // 旧行为：查重不看 status，一次 500 后该审批永远「已投递」，重推端点假成功零外呼。
+    // 用全新 JQR 审批单（此前从未推送过，无 sent 记录干扰），先失败后重推。
+    const retryReq = await api('POST', '/api/panel/industries/JQR/activate-requests', { token: admin })
+    const retryApprovalId = retryReq.data.approval.id
+    const mfgSendsBeforeRetry = ddSends.filter((send) => send.chatId === 'cid-mfg-001').length
+    failNextMfgSend = true
+    const pushFail = await api('POST', `/api/dingtalk/approvals/${retryApprovalId}/push`, { token: admin })
+    check('桥接：投递失败如实报错（推送端点 400，不假成功）',
+      !pushFail.ok && pushFail.status === 400 && /推送未完成/.test(pushFail.error?.message ?? ''), JSON.stringify(pushFail.error ?? pushFail.data))
+    const pushRetry = await api('POST', `/api/dingtalk/approvals/${retryApprovalId}/push`, { token: admin })
+    const mfgSendsAfterRetry = ddSends.filter((send) => send.chatId === 'cid-mfg-001').length
+    check('桥接：失败投递不毒化去重键（同键重推真实外呼并成功，QA BUG-A-02/T-03 回归）',
+      pushRetry.ok && pushRetry.data.delivered === true && mfgSendsAfterRetry === mfgSendsBeforeRetry + 2,
+      JSON.stringify({ ok: pushRetry.ok, before: mfgSendsBeforeRetry, after: mfgSendsAfterRetry, error: pushRetry.error }))
+    // 收尾：JQR 审批单决定通过，不留 pending 残留影响其他段
+    await api('POST', `/api/approvals/${retryApprovalId}/decide`, { token: admin, body: { decision: 'approve', opinion: '投递回归自测收尾', confirmed: true } })
+
     // 回决写回：staffId 反查 fail-closed 三连
     const cbNoLink = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'nobody-staff', approvalId: pcbReq.data.approval.id, decision: 'approve' } })
     check('桥接：未绑定 staffId 回决被拒（fail-closed）', !cbNoLink.ok && /未绑定/.test(cbNoLink.error.message))
@@ -4675,6 +4720,16 @@ try {
     // 解绑 + 恢复 mock（不污染后续断言）
     const unbind = await api('DELETE', `/api/dingtalk/channels/${syncChannel.id}/bridge`, { token: admin })
     check('桥接：群桥解绑', unbind.ok && unbind.data.deleted === true, JSON.stringify(unbind.error ?? unbind.data))
+
+    // QA T-04 回归：无群桥时投递失败必须回执事件 → 面板消息落 failed（旧代码不发事件，
+    // ddSync 永久 pending，用户对着「钉钉投递中…」等到天荒地老）
+    const t4Msg = await api('POST', '/api/panel/mfg/messages', { token: admin, body: { channelId: syncChannel.id, text: '无群桥投递回写自测', ddSync: true } })
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    const t4After = (await api('GET', `/api/panel/mfg/messages?channelId=${syncChannel.id}&limit=5`, { token: admin }))
+      .data.messages.find((m) => m.id === t4Msg.data.message.id)
+    check('桥接：无群桥投递失败如实回写 failed（不永久 pending，QA T-04 回归）',
+      t4After?.ddSync === 'failed', JSON.stringify({ ddSync: t4After?.ddSync }))
+
     const restoreMock = await api('PUT', '/api/iam/connectors/dingtalk', { token: admin, body: { corpId: 'ding-yuanbingke', appKey: 'demo-app-key', appSecret: 'demo-secret-do-not-use', mode: 'mock', enabled: true } })
     check('桥接：连接器恢复 mock（自测收尾）', restoreMock.ok && restoreMock.data.mode === 'mock')
     await new Promise((resolve) => bridgeStub.close(resolve))

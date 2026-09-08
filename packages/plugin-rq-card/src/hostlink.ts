@@ -22,7 +22,7 @@
  *
  * 【配置落盘】<dataDir>/rq-host-link.json（0600，参照 connect-client.json 惯例）。
  */
-import { existsSync, readFileSync, writeFileSync, rmSync, chmodSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { networkInterfaces } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
@@ -92,7 +92,11 @@ const SCAN_CANDIDATE_LIMIT = 600
 export function normalizeHubBase(input: string): string {
   let value = String(input ?? '').trim()
   if (value === '') throw new Error('宿主地址不能为空')
-  if (!/^https?:\/\//i.test(value)) value = `http://${value}`
+  // 非 http(s) 显式 scheme 先行拒绝（QA P2-O-1）：若先补 http:// 前缀，ftp://host 会被
+  // 静默规范化成 http://ftp 并以「宿主不可达」误导用户，专属错误分支永不可达。
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(value)
+  if (scheme && !/^https?$/i.test(scheme[1]!)) throw new Error('宿主地址仅支持 http/https')
+  if (!scheme) value = `http://${value}`
   const url = new URL(value)
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error('宿主地址仅支持 http/https')
   if (!url.hostname) throw new Error('宿主地址缺少主机名')
@@ -262,7 +266,12 @@ export class HostLinkService {
     }
     const text = await response.text().catch(() => '')
     if (!exchange.res.writableEnded) {
-      exchange.res.writeHead(response.status, { 'content-type': String(response.headers.get('content-type') ?? 'application/json; charset=utf-8') })
+      const headers: Record<string, string> = { 'content-type': String(response.headers.get('content-type') ?? 'application/json; charset=utf-8') }
+      // 3xx Location 透传（QA T-02）：redirect:'manual' 下宿主 302（如 /api/auth/sso 登录跳转）
+      // 的 location 若被静默丢弃，登录回跳链路将无声断裂——要么完整透传，要么别用 manual。
+      const location = response.headers.get('location')
+      if (response.status >= 300 && response.status < 400 && location) headers.location = location
+      exchange.res.writeHead(response.status, headers)
       exchange.res.end(text)
     }
   }
@@ -308,7 +317,9 @@ export class HostLinkService {
     if (initialPassword === '') throw new Error('初始口令文件为空，请用常规登录后自行改密')
     const first = this.ctx.authn.login(username, initialPassword)
     this.ctx.iam.resetPassword(first.userId, newPassword)
-    rmSync(file, { force: true })
+    // 一次性消费（防重放，QA SEC-05）：必须用 unlinkSync——Windows 实测 rmSync(force:true)
+    // 会静默失败（不抛错、文件原地不动），口令文件残留=初始口令可被重放，防线破。
+    try { unlinkSync(file) } catch { /* 文件已被并发消费 */ }
     const session = this.ctx.authn.login(username, newPassword)
     return {
       token: session.token,

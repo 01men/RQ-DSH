@@ -11,19 +11,26 @@ import { setBase as depsSetBase, ui as uiDep, realtime as realtimeDep } from './
 // ---------------------------------------------------------------------------
 
 export function esc(text) {
+  // 引号一并转义（QA BUG-U-06）：本函数大量输出进 HTML 属性位（data-* / title），
+  // 不转义双引号=用户可控值可在属性内闭合注入事件（存储型 XSS）。
   return String(text ?? '')
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
 }
 
 /**
  * 白名单渲染（治理 DoD：XSS 面）：先全量转义，再仅放行 <b> 与 mention span——
  * 服务端种子/Agent 产出的轻标记可渲染，任何其他 HTML 一律按文本显示。
+ * 注意 esc 现已转义引号，放行模式同步适配 &quot;/&#39; 形态（种子用单引号 span）。
  */
 export function md(text) {
   let s = esc(text)
   s = s.replaceAll('&lt;b&gt;', '<b>').replaceAll('&lt;/b&gt;', '</b>')
+  s = s.replaceAll(`&lt;span class=&#39;mention&#39;&gt;`, '<span class="mention">')
+  s = s.replaceAll('&lt;span class=&quot;mention&quot;&gt;', '<span class="mention">')
   s = s.replaceAll(`&lt;span class='mention'&gt;`, '<span class="mention">')
   s = s.replaceAll('&lt;span class="mention"&gt;', '<span class="mention">')
   s = s.replaceAll('&lt;/span&gt;', '</span>')
@@ -33,7 +40,14 @@ export function md(text) {
 }
 
 const stars = (n) => '★'.repeat(n) + '☆'.repeat(4 - n)
-const fmtTime = (iso) => (iso ? `${iso.slice(5, 10)} ${iso.slice(11, 16)}` : '')
+const pad2 = (n) => String(n).padStart(2, '0')
+/** 本地时区展示（QA BUG-U-01）：此前直接切片 UTC ISO 串，中国用户全部慢 8 小时。 */
+const fmtTime = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
+}
 const TAG_CLS = { 提质: 'tg-tz', 降本: 'tg-jb', 增效: 'tg-zx', 节能: 'tg-jn', 新模式: 'tg-xm' }
 const LANE_LABELS = { todo: '待办', doing: '进行中', review: '待审', done: '完成' }
 const LANE_ORDER = ['todo', 'doing', 'review', 'done']
@@ -69,7 +83,15 @@ const state = {
   chatModel: localStorage.getItem('panel_chat_model') ?? '',
   stream: null,
   streamDept: '',
+  /** 实时通道健康（QA BUG-U-02）：downgraded=轮询降级态；lastRealtimeAt=最后收到数据时刻；
+   *  stale=轮询连续失败（数据可能过期）——徽标必须如实反映，不许断网仍标 LIVE。 */
+  streamDowngraded: false,
+  streamStale: false,
+  lastRealtimeAt: 0,
 }
+
+/** 实时平台 chip 展示名（QA P2-6）：此前直接显示英文原始 id。 */
+const PLATFORM_LABELS = { strategy: '战略', marketing: '营销', manufacturing: '制造', rd: '研发', quality: '质量' }
 
 /** 嵌套防护（M3）：?embed=1（dsh「榕器工作台」视图 Tab 内嵌本面板）或自身已在 iframe 中 = 嵌入形态——
  *  嵌入态不再内嵌 dsh 对话（防 iframe 递归），侧栏「Agent 对话」入口隐藏。 */
@@ -119,6 +141,23 @@ export function start({ base, hostBridge = false, remoteHub = null }) {
     state.view = location.hash === '#/board' ? 'board' : 'workbench'
     applyView()
   })
+  // 会话中途过期（QA BUG-U-05）：api.js 刷新失败即广播，此处统一切回登录引导
+  // （远端连接态会导向重连向导），不再让用户对着每次操作失败的 toast 摸不着头脑
+  window.addEventListener('panel:session-expired', () => {
+    if (document.getElementById('app')?.dataset.booted) renderLoginGuide()
+  })
+  // 通道健康看门狗（QA BUG-U-02）：轮询降级态下超过 95s（3 轮 + 余量）无任何数据到达，
+  // 徽标转「连接中断」并可点击重连——不许断网后仍宣称实时
+  window.setInterval(() => {
+    if (!state.streamDowngraded || state.streamStale) {
+      if (!state.streamDowngraded && state.streamStale) { state.streamStale = false; renderLiveBadge() }
+      return
+    }
+    if (state.lastRealtimeAt > 0 && Date.now() - state.lastRealtimeAt > 95_000) {
+      state.streamStale = true
+      renderLiveBadge()
+    }
+  }, 15_000)
   void init()
 }
 
@@ -221,6 +260,10 @@ function connectStream() {
   if (state.stream && state.streamDept === state.dept) return
   if (state.stream) { try { state.stream.close() } catch { /* 已关闭 */ } }
   state.streamDept = state.dept
+  state.streamDowngraded = false
+  state.streamStale = false
+  state.lastRealtimeAt = Date.now() // 建流观察窗：首轮数据到达前不误报中断
+  renderLiveBadge()
   void realtimeDep().then((mod) => {
     state.stream = mod.createEventStream({
       url: `${basePath()}/api/panel/stream?dept=${state.dept}&token=${encodeURIComponent(session.token)}`,
@@ -228,12 +271,30 @@ function connectStream() {
       pollIntervalMs: 30_000,
       headers: session.token ? { authorization: `Bearer ${session.token}` } : {},
       onMessage: (data) => handleRealtime(data),
-      onDowngrade: () => renderLiveBadge(),
+      onDowngrade: () => {
+        state.streamDowngraded = true
+        renderLiveBadge()
+      },
     })
   })
 }
 
+/** 手动重连（QA BUG-U-02）：「连接中断」徽标点击后重建通道并给 95s 观察窗。 */
+function reconnectStream() {
+  if (state.stream) { try { state.stream.close() } catch { /* 已关闭 */ } }
+  state.stream = null
+  state.streamDept = ''
+  state.lastRealtimeAt = Date.now()
+  connectStream()
+}
+
 async function handleRealtime(data) {
+  // 任何通道（SSE 事件/轮询应答）只要有数据到达就算「活着」——看门狗据此判断健康
+  state.lastRealtimeAt = Date.now()
+  if (state.streamStale) {
+    state.streamStale = false
+    renderLiveBadge()
+  }
   if (!data || typeof data !== 'object') return
   if (data.name === 'panel.message.created' && data.payload) {
     const payload = data.payload
@@ -387,13 +448,36 @@ function renderTopRight() {
   const user = session.user
   host.innerHTML = `${pill}
     <span class="pill" data-live id="livePill"><span class="dot"></span>LIVE</span>
-    <div class="avatar" title="${esc(user?.displayName ?? '')}">${esc((user?.displayName ?? '?').slice(0, 1))}</div>`
+    <div class="avatar" id="userAvatar" title="${esc(user?.displayName ?? '')}（点击退出登录）">${esc((user?.displayName ?? '?').slice(0, 1))}</div>`
   document.getElementById('ddPill').onclick = () => showBind()
+  // 退出登录入口（QA P2-3）：车间共用电脑下一班不能沿用上一班身份
+  document.getElementById('userAvatar').onclick = async () => {
+    if (!window.confirm(`退出当前账号（${user?.displayName ?? ''}）？`)) return
+    session.clear()
+    renderLoginGuide()
+    void toast('已退出登录')
+  }
 }
 
+/** 实时徽标三态（QA BUG-U-02）：SSE 在场=LIVE；轮询降级=30s 轮询；轮询连续失败=中断可重试。 */
 function renderLiveBadge() {
   const pill = document.getElementById('livePill')
-  if (pill) pill.innerHTML = '<span class="dot" style="background:#f59e0b"></span>30s 轮询'
+  if (!pill) return
+  if (state.streamStale) {
+    pill.innerHTML = '<span class="dot" style="background:#ef4444"></span>连接中断 · 点击重试'
+    pill.title = '超过 90 秒没有收到任何数据（可能断网或服务重启）。点击重建实时通道。'
+    pill.onclick = () => { reconnectStream(); void toast('正在重建实时通道…') }
+    return
+  }
+  if (state.streamDowngraded) {
+    pill.innerHTML = '<span class="dot" style="background:#f59e0b"></span>30s 轮询'
+    pill.title = '实时通道不可用（如钉钉 webview），已按 30 秒轮询兜底'
+    pill.onclick = null
+    return
+  }
+  pill.innerHTML = '<span class="dot"></span>LIVE'
+  pill.title = '实时通道（SSE）已连接'
+  pill.onclick = null
 }
 
 function renderRail() {
@@ -483,7 +567,7 @@ function renderDept() {
         <button class="btn only-compact toggle-left" id="btnLeftDrawer" title="名册/频道（窄窗抽屉）">👥</button>
         <button class="btn only-compact toggle-right" id="btnRightDrawer" title="部门看板（窄窗抽屉）">📊</button>
         <button class="btn" id="btnModels" title="模型配置（与 dsh 服务共用模型目录）">🧠 模型</button>
-        <button class="btn" id="btnConfig">⚙ 面板配置</button>
+        ${session.can('panel.config.write') ? '<button class="btn" id="btnConfig">⚙ 面板配置</button>' : ''}
         <button class="btn primary" id="btnNewChannel">＋ 发起协作</button>
       </div>
     </div>
@@ -492,7 +576,9 @@ function renderDept() {
       <div class="col-main" id="colMain"></div>
       <div class="col-right" id="colRight"></div>
     </div>`
-  document.getElementById('btnConfig').onclick = () => showConfig()
+  const btnConfig = document.getElementById('btnConfig')
+  // 只读用户隐藏配置入口（QA P2-4）：有点击后提示不如按权限直接隐藏
+  if (btnConfig) btnConfig.onclick = () => showConfig()
   document.getElementById('btnModels').onclick = () => void showModels()
   document.getElementById('btnNewChannel').onclick = () => showNewChannel()
   const toggle = (cls) => document.body.classList.toggle(cls)
@@ -745,6 +831,20 @@ async function doCardAction(messageId, opId, btn) {
 
 // -- 输入区 ------------------------------------------------------------------
 
+/** 输入草稿（QA BUG-U-07）：按 部门:频道 落 localStorage——任何 Tab 切换/频道切换/
+ *  整页刷新都不许弄丢正在输入的交接班记录。 */
+function draftKey() {
+  return `panel_draft:${state.dept}:${state.channelId}`
+}
+
+function saveDraft(input) {
+  try { localStorage.setItem(draftKey(), input.value) } catch { /* 存储满/隐私模式忽略 */ }
+}
+
+function clearDraft() {
+  try { localStorage.removeItem(draftKey()) } catch { /* 忽略 */ }
+}
+
 function composerHtml() {
   const dept = state.overview.dept
   const bound = Boolean(state.ddStatus?.bound)
@@ -779,6 +879,9 @@ function composerHtml() {
 function wireComposer(host) {
   const input = host.querySelector('#composerInput')
   if (!input) return
+  // 草稿恢复 + 随输入保存（QA BUG-U-07）
+  try { input.value = localStorage.getItem(draftKey()) ?? '' } catch { /* 忽略 */ }
+  input.oninput = () => saveDraft(input)
   host.querySelectorAll('[data-at]').forEach((el) => {
     el.onclick = () => atMention(el.dataset.at, input)
   })
@@ -821,6 +924,7 @@ function atMention(name, inputEl) {
   const input = inputEl ?? document.querySelector('#composerInput')
   if (!input) { void toast('请先切到「协作会话」再 @ 唤起'); return }
   input.value = `@${name} ${input.value}`
+  saveDraft(input)
   input.focus()
 }
 
@@ -834,11 +938,13 @@ async function sendMessage(input) {
       // 对话框选中的模型（'' = 跟随 Agent 资产配置，不传 model）
       ...(state.chatModel ? { model: state.chatModel } : {}),
     })
+    clearDraft()
     state.messages.push(result.message)
     renderMessages()
     void refreshOverview()
   } catch (error) {
     input.value = text
+    saveDraft(input)
     void toast(error.message, 'error')
   }
 }
@@ -1000,7 +1106,22 @@ function renderScenegraph(host) {
   })
   host.querySelectorAll('[data-syncdd]').forEach((el) => {
     el.onclick = async () => {
-      if (!state.ddStatus?.bound) { showBind(); return }
+      // 前置状态检查（QA BUG-G-03）：未配置/未绑定/无群桥三种情况都必须给明确报错，
+      // 不许「零反馈」——工人按了按钮就该知道发生了什么、下一步找谁
+      if (!state.ddStatus?.connector?.configured) {
+        void toast('钉钉桥接未配置：请联系管理员在控制台「三方集成」配置钉钉连接器', 'error')
+        return
+      }
+      if (!state.ddStatus?.bound) {
+        void toast('尚未绑定钉钉账号：请点击顶栏钉钉状态丸完成扫码绑定', 'error')
+        showBind()
+        return
+      }
+      const deptBridge = state.bridges.some((b) => b.purpose === 'channel' && (!b.dept || b.dept === state.dept))
+      if (!deptBridge) {
+        void toast('本部门尚未绑定钉钉群桥：请联系管理员在频道旁「⇄钉钉」绑定群后重试', 'error')
+        return
+      }
       el.disabled = true
       try {
         await api.post(`/api/panel/${state.dept}/scenes/${el.dataset.syncdd}/sync-dingtalk`)
@@ -1190,7 +1311,8 @@ async function showModels() {
     el.onclick = async () => {
       el.disabled = true
       try {
-        const result = await api.post(`/api/panel/models/${encodeURIComponent(el.dataset.mtest)}/test`)
+        // 真实外呼可能慢于默认 20s（QA BUG-U-03 超时豁免项）
+        const result = await api.post(`/api/panel/models/${encodeURIComponent(el.dataset.mtest)}/test`, {}, { timeoutMs: 60_000 })
         void toast(result.ok ? `✓ ${result.model} 连通正常（输出 ${result.outputTokens} tokens）` : `✗ 连通失败：${result.error}`, result.ok ? undefined : 'error')
       } catch (error) {
         void toast(error.message, 'error')
@@ -1414,8 +1536,8 @@ async function renderBoardView() {
     host.innerHTML = `
       <div class="board-head">
         <div class="board-title">📈 战略看板<span class="tag">${esc(b.platform ?? '')}${b.label ? ' · ' + esc(b.label) : ''}</span></div>
-        <div class="board-plat">${platforms.map((pf) => `<span class="plat-chip${pf === b.platform ? ' active' : ''}" data-p="${esc(pf)}">${esc(pf)}</span>`).join('')}</div>
-        <span class="board-stamp">更新于 ${esc(String(b.generatedAt ?? '').slice(5, 16).replace('T', ' '))} · 近 ${esc(String(b.windowDays ?? 7))} 天</span>
+        <div class="board-plat">${platforms.map((pf) => `<span class="plat-chip${pf === b.platform ? ' active' : ''}" data-p="${esc(pf)}">${esc(PLATFORM_LABELS[pf] ?? pf)}</span>`).join('')}</div>
+        <span class="board-stamp">更新于 ${esc(fmtTime(b.generatedAt))} · 近 ${esc(String(b.windowDays ?? 7))} 天</span>
       </div>
       <div class="board-grid">
         <div class="board-blk"><h3>在线资产</h3><div class="board-row">

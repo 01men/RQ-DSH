@@ -146,20 +146,31 @@ export class DingtalkBridgeService extends Service {
       ? this.bridgeChannels().findOne((item) => item.chatId === input.chatId)
       : this.bridgeChannels().find((item) => item.purpose === 'channel' && (!input.dept || item.dept === input.dept)).at(0)
       ?? this.bridgeChannels().find((item) => item.purpose === 'channel').at(0)
-    if (!bridge && !(input.chatId && input.robotCode)) return { delivered: false, error: '未绑定群桥' }
+    if (!bridge && !(input.chatId && input.robotCode)) {
+      // 无群桥也要回执事件（QA T-04）：否则面板消息永远停在 pending，用户看不出投递已失败
+      this.ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, { messageId: input.messageId, ok: false, error: '未绑定群桥' })
+      return { delivered: false, error: '未绑定群桥' }
+    }
     const chatId = bridge?.chatId ?? input.chatId!
     const robotCode = bridge?.robotCode ?? input.robotCode!
     const dedupKey = `${input.messageId}:${chatId}`
-    if (this.bridgeMessages().findOne((item) => item.dedupKey === dedupKey)) return { delivered: true }
+    // 去重只认「已成功投递」（QA BUG-A-02）：failed 记录不阻断重投——瞬时网络抖动
+    // 曾把去重键永久毒化（查重不看 status 即返回 delivered:true，失败也落同一键），
+    // 导致该消息/审批永远推不出去且界面显示成功。
+    const existing = this.bridgeMessages().findOne((item) => item.dedupKey === dedupKey)
+    if (existing?.status === 'sent') return { delivered: true }
     try {
       await this.sendToGroup({ chatId, robotCode, title: input.title, text: input.text })
-      this.bridgeMessages().insert({ id: newId('ddm'), messageId: input.messageId, direction: 'out', chatId, status: 'sent', dedupKey })
+      // dedupKey 引擎级唯一：重投成功 = 原地覆盖 failed 记录（insert 会撞唯一约束）
+      if (existing) this.bridgeMessages().update(existing.id, { status: 'sent', error: undefined })
+      else this.bridgeMessages().insert({ id: newId('ddm'), messageId: input.messageId, direction: 'out', chatId, status: 'sent', dedupKey })
       this.ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, { messageId: input.messageId, ok: true, chatId })
       return { delivered: true }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       try {
-        this.bridgeMessages().insert({ id: newId('ddm'), messageId: input.messageId, direction: 'out', chatId, status: 'failed', error: message, dedupKey })
+        if (existing) this.bridgeMessages().update(existing.id, { status: 'failed', error: message })
+        else this.bridgeMessages().insert({ id: newId('ddm'), messageId: input.messageId, direction: 'out', chatId, status: 'failed', error: message, dedupKey })
       } catch { /* 回执落库失败不影响事件通知 */ }
       this.ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, { messageId: input.messageId, ok: false, error: message, chatId })
       return { delivered: false, error: message }

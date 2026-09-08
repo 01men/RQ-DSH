@@ -421,7 +421,9 @@ export function apply(ctx: Context) {
     const dept = deptOf(exchange)
     const channelId = exchange.query.get('channelId') ?? ''
     const after = exchange.query.get('after') ?? ''
-    const limit = Math.min(Number(exchange.query.get('limit') ?? 80), 200)
+    // limit 防护（QA T-05）：非数字/负数/超大值一律收敛到 [1,200]，杜绝 NaN→全量回包
+    const limitRaw = Number(exchange.query.get('limit') ?? 80)
+    const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 80, 1), 200)
     let rows = panel.messages().find((m) => m.dept === dept.id && (channelId ? m.channelId === channelId : true))
     if (after) rows = rows.filter((m) => m.createdAt > after)
     return { messages: rows.slice(-limit) }
@@ -431,6 +433,8 @@ export function apply(ctx: Context) {
     const dept = deptOf(exchange)
     const input = body<{ channelId?: string; text?: string; ddSync?: boolean; uniqueKey?: string; model?: string }>(exchange)
     if (!input.text?.trim()) throw new Error('消息内容必填')
+    // 长度上限（QA T-06）：消息正文收敛到 10k 字符，杜绝超大 payload 对落库/SSE/轮询的连锁冲击
+    if (input.text.length > 10_000) throw new Error('消息内容过长（上限 10000 字符）')
     const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id
     if (!channelId) throw new Error('部门暂无频道，请先创建')
     // 对话框模型切换：显式指定 model 时必须是模型目录已登记的 slug（未指定则跟随 Agent 资产配置）
@@ -613,10 +617,31 @@ export function apply(ctx: Context) {
     if (!DEPT_RE.test(dept)) return fail(400, `部门标识非法：${dept}`)
     try {
       const verified = ctx.authn.verify(token)
-      exchange.principal = { kind: verified.principal.type, principalId: verified.principal.id, name: verified.principal.name, permissions: verified.scopes, actChain: verified.actChain }
-      if (!requirePermission(exchange, 'panel.read')) return
+      // principal 形状与 console 鉴权中间件同规（human → userId=refId）：deptScopeAllowed
+      // 的组织子树判定依赖 userId，缺了它所有人类用户都会被误判为无组织归属。
+      exchange.principal = {
+        kind: verified.principal.type,
+        principalId: verified.principal.id,
+        ...(verified.principal.type === 'human' && verified.principal.refId ? { userId: verified.principal.refId } : {}),
+        ...(verified.principal.type === 'machine' ? { refType: verified.principal.refType, refId: verified.principal.refId } : {}),
+        name: verified.principal.name,
+        permissions: verified.scopes,
+        actChain: verified.actChain,
+      }
     } catch (error) {
       return fail(401, `令牌无效：${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (!requirePermission(exchange, 'panel.read')) return
+    // 部门范围校验（QA 2026-09-08 BUG-A-01/T-01）：stream 握手阶段执行与 REST 面 deptOf
+    // 同规的归属校验——本端点经 http.register 注册、不进 routeMatrix（?token= 自校验），
+    // 曾因此逃出 RBAC 断言网造成组织受限用户实时收到受限部门消息；现握手即断，绝不先订阅。
+    const deptConfig = (() => {
+      try { return panel.dept(dept) } catch { return undefined }
+    })()
+    if (!deptConfig) return fail(404, `部门不存在：${dept}`)
+    if (!panel.deptScopeAllowed(caller(exchange), deptConfig)) {
+      exchange.fail(403, 'FORBIDDEN', `部门范围受限：${deptConfig.label} 已绑定组织治理，仅该组织子树成员可访问`, { permission: 'panel.read', deptScope: deptConfig.orgId })
+      return
     }
     const res = exchange.res
     if (res.headersSent) return
@@ -651,9 +676,16 @@ export function apply(ctx: Context) {
     const { messageId, ok, error } = (payload ?? {}) as { messageId?: string; ok?: boolean; error?: string }
     if (!messageId) return
     const message = panel.messages().get(messageId)
-    if (!message || (message.ddSync !== 'pending' && message.ddSync !== 'sent')) return
-    panel.messages().update(messageId, { ddSync: ok ? 'sent' : 'failed' })
-    if (!ok && error) {
+    if (!message) return
+    // 投递成功：sent 终态；failed→sent 必须可达（QA BUG-A-02：失败重投成功后界面仍显示失败）
+    if (ok) {
+      if (message.ddSync !== 'sent') panel.messages().update(messageId, { ddSync: 'sent' })
+      return
+    }
+    // 投递失败：仅 pending 置 failed（failed 已是终态，重复失败不抖动）；告警只在首次失败留痕
+    if (message.ddSync !== 'pending') return
+    panel.messages().update(messageId, { ddSync: 'failed' })
+    if (error) {
       ctx.audit.fire({ severity: 'warning', title: '钉钉桥接投递失败', message: `消息 ${messageId} 投递失败：${error}`, resourceType: 'panel_message', resourceId: messageId })
     }
   })

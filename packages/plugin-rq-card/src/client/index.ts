@@ -195,7 +195,9 @@ export function apply(ctx: ClientContext): void {
     })
   }
 
-  // ── ③ 降级角标：仅当确有降级原因且 shell.overlay 仍在（spike §5 第 6 条）──
+  // ── ③ 降级角标：仅当确有降级原因（spike §5 第 6 条）──
+  // 首选 shell.overlay 槽条目；槽不可用时退为直接挂 DOM 角标（QA BUG-G-01/T-14：
+  // 注入失效必须有用户可见信号，绝不静默消失——真实 dsh web 曾四项能力全失且无任何提示）。
   if (DEGRADED.length > 0) {
     const overlaySpec = probeSpec(ctx, SLOT_OVERLAY)
     if (overlaySpec?.kind === 'list') {
@@ -209,6 +211,19 @@ export function apply(ctx: ClientContext): void {
           // 本文件是 .ts（非 tsx），故用 createElement 而非 JSX 字面量。
           return createElement('span', { className: 'rq-badge' }, '榕器卡片未生效（纯文本模式）')
         }))
+      })
+    } else {
+      safely('degraded-dom-badge', () => {
+        if (typeof document === 'undefined') return
+        if (document.querySelector('.rq-card-dom-badge')) return
+        const el = document.createElement('button')
+        el.type = 'button'
+        el.className = 'rq-card-dom-badge'
+        el.textContent = '榕器卡片未生效（部分能力不可用）'
+        el.title = `降级原因：${DEGRADED.join('；')}（点击刷新重试；详情见控制台 [rq-card] 日志）`
+        el.setAttribute('style', 'position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)')
+        el.onclick = () => { location.reload() }
+        document.body.appendChild(el)
       })
     }
     console.warn(`[rq-card] degraded mode with ${DEGRADED.length} reason(s); markdown fallback remains available`)

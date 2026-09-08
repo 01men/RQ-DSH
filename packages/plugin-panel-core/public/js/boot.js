@@ -112,12 +112,26 @@ async function bootstrap() {
 }
 
 bootstrap().catch((error) => {
+  // 加载失败页（QA BUG-U-10）：一线用户面对英文堆栈无所适从——给明确动作（重新加载），
+  // 技术详情折叠进「联系管理员时出示」区域，不再裸奔 40 行堆栈。
+  const message = String(error?.message ?? error).replace(/[<>&"]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[ch])
+  const stack = String(error?.stack ?? '').replace(/[<>&"]/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' })[ch])
   const app = document.getElementById('app')
-  if (app) app.innerHTML = `<div class="login-guide"><h1>面板加载失败</h1><p>${String(error?.message ?? error).replace(/</g, '&lt;')}</p><pre style="text-align:left;font-size:11px;color:#6b7280">${String(error?.stack ?? '').replace(/</g, '&lt;')}</pre></div>`
+  if (app) app.innerHTML = `
+    <div class="login-guide">
+      <h1>🌳 工作台暂时没有加载起来</h1>
+      <p>通常是网络波动或服务正在重启，稍等片刻再试即可。<br>若反复出现，请联系管理员并出示下方「技术详情」。</p>
+      <button class="btn primary" onclick="location.reload()">重新加载</button>
+      <details style="margin-top:16px;text-align:left">
+        <summary style="cursor:pointer;color:#6b7280;font-size:12px">技术详情（联系管理员时提供）</summary>
+        <pre style="text-align:left;font-size:11px;color:#6b7280;white-space:pre-wrap;max-height:220px;overflow:auto">${message}${stack ? `\n${stack}` : ''}</pre>
+      </details>
+    </div>`
 })
 window.addEventListener('error', (event) => {
+  // 预启动脚本异常：一线用户不需要原始报错——只留一条中性提示（详情在浏览器控制台）
   const app = document.getElementById('app')
   if (app && !app.dataset.booted) {
-    app.insertAdjacentHTML('beforeend', `<pre style="position:fixed;bottom:0;left:0;font-size:10px;color:#ef4444;background:#fff;padding:4px;z-index:999">${String(event.message ?? '').replace(/</g, '&lt;')}</pre>`)
+    app.insertAdjacentHTML('beforeend', '<div style="position:fixed;bottom:8px;left:50%;transform:translateX(-50%);font-size:12px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:4px 12px;z-index:999">页面加载出现异常，请刷新重试；若反复出现请联系管理员（详情见浏览器控制台）</div>')
   }
 })
