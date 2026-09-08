@@ -42,8 +42,8 @@
 
 | 区 | 目录/文件 | 规则 |
 |---|---|---|
-| **宿主面**（主分支拥有并演进） | `packages/platform-core`、`packages/plugin-console`、`packages/plugin-authn`、`packages/plugin-agent`、`packages/plugin-portal`、`packages/plugin-iam`、`packages/plugin-usage`、`packages/plugin-skillhub`、`packages/plugin-app`、`packages/plugin-mcp`、`packages/plugin-nas`、`packages/plugin-dsh-bridge`、`src/boot-all.ts`、`cordis.yml` | 定制分支**禁止修改**；缺陷/需求走交接清单回流；合并冲突以 main 为准 |
-| **定制面**（本分支拥有并演进） | `packages/plugin-panel-core`、`packages/plugin-rq-card`、`packages/plugin-dingtalk-bridge`、`scenegraphs/*.json` 业务数据、`cordis.patch.yml` | 自由演进；主分支侧仅接收性维护 |
+| **宿主面**（主分支拥有并演进） | `packages/platform-core`、`packages/plugin-console`、`packages/plugin-authn`、`packages/plugin-agent`、`packages/plugin-portal`、`packages/plugin-iam`、`packages/plugin-usage`、`packages/plugin-skillhub`、`packages/plugin-app`、`packages/plugin-mcp`、`packages/plugin-nas`、`packages/plugin-dsh-bridge`、`src/boot-all.ts`、`cordis.yml`、`cordis.patch.yml` | 定制分支**禁止修改**；缺陷/需求走交接清单回流；合并冲突以 main 为准 |
+| **定制面**（本分支拥有并演进） | `packages/plugin-panel-core`、`packages/plugin-rq-card`、`packages/plugin-dingtalk-bridge`、`scenegraphs/*.json` 业务数据 | 自由演进；主分支侧仅接收性维护 |
 | **治理/文档**（本分支所有） | `AGENTS.md`、`PROJECT.md`、`scripts/hooks/`、`docs/handoff-*`、`docs/plan-*` | 本分支维护，主分支不消费 |
 
 **修改纪律（北极星护栏）**：每次推送备份前跑一次收敛检查——
@@ -52,7 +52,8 @@
 git diff origin/main custom/dsh-rq -- \
   packages/platform-core packages/plugin-console packages/plugin-portal \
   packages/plugin-authn packages/plugin-agent packages/plugin-iam \
-  packages/plugin-usage packages/plugin-dsh-bridge src/boot-all.ts README.md
+  packages/plugin-usage packages/plugin-dsh-bridge src/boot-all.ts README.md \
+  cordis.yml cordis.patch.yml
 ```
 
 输出应趋于为空（F 域余量在 `docs/handoff-f-remainder-to-main.md` 闭环前允许存在，

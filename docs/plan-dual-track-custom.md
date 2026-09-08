@@ -22,11 +22,12 @@
 git diff origin/main custom/dsh-rq -- \
   packages/platform-core packages/plugin-console packages/plugin-portal \
   packages/plugin-authn packages/plugin-agent packages/plugin-iam \
-  packages/plugin-usage packages/plugin-dsh-bridge src/boot-all.ts README.md
+  packages/plugin-usage packages/plugin-dsh-bridge src/boot-all.ts README.md \
+  cordis.yml cordis.patch.yml
 ```
 
-输出应为空。全部差异集中于：定制自有三包、scenegraphs/*.json、cordis.patch.yml（机器本地）、
-docs/、治理文件（AGENTS.md / PROJECT.md / scripts/hooks）。达成后，日常上游同步不再产生宿主面冲突。
+输出应为空。全部差异集中于：定制自有三包、scenegraphs/*.json、docs/、治理文件（AGENTS.md / PROJECT.md / scripts/hooks）。
+cordis.yml / cordis.patch.yml 属宿主面（装配清单随 main 演进）；定制部署个性走 gitignore 的 cordis.local.yml。达成后，日常上游同步不再产生宿主面冲突。
 **建议每次 push 前跑一次北极星 diff 作为纪律护栏。**
 
 ---
@@ -142,6 +143,10 @@ docs/、治理文件（AGENTS.md / PROJECT.md / scripts/hooks）。达成后，�
   `/api/panel/board` 一套端点下发聚合面+卡片包面；portal/console/platform-core 看板接线拆除；
   dashboard 卡片改源 /api/panel/board；selftest 965/965。
 - **Phase 3 ✅** `docs/handoff-f-remainder-to-main.md`（A 审批深化 / B usage-recent / C 主题与钉钉H5 / D 目录与登记 / E 测试资产）。
+- **所有权修正 ✅** cordis.patch.yml 从「定制面」改划「宿主面」并逐字节收敛：吸收 ff1a8de 补的
+  ops-panel-core / ops-dingtalk-bridge 装配入口（Phase 0 的 --ours 决议曾让定制侧落后这两条）；
+  cordis.yml 一行示例路径注释同步收敛。定制部署个性（安装源 RQ-DSH 等）走 gitignore 的 cordis.local.yml
+  或部署文档，不进版本化装配清单。
 - **北极星现状（对真上游 ff1a8de）**：宿主面剩余差异 = F 域余量（已登记，待主分支采纳/拆除闭环）；
   packages/ 差异仅剩定制自有包（plugin-panel-core 增量 + cardpacks 域文件）。
 
