@@ -29,7 +29,7 @@ plugin-billing（钱包/充值/扣费/流水/月度预算/账期结转/红字冲
 
 | 环境 | 数据目录 | 导出执行日 | 档案行数（journal/ledger/wallets） | 销毁日期 |
 |---|---|---|---|---|
-| 测试 mdzx.fun:8801（Mac mini 7300） | `/Users/xiaodaoqin/ops-platform-test/data` | 2026-09-09 | 见该环境导出输出（本次部署时执行并回填） | **2026-12-08** |
+| 测试 mdzx.fun:8801（Mac mini 7300） | `/Users/xiaodaoqin/ops-platform-test/data` | 2026-09-09 | 0 / 0 / 0（该实例 2026-09-09 全新初始化，未产生过资金流水；空档案 CSV 已落 `data/archive/`） | **2026-12-08** |
 | 正式 192.168.0.7:7300 | `/opt/ops-platform/data` | 待正式发布时执行（发布说明已列入操作清单） | — | 导出日 + 90 天 |
 
 > 存量账期权益登记（market `market:subscriptions` 集合，JSON 存档于 `<数据目录>/data/`）随代收功能一并停写；
