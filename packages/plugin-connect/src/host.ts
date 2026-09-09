@@ -193,7 +193,7 @@ export const connectHostApi = {
         hub: { name: config.hubName ?? '榕器|企业AI资源管理平台', version: config.hubVersion ?? '1.0.0' },
         notice: '机器凭证仅本次返回，请妥善保存；后续用它在 /api/auth/client-credentials 换取机器令牌',
       })
-    })
+    }, { access: 'public', selfValidated: true })
 
     // -- 客户端心跳（接入方主动推送存活/运行元信息；高频不入审计，避免刷爆日志） ----
     http.register('POST', '/api/connect/heartbeat', (exchange) => {
@@ -211,7 +211,7 @@ export const connectHostApi = {
         },
       })
       exchange.ok({ ok: true, clientId: client.clientId, template: client.template })
-    })
+    }, { access: 'authenticated' })
 
     // -- 接入码管理 ----------------------------------------------------------
     http.register('POST', '/api/connect/codes', (exchange) => {
@@ -239,7 +239,7 @@ export const connectHostApi = {
       })
       ctx.platformBus.emit(PlatformEvents.ConnectCodeCreated, { id: record.id, template, ttlMinutes })
       exchange.ok({ id: record.id, code, codeMask: record.codeMask, template, ttlMinutes, expiresAt: record.expiresAt, notice: '接入码仅本次返回且一次性消费，请立即复制分发' })
-    })
+    }, { access: 'guarded', permission: 'connect.manage' })
 
     http.register('GET', '/api/connect/codes', (exchange) => {
       if (!requireManage(exchange)) return
@@ -252,7 +252,7 @@ export const connectHostApi = {
             status: record.revokedAt ? 'revoked' : record.usedAt ? 'used' : new Date(record.expiresAt).getTime() < now ? 'expired' : 'active',
           })),
       })
-    })
+    }, { access: 'guarded', permission: 'connect.manage' })
 
     http.register('DELETE', '/api/connect/codes/:id', (exchange) => {
       if (!requireManage(exchange)) return
@@ -267,7 +267,7 @@ export const connectHostApi = {
         resourceName: record.codeMask, result: 'ok', detail: '作废未使用接入码',
       })
       exchange.ok({ id: record.id, status: 'revoked' })
-    })
+    }, { access: 'guarded', permission: 'connect.manage' })
 
     // -- 已接入客户端管理 -----------------------------------------------------
     http.register('GET', '/api/connect/clients', (exchange) => {
@@ -292,7 +292,7 @@ export const connectHostApi = {
           }
         })
       exchange.ok({ clients, templates: connectTemplates() })
-    })
+    }, { access: 'guarded', permission: 'connect.manage' })
 
     http.register('POST', '/api/connect/clients/:id/disable', (exchange) => {
       if (!requireManage(exchange)) return
@@ -311,7 +311,7 @@ export const connectHostApi = {
       })
       ctx.platformBus.emit(PlatformEvents.ConnectClientDisabled, { principalId: client.principalId, name: client.name, reason })
       exchange.ok({ id: client.id, status: 'disabled' })
-    })
+    }, { access: 'guarded', permission: 'connect.manage' })
 
     http.register('POST', '/api/connect/clients/:id/enable', (exchange) => {
       if (!requireManage(exchange)) return
@@ -326,7 +326,7 @@ export const connectHostApi = {
         resourceName: client.name, result: 'ok', detail: '恢复接入客户端',
       })
       exchange.ok({ id: client.id, status: 'active' })
-    })
+    }, { access: 'guarded', permission: 'connect.manage' })
   },
 }
 

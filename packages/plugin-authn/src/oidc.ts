@@ -961,7 +961,7 @@ export class OidcService extends Service {
       } catch (error) {
         raw(exchange, 404, { error: 'invalid_request', error_description: error instanceof Error ? error.message : String(error) })
       }
-    })
+    }, { access: 'public', selfValidated: true })
 
     // -- 授权页确认（Bearer；human-only，机器 principal 一律 403） ------------------
     http.register('POST', '/api/authn/oidc/authorize', async (exchange) => {
@@ -985,7 +985,7 @@ export class OidcService extends Service {
       } catch (error) {
         raw(exchange, 400, { error: 'consent_required', error_description: error instanceof Error ? error.message : String(error) })
       }
-    })
+    }, { access: 'authenticated' })
 
     // -- 换牌：client_secret_basic + client_secret_post；form-encoded 与 JSON 双编码 --
     http.register('POST', '/oauth/token', async (exchange) => {

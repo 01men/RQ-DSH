@@ -41,7 +41,7 @@ export function apply(ctx: Context) {
   }
 
   const guarded = (method: string, path: string, permission: string, handler: (exchange: HttpExchange) => unknown | Promise<unknown>): void => {
-    http.routeMatrix.push({ method, path, permission })
+    // H5：声明经 http.register 自动汇入 routeMatrix 共享登记处（注册期缺声明即抛错）
     http.register(method, path, async (exchange) => {
       if (!requirePermission(exchange, permission)) return
       try {
@@ -51,7 +51,7 @@ export function apply(ctx: Context) {
         const message = error instanceof Error ? error.message : String(error)
         exchange.fail(400, 'BAD_REQUEST', message)
       }
-    })
+    }, { access: 'guarded', permission })
   }
 
   const body = <T extends Record<string, any>>(exchange: HttpExchange): T => (exchange.body ?? {}) as T

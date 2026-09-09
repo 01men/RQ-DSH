@@ -15,6 +15,7 @@
  */
 import { join, dirname } from 'node:path'
 import { existsSync } from 'node:fs'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange } from '../../platform-core/src/index.ts'
@@ -64,8 +65,7 @@ export function apply(ctx: Context) {
   }
 
   const guarded = (method: string, path: string, permission: string, handler: (exchange: HttpExchange) => unknown | Promise<unknown>): void => {
-    // 自注册路由必须进共享矩阵（routeMatrix 机制下沉后的插件侧登记义务）
-    http.routeMatrix.push({ method, path, permission })
+    // H5：声明经 http.register 自动汇入 routeMatrix 共享登记处（注册期缺声明即抛错）
     http.register(method, path, async (exchange) => {
       if (!requirePermission(exchange, permission)) return
       try {
@@ -75,7 +75,7 @@ export function apply(ctx: Context) {
         const message = error instanceof Error ? error.message : String(error)
         exchange.fail(400, 'BAD_REQUEST', message)
       }
-    })
+    }, { access: 'guarded', permission })
   }
 
   const body = <T extends Record<string, any>>(exchange: HttpExchange): T => (exchange.body ?? {}) as T
@@ -500,19 +500,86 @@ export function apply(ctx: Context) {
     }
   })
 
-  // SSE：公开路径（console 白名单）+ ?token= 内部自校验（EventSource 无法带 Bearer；fail-closed）
+  // -- SSE stream ticket（交接清单 H4 / P2-O-5 架构性收敛） ---------------------------
+  // EventSource 无法携带 Authorization 头，长效 access token 走 ?token= 会进代理/访问日志。
+  // 改为 POST（Bearer + 权限点 + 部门范围校验）换取 ≤60s 一次性 ticket，GET 消费即焚：
+  // URL 里只出现短时一次性凭证。?token= 旧通道保留（fail-closed 同规），供未升级消费方过渡。
+
+  /** SSE 流票据：sha256(ticketRaw) → {principal, dept, 过期时刻}。消费即删；签发时顺手清扫过期。 */
+  const streamTickets = new Map<string, { principal: CallerInfo; dept: string; expiresAt: number }>()
+  const STREAM_TICKET_TTL_MS = 60_000
+
+  const issueStreamTicket = (principal: CallerInfo, dept: string): string => {
+    const now = Date.now()
+    for (const [key, value] of streamTickets) if (value.expiresAt < now) streamTickets.delete(key)
+    const raw = 'stk_' + randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')
+    streamTickets.set(createHash('sha256').update(raw).digest('hex'), { principal, dept, expiresAt: now + STREAM_TICKET_TTL_MS })
+    return raw
+  }
+
+  guarded('POST', '/api/panel/stream-ticket', 'panel.read', (exchange) => {
+    const dept = String(body<{ dept?: string }>(exchange).dept ?? '')
+    if (!DEPT_RE.test(dept)) throw new Error(`部门标识非法：${dept}`)
+    const deptConfig = panel.dept(dept)
+    if (!panel.deptScopeAllowed(caller(exchange), deptConfig)) {
+      exchange.fail(403, 'FORBIDDEN', `部门范围受限：${deptConfig.label} 已绑定组织治理，仅该组织子树成员可访问`, { permission: 'panel.read', deptScope: deptConfig.orgId })
+      return
+    }
+    return { ticket: issueStreamTicket(caller(exchange), dept), expiresInSeconds: STREAM_TICKET_TTL_MS / 1000 }
+  })
+
+  // SSE：公开路径（console 白名单）+ ?ticket=（首选，消费即焚）或 ?token=（旧通道）自校验，fail-closed
   http.register('GET', '/api/panel/stream', (exchange) => {
     const fail = (status: number, message: string) => exchange.fail(status, 'STREAM_AUTH_FAILED', message)
-    const token = exchange.query.get('token') ?? ''
-    const dept = exchange.query.get('dept') ?? ''
-    if (!token) return fail(401, '缺少 token 查询参数')
-    if (!DEPT_RE.test(dept)) return fail(400, `部门标识非法：${dept}`)
-    try {
-      const verified = ctx.authn.verify(token)
-      exchange.principal = { kind: verified.principal.type, principalId: verified.principal.id, name: verified.principal.name, permissions: verified.scopes, actChain: verified.actChain }
+    let dept = exchange.query.get('dept') ?? ''
+    const ticketRaw = exchange.query.get('ticket') ?? ''
+    if (!ticketRaw && !exchange.query.get('token')) return fail(401, '缺少 ticket/token 查询参数')
+    if (ticketRaw) {
+      // ticket 通道：签发时已完成鉴权 + 权限点 + 部门范围校验，这里只做一次性消费（兑换即焚）
+      const key = createHash('sha256').update(ticketRaw).digest('hex')
+      const entry = streamTickets.get(key)
+      if (!entry || entry.expiresAt < Date.now()) {
+        streamTickets.delete(key)
+        return fail(401, 'ticket 无效或已过期，请重新获取')
+      }
+      streamTickets.delete(key)
+      const queryDept = dept
+      dept = entry.dept
+      if (queryDept && queryDept !== dept) return fail(400, `dept 查询参数与 ticket 签发部门不一致：${queryDept} ≠ ${dept}`)
+      exchange.principal = entry.principal
       if (!requirePermission(exchange, 'panel.read')) return
-    } catch (error) {
-      return fail(401, `令牌无效：${error instanceof Error ? error.message : String(error)}`)
+    } else {
+      const token = exchange.query.get('token') ?? ''
+      if (!token) return fail(401, '缺少 token 查询参数')
+      if (!DEPT_RE.test(dept)) return fail(400, `部门标识非法：${dept}`)
+      try {
+        const verified = ctx.authn.verify(token)
+        // principal 形状与 console 鉴权中间件同规（human → userId=refId）：deptScopeAllowed
+        // 的组织子树判定依赖 userId，缺了它所有人类用户都会被误判为无组织归属。
+        exchange.principal = {
+          kind: verified.principal.type,
+          principalId: verified.principal.id,
+          ...(verified.principal.type === 'human' && verified.principal.refId ? { userId: verified.principal.refId } : {}),
+          ...(verified.principal.type === 'machine' ? { refType: verified.principal.refType, refId: verified.principal.refId } : {}),
+          name: verified.principal.name,
+          permissions: verified.scopes,
+          actChain: verified.actChain,
+        }
+      } catch (error) {
+        return fail(401, `令牌无效：${error instanceof Error ? error.message : String(error)}`)
+      }
+      if (!requirePermission(exchange, 'panel.read')) return
+    }
+    // 部门范围校验（QA 2026-09-08 BUG-A-01/T-01，两通道同规）：stream 握手阶段执行与 REST 面
+    // deptOf 同规的归属校验——本端点曾因 ?token= 自校验逃出 RBAC 断言网，组织受限用户实时收到
+    // 受限部门消息；现握手即断，绝不先订阅。
+    const deptConfig = (() => {
+      try { return panel.dept(dept) } catch { return undefined }
+    })()
+    if (!deptConfig) return fail(404, `部门不存在：${dept}`)
+    if (!panel.deptScopeAllowed(caller(exchange), deptConfig)) {
+      exchange.fail(403, 'FORBIDDEN', `部门范围受限：${deptConfig.label} 已绑定组织治理，仅该组织子树成员可访问`, { permission: 'panel.read', deptScope: deptConfig.orgId })
+      return
     }
     const res = exchange.res
     if (res.headersSent) return
@@ -535,7 +602,7 @@ export function apply(ctx: Context) {
       clearInterval(heartbeat)
       unsubscribe()
     })
-  })
+  }, { access: 'public', selfValidated: true })
 
   // -- 行业激活审批执行器（审批通过 → 置 active + grantCapabilities + 事件） ----------------
 
