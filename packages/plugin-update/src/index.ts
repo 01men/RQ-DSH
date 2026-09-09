@@ -550,7 +550,7 @@ export const updateApi = {
     // 状态对全部已登录用户开放（顶栏更新横幅人人可见；不含敏感信息）
     http.register('GET', '/api/update/status', (exchange) => {
       exchange.ok(service.status())
-    })
+    }, { access: 'authenticated' })
 
     http.register('POST', '/api/update/check', async (exchange) => {
       if (!requirePermission(exchange, 'platform.update.read')) return
@@ -564,13 +564,13 @@ export const updateApi = {
           exchange.fail(502, 'UPSTREAM_ERROR', message)
         }
       }
-    })
+    }, { access: 'guarded', permission: 'platform.update.read' })
 
     http.register('POST', '/api/update/settings', (exchange) => {
       if (!requirePermission(exchange, 'platform.update.apply')) return
       const input = (exchange.body ?? {}) as { autoCheck?: boolean; intervalHours?: number; dismissedVersion?: string | null }
       exchange.ok(service.setSettings(input))
-    })
+    }, { access: 'guarded', permission: 'platform.update.apply' })
 
     http.register('POST', '/api/update/apply', async (exchange) => {
       if (!requirePermission(exchange, 'platform.update.apply')) return
@@ -581,7 +581,7 @@ export const updateApi = {
         const message = error instanceof Error ? error.message : String(error)
         exchange.fail(400, 'APPLY_FAILED', message)
       }
-    })
+    }, { access: 'guarded', permission: 'platform.update.apply' })
   },
 }
 

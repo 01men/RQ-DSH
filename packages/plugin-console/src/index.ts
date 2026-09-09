@@ -200,12 +200,8 @@ export function apply(ctx: Context) {
     return false
   }
 
-  /** 注册一条受权限保护的路由。同时登记进路由×权限矩阵（WP-04/A1：矩阵驱动 RBAC 断言）。 */
-  const routeMatrix: Array<{ method: string; path: string; permission: string }> = []
+  /** 注册一条受权限保护的路由（H5：声明经 register 自动汇入路由×权限矩阵，含共享登记处去重）。 */
   const guarded = (method: string, path: string, permission: string, handler: (exchange: HttpExchange) => unknown | Promise<unknown>): void => {
-    routeMatrix.push({ method, path, permission })
-    // 插件自注册路由（如 plugin-panel-core）经 httpServer.routeMatrix 共享登记处汇入同一矩阵
-    http.routeMatrix.push({ method, path, permission })
     http.register(method, path, async (exchange) => {
       if (!requirePermission(exchange, permission)) return
       try {
@@ -215,7 +211,7 @@ export function apply(ctx: Context) {
         const message = error instanceof Error ? error.message : String(error)
         exchange.fail(400, 'BAD_REQUEST', message)
       }
-    })
+    }, { access: 'guarded', permission })
   }
 
   const body = <T extends Record<string, any>>(exchange: HttpExchange): T => (exchange.body ?? {}) as T
@@ -239,7 +235,7 @@ export function apply(ctx: Context) {
   // -- 健康 ---------------------------------------------------------------
   http.register('GET', '/api/health', (exchange) => {
     exchange.ok({ status: 'ok', time: new Date().toISOString() })
-  })
+  }, { access: 'public' })
 
   // -- 三方登录可用性（公开：登录页按配置显隐三方登录入口） ----------------------
   http.register('GET', '/api/auth/providers', (exchange) => {
@@ -247,7 +243,7 @@ export function apply(ctx: Context) {
       .filter((config) => config.enabled && config.loginEnabled)
       .map((config) => ({ provider: config.provider, corpId: config.corpId, configId: config.id, name: config.name }))
     exchange.ok({ providers })
-  })
+  }, { access: 'public' })
 
   // -- 认证 ---------------------------------------------------------------
   http.register('POST', '/api/auth/login', async (exchange) => {
@@ -274,7 +270,7 @@ export function apply(ctx: Context) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(401, 'LOGIN_FAILED', message)
     }
-  })
+  }, { access: 'public' })
 
   // -- 三方登录（IdentityProviderAdapter 链路） ------------------------------
   http.register('POST', '/api/auth/sso/authorize', async (exchange) => {
@@ -285,7 +281,7 @@ export function apply(ctx: Context) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(400, 'SSO_AUTHORIZE_FAILED', message)
     }
-  })
+  }, { access: 'public' })
 
   http.register('POST', '/api/auth/sso', async (exchange) => {
     const { provider, code, state } = body<{ provider: string; code: string; state: string }>(exchange)
@@ -316,7 +312,7 @@ export function apply(ctx: Context) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(401, 'SSO_FAILED', message)
     }
-  })
+  }, { access: 'public' })
 
   http.register('POST', '/api/auth/sso/bind', async (exchange) => {
     const { pendingTicket, username, password } = body<{ pendingTicket: string; username: string; password: string }>(exchange)
@@ -338,7 +334,7 @@ export function apply(ctx: Context) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(401, 'SSO_BIND_FAILED', message)
     }
-  })
+  }, { access: 'public' })
 
   // -- 扫码/自动识别绑定三方身份（不手工输入 unionId） -------------------------
 
@@ -368,7 +364,7 @@ export function apply(ctx: Context) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(400, 'SSO_BIND_AUTHORIZE_FAILED', message)
     }
-  })
+  }, { access: 'authenticated' })
 
   /**
    * 钉钉 OAuth 浏览器回跳（公开，无需会话）：按 state 用途分发——
@@ -458,8 +454,8 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       render('操作失败', `<div class="bad">✕</div><h2>三方授权失败</h2><p>${escapeHtml(message)}</p><p><a href="/">返回控制台</a></p>`)
     }
   }
-  http.register('GET', '/api/auth/sso', handleSsoCallback)
-  http.register('GET', '/api/auth/sso/callback', handleSsoCallback)
+  http.register('GET', '/api/auth/sso', handleSsoCallback, { access: 'public' })
+  http.register('GET', '/api/auth/sso/callback', handleSsoCallback, { access: 'public' })
 
   http.register('POST', '/api/auth/sso/register', async (exchange) => {
     const { pendingTicket } = body<{ pendingTicket: string }>(exchange)
@@ -481,7 +477,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(401, 'SSO_REGISTER_FAILED', message)
     }
-  })
+  }, { access: 'public' })
 
   http.register('POST', '/api/auth/refresh', async (exchange) => {
     const { refreshToken } = body<{ refreshToken: string }>(exchange)
@@ -496,7 +492,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(401, 'REFRESH_FAILED', message)
     }
-  })
+  }, { access: 'public' })
 
   http.register('POST', '/api/auth/client-credentials', async (exchange) => {
     const { clientId, clientSecret } = body<{ clientId: string; clientSecret: string }>(exchange)
@@ -507,7 +503,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(401, 'CC_FAILED', message)
     }
-  })
+  }, { access: 'public' })
 
   http.register('GET', '/api/auth/me', (exchange) => {
     const info = caller(exchange)
@@ -519,7 +515,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       permissions: info.permissions,
       actChain: info.actChain,
     })
-  })
+  }, { access: 'authenticated' })
 
   http.register('POST', '/api/auth/logout', async (exchange) => {
     const header = String(exchange.headers['authorization'] ?? '')
@@ -539,7 +535,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     // 吊销强持久化后再响应：返回 200 后进程被杀，吊销状态不丢失（评审崩溃恢复实验）
     await ctx.opsStorage.flushDurable()
     exchange.ok()
-  })
+  }, { access: 'authenticated' })
 
   // -- 总览（工作台）-------------------------------------------------------
   guarded('GET', '/api/overview', 'console.login', () => {
@@ -1297,7 +1293,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     } catch (error) {
       exchange.ok({ valid: false, reason: error instanceof Error ? error.message : String(error) })
     }
-  })
+  }, { access: 'guarded', permission: 'authn.principal.read' })
 
   guarded('DELETE', '/api/authn/tokens/:jti', 'authn.token.revoke', (exchange) => {
     const { reason } = body<{ reason?: string }>(exchange)
@@ -2405,7 +2401,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       'cache-control': 'no-cache',
     })
     createReadStream(resolved.localFile).pipe(exchange.res)
-  })
+  }, { access: 'public', selfValidated: true })
 
   /** 批量上传（保留目录结构）：files = [{ relativePath, contentBase64 }]，destDir=目标目录。 */
   guarded('POST', '/api/nas/:id/fs/upload-many', 'nas.write', async (exchange) => {
@@ -2479,7 +2475,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       }
       exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
     }
-  })
+  }, { access: 'guarded', permission: 'nas.authz.write' })
 
   guarded('POST', '/api/nas/authz/rules/import', 'nas.authz.write', (exchange) => {
     const seed = body<Record<string, unknown>>(exchange)
@@ -2540,7 +2536,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     } catch (error) {
       exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
     }
-  })
+  }, { access: 'guarded', permission: 'nas.authz.write,nas.authz.check' })
 
   guarded('GET', '/api/nas/authz/decisions', 'nas.authz.read', (exchange) => {
     const limit = Math.min(500, Number(exchange.query.get('limit') ?? 100))
@@ -2793,7 +2789,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       exchange.res.writeHead(204, redeemCorsHeaders)
       exchange.res.end()
     }
-  })
+  }, { access: 'public' })
   http.register('POST', '/api/authn/entry-tickets/redeem', (exchange) => {
     const input = body<{ ticket?: string }>(exchange)
     const clientIp = String(exchange.raw.socket?.remoteAddress ?? 'unknown')
@@ -2813,7 +2809,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     } catch (error) {
       exchange.fail(400, 'ENTRY_TICKET_INVALID', error instanceof Error ? error.message : String(error))
     }
-  })
+  }, { access: 'public', selfValidated: true })
 
   /**
    * 票据免登控制台（公开端点，与 redeem 同安全语义）：一次性票据兑换 → 直接建立控制台会话，
@@ -2853,7 +2849,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     } catch (error) {
       exchange.fail(400, 'ENTRY_TICKET_INVALID', error instanceof Error ? error.message : String(error))
     }
-  })
+  }, { access: 'public', selfValidated: true })
 
   // -- 应用访客埋点 beacon（公开端点：浏览器 PV/UV 上报，免机器鉴权） ----------------
   // 指标口径补全：应用页面在加载/路由切换时上报一次即可。GET 返回 1x1 GIF（<img>/fetch(no-cors) 均可跨域），
@@ -2894,14 +2890,14 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       exchange.res.writeHead(204, beaconCorsHeaders)
       exchange.res.end()
     }
-  })
+  }, { access: 'public' })
   http.register('GET', '/api/apps/beacon', (exchange) => {
     try {
       beaconHit(String(exchange.query.get('app') ?? ''), beaconVidOf(exchange, exchange.query.get('vid')), exchange.query.get('uid') ?? undefined, clientIpOf(exchange))
     } catch { /* 指标采集永不影响调用方页面 */ }
     exchange.res.writeHead(200, { 'content-type': 'image/gif', 'cache-control': 'no-store, no-cache, must-revalidate, private', ...beaconCorsHeaders })
     exchange.res.end(BEACON_GIF)
-  })
+  }, { access: 'public' })
   http.register('POST', '/api/apps/beacon', (exchange) => {
     const input = (exchange.body !== null && typeof exchange.body === 'object' ? exchange.body : {}) as { app?: string; vid?: string; uid?: string }
     try {
@@ -2909,7 +2905,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     } catch { /* 指标采集永不影响调用方页面 */ }
     for (const [key, value] of Object.entries(beaconCorsHeaders)) exchange.res.setHeader(key, value)
     exchange.ok({ reported: true })
-  })
+  }, { access: 'public' })
 
   // -- Agent SSO 客户端（OIDC-agent 关联；owner 自助，对齐 app 侧） ----------------
 
@@ -3444,7 +3440,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     } catch (error) {
       exchange.fail(400, 'DEVELOPER_REGISTER_FAILED', error instanceof Error ? error.message : String(error))
     }
-  })
+  }, { access: 'public' })
 
   http.register('POST', '/api/market/developers/login', async (exchange) => {
     const input = body<{ username: string; password: string }>(exchange)
@@ -3454,7 +3450,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     } catch (error) {
       exchange.fail(401, 'DEVELOPER_LOGIN_FAILED', error instanceof Error ? error.message : String(error))
     }
-  })
+  }, { access: 'public' })
 
   /** 开发者身份解析：机器主体 refId=developerId（独立身份域，与 iam 员工域分离）。 */
   const developerCaller = (exchange: HttpExchange) => {
@@ -3482,7 +3478,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     } catch (error) {
       exchange.fail(400, 'MARKET_SUBMIT_FAILED', error instanceof Error ? error.message : String(error))
     }
-  })
+  }, { access: 'authenticated' })
 
   guarded('GET', '/api/market/submissions/mine', 'market.developer', (exchange) => {
     const developer = developerCaller(exchange)
@@ -3722,16 +3718,29 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   })
 
   // -- 平台信息与工具桥 -----------------------------------------------------
-  /**
-  /** 路由×权限矩阵（WP-04/A1）：RBAC 端点覆盖的服务端事实源，selftest 据此驱动 100% 越权断言。
-   *  返回 = console 自身 guarded 矩阵 + 插件自注册路由（httpServer.routeMatrix 共享登记处，去重）。 */
+  /** 路由×权限矩阵（WP-04/A1 + 交接清单 H5）：RBAC 断言网的服务端事实源。
+   *  guarded=register 声明自动汇入的权限点保护端点；public=免鉴权白名单（selfValidated=处理器自带凭证
+   *  校验，断言网对其实施匿名探针必须被拒）；authenticated=仅中间件 Bearer、无独立权限点；
+   *  /api/* 缺声明在 register 期即抛错，undeclaredApi 恒空——自注册端点不再可能逃出断言网。 */
   guarded('GET', '/api/platform/route-matrix', 'audit.read', () => {
-    const seen = new Set(routeMatrix.map((route) => `${route.method} ${route.path}`))
-    const external = http.routeMatrix.filter((route) => !seen.has(`${route.method} ${route.path}`))
+    const apiDeclared = http.declaredRoutes.filter((route) => route.path === '/api' || route.path.startsWith('/api/'))
+    const publicEntries = apiDeclared.flatMap((route) => route.auth.access === 'public'
+      ? [{ method: route.method, path: route.path, selfValidated: route.auth.selfValidated === true }]
+      : [])
+    const authenticated = apiDeclared.flatMap((route) => route.auth.access === 'authenticated' ? [{ method: route.method, path: route.path }] : [])
     return {
-      guarded: [...routeMatrix, ...external],
-      public: [...PUBLIC_PATHS],
-      note: 'guarded=权限点保护端点（含插件自注册）；public=鉴权中间件白名单（免鉴权，变动须经评审）',
+      guarded: http.routeMatrix.map((route) => ({ ...route })),
+      public: publicEntries.map((route) => route.path),
+      publicEntries,
+      authenticated,
+      counts: {
+        declaredApi: apiDeclared.length,
+        guarded: http.routeMatrix.length,
+        public: publicEntries.length,
+        authenticated: authenticated.length,
+        undeclaredApi: apiDeclared.filter((route) => route.auth.access === 'outside-api').length,
+      },
+      note: 'guarded=权限点保护端点；public=免鉴权（selfValidated=自带凭证校验）；authenticated=仅 Bearer；变动须经评审',
     }
   })
 

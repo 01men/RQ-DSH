@@ -169,7 +169,7 @@ export class BehaviorService extends Service {
       } catch (error) {
         exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
       }
-    })
+    }, { access: 'authenticated' })
     http.register('GET', '/api/behavior/events', (exchange) => {
       const principal = exchange.principal as { permissions?: string[] } | undefined
       if (!principal || !Array.isArray(principal.permissions)) {
@@ -193,7 +193,7 @@ export class BehaviorService extends Service {
         ...(query.get('to') ? { to: query.get('to')! } : {}),
         ...(query.get('limit') ? { limit: Number(query.get('limit')) } : {}),
       }))
-    })
+    }, { access: 'guarded', permission: 'audit.read' })
   }
 
   /** 全平台唯一行为事件入口：校验 → 落库（幂等）→ 总线分发。返回 duplicated 标识幂等重放。 */

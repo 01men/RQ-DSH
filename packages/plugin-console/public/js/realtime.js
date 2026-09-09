@@ -5,6 +5,11 @@
  * （SSE/WS）支持不稳，因此一律 SSE 优先，10s 内未 open 或中途 error 即降级为
  * 30s 轮询，降级一次性回调 onDowngrade(reason)，之后不再尝试恢复 SSE/WS。
  *
+ * 轮询失败可观测（QA 2026-09-08 BUG-U-02 根治 / 交接清单 H2）：单轮轮询失败不再静默——
+ * onPollError(error, { consecutiveFailures, status? }) 逐次回调，消费方据此降级徽标；
+ * handle.health() 暴露传输层健康态（transport / 连续失败数 / 最近成功与失败时刻），
+ * 轮询成功自动清零连续失败计数（自愈即恢复）。契约向后兼容：onPollError / health 均可选。
+ *
  * 零依赖：本文件不 import 任何模块；fetch / EventSource 由调用方传入或从
  * globalThis 取（钉钉 webview 与 Node 测试环境通吃，便于脚本直测）。
  */
@@ -32,10 +37,12 @@ export function decideTransport({ sseOpened, sseError, supportsEventSource }) {
  * @param {number} [options.openTimeoutMs=10000]  SSE open 超时（超时未 open 即降级）
  * @param {(data: unknown) => void} [options.onMessage] 收到消息（SSE data 或轮询响应体，尽量 JSON.parse）
  * @param {(reason: string) => void} [options.onDowngrade] 降级回调（恰好一次）
+ * @param {(error: Error, info: { consecutiveFailures: number, status?: number }) => void} [options.onPollError]
+ *        轮询单轮失败回调（含网络异常与非 2xx 响应；consecutiveFailures 从 1 起计，成功即清零）
  * @param {object} [options.headers]        轮询请求头（如鉴权 authorization）
  * @param {typeof fetch} [options.fetchImpl] 轮询用 fetch（缺省取 globalThis.fetch）
  * @param {typeof EventSource} [options.EventSourceImpl] SSE 实现（缺省取 globalThis.EventSource）
- * @returns {{ close: () => void }}
+ * @returns {{ close: () => void, health: () => object }}
  */
 export function createEventStream(options) {
   const {
@@ -45,6 +52,7 @@ export function createEventStream(options) {
     openTimeoutMs = 10000,
     onMessage,
     onDowngrade,
+    onPollError,
     headers,
     fetchImpl = globalThis.fetch ? globalThis.fetch.bind(globalThis) : undefined,
     EventSourceImpl = globalThis.EventSource,
@@ -56,6 +64,21 @@ export function createEventStream(options) {
   let openTimer = null
   let pollTimer = null
   let pollInFlight = false // 仅一次在途：上一轮未完成不发起下一轮
+  let sseOpened = false
+  // 健康态台账（H2）：轮询失败可观测，成功即自愈清零
+  let consecutivePollFailures = 0
+  let lastPollOkAt = null
+  let lastPollErrorAt = null
+  let lastPollErrorMessage = null
+
+  const health = () => ({
+    transport: closed ? 'closed' : downgraded ? 'polling' : sseOpened ? 'sse' : 'connecting',
+    downgraded,
+    consecutivePollFailures,
+    lastPollOkAt,
+    lastPollErrorAt,
+    lastPollErrorMessage,
+  })
 
   const emitMessage = (data) => {
     if (closed || typeof onMessage !== 'function') return
@@ -77,9 +100,24 @@ export function createEventStream(options) {
     pollInFlight = true
     try {
       const res = await fetchImpl(pollPath, { headers })
+      // 非 2xx 同样计入失败（旧实现静默吞掉 401/5xx，徽标照常宣称实时——BUG-U-02 根因之一）
+      if (!res.ok) {
+        const err = new Error(`轮询响应异常：HTTP ${res.status}`)
+        err.status = res.status
+        throw err
+      }
       const text = await res.text()
+      consecutivePollFailures = 0
+      lastPollOkAt = Date.now()
       if (!closed) emitMessage(parseMaybeJson(text))
-    } catch { /* 单轮失败静默，下一轮再试 */ } finally {
+    } catch (error) {
+      consecutivePollFailures += 1
+      lastPollErrorAt = Date.now()
+      lastPollErrorMessage = error instanceof Error ? error.message : String(error)
+      if (typeof onPollError === 'function') {
+        try { onPollError(error instanceof Error ? error : new Error(String(error)), { consecutiveFailures: consecutivePollFailures, status: error?.status }) } catch { /* 消费方异常不中断通道 */ }
+      }
+    } finally {
       pollInFlight = false
       schedulePoll(pollIntervalMs)
     }
@@ -100,7 +138,10 @@ export function createEventStream(options) {
   // 环境无 EventSource：直接降级（如 Node 测试环境 / 极旧 webview）
   if (!EventSourceImpl) {
     downgrade('unsupported')
-    return { close: () => { closed = true; if (pollTimer) clearTimeout(pollTimer) } }
+    return {
+      close: () => { closed = true; if (pollTimer) clearTimeout(pollTimer) },
+      health,
+    }
   }
 
   // SSE 优先：open 超时兜底 + error 即降级（不依赖 EventSource 的自动重连）
@@ -108,10 +149,14 @@ export function createEventStream(options) {
     es = new EventSourceImpl(url)
   } catch {
     downgrade('sse-init-failed')
-    return { close: () => { closed = true; if (pollTimer) clearTimeout(pollTimer) } }
+    return {
+      close: () => { closed = true; if (pollTimer) clearTimeout(pollTimer) },
+      health,
+    }
   }
   es.onopen = () => {
     if (openTimer) { clearTimeout(openTimer); openTimer = null }
+    sseOpened = true
   }
   es.onmessage = (event) => {
     emitMessage(parseMaybeJson(event.data))
@@ -128,5 +173,6 @@ export function createEventStream(options) {
       if (openTimer) { clearTimeout(openTimer); openTimer = null }
       if (pollTimer) { clearTimeout(pollTimer); pollTimer = null }
     },
+    health,
   }
 }

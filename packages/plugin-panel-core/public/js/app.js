@@ -255,7 +255,12 @@ async function refreshModels() {
 
 // ---------------------------------------------------------------------------
 // 实时通道（SSE 优先 + 轮询降级；复用 console realtime.js）
+// H4：stream URL 首选一次性短时 ticket（POST /api/panel/stream-ticket 换取，消费即焚），
+// 长效 access token 不再进 URL/代理日志；ticket 获取失败回落 ?token= 旧通道。
+// H2：onPollError 连续失败 ≥3 轮（约 95s）→「连接中断·点击重试」徽标；成功自愈自动恢复。
 // ---------------------------------------------------------------------------
+
+const POLL_FAIL_BADGE_THRESHOLD = 3
 
 function connectStream() {
   if (state.stream && state.streamDept === state.dept) return
@@ -271,19 +276,31 @@ function connectStream() {
   const streamBase = remote ? `${basePath()}/rqcard/proxy` : basePath()
   const headers = session.token ? { authorization: `Bearer ${session.token}` } : {}
   if (remote && session.token) headers['x-rqcard-call'] = '1'
-  void realtimeDep().then((mod) => {
-    state.stream = mod.createEventStream({
-      url: `${streamBase}/api/panel/stream?dept=${state.dept}&token=${encodeURIComponent(session.token)}`,
+  void (async () => {
+    // H4/P2-O-5：URL 不再携带长效 access token——先换 ≤60s 一次性 stream ticket（消费即焚）；
+    // 票据面不可用（旧版后端/权限缺失）回落 ?token= 旧通道
+    let url = `${streamBase}/api/panel/stream?dept=${state.dept}&token=${encodeURIComponent(session.token)}`
+    try {
+      const ticket = await api.post('/api/panel/stream-ticket', { dept: state.dept })
+      if (ticket?.ticket) url = `${streamBase}/api/panel/stream?dept=${state.dept}&ticket=${encodeURIComponent(ticket.ticket)}`
+    } catch { /* 票据面不可用：回落 token 通道 */ }
+    state.stream = (await realtimeDep()).createEventStream({
+      url,
       pollPath: `${streamBase}/api/panel/${state.dept}/poll`,
       pollIntervalMs: 30_000,
       headers,
-      onMessage: (data) => handleRealtime(data),
+      onMessage: (data) => { renderLiveBadge(); handleRealtime(data) },
       onDowngrade: () => {
         state.streamDowngraded = true
         renderLiveBadge()
       },
+      // H2：轮询连续失败可观测（95s 看门狗只覆盖「完全无数据」，这里覆盖「有失败在身」）
+      onPollError: (_error, info) => {
+        if (info.consecutiveFailures >= POLL_FAIL_BADGE_THRESHOLD) renderLiveBadge('down')
+      },
     })
-  }).catch(() => { /* realtime 依赖装载失败（异常环境）：静默，消息刷新退化为操作后手动拉取 */ })
+    renderLiveBadge()
+  })().catch(() => { /* realtime 依赖装载失败（异常环境）：静默，消息刷新退化为操作后手动拉取 */ })
 }
 
 /** 手动重连（QA BUG-U-02）：「连接中断」徽标点击后重建通道并给 95s 观察窗。 */
@@ -466,25 +483,30 @@ function renderTopRight() {
   }
 }
 
-/** 实时徽标三态（QA BUG-U-02）：SSE 在场=LIVE；轮询降级=30s 轮询；轮询连续失败=中断可重试。 */
-function renderLiveBadge() {
+/** 实时徽标三态（QA BUG-U-02 / 交接 H2 根治）：LIVE（SSE）/ 30s 轮询 / 连接中断·点击重试。
+ *  缺省按 state.stream.health() 投影当前传输态（轮询有失败在身即示警，自愈即恢复）；
+ *  kind='down' 为轮询连续失败直呼（onPollError 阈值）；95s 无数据看门狗置 streamStale 同样示警。 */
+function renderLiveBadge(kind) {
   const pill = document.getElementById('livePill')
   if (!pill) return
-  if (state.streamStale) {
+  const down = (title) => {
     pill.innerHTML = '<span class="dot" style="background:#ef4444"></span>连接中断 · 点击重试'
-    pill.title = '超过 90 秒没有收到任何数据（可能断网或服务重启）。点击重建实时通道。'
+    pill.title = title
     pill.onclick = () => { reconnectStream(); void toast('正在重建实时通道…') }
-    return
   }
-  if (state.streamDowngraded) {
+  if (kind === 'down') return down('实时轮询连续失败。点击重建实时通道。')
+  if (state.streamStale) return down('超过 90 秒没有收到任何数据（可能断网或服务重启）。点击重建实时通道。')
+  pill.onclick = null
+  const health = state.stream?.health?.()
+  if (!health || health.transport === 'sse') {
+    pill.innerHTML = '<span class="dot"></span>LIVE'
+    pill.title = '实时通道（SSE）已连接'
+  } else if (health.consecutivePollFailures > 0) {
+    down('实时轮询连续失败。点击重建实时通道。')
+  } else {
     pill.innerHTML = '<span class="dot" style="background:#f59e0b"></span>30s 轮询'
     pill.title = '实时通道不可用（如钉钉 webview），已按 30 秒轮询兜底'
-    pill.onclick = null
-    return
   }
-  pill.innerHTML = '<span class="dot"></span>LIVE'
-  pill.title = '实时通道（SSE）已连接'
-  pill.onclick = null
 }
 
 function renderRail() {

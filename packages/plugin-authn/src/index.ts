@@ -68,8 +68,10 @@ export interface TokenRecord extends RecordBase {
   chainId?: string
   /** refresh token 的 SHA-256 哈希（原文不落库，仅签发时返回一次）。 */
   refreshHash?: string
-  /** 已被轮转的时间：再次出现即判定重放。 */
+  /** 已被轮转的时间：再次出现即判定重放（宽限窗口内除外，见 REFRESH_GRACE_MS）。 */
   rotatedAt?: string
+  /** 宽限窗口内的兑换次数（多标签页互踩自愈计数，超过上限拒绝且不再签发）。 */
+  graceRedemptions?: number
 }
 
 /** OAuth state 记录（防 CSRF，一次性消费）。 */
@@ -109,6 +111,14 @@ export interface VerifiedPrincipal {
 /** 令牌生命周期基线（auth-identity docs/06）：access 30min + refresh 7d 轮转。 */
 const ACCESS_TTL_MS = 30 * 60_000
 const REFRESH_TTL_MS = 7 * 24 * 3600_000
+/**
+ * refresh 轮换宽限窗口（QA 2026-09-08 T-08 / 交接清单 H3）：旧 refresh 轮转后 N 秒内再现
+ * 不判重放，改签发同链新兄弟对——多标签页场景下标签 A 刷新令牌后，标签 B/C 持有的同一旧
+ * token 401 自愈，不再被「重放检测」整链吊销。窗口外再现仍是硬重放：整链吊销（不变）。
+ * 每条已轮转记录的宽限兑换次数上限兜底（防窗口内无限铸造），超限仅拒绝该次请求不吊销链。
+ */
+const REFRESH_GRACE_MS = 30_000
+const REFRESH_GRACE_MAX_REDEMPTIONS = 10
 /** 旧签名密钥的验签宽限期：轮换后旧令牌在窗口内仍可验证，宽限期后自然失效（评审 S2）。 */
 const SECRET_GRACE_MS = 24 * 3600_000
 
@@ -228,7 +238,12 @@ export class AuthnService extends Service {
     return { token: access.token, refreshToken: refreshRaw, access: access.record, sid }
   }
 
-  /** 刷新会话：校验 refresh 哈希 → 重放检测（已轮转的 refresh 再现 → 吊销整链）。 */
+  /**
+   * 刷新会话：校验 refresh 哈希 → 重放检测（已轮转的 refresh 再现 → 吊销整链）。
+   * 宽限契约（H3/T-08）：轮转后 REFRESH_GRACE_MS 内旧 token 再现不判重放，签发同链兄弟对
+   * （各标签此后各持独立令牌、后续轮转互不影响）；窗口外再现仍整链吊销。响应形状不变
+   * （{token, refreshToken, sid}），消费方无需改动即获得多标签自愈。
+   */
   refreshSession(refreshToken: string): { token: string; refreshToken: string; sid: string } {
     const hash = sha256Hex(refreshToken)
     const recordId = this.refreshIndex.get(hash)
@@ -237,6 +252,22 @@ export class AuthnService extends Service {
     if (record.revokedAt) throw new Error('refresh token 已吊销：' + (record.revokedReason ?? ''))
     if (new Date(record.expiresAt).getTime() < Date.now()) throw new Error('refresh token 已过期，请重新登录')
     if (record.rotatedAt) {
+      const rotatedAtMs = new Date(record.rotatedAt).getTime()
+      const withinGrace = Date.now() - rotatedAtMs <= REFRESH_GRACE_MS
+      const redemptions = record.graceRedemptions ?? 0
+      if (withinGrace) {
+        if (redemptions < REFRESH_GRACE_MAX_REDEMPTIONS) {
+          this.tokens().update(record.id, { graceRedemptions: redemptions + 1 })
+          return this.issueSessionPair(record.principalId, {
+            sid: record.sid,
+            chainId: record.chainId,
+            issuedBy: 'refresh-grace',
+          })
+        }
+        // 窗口内超限：仅拒绝该次请求（bounded minting 兜底），不牵连整链——多标签风暴的第
+        // N+1 个标签退化为重新登录，已签发的兄弟对不受影响。
+        throw new Error(`refresh token 宽限兑换已达上限（${REFRESH_GRACE_MAX_REDEMPTIONS} 次），请重新登录`)
+      }
       this.revokeChain(record.chainId ?? '', 'refresh token 重放检测（原轮转于 ' + record.rotatedAt + '）')
       throw new Error('检测到 refresh token 重放：该会话整链已吊销，请重新登录')
     }

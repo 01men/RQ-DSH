@@ -29,6 +29,27 @@ export interface HttpExchange {
 export type HttpHandler = (exchange: HttpExchange) => void | Promise<void>
 export type HttpMiddleware = (exchange: HttpExchange) => boolean | void | Promise<boolean | void>
 
+/**
+ * 路由鉴权 profile（QA 2026-09-08 T-01 教训的平台加固，交接清单 H5）：
+ * /api/* 端点注册时必须显式声明，使 RBAC 断言网可枚举全部端点——
+ * 含「公开+自校验」这一显式类别（如 SSE ?token=/?ticket= 端点），
+ * 同类缺口（自注册端点逃出断言网）不再依赖人肉发现。
+ * - guarded：权限点保护（登记进 routeMatrix，断言网对普通成员探针断言 403）；
+ * - authenticated：仅控制台鉴权中间件要求 Bearer，无独立权限点（身份自辖端点）；
+ * - public：免鉴权白名单；selfValidated=true 表示处理器自带凭证校验（fail-closed），
+ *   断言网对其实施匿名探针必须被拒的覆盖断言。
+ */
+export type RouteAuthDecl =
+  | { access: 'guarded'; permission: string }
+  | { access: 'authenticated' }
+  | { access: 'public'; selfValidated?: boolean }
+
+/** 台账条目：/api/* 外的路由（/oauth/*、/mcp、/docs 等）不属控制台鉴权域，自动归类 outside-api。 */
+export type RouteLedgerEntry = { method: string; path: string; auth: RouteAuthDecl | { access: 'outside-api' } }
+
+/** /api/* 路径判定（声明义务的作用域：控制台鉴权中间件与 RBAC 断言网覆盖面）。 */
+const isApiPattern = (pattern: string): boolean => pattern === '/api' || pattern.startsWith('/api/')
+
 interface Route {
   method: string
   segments: string[]
@@ -96,11 +117,15 @@ export class HttpServerService extends Service {
   readonly externalBase: string
   private readonly corsAllowOrigins: string[]
   /**
-   * 路由×权限矩阵（跨插件共享登记处）。console 的 guarded() 是第一登记方；
-   * 插件自注册 REST（如 plugin-panel-core）也必须把 {method, path, permission} 推入此处，
-   * 否则逃出 selftest「RBAC 端点矩阵 100% 越权断言网」（review-dsh-agent-panel-v2 Phase 0）。
+   * 路由×权限矩阵（跨插件共享登记处）。register() 对 guarded 声明自动汇入（幂等去重），
+   * selftest「RBAC 端点矩阵 100% 越权断言网」据此驱动（review-dsh-agent-panel-v2 Phase 0）。
    */
   readonly routeMatrix: Array<{ method: string; path: string; permission: string }> = []
+  /**
+   * 全量路由台账（H5）：每个 register 都落一条，/api/* 缺声明在注册期直接抛错（fail-loud），
+   * route-matrix 端点据此暴露计数，断言网核对「guarded+public+authenticated 全覆盖」。
+   */
+  readonly declaredRoutes: RouteLedgerEntry[] = []
 
   constructor(ctx: Context, config: HttpServerConfig = {}) {
     super(ctx, 'httpServer')
@@ -143,7 +168,23 @@ export class HttpServerService extends Service {
     }
   }
 
-  register(method: string, pattern: string, handler: HttpHandler): () => void {
+  register(method: string, pattern: string, handler: HttpHandler, auth?: RouteAuthDecl): () => void {
+    // H5（T-01 教训）：/api/* 端点必须声明鉴权 profile，缺声明在注册期即抛错——
+    // 插件 apply 期抛错会让装配响亮失败，绝不让未声明端点静默上线逃出断言网。
+    if (isApiPattern(pattern) && auth === undefined) {
+      throw new Error(
+        `httpServer: 注册 ${method.toUpperCase()} ${pattern} 缺少鉴权声明（auth: guarded{permission} | authenticated | public{selfValidated?}）`
+        + '——自注册端点必须可被 RBAC 断言网枚举（交接清单 H5）',
+      )
+    }
+    const normalized = auth ?? { access: 'outside-api' as const }
+    this.declaredRoutes.push({ method: method.toUpperCase(), path: pattern, auth: normalized })
+    if (auth?.access === 'guarded') {
+      const key = `${method.toUpperCase()} ${pattern}`
+      if (!this.routeMatrix.some((route) => `${route.method} ${route.path}` === key)) {
+        this.routeMatrix.push({ method: method.toUpperCase(), path: pattern, permission: auth.permission })
+      }
+    }
     const segments = pattern.split('/').filter(Boolean)
     const route: Route = { method: method.toUpperCase(), segments, handler }
     this.routes.push(route)

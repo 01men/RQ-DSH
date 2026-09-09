@@ -874,17 +874,30 @@ try {
   check('冻结账号无法登录', frozenLogin.status === 401)
 
   // ================================================================ refresh 轮转链
-  section('refresh token 轮转与重放防护')
+  section('refresh token 轮转、宽限自愈与重放防护（H3/T-08：多标签页互踩自愈）')
   const rl = await api('POST', '/api/auth/login', { body: { username: 'ops', password: 'Ybk@2026' } })
   check('登录返回令牌对', rl.ok && rl.data.refreshToken)
   const rotated = await api('POST', '/api/auth/refresh', { body: { refreshToken: rl.data.refreshToken } })
   check('refresh 轮转签发新对', rotated.ok && rotated.data.refreshToken !== rl.data.refreshToken)
   const newMe = await api('GET', '/api/auth/me', { token: rotated.data.token })
   check('轮转后新 access 可用', newMe.ok)
-  const oldReplay = await api('POST', '/api/auth/refresh', { body: { refreshToken: rl.data.refreshToken } })
-  check('旧 refresh 重放被拒绝', oldReplay.status === 401)
-  const chainKilled = await api('GET', '/api/auth/me', { token: rotated.data.token })
-  check('重放触发整链吊销（新 access 一并失效）', chainKilled.status === 401)
+  // 宽限窗口：轮转后 30s 内旧 token 再兑换不判重放，签发同链兄弟对（标签 B 401 自愈）
+  const graceSibling = await api('POST', '/api/auth/refresh', { body: { refreshToken: rl.data.refreshToken } })
+  check('refresh 宽限：轮转后 30s 内旧 token 再兑换成功（多标签自愈，H3/T-08）',
+    graceSibling.ok && graceSibling.data.refreshToken !== rotated.data.refreshToken, JSON.stringify(graceSibling.error))
+  const graceMe = await api('GET', '/api/auth/me', { token: graceSibling.data.token })
+  check('refresh 宽限：宽限签发的兄弟对立即可用', graceMe.ok)
+  const rotatedStillOk = await api('GET', '/api/auth/me', { token: rotated.data.token })
+  check('refresh 宽限：宽限兑换不吊销原链（兄弟对共存）', rotatedStillOk.ok)
+  // 上限兜底：同一旧 token 宽限兑换至 10 次封顶，超限仅拒绝该次请求、不吊销整链
+  let capRejected = false
+  for (let i = 0; i < 12 && !capRejected; i++) {
+    const attempt = await api('POST', '/api/auth/refresh', { body: { refreshToken: rl.data.refreshToken } })
+    if (!attempt.ok) capRejected = attempt.status === 401
+  }
+  check('refresh 宽限：超过兑换上限仅拒绝该次请求（宽限 10 次封顶）', capRejected)
+  const capNotRevoked = await api('GET', '/api/auth/me', { token: rotated.data.token })
+  check('refresh 宽限：超限拒绝不连带吊销整链', capNotRevoked.ok)
 
   // ================================================================ Authn
   section('统一认证（机器身份 / 令牌）')
@@ -1149,6 +1162,25 @@ try {
     check('矩阵：公开白名单零意外扩张（变动须经评审后同步本清单）',
       expectedPublic.every((path) => matrix.data.public.includes(path)),
       JSON.stringify(matrix.data.public))
+    // H5（T-01 教训）：端点全量可枚举 + 公开自校验端点匿名探针 fail-closed——
+    // /api/panel/stream 类自注册端点不再可能逃出断言网（注册期缺声明即抛错兜底）
+    check('矩阵：/api/* 全量声明且三分类全覆盖（H5：register 缺声明注册期即抛）',
+      matrix.data.counts.declaredApi === matrix.data.counts.guarded + matrix.data.counts.public + matrix.data.counts.authenticated
+      && matrix.data.counts.undeclaredApi === 0,
+      JSON.stringify(matrix.data.counts))
+    const selfValidated = matrix.data.publicEntries.filter((entry) => entry.selfValidated)
+    const anonLeaked = []
+    for (const route of selfValidated) {
+      const probePath = route.path.replace(/:[a-zA-Z]+/g, 'selftest-probe')
+      try {
+        const probe = await api(route.method, probePath, route.method === 'GET' ? {} : { body: {} })
+        if (probe.status === 200 || probe.status === 500) anonLeaked.push(`${route.method} ${route.path} → ${probe.status}`)
+      } catch (error) {
+        anonLeaked.push(`${route.method} ${route.path} → 异常 ${error.message}`)
+      }
+    }
+    check(`矩阵：${selfValidated.length} 个公开自校验端点匿名探针 100% fail-closed（H5）`,
+      selfValidated.length >= 4 && anonLeaked.length === 0, anonLeaked.length ? anonLeaked.slice(0, 5).join('；') : '全部 401/403/400/404')
     const bareFetch = []
     const walkJs = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((entry) =>
       entry.isDirectory() ? walkJs(join(dir, entry.name)) : [join(dir, entry.name)])
@@ -4566,7 +4598,6 @@ try {
       && outsiderDepts.data.depts.find((dept) => dept.id === 'mfg').allowed === true)
     const adminCrossDept = await api('GET', '/api/panel/rd/overview', { token: panelAdmin })
     check("面板：'*' 管理员跨部门直通（治理豁免）", adminCrossDept.ok)
-
     // -- QA 2026-09-08 BUG-A-01（T-01）回归：SSE 流必须执行与 REST 一致的部门范围校验 --------
     // 旧根因：stream 端点经 http.register 注册、不进 routeMatrix，握手只做
     // verify+requirePermission，从不调 deptScopeAllowed——组织受限用户可实时收到
@@ -4586,6 +4617,23 @@ try {
     check('面板：SSE 未知部门 404（不建立空订阅）',
       sseUnknownDept.status === 404 && /部门不存在/.test(sseUnknownBody), `status=${sseUnknownDept.status}`)
 
+    // -- stream ticket 一次性通道（交接清单 H4 / P2-O-5）：URL 不再携带长效 access token ------
+    const ticketRd = await api('POST', '/api/panel/stream-ticket', { token: rdLogin.data.token, body: { dept: 'rd' } })
+    check('面板：stream ticket 签发（Bearer + panel.read + 部门范围校验，H4）',
+      ticketRd.ok && /^stk_/.test(ticketRd.data?.ticket ?? '') && ticketRd.data?.expiresInSeconds === 60,
+      JSON.stringify(ticketRd.error ?? ticketRd.data))
+    const ticketRes = await fetch(`${BASE}/api/panel/stream?dept=rd&ticket=${encodeURIComponent(ticketRd.data.ticket)}`)
+    const ticketReader = ticketRes.body?.getReader()
+    const ticketHead = ticketReader ? new TextDecoder().decode((await ticketReader.read()).value) : ''
+    await ticketReader?.cancel().catch(() => {})
+    check('面板：ticket 换流成功（URL 只出现一次性短时凭证，不再携带长效 access token）',
+      ticketRes.status === 200 && ticketHead.includes('retry:'), String(ticketRes.status))
+    const ticketReplay = await fetch(`${BASE}/api/panel/stream?dept=rd&ticket=${encodeURIComponent(ticketRd.data.ticket)}`)
+    check('面板：ticket 一次性消费（重放 401，消费即焚）', ticketReplay.status === 401, String(ticketReplay.status))
+    const ticketOutsider = await api('POST', '/api/panel/stream-ticket', { token: memberToken, body: { dept: 'rd' } })
+    check('面板：组织外成员签发 ticket 被拒 403（签发端同规校验）', ticketOutsider.status === 403, String(ticketOutsider.status))
+    const ticketNoAuth = await fetch(`${BASE}/api/panel/stream-ticket`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dept: 'rd' }) })
+    check('面板：未认证签发 ticket 被拒 401', ticketNoAuth.status === 401, String(ticketNoAuth.status))
     const orgUnbind = await api('PUT', '/api/panel/rd/config', { token: panelAdmin, body: { orgId: null } })
     check('面板：解除组织绑定恢复开放', orgUnbind.ok && !orgUnbind.data.dept.org)
 
@@ -4774,7 +4822,7 @@ try {
     await mountCtx.plugin(panelCore)
     await mountCtx.plugin(dingtalkBridge)
     await mountCtx.plugin(dshBridge, { mountPath: '/rq' })
-    mountCtx.httpServer.register('GET', '/api/__mount_probe', (exchange) => exchange.ok({ pong: exchange.path }))
+    mountCtx.httpServer.register('GET', '/api/__mount_probe', (exchange) => exchange.ok({ pong: exchange.path }), { access: 'authenticated' })
     // 将伪造 webServer 提供给 ctx 后正常装配（等价 dsh 形态：inject 完成后 apply）
     // 绑定服务显式构造（注册在真实 mountCtx 上，供 plugin-nas 出站归因读取）；
     // apply 以「服务视图」调用——等价 dsh 形态下 inject 完成后的装配
@@ -4794,6 +4842,27 @@ try {
       && captured.some((r) => r.kind === 'exact' && r.path === '/auth/oidc/callback'),
       JSON.stringify(captured.map((r) => `${r.kind}:${r.path}`)))
     check('externalBase 配置生效（/rq）', mountCtx.httpServer.externalBase === '/rq')
+
+    // -- H3 白盒回归：宽限窗口外旧 token 重放 = 硬重放，整链吊销（含宽限兄弟对） ----------
+    const gracePrincipal = mountCtx.authn.ensureHumanPrincipal('selftest-grace-user', '宽限窗口自测')
+    const gracePairA = mountCtx.authn.issueSessionPair(gracePrincipal.id, { issuedBy: 'selftest-grace' })
+    const graceRotated = mountCtx.authn.refreshSession(gracePairA.refreshToken)
+    const graceSibling = mountCtx.authn.refreshSession(gracePairA.refreshToken) // 窗口内：兄弟对自愈
+    check('H3 白盒：宽限内二次兑换签发兄弟对（不吊销链）',
+      graceSibling.refreshToken !== graceRotated.refreshToken
+      && Boolean(mountCtx.authn.verify(graceRotated.token))
+      && Boolean(mountCtx.authn.verify(graceSibling.token)))
+    const graceOldHash = createHash('sha256').update(gracePairA.refreshToken).digest('hex')
+    const graceOldRecord = mountCtx.authn.tokens().findOne((token) => token.refreshHash === graceOldHash)
+    // 时间旅行：轮转时刻拨到 60s 前（窗口 30s）→ 旧 token 再现即硬重放
+    mountCtx.authn.tokens().update(graceOldRecord.id, { rotatedAt: new Date(Date.now() - 60_000).toISOString() })
+    let graceReplayThrew = false
+    try { mountCtx.authn.refreshSession(gracePairA.refreshToken) } catch { graceReplayThrew = true }
+    check('H3 白盒：宽限窗口外旧 token 重放被拒并整链吊销（重放防线不变）', graceReplayThrew)
+    let graceChainDead = true
+    try { mountCtx.authn.verify(graceRotated.token); graceChainDead = false } catch { /* 已吊销 */ }
+    try { mountCtx.authn.verify(graceSibling.token); graceChainDead = false } catch { /* 已吊销 */ }
+    check('H3 白盒：整链吊销覆盖轮转对与宽限兄弟对', graceChainDead)
     // 模拟 dsh webserver 分发：命中 /rq 前缀即交给 bridge handler，其余 404
     const sim = createServer((req, res) => {
       const exact = captured.find((r) => r.kind === 'exact' && (req.url ?? '').split('?')[0] === r.path)
