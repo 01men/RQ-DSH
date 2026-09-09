@@ -493,15 +493,7 @@ async function seedDemo(ctx: Context): Promise<void> {
     }
   }
 
-  // -- 演示计量历史（经真实 usage 管道：可对账/可报表；钱包先充值，账实一致） ----
-  const meteredOrgs = new Map<string, string>()
-  for (const service of [kb, dw, ticket, hrSvc]) meteredOrgs.set(service.orgId, service.name)
-  for (const orgId of meteredOrgs.keys()) {
-    ctx.billing.recharge({
-      ownerType: 'org', ownerId: orgId, amountCents: 2_000_000,
-      channelRef: 'demo-seed-grant', idempotencyKey: `seed:recharge:${orgId}`, actor: '演示初始化',
-    })
-  }
+  // -- 演示计量历史（经真实 usage 管道：可对账/可报表；零价快照口径，M0-2 起无钱包） ----
   for (let day = 27; day >= 0; day--) {
     const date = new Date(today.getTime() - day * 86400_000).toISOString().slice(0, 10)
     for (const service of [kb, dw, ticket, hrSvc]) {
@@ -521,8 +513,8 @@ async function seedDemo(ctx: Context): Promise<void> {
   }
 
   // 模型路由台账（演示：未配置真实凭据，offline 待接入——诚实降级，不伪装可调用）
-  ctx.modelGateway.upsertModel({ slug: 'deepseek-chat', displayName: 'DeepSeek Chat（待接入）', provider: 'deepseek', endpoint: '', apiKey: '', listCentsPerKTokens: 1, costCentsPerKTokens: 0, status: 'offline' })
-  ctx.modelGateway.upsertModel({ slug: 'qwen-plus', displayName: 'Qwen Plus（待接入）', provider: 'qwen', endpoint: '', apiKey: '', listCentsPerKTokens: 2, costCentsPerKTokens: 0, status: 'offline' })
+  ctx.modelGateway.upsertModel({ slug: 'deepseek-chat', displayName: 'DeepSeek Chat（待接入）', provider: 'deepseek', endpoint: '', apiKey: '', costCentsPerKTokens: 0, status: 'offline' })
+  ctx.modelGateway.upsertModel({ slug: 'qwen-plus', displayName: 'Qwen Plus（待接入）', provider: 'qwen', endpoint: '', apiKey: '', costCentsPerKTokens: 0, status: 'offline' })
 
   // -- 告警规则与告警 ----------------------------------------------------------
   ctx.audit.createAlertRule({ name: 'MCP 服务熔断', metric: 'mcp_unhealthy', operator: 'gt', threshold: 2, windowMinutes: 5, severity: 'critical', channels: ['dingtalk', 'email'], enabled: true, description: '健康探活连续失败超过阈值' })

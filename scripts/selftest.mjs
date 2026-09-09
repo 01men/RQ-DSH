@@ -24,7 +24,6 @@ import * as resourceCore from '../packages/plugin-resource-core/src/index.ts'
 import * as iam from '../packages/plugin-iam/src/index.ts'
 import * as authn from '../packages/plugin-authn/src/index.ts'
 import * as usage from '../packages/plugin-usage/src/index.ts'
-import * as billing from '../packages/plugin-billing/src/index.ts'
 import * as audit from '../packages/plugin-audit/src/index.ts'
 import * as market from '../packages/plugin-market/src/index.ts'
 import * as agent from '../packages/plugin-agent/src/index.ts'
@@ -896,17 +895,17 @@ try {
 
   // ================================================================ 第 1 步：受众与插件命名空间
   section('第 1 步：令牌受众（aud）与插件命名空间收敛')
-  const audPrincipal = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'billing-svc', refType: 'external', scopes: ['audit.read'] } })
-  const audToken = await api('POST', '/api/authn/tokens', { token: admin, body: { principalId: audPrincipal.data.principalId, audience: 'billing', ttlHours: 1, reason: '受限受众令牌' } })
+  const audPrincipal = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'reporting-svc', refType: 'external', scopes: ['audit.read'] } })
+  const audToken = await api('POST', '/api/authn/tokens', { token: admin, body: { principalId: audPrincipal.data.principalId, audience: 'reporting', ttlHours: 1, reason: '受限受众令牌' } })
   check('签发带受众（aud）的令牌', audToken.ok)
 
-  const audOk = await api('POST', '/api/authn/verify-audience', { token: admin, body: { token: audToken.data.token, audience: 'billing' } })
+  const audOk = await api('POST', '/api/authn/verify-audience', { token: admin, body: { token: audToken.data.token, audience: 'reporting' } })
   check('受众匹配 → 校验通过', audOk.data.valid === true)
   const audMismatch = await api('POST', '/api/authn/verify-audience', { token: admin, body: { token: audToken.data.token, audience: 'market' } })
   check('受众不匹配 → 拒绝', audMismatch.data.valid === false && String(audMismatch.data.reason).includes('受众'))
 
   const noAudToken = await api('POST', '/api/authn/tokens', { token: admin, body: { principalId: audPrincipal.data.principalId, ttlHours: 1 } })
-  const noAudCheck = await api('POST', '/api/authn/verify-audience', { token: admin, body: { token: noAudToken.data.token, audience: 'billing' } })
+  const noAudCheck = await api('POST', '/api/authn/verify-audience', { token: admin, body: { token: noAudToken.data.token, audience: 'reporting' } })
   check('无受众令牌访问受众服务被拒', noAudCheck.data.valid === false)
 
   const pluginScopeOk = await api('POST', '/api/authn/tokens', { token: admin, body: { principalId: audPrincipal.data.principalId, audience: 'plugin:com.demo.kb', scopes: ['plugin:com.demo.kb:read'], ttlHours: 1 } })
@@ -925,11 +924,11 @@ try {
 
   const meterInput = { org: tenantOrg.data.id, subject: 'user:' + adminLogin.data.user.id, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 5000, unit: 'token' }], idempotency_key: 'test-usage-001' }
   const meterA = await api('POST', '/api/usage/record', { token: admin, body: meterInput })
-  check('计量事件登记（价格簿计价 + 租户解析）', meterA.ok && meterA.data.pricing.charge_cents === 150 && meterA.data.tenant_id === newTenant.data.id && meterA.data.schema_version === 1)
+  check('计量事件登记（零价快照 charge=0 + 租户解析）', meterA.ok && meterA.data.pricing.charge_cents === 0 && meterA.data.pricing.rate?.pattern === 'mcp:*' && meterA.data.tenant_id === newTenant.data.id && meterA.data.schema_version === 1)
   const meterDup = await api('POST', '/api/usage/record', { token: admin, body: meterInput })
   check('幂等键重复投递不重复计量', meterDup.ok && meterDup.data.event_id === meterA.data.event_id)
   const meterTotals = await api('GET', '/api/usage/totals?principal=' + encodeURIComponent(`org:${tenantOrg.data.id}`), { token: admin })
-  check('租户隔离的计量总额（只计一次）', meterTotals.ok && meterTotals.data.count === 1 && meterTotals.data.charge_cents === 150)
+  check('租户隔离的计量总额（只计一次）', meterTotals.ok && meterTotals.data.count === 1 && meterTotals.data.charge_cents === 0)
   const meterConflict = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, meters: [{ key: 'tokens', value: 999, unit: 'token' }] } })
   check('同幂等键不同内容被拒（防篡改）', !meterConflict.ok && JSON.stringify(meterConflict.error).includes('冲突'))
   const badResource = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, idempotency_key: 'test-usage-002', resource: 'not-a-resource' } })
@@ -941,7 +940,7 @@ try {
   const wrongMeterKey = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, idempotency_key: 'test-usage-wrong-key-1', meters: [{ key: 'calls', value: 1, unit: '次' }] } })
   check('计量键与价格簿不符被拒（mcp:* 须 tokens，错误可自纠）', !wrongMeterKey.ok && JSON.stringify(wrongMeterKey.error).includes('计量键不匹配') && JSON.stringify(wrongMeterKey.error).includes('tokens'))
   const rightKeyAgain = await api('POST', '/api/usage/record', { token: admin, body: { ...meterInput, idempotency_key: 'test-usage-right-key-1', meters: [{ key: 'tokens', value: 1000, unit: 'token' }] } })
-  check('计量键匹配路径计价不变（1000 tokens = 30 分）', rightKeyAgain.ok && rightKeyAgain.data.pricing.charge_cents === 30)
+  check('计量键匹配路径计价恒等（1000 tokens 零价快照 charge=0）', rightKeyAgain.ok && rightKeyAgain.data.pricing.charge_cents === 0)
 
   const reconcile1 = await api('POST', '/api/usage/reconcile', { token: admin })
   check('三方对账：usage 口径 = audit 投影（全量比对）', reconcile1.ok
@@ -991,7 +990,7 @@ try {
     } })
     check('nonbillable 标记配非零费率规则被拒（防计费口径漂移）', !nonbillableOnPaid.ok && JSON.stringify(nonbillableOnPaid.error).includes('非计费'))
     const orgTotals = await api('GET', '/api/usage/totals?principal=' + encodeURIComponent(`org:${tenantOrg.data.id}`), { token: admin })
-    check('零价快照不污染计费总额（charge 只含计费事件 150+30）', orgTotals.ok && orgTotals.data.charge_cents === 180, JSON.stringify(orgTotals.data))
+    check('零价快照不污染总额（charge 恒 0）', orgTotals.ok && orgTotals.data.charge_cents === 0, JSON.stringify(orgTotals.data))
   }
   section('behavior 事件管道（WP-03/D3：采集 / 鉴权 / 幂等）')
   {
@@ -1195,7 +1194,7 @@ try {
     'manifest/permissions.yaml': 'requested:\n  - knowledgebase.read\n',
     'manifest/api.yaml': 'routes: []\n',
     'manifest/events.yaml': 'subscribes: []\nemits: []\n',
-    'manifest/billing.yaml': 'model: usage\nusage:\n  - key: prompts.used\n    unit: 次\n    price: 0.5\ncommission: platform_default\n',
+    'manifest/billing.yaml': 'model: free\nusage:\n  - key: prompts.used\n    unit: 次\n    price: 0\n',
   })
   const fpOf = (files) => createHash('sha256').update(Object.keys(files).sort().map((k) => `${k}\n${files[k] ?? ''}`).join('\n---\n')).digest('hex')
   const signed = (files) => edSign(null, Buffer.from(fpOf(files)), devKeys.privateKey).toString('base64')
@@ -1228,7 +1227,7 @@ try {
   const usePrompt = await api('POST', '/api/market/prompts/use', { token: admin, body: { orgId: tenantOrg.data.id, pluginId: 'com.acme.hello', promptName: 'hello' } })
   check('L0 计量：提示词取用产生 usage 事件（L3）', usePrompt.ok)
   const pluginUsage = await api('GET', '/api/usage/events?principal=' + encodeURIComponent('plugin:com.acme.hello'), { token: admin })
-  check('插件计量入账（价格簿来自 billing.yaml：0.5 元/次）', pluginUsage.ok && pluginUsage.data.total >= 1 && pluginUsage.data.items[0].pricing.charge_cents === 50 && pluginUsage.data.items[0].tenant_id === newTenant.data.id)
+  check('插件计量入账（meter key 来自 billing.yaml 声明，金额零价快照）', pluginUsage.ok && pluginUsage.data.total >= 1 && pluginUsage.data.items[0].pricing.charge_cents === 0 && pluginUsage.data.items[0].pricing.rate?.nonbillable === true && pluginUsage.data.items[0].tenant_id === newTenant.data.id)
 
   // app 复合验收（F5 修正：以覆盖面而非复杂度为由）
   const seededApps = (await api('GET', '/api/apps', { token: admin })).data.apps
@@ -1299,18 +1298,10 @@ try {
   const scaffoldYaml = existsFile(join(scaffoldDir, 'plugin.yaml')) ? scaffoldRead(join(scaffoldDir, 'plugin.yaml'), 'utf8') : ''
   check('脚手架默认 L0 + Hello World + 发布者密钥对', scaffoldYaml.includes('sandbox: L0') && scaffoldYaml.includes('hello') && existsFile(join(scaffoldDir, 'publisher-private-key.pem')))
 
-  // ================================================================ 第 5 步：钱包 / 资金流水 / 模型转售
-  section('第 5 步：钱包资金流水（只追加+幂等）与模型转售网关')
+  // ================================================================ 第 5 步：模型接入网关（M0-3 用量透明计量）
+  section('第 5 步：模型接入网关（真实转发 / 零价快照计量 / 内部成本参考）')
 
-  const walletKey = { ownerType: 'org', ownerId: tenantOrg.data.id, tenantId: newTenant.data.id }
-  const recharge1 = await api('POST', '/api/billing/recharge', { token: admin, body: { ...walletKey, amountCents: 100_000, channelRef: 'BANK-20260821-001', idempotencyKey: 'rc-test-001' } })
-  check('充值入账（资金通道未就位→管理员手工录入流水）', recharge1.ok && recharge1.data.balanceCents === 100_000 && recharge1.data.duplicated === false)
-  const rechargeDup = await api('POST', '/api/billing/recharge', { token: admin, body: { ...walletKey, amountCents: 100_000, channelRef: 'BANK-20260821-001', idempotencyKey: 'rc-test-001' } })
-  check('充值幂等（同渠道单号重复录入不重复入账）', rechargeDup.ok && rechargeDup.data.duplicated === true && rechargeDup.data.balanceCents === 100_000)
-  const badRecharge = await api('POST', '/api/billing/recharge', { token: admin, body: { ...walletKey, amountCents: -5, channelRef: 'x', idempotencyKey: 'rc-test-002' } })
-  check('负数充值被拒', !badRecharge.ok)
-
-  // 模型转售：OpenAI 兼容真实 stub
+  // OpenAI 兼容真实 stub
   const modelStub = createServer(async (req, res) => {
     if (req.url.endsWith('/chat/completions')) {
       await readBody(req)
@@ -1326,36 +1317,25 @@ try {
   await new Promise((resolve) => modelStub.listen(0, '127.0.0.1', resolve))
   const modelPort = modelStub.address().port
 
-  const noEndpointModel = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ghost-model', endpoint: '', listCentsPerKTokens: 10 } })
+  const noEndpointModel = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ghost-model', endpoint: '' } })
   const ghostInvoke = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'ghost-model', messages: [{ role: 'user', content: 'hi' }], orgId: tenantOrg.data.id } })
   check('未配置 endpoint 的模型拒绝调用（不生成假 completion）', noEndpointModel.ok && !ghostInvoke.ok && JSON.stringify(ghostInvoke.error).includes('endpoint'))
 
-  const modelReg = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ds-stub', displayName: 'DeepSeek（stub 验证）', provider: 'deepseek', endpoint: `http://127.0.0.1:${modelPort}/v1`, apiKey: 'stub-key', listCentsPerKTokens: 10, costCentsPerKTokens: 5 } })
-  check('模型目录登记（价格簿自动登记）', modelReg.ok)
+  const modelReg = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ds-stub', displayName: 'DeepSeek（stub 验证）', provider: 'deepseek', endpoint: `http://127.0.0.1:${modelPort}/v1`, apiKey: 'stub-key', costCentsPerKTokens: 5 } })
+  check('模型目录登记（价格簿自动登记：零价 + 内部成本参考）', modelReg.ok)
 
   const modelInvoke = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'ds-stub', messages: [{ role: 'user', content: '真实链路测试' }], orgId: tenantOrg.data.id } })
   check('模型调用真实往返 + 实测 tokens 计量', modelInvoke.ok && modelInvoke.data.content.includes('真实模型') && modelInvoke.data.inputTokens === 120 && modelInvoke.data.outputTokens === 1500)
-  check('按价格簿扣费（1500 tokens × 10分/千 = 15 分）', modelInvoke.ok && modelInvoke.data.chargeCents === 15 && modelInvoke.data.balanceAfterCents === 100_000 - 15, JSON.stringify(modelInvoke))
+  check('内部成本参考折算（1500 tokens × 5分/千 = 8 分；charge 恒 0）', modelInvoke.ok && modelInvoke.data.costCents === 8, JSON.stringify(modelInvoke))
 
   const modelUsageEvents = await api('GET', '/api/usage/events?resource=model:ds-stub', { token: admin })
   check('模型计量事件含 input/output meters + 租户维度', modelUsageEvents.ok && modelUsageEvents.data.total >= 1 && modelUsageEvents.data.items[0].meters.length === 2 && modelUsageEvents.data.items[0].tenant_id === newTenant.data.id)
 
-  const walletAfter = await api('GET', `/api/billing/wallets/org/${tenantOrg.data.id}`, { token: admin })
-  check('钱包余额与流水一致（扣费经计量管道）', walletAfter.ok && walletAfter.data.balanceCents === 100_000 - 15 && walletAfter.data.monthSpentCents === 15, JSON.stringify(walletAfter))
-
-  // 预算/限额
-  await api('PUT', `/api/billing/budgets/${tenantOrg.data.id}`, { token: admin, body: { monthlyCents: 30 } })
-  const budgetBlock = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'ds-stub', messages: [{ role: 'user', content: '再试一次' }], orgId: tenantOrg.data.id } })
-  check('月度预算限额拦截（quota.exceeded，不计费）', !budgetBlock.ok && JSON.stringify(budgetBlock.error).includes('预算'))
-  const balanceAfterBlock = await api('GET', `/api/billing/wallets/org/${tenantOrg.data.id}`, { token: admin })
-  check('被拒调用不产生扣费', balanceAfterBlock.data.balanceCents === 100_000 - 15)
-
-  const poorOrg = await api('POST', '/api/billing/recharge', { token: admin, body: { ownerType: 'org', ownerId: newOrg.data.id, amountCents: 10, channelRef: 'BANK-POOR', idempotencyKey: 'rc-poor-001' } })
-  const poorInvoke = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'ds-stub', messages: [{ role: 'user', content: '余额不足测试' }], orgId: newOrg.data.id } })
-  check('余额不足预检拦截（先检后用）', poorOrg.ok && !poorInvoke.ok && JSON.stringify(poorInvoke.error).includes('余额不足'))
-
-  const integrity = await api('POST', '/api/billing/verify', { token: admin })
-  check('资金完整性：余额 ≡ Σ流水（全量重放）', integrity.ok && integrity.data.ok === true && integrity.data.wallets >= 2)
+  // M0-3 口径：模型网关事件为零价快照（charge=0），无余额/预算闸
+  const modelGwEvent = await api('GET', '/api/usage/events?resource=model:ds-stub', { token: admin })
+  check('模型网关事件零价快照（charge=0 / cost=8）', modelGwEvent.ok && modelGwEvent.data.items[0].pricing.charge_cents === 0 && modelGwEvent.data.items[0].pricing.cost_cents === 8, JSON.stringify(modelGwEvent.data?.items?.[0]?.pricing))
+  const billingRechargeGone = await api('POST', '/api/billing/recharge', { token: admin, body: {} })
+  check('充值端点已随 M0-2 下线（404）', billingRechargeGone.status === 404)
   modelStub.close()
 
   // ================================================================ 第 6 步：OIDC Provider（浏览器授权流 / 协议合规）
@@ -1399,7 +1379,7 @@ try {
   check('无效 client_id → 302 平台错误页（Location 不含外部域）', badClient.status === 302 && String(badClient.headers.location).startsWith('/#/oauth/error') && !String(badClient.headers.location).includes('crm.partner.example'))
   const badRedirect = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ redirect_uri: 'https://evil.example/cb' })}`)
   check('redirect_uri 不在白名单 → 平台错误页', badRedirect.status === 302 && String(badRedirect.headers.location).startsWith('/#/oauth/error'))
-  const badScope = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ scope: 'openid profile billing:admin' })}`)
+  const badScope = await rawReq('GET', `/oauth/authorize?${authorizeQuery({ scope: 'openid profile reporting:admin' })}`)
   check('白名单外 scope → invalid_scope 错误页', badScope.status === 302 && decodeURIComponent(String(badScope.headers.location)).includes('invalid_scope'))
   const noPkce = await rawReq('GET', `/oauth/authorize?${new URLSearchParams({ response_type: 'code', client_id: OC.clientId, redirect_uri: 'https://crm.partner.example/cb', state: 'st', scope: 'openid' }).toString()}`)
   check('缺少 PKCE → 错误页（强制 S256）', noPkce.status === 302 && String(noPkce.headers.location).startsWith('/#/oauth/error') && decodeURIComponent(String(noPkce.headers.location)).includes('PKCE'))
@@ -1550,15 +1530,16 @@ try {
   const devRelogin = await api('POST', '/api/auth/login', { body: { username: 'dev', password: 'Ybk@2026' } })
   dev = devRelogin.data.token
 
-  // ================================================================ 第 7 步：L0 市场 beta（自营供给 + 订阅代收）
-  section('第 7 步：L0 市场 beta（自营供给 / 订阅代收 / 卸载联动）')
+  // ================================================================ 第 7 步：L0 市场 beta（自营供给 + 零价计量）
+  section('第 7 步：L0 市场 beta（自营供给 / 零价计量 / 卸载联动）')
   const marketList = await api('GET', '/api/market/plugins', { token: admin })
   check('自营首批供给上架（3 个标杆 L0）', marketList.ok && marketList.data.plugins.filter((p) => p.pluginId.startsWith('com.platform.')).length === 3, JSON.stringify(marketList).slice(0, 400))
   const officialInstall = await api('POST', '/api/market/plugins/com.platform.contract-review/install', { token: admin, body: { orgId: newOrg.data.id, approvedCapabilities: ['knowledgebase.read'] } })
   check('安装自营插件', officialInstall.ok && officialInstall.data.status === 'running')
-  const subs = await api('GET', '/api/market/subscriptions', { token: admin })
-  const subEntry = subs.data.subscriptions.find((s) => s.pluginId === 'com.platform.contract-review' && s.orgId === newOrg.data.id)
-  check('L3 订阅代收登记（hybrid 999 元/月，人工对账过渡）', Boolean(subEntry) && subEntry.monthlyCents === 99900 && subEntry.channel === 'manual-settlement')
+  const meteringView = (await api('GET', '/api/market/plugins', { token: admin })).data.plugins.find((p) => p.pluginId === 'com.platform.contract-review')
+  check('市场计量口径（仅 meter key/单位，零价无金额）', Boolean(meteringView) && meteringView.metering?.usageKey === 'contract.docs' && meteringView.billing === undefined)
+  const subsGone = await api('GET', '/api/market/subscriptions', { token: admin })
+  check('订阅代收端点已随 M0-2 下线（404）', subsGone.status === 404)
   const officialPrompts = await api('GET', '/api/market/prompts?orgId=' + newOrg.data.id, { token: admin })
   check('自营插件提示词包可取用', officialPrompts.ok && JSON.stringify(officialPrompts.data.prompts).includes('合同审查'))
 
@@ -1938,37 +1919,21 @@ try {
   mcpStub.close()
   ddStub.close()
 
-  // ================================================================ 第 8 步：复式分账 ledger
-  section('第 8 步：复式分账 ledger（账期汇总结转 / 试算平衡 / 红字冲正）')
-  const arrearsAlerts = await api('GET', '/api/audit/alerts', { token: admin })
-  check('事后扣费失败触发欠费告警（预检兜底之外的防线）', arrearsAlerts.ok && JSON.stringify(arrearsAlerts.data.alerts).includes('欠费'))
-  const month = new Date().toISOString().slice(0, 7)
-  const settle = await api('POST', '/api/billing/settle', { token: admin, body: { period: month } })
-  check('账期汇总结转（一借多贷复合分录）', settle.ok && settle.data.entries >= 4 && settle.data.debitCents > 0)
-  check('试算平衡（借方合计 = 贷方合计）', settle.data.balanced === true && settle.data.debitCents === settle.data.creditCents)
-  const ledgerRows = (await api('GET', `/api/billing/ledger?period=${month}`, { token: admin })).data
-  const devCredit = ledgerRows.entries.find((e) => e.account.startsWith('developer:') && e.direction === 'credit' && e.amount_cents === 10)
-  check('开发者分成入账（50 分 × 20% 平台默认费率，费率版本快照）', Boolean(devCredit) && devCredit.rate_version === 'v2026.08')
-  const dupSettle = await api('POST', '/api/billing/settle', { token: admin, body: { period: month } })
-  check('账期重复结转被拒（调整走红字冲正）', !dupSettle.ok)
-  const reverse = await api('POST', '/api/billing/ledger/reverse', { token: admin, body: { period: month, reason: '自测冲正演练' } })
-  check('红字冲正（负数分录引用原分录，试算仍平衡）', reverse.ok && reverse.data.balanced === true)
-  const trialAfter = (await api('GET', `/api/billing/ledger?period=${month}`, { token: admin })).data.trial
-  check('冲正后期间净额归零（借=贷）', trialAfter.debitCents === trialAfter.creditCents && trialAfter.debitCents === 0)
-
-  // ================================================================ 评审缺陷修复回归（S/M 系列）
-  section('评审缺陷修复回归（settle 全量 / 冲正防重 / 幂等键绑定主体 / replay 不双计）')
-  const monthTotals = await api('GET', `/api/usage/totals?from=${month}-01T00:00:00`, { token: admin })
-  check('结转归集事件数 = 计量口径 COUNT（无截断对账）', settle.ok && settle.data.events === monthTotals.data.count)
-
-  const reverseAgain = await api('POST', '/api/billing/ledger/reverse', { token: admin, body: { period: month, reason: '二次冲正应被拒绝' } })
-  check('同一账期二次红字冲正被拒（防借贷破坏）', !reverseAgain.ok && JSON.stringify(reverseAgain.error).includes('已存在'))
-
+  // ================================================================ M0-2：钱包/分账功能面下线回归
+  section('M0-2 钱包/分账下线回归（全端点 404 / 权限点移除）')
   const idemOwner = (await api('GET', '/api/iam/orgs', { token: admin })).data[0]
-  const rechA = await api('POST', '/api/billing/recharge', { token: admin, body: { ownerType: 'org', ownerId: idemOwner.id, amountCents: 100, channelRef: 'selftest-idem-owner', idempotencyKey: 'rech-selftest-owner-binding' } })
-  const rechB = await api('POST', '/api/billing/recharge', { token: admin, body: { ownerType: 'platform', ownerId: 'platform', amountCents: 100, channelRef: 'selftest-idem-owner', idempotencyKey: 'rech-selftest-owner-binding' } })
-  check('钱包幂等键绑定主体（同键异主体被拒）', rechA.ok && !rechB.ok && JSON.stringify(rechB.error).includes('绑定主体'))
+  const billingWalletGone = await api('GET', '/api/billing/wallets/org/selftest-nonexistent', { token: admin })
+  check('钱包查询端点已下线（404）', billingWalletGone.status === 404)
+  const billingSettleGone = await api('POST', '/api/billing/settle', { token: admin, body: { period: '2026-09' } })
+  check('账期结转端点已下线（404）', billingSettleGone.status === 404)
+  const billingLedgerGone = await api('GET', '/api/billing/ledger', { token: admin })
+  check('分账分录端点已下线（404）', billingLedgerGone.status === 404)
+  const iamPoints = (await api('GET', '/api/iam/permissions', { token: admin })).data
+  const allPoints = JSON.stringify(iamPoints)
+  check('billing.* 权限点已从矩阵移除', !allPoints.includes('billing.read') && !allPoints.includes('billing.write') && !allPoints.includes('billing.admin'), allPoints.slice(0, 120))
 
+  // ================================================================ 评审缺陷修复回归（replay 不双计 / 死信）
+  section('评审缺陷修复回归（replay 不双计 / 死信端点可用）')
   const reconcileBeforeReplay = await api('POST', '/api/usage/reconcile', { token: admin })
   const replayAll = await api('POST', '/api/usage/replay', { token: admin, body: { from: new Date(Date.now() - 40 * 86_400_000).toISOString() } })
   const reconcileAfterReplay = await api('POST', '/api/usage/reconcile', { token: admin })
@@ -2018,9 +1983,9 @@ try {
   check('台账筛选（类型 + 窗口）', assetsTyped.ok && assetsTyped.data.items.every((i) => i.type === 'mcp'))
 
   const benefit = await api('GET', '/api/assets/benefit?days=30', { token: admin })
-  check('效益分析（毛利 = 列表价收入 − 采购成本，逐行恒等）', benefit.ok && benefit.data.rows.length >= 1
-    && benefit.data.totals.margin_cents === benefit.data.totals.charge_cents - benefit.data.totals.cost_cents
-    && benefit.data.rows.every((row) => row.margin_cents === row.charge_cents - row.cost_cents))
+  check('成本穿透（零价快照口径：内部成本逐行恒等，无收入/毛利）', benefit.ok && benefit.data.rows.length >= 1
+    && benefit.data.totals.cost_cents === benefit.data.rows.reduce((s, r) => s + r.cost_cents, 0)
+    && benefit.data.rows.every((row) => row.margin_cents === undefined && row.charge_cents === undefined))
 
   // ================================================================ Skill 市场
   section('Skill 市场流水线')
@@ -2144,7 +2109,7 @@ try {
   check('Agent 自主提报交互界面地址（entryUrl 白名单生效）', agentEntryUrl.ok && agentEntryUrl.data.attrs['entryUrl'] === 'https://bot.example.com/chat', JSON.stringify(agentEntryUrl.error))
 
   const agentSelfMeter = await api('POST', '/api/usage/record', { token: selfAgentCc.data.token, body: { org: tenantOrg.data.id, subject: `agent:${selfAgent.id}`, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 100, unit: 'token' }], idempotency_key: 'test-usage-agent-self-1' } })
-  check('Agent 机器令牌自推计量 200（usage.write 生效）', agentSelfMeter.ok && agentSelfMeter.data.pricing.charge_cents === 3)
+  check('Agent 机器令牌自推计量 200（usage.write 生效，零价快照）', agentSelfMeter.ok && agentSelfMeter.data.pricing.charge_cents === 0)
 
   // Agent 接入提示词（与 app 同构：rotate 轮换机器凭证携带完整凭证；首行含关键词「提示词」供 connector 触发）
   const agentPrompt = await api('POST', `/api/agents/${selfAgent.id}/onboarding-prompt`, { token: selfAgentCc.data.token, body: { rotate: true } })
@@ -2178,10 +2143,8 @@ try {
   })
   await new Promise((resolve) => agentModelStub.listen(0, '127.0.0.1', resolve))
   const agentModelPort = agentModelStub.address().port
-  const agentModelReg = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ds-stub-agent', displayName: 'Agent 回灌验证', provider: 'deepseek', endpoint: `http://127.0.0.1:${agentModelPort}/v1`, apiKey: 'stub-key', listCentsPerKTokens: 1, costCentsPerKTokens: 0 } })
+  const agentModelReg = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'ds-stub-agent', displayName: 'Agent 回灌验证', provider: 'deepseek', endpoint: `http://127.0.0.1:${agentModelPort}/v1`, apiKey: 'stub-key', costCentsPerKTokens: 0 } })
   check('Agent 验证模型目录登记', agentModelReg.ok)
-  // 第 5 步曾对 tenantOrg 设 30 分月度预算用于验证拦截，此处放开以让回灌链路通过预检
-  await api('PUT', `/api/billing/budgets/${tenantOrg.data.id}`, { token: admin, body: { monthlyCents: 1_000_000 } })
   const agentGwInvoke = await api('POST', '/api/modelgw/invoke', { token: selfAgentCc.data.token, body: { model: 'ds-stub-agent', messages: [{ role: 'user', content: 'hi' }], orgId: tenantOrg.data.id } })
   check('Agent 凭自身凭证调用模型网关 200（modelgw.invoke 生效）', agentGwInvoke.ok && agentGwInvoke.data.outputTokens === 1500, JSON.stringify(agentGwInvoke.error ?? agentGwInvoke.data))
   const agentGwEvent = await api('GET', '/api/usage/events?resource=model:ds-stub-agent', { token: admin })
@@ -2191,6 +2154,18 @@ try {
     agentMetricsAfterGw.ok && agentMetricsAfterGw.data.metrics.calls === 1 && agentMetricsAfterGw.data.metrics.tokens === 1620 && agentMetricsAfterGw.data.metrics.gwCalls === 1,
     JSON.stringify(agentMetricsAfterGw.data?.metrics))
   agentModelStub.close()
+
+  // ================================================================ M0-3 用量透明月报（J4 契约）
+  section('M0 用量透明月报（J4：部门/Agent/Skill tokens 三维聚合 + CSV 自助导出）')
+  const j4Month = new Date().toISOString().slice(0, 7)
+  const j4Report = await api('GET', `/api/usage/report/monthly?month=${j4Month}`, { token: admin })
+  check('J4 月报聚合可用（当月 totals 事件数 > 0）', j4Report.ok && j4Report.data.month === j4Month && j4Report.data.totals.events > 0, JSON.stringify(j4Report).slice(0, 200))
+  check('J4 部门维度（org 归口聚合，tokens 汇总）', j4Report.ok && j4Report.data.byOrg.some((r) => r.dimension === tenantOrg.data.id && r.tokens > 0), JSON.stringify(j4Report.data?.byOrg))
+  check('J4 Agent 维度（subject=agent:* 聚合）', j4Report.ok && j4Report.data.byAgent.some((r) => r.dimension === `agent:${selfAgent.id}` && r.tokens > 0), JSON.stringify(j4Report.data?.byAgent))
+  check('J4 Skill 维度（resource=skill:* 聚合）', j4Report.ok && j4Report.data.bySkill.length >= 1)
+  check('J4 零价快照口径（totals charge 恒 0）', j4Report.ok && j4Report.data.totals.charge_cents === 0)
+  const j4Csv = await rawReq('GET', `/api/usage/report/monthly?month=${j4Month}&format=csv`, { headers: { authorization: `Bearer ${admin}` } })
+  check('J4 CSV 自助导出（text/csv + BOM + 表头）', j4Csv.status === 200 && (j4Csv.headers['content-type'] ?? '').includes('text/csv') && j4Csv.body.startsWith('\ufeff') && j4Csv.body.includes('维度,维度值,事件数,tokens'), JSON.stringify({ status: j4Csv.status, ct: j4Csv.headers['content-type'], head: j4Csv.body.slice(0, 80) }))
 
   const onlineTooEarly = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: ops, body: { action: 'online' } })
   check('缺治理属性不可上线（校验）', !onlineTooEarly.ok)
@@ -3613,8 +3588,6 @@ try {
     name: 'admin 全量组', orgId: connOrg,
     policies: { hackernews: { allowedActions: '*', riskCap: 'admin' }, github: { allowedActions: '*', riskCap: 'admin' }, },
     subjects: [{ type: 'user_group', id: grpAdmin.id }],
-    // 新建组织钱包为 0 分：预估置 0 让主链路不被余额闸误伤（quota 路径由 T-16b 独立大额组覆盖）
-    precheckCents: 0,
   } })).data
   const pgTmp = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
     name: 'dev 高危通道组', orgId: connOrg,
@@ -3761,19 +3734,6 @@ try {
     [rateLimited.data?.status, rateLimitedSecond.data?.status].includes('rate_limited'),
     JSON.stringify([rateLimited.data, rateLimitedSecond.data]).slice(0, 300))
   await api('PATCH', `/api/connector/perm-groups/${pgIso.id}`, { token: admin, body: { rateLimitPerMin: 60 } })
-
-  // -- T-16b billing.precheck quota.exceeded（独立 agent 主体 + 大额预估组） --------
-  const heavyAgent = await api('POST', '/api/agents', { token: admin, body: { name: '连接器预算闸机器人', attrs: { description: 'precheck 回归', model: 'deepseek-chat', riskLevel: 'low', avatar: '🤖' } } })
-  const heavyCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: heavyAgent.data.credential.clientId, clientSecret: heavyAgent.data.credential.clientSecret } })
-  const grpHeavy = (await api('POST', '/api/iam/groups', { token: admin, body: { name: '连接器组-heavy', type: 'static', memberIds: [] } })).data
-  await api('POST', '/api/connector/perm-groups', { token: admin, body: {
-    name: '大额预估组', orgId: connOrg,
-    policies: { hackernews: { allowedActions: 'hackernews.*', riskCap: 'admin' } },
-    subjects: [{ type: 'agent', id: heavyAgent.data.agent.id }],
-    precheckCents: 99999999,
-  } })
-  const heavyDenied = await api('POST', '/api/connector/execute', { token: heavyCc.data.token, body: { actionId: 'hackernews.fetch_item', input: {} } })
-  check('T-16b precheck 余额不足 → quota_exceeded', heavyDenied.ok && heavyDenied.data?.status === 'quota_exceeded' && String(heavyDenied.data.error).includes('quota.exceeded'), JSON.stringify(heavyDenied).slice(0, 240))
 
   // -- T-19 stub 关停 fail-closed + 恢复 ------------------------------------------
   await api('PUT', '/api/connector/gateway', { token: admin, body: { baseUrl: 'http://127.0.0.1:9', adminToken: 'env:OOMOL_CONNECT_ADMIN_TOKEN' } })
@@ -4504,7 +4464,6 @@ try {
     await mountCtx.plugin(iam)
     await mountCtx.plugin(authn)
     await mountCtx.plugin(usage)
-    await mountCtx.plugin(billing)
     await mountCtx.plugin(audit)
     await mountCtx.plugin(market)
     await mountCtx.plugin(connector)
@@ -4543,6 +4502,32 @@ try {
       && captured.some((r) => r.kind === 'exact' && r.path === '/auth/oidc/callback'),
       JSON.stringify(captured.map((r) => `${r.kind}:${r.path}`)))
     check('externalBase 配置生效（/rq）', mountCtx.httpServer.externalBase === '/rq')
+
+    // -- M0-1 死信重放演练：消费 3 次失败入死信 → 修复后重投成功且不双计 ----------
+    let drillFail = true
+    let drillHandled = 0
+    mountCtx.usage.consume('selftest-drill', (event) => {
+      drillHandled++
+      if (drillFail) throw new Error('drill 注入失败')
+      mountCtx.usage.project('selftest-drill', event)
+    })
+    const drillEvent = mountCtx.usage.record({
+      org: 'drill-org', subject: 'agent:drill-bot', principal: 'platform',
+      resource: 'app:app-drill', meters: [{ key: 'calls', value: 1, unit: 'call' }],
+      idempotency_key: 'selftest-drill-001',
+    })
+    const drillLetters = mountCtx.usage.deadLetters().all()
+    check('M0-1 死信演练：消费连续 3 次失败入死信',
+      drillLetters.some((letter) => letter.event_id === drillEvent.event_id && letter.consumer === 'selftest-drill'),
+      JSON.stringify(drillLetters))
+    drillFail = false
+    const drillRetry = mountCtx.usage.retryDeadLetters()
+    const projectionAfter = mountCtx.opsStorage.collection('usage:projection:selftest-drill').all().reduce((sum, row) => sum + row.count, 0)
+    check('M0-1 死信重投：修复后重投成功且投影恰好一次', drillRetry.retried >= 1 && drillHandled === 4 && projectionAfter === 1,
+      JSON.stringify({ drillRetry, drillHandled, projectionAfter }))
+    mountCtx.usage.replay(new Date(Date.now() - 3_600_000).toISOString())
+    const projectionAfterReplay = mountCtx.opsStorage.collection('usage:projection:selftest-drill').all().reduce((sum, row) => sum + row.count, 0)
+    check('M0-1 死信重投后 replay 不双计（消费水位幂等）', projectionAfterReplay === 1, String(projectionAfterReplay))
 
     // -- H3 白盒回归：宽限窗口外旧 token 重放 = 硬重放，整链吊销（含宽限兄弟对） ----------
     const gracePrincipal = mountCtx.authn.ensureHumanPrincipal('selftest-grace-user', '宽限窗口自测')

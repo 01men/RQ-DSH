@@ -38,7 +38,7 @@ export interface OrgRecord extends RecordBase {
   leaderSource?: 'sync' | 'manual'
 }
 
-/** 租户（多租户最小集）：计量/钱包/分账的租户维度载体。 */
+/** 租户（多租户最小集）：计量/用量报表的租户维度载体。 */
 export interface TenantRecord extends RecordBase {
   name: string
   status: 'active' | 'suspended'
@@ -244,15 +244,12 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'audit.rule.write', label: '管理告警规则', group: '审计' },
   { point: 'approval.read', label: '查看审批中心', group: '审批' },
   { point: 'approval.decide', label: '审批决策', group: '审批' },
-  { point: 'usage.read', label: '查看计量流水', group: '计量计费' },
-  { point: 'usage.write', label: '登记计量事件', group: '计量计费' },
-  { point: 'usage.admin', label: '管理价格簿/对账/能力授权', group: '计量计费' },
-  { point: 'billing.read', label: '查看钱包/流水/分账', group: '计量计费' },
-  { point: 'billing.write', label: '充值/预算管理', group: '计量计费' },
-  { point: 'billing.admin', label: '账期结转/冲正', group: '计量计费' },
-  { point: 'modelgw.read', label: '查看模型网关', group: '模型转售' },
-  { point: 'modelgw.invoke', label: '调用模型网关', group: '模型转售' },
-  { point: 'modelgw.admin', label: '管理模型目录', group: '模型转售' },
+  { point: 'usage.read', label: '查看计量流水', group: '用量计量' },
+  { point: 'usage.write', label: '登记计量事件', group: '用量计量' },
+  { point: 'usage.admin', label: '管理价格簿/对账/能力授权', group: '用量计量' },
+  { point: 'modelgw.read', label: '查看模型网关', group: '模型网关' },
+  { point: 'modelgw.invoke', label: '调用模型网关', group: '模型网关' },
+  { point: 'modelgw.admin', label: '管理模型目录', group: '模型网关' },
   { point: 'market.read', label: '浏览插件市场', group: '插件市场' },
   { point: 'market.submit', label: '提交插件', group: '插件市场' },
   { point: 'market.approve', label: '审批插件', group: '插件市场' },
@@ -753,7 +750,7 @@ export class IamService extends Service {
     })
   }
 
-  /** 租户解析：org → tenant；缺省 t_default（usage/钱包/分账统一入口）。 */
+  /** 租户解析：org → tenant；缺省 t_default（usage/用量报表统一入口）。 */
   tenantOfOrg(orgId: string): string {
     return this.orgs().get(orgId)?.tenantId ?? DEFAULT_TENANT_ID
   }

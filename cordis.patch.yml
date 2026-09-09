@@ -41,13 +41,11 @@
       name: dsh-enterprise-ops/packages/plugin-authn/src/index.ts
     - id: ops-usage
       name: dsh-enterprise-ops/packages/plugin-usage/src/index.ts
-    - id: ops-billing
-      name: dsh-enterprise-ops/packages/plugin-billing/src/index.ts
     - id: ops-audit
       name: dsh-enterprise-ops/packages/plugin-audit/src/index.ts
     - id: ops-market
       name: dsh-enterprise-ops/packages/plugin-market/src/index.ts
-    # 连接器纳管（open-connector 数据面网关适配）：依赖 iam/usage/billing/audit，先于 mcp/modelgw
+    # 连接器纳管（open-connector 数据面网关适配）：依赖 iam/usage/audit，先于 mcp/modelgw（billing 已下线封存，M0-2）
     - id: ops-connector
       name: dsh-enterprise-ops/packages/plugin-connector/src/index.ts
     - id: ops-mcp

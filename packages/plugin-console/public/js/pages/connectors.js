@@ -648,7 +648,6 @@ export async function renderConnectors(content, params, ctx) {
         }))}
         <div style="display:flex;gap:12px">
           <div style="flex:1">${field('限流（次/分/主体）', inputField('rateLimitPerMin', { value: String(existing?.rateLimitPerMin ?? 60) }))}</div>
-          <div style="flex:1">${field('计费预估（分）', inputField('precheckCents', { value: String(existing?.precheckCents ?? 0) }))}</div>
         </div>
         <div id="pg-impact" class="form-hint">${isEdit ? '正在预览变更影响面…' : '变更影响面：保存前自动预览 N 个令牌 / M 个连接受影响。'}</div>`,
       foot: `<button class="btn btn-default" data-cancel>取消</button>
@@ -674,7 +673,6 @@ export async function renderConnectors(content, params, ctx) {
         policies,
         subjects,
         rateLimitPerMin: Number(val('rateLimitPerMin')) || 60,
-        precheckCents: Number(val('precheckCents')) || 0,
       }
       if (!basePayload.name) return toast('请填写名称', 'error')
       if (!isEdit && !val('orgId')) return toast('请选择归属组织', 'error')

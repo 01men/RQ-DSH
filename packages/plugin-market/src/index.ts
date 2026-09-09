@@ -6,7 +6,7 @@
  *   manifest/permissions.yaml   权限声明（requested；安装时企业逐项审批 → approved）
  *   manifest/api.yaml           声明式提供面（L0 阶段仅登记描述）
  *   manifest/events.yaml        事件声明（订阅/发射均收敛在 plugin:<id>: 命名空间）
- *   manifest/billing.yaml       L3 计费声明（安装时登记价格簿）
+ *   manifest/billing.yaml       计量声明（兼容字段：仅 meter key/单位参与计量登记，金额侧一律零价快照）
  *
  * 市场准入门禁（硬性）：sandbox 仅受理 L0——L1 有码沙箱（第 10 步）交付前，
  * 任何有码插件提交直接拒绝，杜绝「内部信任」例外。
@@ -91,16 +91,6 @@ export interface PluginInstallRecord extends RecordBase {
   permissions: string[]
   status: 'running' | 'suspended' | 'uninstalled'
   installedBy: string
-}
-
-/** L3 订阅代收登记（资金通道未就位：先记账期权益，结算走人工对账单，v1.2 §六过渡形态）。 */
-export interface PluginSubscriptionRecord extends RecordBase {
-  pluginId: string
-  orgId: string
-  tenantId: string
-  monthlyCents: number
-  startedAt: string
-  channel: 'manual-settlement'
 }
 
 // ---------------------------------------------------------------------------
@@ -264,10 +254,6 @@ export class MarketService extends Service {
     return this.ctx.opsStorage.collection<PluginInstallRecord>('market:installs')
   }
 
-  subscriptions(): Collection<PluginSubscriptionRecord> {
-    return this.ctx.opsStorage.collection<PluginSubscriptionRecord>('market:subscriptions')
-  }
-
   // -- 开发者身份域（M2：独立于内部员工 iam） --------------------------------
 
   registerDeveloper(input: { username: string; displayName: string; email: string; password: string; publicKey: string; company?: string; payoutAccount?: string }): { developer: DeveloperRecord; token: string } {
@@ -423,13 +409,15 @@ export class MarketService extends Service {
     // 能力固化：运行时对账基线（M5）——插件主体只许消耗获批能力对应的资源
     const grantedResources = [`plugin:${input.pluginId}`, ...input.approvedCapabilities.map((cap) => CAPABILITY_RESOURCE_MAP[cap] ?? cap)]
     this.ctx.usage.grantCapabilities(`plugin:${input.pluginId}`, grantedResources, `market-install:${record.id}`)
-    // L3 计费登记：安装即写入价格簿（meter key 取 billing.usage[0]）
+    // 计量登记（M0-3 收敛）：安装即写入价格簿，meter key 取 billing.usage[0] 声明
+    //（L0 运行时计量 meterPromptUse 依赖该键过 record() 硬校验）；金额侧一律零价快照——
+    // 第三方声明价不再入账（商业模式为私有化年费+治理包，无转售分成/代收）
     const usageEntry = submission.parsed.billing.usage[0]
     if (usageEntry) {
       this.ctx.usage.upsertPrice({
         pattern: `plugin:${input.pluginId}`,
         meter_key: usageEntry.key,
-        list_cents_per_unit: Math.round(usageEntry.price * 100),
+        list_cents_per_unit: 0,
         cost_cents_per_unit: 0,
         units_per_step: 1,
         tax_rate: 0.06,
@@ -438,18 +426,6 @@ export class MarketService extends Service {
       })
     }
     this.submissions().update(submission.id, { installs: submission.installs + 1 })
-    // L3 订阅代收：billing.yaml 声明订阅 → 登记账期权益（资金通道未就位 → 人工对账单结算）
-    if (submission.parsed.billing.subscription && submission.parsed.billing.subscription.monthly > 0) {
-      this.subscriptions().insert({
-        id: newId('subr'),
-        pluginId: input.pluginId,
-        orgId: input.orgId,
-        tenantId: input.tenantId,
-        monthlyCents: Math.round(submission.parsed.billing.subscription.monthly * 100),
-        startedAt: new Date().toISOString(),
-        channel: 'manual-settlement',
-      })
-    }
     this.ctx.platformBus.emit(PlatformEvents.PluginInstalledEvent, {
       pluginId: input.pluginId, version: submission.version, orgId: input.orgId, tenantId: input.tenantId,
       capabilities: input.approvedCapabilities, installedBy: input.installedBy,
@@ -528,25 +504,25 @@ export function apply(ctx: Context) {
 }
 
 // ---------------------------------------------------------------------------
-// 平台自营首批供给（M3 消解：L0 供给空窗 → 3 个可收费标杆场景）
+// 平台自营首批供给（M3 消解：L0 供给空窗 → 标杆场景演示包，零价快照计量）
 // 走与第三方完全相同的提交/签名/审批流水线（吃自己的狗粮）。
 // ---------------------------------------------------------------------------
 
-const OFFICIAL_PLUGINS: Array<{ id: string; name: string; description: string; template: string; usageKey: string; unit: string; price: number; monthly?: number }> = [
+const OFFICIAL_PLUGINS: Array<{ id: string; name: string; description: string; template: string; usageKey: string; unit: string }> = [
   {
     id: 'com.platform.contract-review', name: '合同审查提示词包', description: '按企业合同红线清单输出结构化审查意见',
     template: '你是合同审查专家。对输入合同执行：1) 标的主体与签署权限核验；2) 付款/违约/知识产权条款风险标注（高/中/低）；3) 输出结构化审查意见表。',
-    usageKey: 'contract.docs', unit: '份', price: 2.0, monthly: 999,
+    usageKey: 'contract.docs', unit: '份',
   },
   {
     id: 'com.platform.weekly-report', name: '周报生成器', description: '把零散工作记录收敛为管理层周报',
     template: '你是周报整理助手。将输入的工作记录归纳为：本周进展（按优先级）/ 数据亮点 / 风险与求助 / 下周计划，保持事实忠实不夸大。',
-    usageKey: 'report.count', unit: '次', price: 1.0,
+    usageKey: 'report.count', unit: '次',
   },
   {
     id: 'com.platform.pii-mask', name: '数据脱敏模板', description: '对外输出前的 PII 脱敏规则包',
     template: '你是数据脱敏助手。按规则处理输入文本：手机号/身份证/银行卡保留前三后四；姓名保留姓；邮箱打码域名前部分；输出脱敏后文本与脱敏项清单。',
-    usageKey: 'mask.count', unit: '次', price: 0.5,
+    usageKey: 'mask.count', unit: '次',
   },
 ]
 
@@ -588,13 +564,11 @@ function seedOfficialPlugins(market: MarketService): void {
         'manifest/api.yaml': 'routes: []\n',
         'manifest/events.yaml': 'subscribes: []\nemits: []\n',
         'manifest/billing.yaml': [
-          `model: ${spec.monthly !== undefined ? 'hybrid' : 'usage'}`,
-          ...(spec.monthly !== undefined ? ['', `subscription:`, `  monthly: ${spec.monthly}`] : []),
+          'model: free',
           'usage:',
           `  - key: ${spec.usageKey}`,
           `    unit: ${spec.unit}`,
-          `    price: ${spec.price}`,
-          'commission: platform_default',
+          '    price: 0',
           '',
         ].join('\n'),
       }

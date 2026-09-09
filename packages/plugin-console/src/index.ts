@@ -25,7 +25,7 @@ import { seedAll } from './seed.ts'
 export const name = 'console'
 export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
-  'iam', 'authn', 'oidc', 'entryTickets', 'audit', 'usage', 'billing', 'market', 'modelGateway',
+  'iam', 'authn', 'oidc', 'entryTickets', 'audit', 'usage', 'market', 'modelGateway',
   'mcpRegistry', 'nasRegistry', 'nasAuthz', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
   'connectorHub',
 ]
@@ -572,9 +572,9 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     const usageByResource = new Map(ctx.usage.breakdown(fromIso).byResource.map((row) => [row.resource, row]))
     const orgName = (orgId: string) => ctx.iam.orgs().get(orgId)?.name ?? orgId
     const usageOf = (resource: string | undefined) => {
-      if (!resource) return { calls: 0, chargeCents: 0 }
+      if (!resource) return { calls: 0, costCents: 0 }
       const row = usageByResource.get(resource)
-      return { calls: row?.count ?? 0, chargeCents: row?.charge_cents ?? 0 }
+      return { calls: row?.count ?? 0, costCents: row?.cost_cents ?? 0 }
     }
     const items = [
       ...ctx.mcpRegistry.services().all().map((service) => ({
@@ -602,7 +602,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
         owner: nas.ownerId,
         updatedAt: nas.updatedAt,
         calls: 0,
-        chargeCents: 0,
+        costCents: 0,
       })),
       ...ctx.resourceCore.list('agent').map((agent) => ({
         type: 'agent' as const,
@@ -639,7 +639,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
         owner: skill.authorName,
         updatedAt: skill.updatedAt,
         calls: skill.stats?.installs ?? 0,
-        chargeCents: 0,
+        costCents: 0,
       })),
       ...ctx.modelGateway.models().all().map((model) => ({
         type: 'model' as const,
@@ -662,7 +662,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       if (status && item.status !== status) return false
       if (q && !`${item.name}${item.slug}${item.org}${item.owner}`.toLowerCase().includes(q.toLowerCase())) return false
       return true
-    }).sort((a, b) => b.chargeCents - a.chargeCents || a.name.localeCompare(b.name))
+    }).sort((a, b) => b.costCents - a.costCents || a.name.localeCompare(b.name))
     const byType: Record<string, { total: number; inService: number }> = {}
     for (const item of items) {
       const bucket = byType[item.type] ?? { total: 0, inService: 0 }
@@ -676,7 +676,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       summary: {
         byType,
         unhealthy: items.filter((item) => item.health === 'down' || item.health === 'degraded').length,
-        chargeCents30d: items.reduce((sum, item) => sum + item.chargeCents, 0),
+        costCents30d: items.reduce((sum, item) => sum + item.costCents, 0),
       },
       items: filtered,
     }
@@ -747,7 +747,8 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     }
   })
 
-  // -- 效益分析（毛利口径）：列表价收入 - 采购成本；应用类资产关联单位 DAU 成本 --------------
+  // -- 成本穿透（M0-3 用量透明口径）：内部采购成本参考 + 应用关联单位 DAU 成本 --------------
+  // （零价快照下 charge_cents 恒 0，不再呈现收入/毛利等结算语义）
   guarded('GET', '/api/assets/benefit', 'usage.read', (exchange) => {
     const days = Math.min(Math.max(Number(exchange.query.get('days') ?? 30) || 30, 1), 90)
     const fromIso = new Date(Date.now() - days * 86_400_000).toISOString()
@@ -765,20 +766,16 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
         label: labelOfResource(row.resource),
         kind,
         count: row.count,
-        charge_cents: row.charge_cents,
         cost_cents: row.cost_cents,
-        margin_cents: row.charge_cents - row.cost_cents,
         window_dau: windowDau,
         cost_per_dau_cents: windowDau && windowDau > 0 ? Math.round(row.cost_cents / windowDau) : null,
       }
-    }).sort((a, b) => b.margin_cents - a.margin_cents || b.count - a.count)
+    }).sort((a, b) => b.cost_cents - a.cost_cents || b.count - a.count)
     return {
       days,
       totals: {
         count: rows.reduce((sum, row) => sum + row.count, 0),
-        charge_cents: rows.reduce((sum, row) => sum + row.charge_cents, 0),
         cost_cents: rows.reduce((sum, row) => sum + row.cost_cents, 0),
-        margin_cents: rows.reduce((sum, row) => sum + row.margin_cents, 0),
       },
       rows,
     }
@@ -3304,7 +3301,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
 
   /**
    * 反馈回传（WP-07/D1）：👍/👎 薄端点 —— 落零价快照 usage 事件（D2：charge=0 + nonbillable，
-   * 不污染计费口径）。主体经 X-On-Behalf-User 归因（Agent 代用户回传），缺省取登录人；
+   * 不污染计量口径）。主体经 X-On-Behalf-User 归因（Agent 代用户回传），缺省取登录人；
    * 幂等键=主体+资源+消息+评分，同键重放不重复计数。
    */
   guarded('POST', '/api/usage/feedback', 'console.login', (exchange) => {
@@ -3454,7 +3451,8 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     plugins: ctx.market.listed().map((item) => ({
       id: item.id, pluginId: item.pluginId, version: item.version, developer: item.developerName,
       capabilities: item.parsed.capabilities_request, permissions: item.parsed.permissions.requested,
-      billing: item.parsed.billing, installs: item.installs, contentHash: item.contentHash,
+      metering: { usageKey: item.parsed.billing.usage[0]?.key ?? null, unit: item.parsed.billing.usage[0]?.unit ?? null },
+      installs: item.installs, contentHash: item.contentHash,
     })),
   }))
 
@@ -3491,10 +3489,6 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     return record
   })
 
-  guarded('GET', '/api/market/subscriptions', 'market.read', () => ({
-    subscriptions: ctx.market.subscriptions().all(),
-  }))
-
   guarded('GET', '/api/market/prompts', 'market.read', (exchange) => {
     const orgId = exchange.query.get('orgId') ?? ''
     return { prompts: ctx.market.promptPacks(orgId) }
@@ -3524,91 +3518,49 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     return { pluginId, capabilities, results }
   })
 
-  // -- 钱包与计费（v1.2 第 5/8 步） -----------------------------------------
-  guarded('GET', '/api/billing/wallets/:ownerType/:ownerId', 'billing.read', (exchange) => ({
-    ownerType: exchange.params['ownerType'],
-    ownerId: exchange.params['ownerId'],
-    balanceCents: ctx.billing.balance(exchange.params['ownerType']! as 'org', exchange.params['ownerId']!),
-    monthSpentCents: exchange.params['ownerType'] === 'org' ? ctx.billing.monthSpent(exchange.params['ownerId']!) : undefined,
-  }))
-
-  guarded('POST', '/api/billing/recharge', 'billing.write', (exchange) => {
-    const info = caller(exchange)
-    const input = body<{ ownerType?: 'org' | 'developer' | 'platform'; ownerId: string; tenantId?: string; amountCents: number; channelRef: string; idempotencyKey: string }>(exchange)
-    const result = ctx.billing.recharge({
-      ownerType: input.ownerType ?? 'org',
-      ownerId: input.ownerId,
-      ...(input.tenantId !== undefined ? { tenantId: input.tenantId } : {}),
-      amountCents: input.amountCents,
-      channelRef: input.channelRef,
-      idempotencyKey: input.idempotencyKey,
-      actor: info.name,
+  // -- 用量透明月度报表（M0-3；J4 契约：docs/contract-j4-usage-report.md） ----------------
+  // 部门/Agent/Skill 三维 tokens 聚合 + 零价快照口径；format=csv 自助导出（Excel 友好 BOM）。
+  guarded('GET', '/api/usage/report/monthly', 'usage.read', (exchange) => {
+    const monthParam = exchange.query.get('month') ?? undefined
+    const report = ctx.usage.monthlyReport(monthParam)
+    if ((exchange.query.get('format') ?? '') !== 'csv') return report
+    const esc = (value: string | number) => {
+      const text = String(value)
+      return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+    }
+    const header = '维度,维度值,事件数,tokens,charge_cents(零价快照恒0),cost_cents(内部成本参考),nonbillable事件数'
+    const lines = [header]
+    const pushRows = (name: string, rows: Array<{ dimension: string; events: number; tokens: number; charge_cents: number; cost_cents: number; nonbillable_events: number }>) => {
+      for (const row of rows) lines.push([name, esc(row.dimension), row.events, row.tokens, row.charge_cents, row.cost_cents, row.nonbillable_events].join(','))
+    }
+    pushRows('total', [report.totals])
+    pushRows('org', report.byOrg)
+    pushRows('agent', report.byAgent)
+    pushRows('skill', report.bySkill)
+    pushRows('model', report.byModel)
+    // 直接写原始响应（guarded 包装器对返回值做 JSON 序列化，流式文件下载须绕开）
+    exchange.res.writeHead(200, {
+      'content-type': 'text/csv; charset=utf-8',
+      'content-disposition': `attachment; filename="usage-report-${report.month}.csv"`,
     })
-    changeLog(exchange, 'billing.recharge', 'wallet', `${input.ownerType ?? 'org'}:${input.ownerId}`, '', `+${input.amountCents} 分（${input.channelRef}）`)
-    return result
+    exchange.res.end('\ufeff' + lines.join('\r\n') + '\r\n')
+    return undefined
   })
 
-  guarded('GET', '/api/billing/journal', 'billing.read', (exchange) => ({
-    entries: ctx.billing.journal({
-      ...(exchange.query.get('ownerType') ? { ownerType: exchange.query.get('ownerType')! } : {}),
-      ...(exchange.query.get('ownerId') ? { ownerId: exchange.query.get('ownerId')! } : {}),
-      ...(exchange.query.get('tenantId') ? { tenantId: exchange.query.get('tenantId')! } : {}),
-      ...(exchange.query.get('limit') ? { limit: Number(exchange.query.get('limit')) } : {}),
-    }),
-  }))
-
-  guarded('POST', '/api/billing/verify', 'billing.read', () => ctx.billing.verifyIntegrity())
-
-  guarded('PUT', '/api/billing/budgets/:orgId', 'billing.write', (exchange) => {
-    const info = caller(exchange)
-    const { monthlyCents } = body<{ monthlyCents: number }>(exchange)
-    const record = ctx.billing.setBudget(exchange.params['orgId']!, monthlyCents, info.name)
-    changeLog(exchange, 'billing.budget.set', 'budget', record.orgId, '', `${monthlyCents} 分/月`)
-    return record
-  })
-
-  guarded('GET', '/api/billing/budgets/:orgId', 'billing.read', (exchange) => ({
-    orgId: exchange.params['orgId'],
-    budget: ctx.billing.budgets().findOne((item) => item.orgId === exchange.params['orgId']) ?? null,
-    monthSpentCents: ctx.billing.monthSpent(exchange.params['orgId']!),
-  }))
-
-  guarded('POST', '/api/billing/settle', 'billing.admin', (exchange) => {
-    const info = caller(exchange)
-    const { period } = body<{ period: string }>(exchange)
-    const result = ctx.billing.settle(period, info.name)
-    changeLog(exchange, 'billing.ledger.settle', 'ledger', period, '', `分录 ${result.entries} 条，借=${result.debitCents} 贷=${result.creditCents}`)
-    return result
-  })
-
-  guarded('GET', '/api/billing/ledger', 'billing.read', (exchange) => {
-    const period = exchange.query.get('period') ?? undefined
-    return { entries: ctx.billing.ledger(period), trial: period ? ctx.billing.trialBalance(period) : undefined }
-  })
-
-  guarded('POST', '/api/billing/ledger/reverse', 'billing.admin', (exchange) => {
-    const info = caller(exchange)
-    const { period, reason } = body<{ period: string; reason: string }>(exchange)
-    const result = ctx.billing.reverse(period, reason, info.name)
-    changeLog(exchange, 'billing.ledger.reverse', 'ledger', period, '', `红字冲正：${reason}`)
-    return result
-  })
-
-  // -- 模型网关（v1.2 第 5 步：L1 模型转售） ---------------------------------
+  // -- 模型网关（M0-3：统一模型接入 + 用量透明计量） ---------------------------
   guarded('GET', '/api/modelgw/models', 'modelgw.read', () => ({
     models: ctx.modelGateway.models().all().map((item) => ({ ...item, apiKey: item.apiKey.startsWith('env:') ? item.apiKey : '***' })),
   }))
 
   guarded('POST', '/api/modelgw/models', 'modelgw.admin', (exchange) => {
-    const input = body<{ slug: string; displayName?: string; provider?: string; endpoint: string; apiKey?: string; listCentsPerKTokens: number; costCentsPerKTokens?: number; status?: 'online' | 'offline' }>(exchange)
+    const input = body<{ slug: string; displayName?: string; provider?: string; endpoint: string; apiKey?: string; costCentsPerKTokens?: number; status?: 'online' | 'offline' }>(exchange)
     const model = ctx.modelGateway.upsertModel({
       slug: input.slug,
       displayName: input.displayName ?? input.slug,
       provider: input.provider ?? 'external',
       endpoint: input.endpoint,
       apiKey: input.apiKey ?? 'env:MODEL_API_KEY',
-      listCentsPerKTokens: input.listCentsPerKTokens,
-      costCentsPerKTokens: input.costCentsPerKTokens ?? Math.floor(input.listCentsPerKTokens / 2),
+      costCentsPerKTokens: input.costCentsPerKTokens ?? 0,
       status: input.status ?? 'online',
     })
     changeLog(exchange, 'modelgw.model.upsert', 'model', model.id, model.slug)
@@ -3628,10 +3580,10 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   guarded('POST', '/api/modelgw/invoke', 'modelgw.invoke', async (exchange) => {
     const info = caller(exchange)
     const input = body<{ model: string; messages: Array<{ role: string; content: string }>; orgId?: string; maxTokens?: number; temperature?: number }>(exchange)
-    // 默认计费组织：调用者所属组织（人）或凭证组织（机器）
+    // 默认用量归口组织：调用者所属组织（人）或凭证组织（机器）
     const orgId = input.orgId
       ?? (info.kind === 'human' && info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined)
-    if (!orgId) throw new Error('未指定计费组织（orgId），且调用者无可归属组织')
+    if (!orgId) throw new Error('未指定用量归口组织（orgId），且调用者无可归属组织')
     // 计量主体：human=user:<id>；machine 凭证关联 Agent 时=agent:<refId>（usage.recorded 回灌 Agent 台账的依据），其余机器=app:<principalId>
     const subject = info.kind === 'human'
       ? `user:${info.userId ?? info.principalId}`
@@ -3687,7 +3639,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   guarded('GET', '/api/platform/info', 'console.login', () => {
     const versionInfo = platformVersionInfo()
     const plugins = [
-      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'billing', 'audit', 'market', 'modelgw', 'mcp', 'nas', 'skillhub', 'agent', 'app', 'connect', 'update', 'console', 'panel-core', 'dingtalk-bridge',
+      'platform-core', 'resource-core', 'iam', 'authn', 'usage', 'audit', 'market', 'modelgw', 'mcp', 'nas', 'skillhub', 'agent', 'app', 'connect', 'update', 'console', 'panel-core', 'dingtalk-bridge',
     ]
     return {
       name: '榕器|企业AI资源管理平台',
@@ -3829,7 +3781,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
             protocolVersion: '2025-03-26',
             capabilities: { tools: {} },
             serverInfo: { name: 'dsh-ops-platform', title: '榕器|企业AI资源管理平台 · MCP 网关', version: platformVersionInfo().version },
-            instructions: '榕器|企业AI资源管理平台（IAM/MCP/Skill/Agent/应用/NAS/计量计费/审计）。工具权限与控制台账号一致：先用 nas_list / mcp_service_list / skill_search 等盘点资产，再按需调用写类工具。',
+            instructions: '榕器|企业AI资源管理平台（IAM/MCP/Skill/Agent/应用/NAS/用量计量/审计）。工具权限与控制台账号一致：先用 nas_list / mcp_service_list / skill_search 等盘点资产，再按需调用写类工具。',
           },
           { 'mcp-session-id': `dshmcp-${Date.now().toString(36)}` },
         )

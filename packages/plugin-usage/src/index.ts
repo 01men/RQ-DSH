@@ -19,6 +19,11 @@
  *   - D2 非计费事件统一零价快照：零费率规则产出 charge_cents=0 且 rate.nonbillable=true；
  *     UsageRecordInput.nonbillable=true 为便捷构造入口（非计费反馈/知识事件），仅允许配零费率规则，
  *     防止「标了非计费却按计费规则入账」的口径漂移。
+ *
+ * 商业模式收敛（榕器开发计划 M0，2026-09-09）：平台商业口径为「私有化年费 + 治理包」，
+ * usage 管道定位为**用量透明计量与内部成本参考**——价格簿 list 侧统一零价快照（charge_cents=0，
+ * 不对外呈现任何金额结算语义），cost 侧保留内部采购成本参考（成本穿透报表口径，见 docs/contract-j4-usage-report.md）。
+ * monthlyReport() 提供 J4 契约的 tokens 三维聚合（部门 org / Agent / Skill）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
@@ -270,7 +275,7 @@ export class UsageService extends Service {
           this.ctx.txnStore.run('DELETE FROM usage_consumptions WHERE consumer = ? AND event_id = ?', [consumerId, event.event_id])
           this.deadLetters().insert({
             id: newId('dlq'), event_id: event.event_id, consumer: consumerId,
-            error: error instanceof Error ? error.message : String(error), attempts,
+            error: error instanceof Error ? error.message : String(error), attempts: attempt,
           })
           this.ctx.platformBus.emit('audit.alert.fired', {
             id: newId('alt'), severity: 'critical', title: 'usage 消费死信',
@@ -356,26 +361,27 @@ export class UsageService extends Service {
   }
 
   /**
-   * 运营分析聚合（资产运营页/成本报表）：窗口内按资源 / 计费主体（组织）/ 日趋势分组。
-   * 一次 SQL 各取一份聚合，供「谁在用什么资产、花了多少」的运营口径。
+   * 运营分析聚合（资产运营页/成本穿透报表）：窗口内按资源 / 归口主体（组织）/ 日趋势分组。
+   * 一次 SQL 各取一份聚合，供「谁在用什么资产、内部成本多少」的运营口径。
+   * M0-3：金额口径为内部成本参考（cost_cents）；charge_cents 零价快照恒 0，仅为事件快照兼容字段。
    */
   breakdown(fromIso: string): {
     byResource: Array<{ resource: string; count: number; charge_cents: number; cost_cents: number }>
-    byPrincipal: Array<{ principal: string; count: number; charge_cents: number }>
-    byDay: Array<{ day: string; count: number; charge_cents: number }>
+    byPrincipal: Array<{ principal: string; count: number; charge_cents: number; cost_cents: number }>
+    byDay: Array<{ day: string; count: number; charge_cents: number; cost_cents: number }>
   } {
     const byResource = this.ctx.txnStore.sql<{ resource: string; count: number; charge_cents: number; cost_cents: number }>(
-      "SELECT resource, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents, COALESCE(SUM(CAST(json_extract(pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents FROM usage_events WHERE occurred_at >= ? GROUP BY resource ORDER BY charge_cents DESC",
+      "SELECT resource, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents, COALESCE(SUM(CAST(json_extract(pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents FROM usage_events WHERE occurred_at >= ? GROUP BY resource ORDER BY cost_cents DESC, count DESC",
       [fromIso],
     ).map((row) => ({ resource: row.resource, count: Number(row.count), charge_cents: Number(row.charge_cents), cost_cents: Number(row.cost_cents) }))
-    const byPrincipal = this.ctx.txnStore.sql<{ principal: string; count: number; charge_cents: number }>(
-      "SELECT principal, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents FROM usage_events WHERE occurred_at >= ? GROUP BY principal ORDER BY charge_cents DESC",
+    const byPrincipal = this.ctx.txnStore.sql<{ principal: string; count: number; charge_cents: number; cost_cents: number }>(
+      "SELECT principal, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents, COALESCE(SUM(CAST(json_extract(pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents FROM usage_events WHERE occurred_at >= ? GROUP BY principal ORDER BY cost_cents DESC, count DESC",
       [fromIso],
-    ).map((row) => ({ principal: row.principal, count: Number(row.count), charge_cents: Number(row.charge_cents) }))
-    const byDay = this.ctx.txnStore.sql<{ day: string; count: number; charge_cents: number }>(
-      "SELECT substr(occurred_at, 1, 10) AS day, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents FROM usage_events WHERE occurred_at >= ? GROUP BY day ORDER BY day",
+    ).map((row) => ({ principal: row.principal, count: Number(row.count), charge_cents: Number(row.charge_cents), cost_cents: Number(row.cost_cents) }))
+    const byDay = this.ctx.txnStore.sql<{ day: string; count: number; charge_cents: number; cost_cents: number }>(
+      "SELECT substr(occurred_at, 1, 10) AS day, COUNT(*) AS count, COALESCE(SUM(CAST(json_extract(pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents, COALESCE(SUM(CAST(json_extract(pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents FROM usage_events WHERE occurred_at >= ? GROUP BY day ORDER BY day",
       [fromIso],
-    ).map((row) => ({ day: row.day, count: Number(row.count), charge_cents: Number(row.charge_cents) }))
+    ).map((row) => ({ day: row.day, count: Number(row.count), charge_cents: Number(row.charge_cents), cost_cents: Number(row.cost_cents) }))
     return { byResource, byPrincipal, byDay }
   }
 
@@ -388,6 +394,47 @@ export class UsageService extends Service {
       "SELECT resource, substr(occurred_at, 1, 10) AS day, COUNT(*) AS count FROM usage_events WHERE occurred_at >= ? AND resource LIKE ? GROUP BY resource, day ORDER BY day",
       [fromIso, `${prefix}%`],
     ).map((row) => ({ resource: row.resource, day: String(row.day), count: Number(row.count) }))
+  }
+
+  /**
+   * J4 月度用量报表聚合（M0-3：用量透明计量报表；契约口径见 docs/contract-j4-usage-report.md）。
+   * tokens 三维聚合：部门（org 归口字段）/ Agent（subject=agent:*）/ Skill（resource=skill:*），
+   * 附模型维度（byModel，additive）与全口径 totals；tokens 取计量键名含 "tokens" 的米值求和
+   * （input_tokens/output_tokens/tokens 同口径累加）。nonbillable_events 为零价快照事件数（D2）。
+   */
+  monthlyReport(month?: string): MonthlyUsageReport {
+    const period = month ?? new Date().toISOString().slice(0, 7)
+    if (!/^\d{4}-\d{2}$/.test(period)) throw new Error('报表月份格式应为 YYYY-MM')
+    const [from, to] = periodBoundsIso(period)
+    const tokensExpr = "COALESCE((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%'), 0)"
+    const select = (dimension: string, extraWhere: string) =>
+      this.ctx.txnStore.sql<ReportRow>(
+        `SELECT ${dimension} AS dimension, COUNT(*) AS events, ${tokensExpr} AS tokens,` +
+        " COALESCE(SUM(CAST(json_extract(e.pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents," +
+        " COALESCE(SUM(CAST(json_extract(e.pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents," +
+        " COALESCE(SUM(CASE WHEN json_extract(e.pricing_json, '$.rate.nonbillable') = 1 THEN 1 ELSE 0 END), 0) AS nonbillable_events" +
+        ` FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ?${extraWhere} GROUP BY ${dimension} ORDER BY tokens DESC, events DESC`,
+        [from, to],
+      ).map((row) => ({
+        dimension: String(row.dimension),
+        events: Number(row.events),
+        tokens: Number(row.tokens),
+        charge_cents: Number(row.charge_cents),
+        cost_cents: Number(row.cost_cents),
+        nonbillable_events: Number(row.nonbillable_events),
+      }))
+    const totalsRows = select("'ALL'", '')
+    const totals = totalsRows[0] ?? { dimension: 'ALL', events: 0, tokens: 0, charge_cents: 0, cost_cents: 0, nonbillable_events: 0 }
+    return {
+      month: period,
+      from,
+      to,
+      totals,
+      byOrg: select('e.org', ''),
+      byAgent: select('e.subject', " AND e.subject LIKE 'agent:%'"),
+      bySkill: select('e.resource', " AND e.resource LIKE 'skill:%'"),
+      byModel: select('e.resource', " AND e.resource LIKE 'model:%'"),
+    }
   }
 
   // -- 价格簿 ---------------------------------------------------------------
@@ -415,7 +462,8 @@ export class UsageService extends Service {
   private ensureDefaultPriceBook(): void {
     // 逐条幂等播种：存量部署升级时只补缺失的默认规则，不覆盖运营已改过的费率
     const defaults: Array<Omit<PriceBookEntry, 'id' | 'createdAt' | 'updatedAt'>> = [
-      { pattern: 'mcp:*', meter_key: 'tokens', list_cents_per_unit: 30, cost_cents_per_unit: 15, units_per_step: 1000, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' },
+      // M0-3（2026-09-09）：mcp:* 转为「零价快照 + 内部成本参考」——charge 恒 0（不对外结算），cost 保留采购成本口径
+      { pattern: 'mcp:*', meter_key: 'tokens', list_cents_per_unit: 0, cost_cents_per_unit: 15, units_per_step: 1000, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.09-cost' },
       { pattern: 'platform:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' },
       // 观测补齐：skill/nas 先零费率采集（价格簿有规则即可入管道），是否计费由运营调价决定
       { pattern: 'skill:*', meter_key: 'calls', list_cents_per_unit: 0, cost_cents_per_unit: 0, units_per_step: 1, tax_rate: 0.06, currency: 'CNY', rate_version: 'v2026.08' },
@@ -434,6 +482,12 @@ export class UsageService extends Service {
     ]
     for (const entry of defaults) {
       if (!this.priceBook().findOne((item) => item.pattern === entry.pattern)) this.upsertPrice(entry)
+    }
+    // 存量迁移（M0-3）：mcp:* 若仍是旧的转售默认价（list 30 分/千 tokens，未被运营改过），
+    // 归零为「零价快照 + 成本参考」口径；运营已主动调价的条目不动。
+    const legacyMcp = this.priceBook().findOne((item) => item.pattern === 'mcp:*')
+    if (legacyMcp && legacyMcp.list_cents_per_unit === 30 && legacyMcp.cost_cents_per_unit === 15 && legacyMcp.rate_version === 'v2026.08') {
+      this.priceBook().update(legacyMcp.id, { list_cents_per_unit: 0, rate_version: 'v2026.09-cost' })
     }
   }
 
@@ -560,6 +614,47 @@ interface ProjectionRow extends RecordBase {
   window: string
   count: number
   charge_cents: number
+}
+
+/** J4 月度报表行（维度值 + 事件数 + tokens 聚合 + 金额口径 + 零价快照事件数）。 */
+export interface MonthlyUsageReportRow {
+  dimension: string
+  events: number
+  tokens: number
+  charge_cents: number
+  cost_cents: number
+  nonbillable_events: number
+}
+
+export interface MonthlyUsageReport {
+  month: string
+  from: string
+  to: string
+  totals: MonthlyUsageReportRow
+  /** 部门维度（org 归口字段）。 */
+  byOrg: MonthlyUsageReportRow[]
+  /** Agent 维度（subject=agent:*）。 */
+  byAgent: MonthlyUsageReportRow[]
+  /** Skill 维度（resource=skill:*）。 */
+  bySkill: MonthlyUsageReportRow[]
+  /** 模型维度（resource=model:*，additive 便于成本穿透）。 */
+  byModel: MonthlyUsageReportRow[]
+}
+
+interface ReportRow {
+  dimension: string
+  events: number
+  tokens: number
+  charge_cents: number
+  cost_cents: number
+  nonbillable_events: number
+}
+
+/** 月度报表期间边界：[当月 1 日 00:00, 次月 1 日 00:00)。 */
+function periodBoundsIso(period: string): [string, string] {
+  const [year, month] = period.split('-').map(Number)
+  const next = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`
+  return [`${period}-01T00:00:00`, `${next}-01T00:00:00`]
 }
 
 interface UsageRow {

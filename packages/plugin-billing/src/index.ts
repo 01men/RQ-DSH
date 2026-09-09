@@ -1,5 +1,16 @@
 /**
- * @dsh-ops/plugin-billing —— 钱包 / 资金流水 / 复式分账（生态设计 v1.2 第 5/8 步）。
+ * @dsh-ops/plugin-billing ——【已下线封存，M0-2，2026-09-09】
+ *
+ * ⚠️ 本插件已退出运行时（boot-all / cordis*.yml / selftest 均不再装载），代码仅作封存存档：
+ *   - 下线原因：平台商业模式收敛为「私有化年费 + 治理包」，钱包/复式分账/转售分成属支付语义，按合规要求移除功能面；
+ *   - 存量数据：钱包流水（wallet_journal / ledger_entries，SQLite data/txnstore.db）导出 CSV 只读封存 90 天，
+ *     归档位置与销毁日期登记见 docs/billing-archive-register.md；导出工具 scripts/billing-archive-export.mjs；
+ *   - 运行面替代：用量透明计量走 plugin-usage（零价快照 + 内部成本参考），月度报表见
+ *     GET /api/usage/report/monthly（J4 契约 docs/contract-j4-usage-report.md）；
+ *   - 90 天封存期满（2026-12-08）确认无误后，删除本目录与存量数据表，在此之前不得复用/复活本插件。
+ *
+ * ——以下为封存前原实现说明（勿参照开发）——
+ * 钱包 / 资金流水 / 复式分账（生态设计 v1.2 第 5/8 步）。
  *
  * 资金底线（S2/M4 消解）：
  *   - wallet_journal 只追加（服务层不暴露 UPDATE/DELETE），幂等键引擎级唯一；

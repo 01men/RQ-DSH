@@ -147,7 +147,6 @@ export async function renderDashboard(content) {
     'approval.created': '新建审批', 'approval.decided': '审批决策',
     'audit.alert.fired': '触发告警',
     'market.plugin.submitted': '插件提交', 'market.plugin.listed': '插件上架', 'market.plugin.installed': '插件安装',
-    'wallet.balance.changed': '钱包余额变动', 'billing.ledger.settled': '账单结算',
     'connect.code.created': '接入码生成', 'connect.client.enrolled': '客户端接入', 'connect.client.disabled': '客户端停用',
     'platform.update.available': '发现平台更新', 'platform.update.applied': '平台更新完成',
   }
@@ -169,8 +168,8 @@ function eventLabel(name, labels) {
   if (labels[name]) return labels[name]
   const SEGMENTS = {
     iam: '账号', authn: '认证', oidc: '单点登录', mcp: 'MCP', nas: 'NAS', audit: '审计',
-    skill: '技能', agent: '智能体', app: '应用', usage: '用量', billing: '计费', market: '市场',
-    wallet: '钱包', platform: '平台', approval: '审批', connector: '连接器', console: '控制台', connect: '接入',
+    skill: '技能', agent: '智能体', app: '应用', usage: '用量', market: '市场',
+    platform: '平台', approval: '审批', connector: '连接器', console: '控制台', connect: '接入',
     user: '用户', org: '组织', permission: '权限', token: '令牌', gateway: '网关', permgroup: '权限组',
     created: '创建', changed: '变更', issued: '签发', revoked: '吊销', deployed: '发布', onlined: '上线',
     offlined: '下线', unhealthy: '异常', invoked: '调用', connected: '连接', disconnected: '断开',

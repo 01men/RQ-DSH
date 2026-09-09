@@ -36,16 +36,16 @@ function ownerCell(owner) {
 
 function trendSvg(byDay) {
   if (!byDay.length) return '<span class="text-4 fs-12">窗口内无计量数据</span>'
-  const max = Math.max(...byDay.map((d) => d.charge_cents), 1)
+  const max = Math.max(...byDay.map((d) => d.cost_cents), 1)
   const w = 100
-  const points = byDay.map((d, i) => `${(i / Math.max(byDay.length - 1, 1)) * w},${28 - (d.charge_cents / max) * 24}`)
+  const points = byDay.map((d, i) => `${(i / Math.max(byDay.length - 1, 1)) * w},${28 - (d.cost_cents / max) * 24}`)
   return `
     <svg viewBox="0 0 100 30" preserveAspectRatio="none" style="width:100%;height:64px;display:block">
       <polyline points="${points.join(' ')}" fill="none" stroke="var(--brand-500)" stroke-width="1.4" vector-effect="non-scaling-stroke"/>
       <polyline points="0,30 ${points.join(' ')} 100,30" fill="var(--brand-500)" opacity="0.08" stroke="none"/>
     </svg>
     <div class="flex fs-11 text-4" style="justify-content:space-between;margin-top:2px">
-      <span>${esc(byDay[0]?.day ?? '')}</span><span>峰值 ${(max / 100).toFixed(2)} 元/日</span><span>${esc(byDay[byDay.length - 1]?.day ?? '')}</span>
+      <span>${esc(byDay[0]?.day ?? '')}</span><span>峰值成本 ${(max / 100).toFixed(2)} 元/日</span><span>${esc(byDay[byDay.length - 1]?.day ?? '')}</span>
     </div>`
 }
 
@@ -94,9 +94,9 @@ export async function renderAssets(content, params, { rerender }) {
       </div>
       <div class="stat-card">
         <div class="stat-icon" style="background:var(--purple-bg);color:#6d28d9">${icon('coins', 18)}</div>
-        <div class="stat-value">${fmtCents(inv.summary.chargeCents30d)}</div>
-        <div class="stat-label">${esc(days)} 天资产消耗</div>
-        <div class="stat-foot">计量口径（列表价含税）</div>
+        <div class="stat-value">${fmtCents(inv.summary.costCents30d)}</div>
+        <div class="stat-label">${esc(days)} 天内部成本参考</div>
+        <div class="stat-foot">零价快照 · 成本仅内部口径</div>
       </div>
     </div>
 
@@ -109,7 +109,7 @@ export async function renderAssets(content, params, { rerender }) {
               <span class="rank ${i < 3 ? 'rank-top' : ''}">${i + 1}</span>
               <span class="fs-13 ellipsis" style="max-width:40%">${esc(row.label)}</span>
               <span class="fs-11 text-4 mono grow ellipsis">${esc(row.resource)}</span>
-              <span class="fs-12 col-num" style="font-weight:600">${fmtCents(row.charge_cents)}</span>
+              <span class="fs-12 col-num" style="font-weight:600">${fmtCents(row.cost_cents)}</span>
               <span class="fs-11 text-4 col-num" style="min-width:56px;text-align:right">${row.count} 次</span>
             </div>`).join('') || '<span class="text-4 fs-12">暂无计量数据</span>'}
         </div>
@@ -123,29 +123,27 @@ export async function renderAssets(content, params, { rerender }) {
     <div class="grid-2 mb-20" style="grid-template-columns:1.35fr 1fr;align-items:start">
       <div class="card">
         <div class="card-head">
-          <span class="card-title">${icon('coins', 15)} 效益分析</span>
-          <span class="card-sub">毛利 = 列表价收入 − 采购成本 · 近 ${esc(days)} 天</span>
+          <span class="card-title">${icon('coins', 15)} 成本穿透</span>
+          <span class="card-sub">内部采购成本参考（零价快照，不对外结算）· 近 ${esc(days)} 天</span>
         </div>
         <div class="card-body" style="padding:10px 8px 14px">
           <div class="flex mb-10" style="gap:18px;padding:0 6px">
-            <span class="fs-12 text-4">收入 <b class="fs-14" style="color:var(--text-1)">${fmtCents(benefit.totals.charge_cents)}</b></span>
-            <span class="fs-12 text-4">成本 <b class="fs-14" style="color:var(--text-1)">${fmtCents(benefit.totals.cost_cents)}</b></span>
-            <span class="fs-12 text-4">毛利 <b class="fs-14" style="color:${benefit.totals.margin_cents >= 0 ? 'var(--ok, #047857)' : 'var(--danger)'}">${fmtCents(benefit.totals.margin_cents)}</b></span>
+            <span class="fs-12 text-4">调用 <b class="fs-14" style="color:var(--text-1)">${benefit.totals.count}</b> 次</span>
+            <span class="fs-12 text-4">内部成本 <b class="fs-14" style="color:var(--text-1)">${fmtCents(benefit.totals.cost_cents)}</b></span>
           </div>
           <div class="table-wrap">
             <table class="tbl">
-              <thead><tr><th>资产</th><th style="text-align:right">调用</th><th style="text-align:right">收入</th><th style="text-align:right">成本</th><th style="text-align:right">毛利</th><th style="text-align:right">单位 DAU 成本</th></tr></thead>
+              <thead><tr><th>资产</th><th style="text-align:right">调用</th><th style="text-align:right">次数占比</th><th style="text-align:right">内部成本</th><th style="text-align:right">单位 DAU 成本</th></tr></thead>
               <tbody>
                 ${benefit.rows.length ? benefit.rows.slice(0, 10).map((row) => `
                   <tr>
                     <td><div class="col-strong">${esc(row.label)}</div><div class="col-sub mono">${esc(row.resource)}</div></td>
                     <td class="col-num fs-12" style="text-align:right">${row.count}</td>
-                    <td class="col-num fs-12" style="text-align:right">${fmtCents(row.charge_cents)}</td>
-                    <td class="col-num fs-12" style="text-align:right">${fmtCents(row.cost_cents)}</td>
-                    <td class="col-num fs-12" style="text-align:right;font-weight:600;color:${row.margin_cents >= 0 ? 'inherit' : 'var(--danger)'}">${fmtCents(row.margin_cents)}</td>
+                    <td class="col-num fs-12" style="text-align:right">${benefit.totals.count > 0 ? `${((row.count / benefit.totals.count) * 100).toFixed(1)}%` : '—'}</td>
+                    <td class="col-num fs-12" style="text-align:right;font-weight:600">${fmtCents(row.cost_cents)}</td>
                     <td class="col-num fs-12" style="text-align:right">${row.cost_per_dau_cents !== null && row.cost_per_dau_cents !== undefined ? fmtCents(row.cost_per_dau_cents) : '—'}</td>
                   </tr>`).join('') : `
-                  <tr><td colspan="6"><div class="tbl-empty">${icon('coins', 28)}<span>窗口内暂无计量事件（毛利随调用累积）</span></div></td></tr>`}
+                  <tr><td colspan="5"><div class="tbl-empty">${icon('coins', 28)}<span>窗口内暂无计量事件（成本随调用累积）</span></div></td></tr>`}
               </tbody>
             </table>
           </div>
@@ -156,12 +154,12 @@ export async function renderAssets(content, params, { rerender }) {
           <div class="card-head"><span class="card-title">${icon('users', 15)} 主体分摊（谁在用）</span><span class="card-sub">近 ${esc(days)} 天</span></div>
           <div class="card-body" style="padding-top:8px">
             ${report.byPrincipal.slice(0, 6).map((row) => {
-              const max = Math.max(...report.byPrincipal.map((r) => r.charge_cents), 1)
+              const max = Math.max(...report.byPrincipal.map((r) => r.cost_cents), 1)
               return `
                 <div style="padding:7px 0">
-                  <div class="flex fs-12" style="margin-bottom:3px"><span class="ellipsis" style="max-width:60%">${esc(row.label)}</span><span style="margin-left:auto;font-weight:600">${fmtCents(row.charge_cents)}</span></div>
+                  <div class="flex fs-12" style="margin-bottom:3px"><span class="ellipsis" style="max-width:60%">${esc(row.label)}</span><span style="margin-left:auto;font-weight:600">${fmtCents(row.cost_cents)}</span></div>
                   <div style="height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden">
-                    <div style="height:100%;width:${Math.max((row.charge_cents / max) * 100, 2)}%;border-radius:3px;background:linear-gradient(90deg,#4f6ef7,#7c5cf5)"></div>
+                    <div style="height:100%;width:${Math.max((row.cost_cents / max) * 100, 2)}%;border-radius:3px;background:linear-gradient(90deg,#4f6ef7,#7c5cf5)"></div>
                   </div>
                 </div>`
             }).join('') || '<span class="text-4 fs-12">暂无计量数据</span>'}
@@ -197,7 +195,7 @@ export async function renderAssets(content, params, { rerender }) {
       <div class="card-body" style="padding:10px 8px 14px">
         <div class="table-wrap">
           <table class="tbl">
-            <thead><tr><th>资产</th><th>类型</th><th>状态</th><th>健康</th><th>归属组织</th><th>负责人</th><th style="text-align:right">近 ${esc(days)} 天调用</th><th style="text-align:right">消耗</th></tr></thead>
+            <thead><tr><th>资产</th><th>类型</th><th>状态</th><th>健康</th><th>归属组织</th><th>负责人</th><th style="text-align:right">近 ${esc(days)} 天调用</th><th style="text-align:right">内部成本</th></tr></thead>
             <tbody>
               ${inv.items.length ? inv.items.map((item) => `
                 <tr ${item.type === 'nas' ? `data-nas-id="${esc(item.id)}" style="cursor:pointer" title="打开 NAS 详情"` : ''}>
@@ -208,7 +206,7 @@ export async function renderAssets(content, params, { rerender }) {
                   <td><span class="org-cell">${icon('building', 12)}<span class="fs-12">${esc(item.org)}</span></span></td>
                   <td>${ownerCell(item.owner)}</td>
                   <td class="col-num fs-12" style="text-align:right">${item.calls}</td>
-                  <td class="col-num col-strong" style="text-align:right">${item.chargeCents > 0 ? fmtCents(item.chargeCents) : '—'}</td>
+                  <td class="col-num col-strong" style="text-align:right">${item.costCents > 0 ? fmtCents(item.costCents) : '—'}</td>
                 </tr>`).join('') : `
                 <tr><td colspan="8">
                   <div class="tbl-empty">${icon('search', 28)}<span>暂无匹配资产，试试调整搜索或类型筛选</span></div>
