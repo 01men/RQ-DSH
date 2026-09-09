@@ -19,9 +19,9 @@
 **北极星（收敛判据）**：定制轨对宿主轨的**代码差异收敛为零**——
 
 ```bash
-# 锚点=真上游 main 头（当前 ff1a8de；上游前进后更新锚点哈希）。
+# 锚点=真上游 main 头（当前 37880a2；上游前进后更新锚点哈希）。
 # 不用 origin/main 追踪引用——它在 push/fetch 之间摇摆（见 AGENTS.md「已知无害怪象」），自比较会假绿。
-git diff ff1a8de custom/dsh-rq -- \
+git diff 37880a2 custom/dsh-rq -- \
   packages/platform-core packages/plugin-console packages/plugin-portal \
   packages/plugin-authn packages/plugin-agent packages/plugin-audit packages/plugin-iam \
   packages/plugin-usage packages/plugin-skillhub packages/plugin-app \

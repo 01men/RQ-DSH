@@ -14,10 +14,15 @@
  *      挂可点击提醒，点击打开面板（未连接且未登录时面板首屏即连接向导）。
  *
  * 【降级预案（spike §5 的 1-4 条，本 apply 逐条落实）】
- *   1. 声明依赖全部走 ctx.slots.inject：目标槽未声明时回调永不执行、注入保持
- *      惰性——上游改名/删槽 = 卡片静默消失，不崩宿主（机制天然兜底）；
- *   2. 显式探测：apply 内 ctx.slots.specDynamic(name) 存在性检查 + 回调执行时
- *      校验 spec.kind；任一不满足 → 置降级标志（DEGRADED 数组）；
+ *   1. 声明依赖全部走 ctx.slots.inject：目标槽未声明时回调挂起、属主包声明提交即同步
+ *      触发（纪元机制）——上游改名/删槽 = 卡片静默消失，不崩宿主（机制天然兜底）；
+ *   2. kind 校验在注入回调内执行（QA BUG-G-01 根因修复 / 交接清单 H1）：其一，rc.7 客户端
+ *      服务面的 spec 查询 API 是 `spec(key)`，旧 bundle 探测用的 `specDynamic` 只存在于
+ *      pure core——服务面上永远 undefined，五处 probe 必然全数落空（确定性根因）；其二，
+ *      spec 查询是点时刻语义，apply 时属主包尚未声明槽也返回 undefined（时序根因，条目
+ *      并发创建、激活序不作保证）。现 apply 一律无条件 inject；回调触发即声明已在场，此时
+ *      校验 spec.kind 才有意义；任一不满足 → 置降级标志（DEGRADED 数组）+ 记
+ *      __RQ_CARD_DIAG__ 台账（attempts[].stage 可定性）；
  *   3. boot 面探测：window.__DSH_BOOT__ / bundle 404 属于「机制整体不存在」，
  *      该场景下本 bundle 根本不会执行，无需代码面处理（见 spike §5 第 3 条）；
  *   4. apply 全体 try/catch：任何抛错吞掉并置降级标志；slot 边界另有
@@ -100,6 +105,32 @@ function markDegraded(what: string, error?: unknown): void {
   console.warn(`[rq-card] degraded (${what}):`, error ?? 'target slot unavailable')
 }
 
+/** 同一原因只记一次（toolview 键位批量注册下 kind 失配会 N 连击，台账去噪）。 */
+const DEGRADED_SEEN = new Set<string>()
+function markDegradedOnce(what: string, error?: unknown): void {
+  if (DEGRADED_SEEN.has(what)) return
+  DEGRADED_SEEN.add(what)
+  markDegraded(what, error)
+}
+
+/**
+ * __RQ_CARD_DIAG__ 台账补记（QA BUG-G-01 复测取证 / 交接清单 H1）：banner 闭包记录装载
+ * 半（installed / materialize-missing 等），这里补注入半——apply 时槽未声明记
+ * `inject-pending:<key>`（挂起等声明）、回调触发记 `inject-materialized:<key>`、kind 失配记
+ * `inject-kind-mismatch:<key>`。复测定性：attempts 停在 inject-pending = 声明永不到来
+ * （属主包改名/未装载）；停在 materialized 但 UI 缺失 = 注册后被宿主消费链丢弃。
+ * 台账不可用（无 banner 的直跑环境）时静默跳过，绝不影响主流程。
+ */
+const DIAG_SEEN = new Set<string>()
+function diagNote(stage: string): void {
+  if (DIAG_SEEN.has(stage)) return
+  DIAG_SEEN.add(stage)
+  try {
+    const diag = (globalThis as { __RQ_CARD_DIAG__?: { attempts: unknown[] } }).__RQ_CARD_DIAG__
+    diag?.attempts.push({ at: new Date().toISOString(), stage })
+  } catch { /* 诊断台账不可用：忽略 */ }
+}
+
 /** 安全执行一段注入动作；抛错吞掉并记降级（spike §5 第 4 条）。 */
 function safely(what: string, action: () => void): void {
   try {
@@ -109,12 +140,36 @@ function safely(what: string, action: () => void): void {
   }
 }
 
-/** specDynamic 探测的安全封装（API 不存在/抛错都折叠为 undefined）。 */
+/**
+ * 注入回调体全保护：回调可能在声明波次内（属主包 register 调用栈中）执行，宿主对
+ * 延迟路径的回调抛错经 queueMicrotask 重抛——未捕获异常会污染宿主页面。回调内一切
+ * 异常（kind 校验之外的 register 校验失败等）必须在此折叠为降级记录，绝不外逃。
+ */
+function injectBody(what: string, body: () => (() => void) | undefined): () => void {
+  try {
+    return body() ?? (() => {})
+  } catch (error) {
+    markDegraded(what, error)
+    return () => {}
+  }
+}
+
+/**
+ * 槽 spec 探测的安全封装（API 不存在/抛错都折叠为 undefined）。
+ *
+ * 【H1 确定性根因（QA BUG-G-01）】rc.7 客户端 SlotRegistry 服务面暴露的查询 API 是
+ * `spec(key)`（runtime/src/client/slots.ts 的 SlotsService），`specDynamic` 只存在于
+ * pure core（ui-slots SlotCore）——旧 bundle 对服务面 `specDynamic?.()` 探测永远
+ * undefined，五处槽 probe 必然全数落空、全部静默降级。现优先走 `spec`（探测仅发生在
+ * 注入回调内=声明已提交，结果可信），并兼容 `specDynamic` 以容忍 dsh 版本差异。
+ */
 function probeSpec(ctx: ClientContext, slot: string): { kind?: string } | undefined {
   try {
-    const spec = (ctx.slots as {
+    const face = ctx.slots as {
+      spec?: (name: string) => { kind?: string } | undefined
       specDynamic?: (name: string) => { kind?: string } | undefined
-    }).specDynamic?.(slot)
+    }
+    const spec = typeof face.spec === 'function' ? face.spec(slot) : face.specDynamic?.(slot)
     return typeof spec === 'object' && spec !== null ? spec : undefined
   } catch {
     return undefined
@@ -123,6 +178,22 @@ function probeSpec(ctx: ClientContext, slot: string): { kind?: string } | undefi
 
 /** 必需服务：slot 注册表 + 词典。 */
 export const inject = ['slots', 'locale']
+
+/** 降级角标的 DOM 直挂兜底（不依赖 slots；QA BUG-G-01/T-14：失效必须有用户可见信号）。 */
+function mountDegradedDomBadge(): void {
+  safely('degraded-dom-badge', () => {
+    if (typeof document === 'undefined') return
+    if (document.querySelector('.rq-card-dom-badge')) return
+    const el = document.createElement('button')
+    el.type = 'button'
+    el.className = 'rq-card-dom-badge'
+    el.textContent = '榕器卡片未生效（部分能力不可用）'
+    el.title = `降级原因：${DEGRADED.join('；')}（点击刷新重试；详情见控制台 [rq-card] 日志）`
+    el.setAttribute('style', 'position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)')
+    el.onclick = () => { location.reload() }
+    document.body.appendChild(el)
+  })
+}
 
 /**
  * 客户端插件体。
@@ -137,14 +208,18 @@ export function apply(ctx: ClientContext): void {
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'rq-card: dictionaries')
   })
 
-  // ── ① 四态执行卡：显式探测 + 键位注册（spike §5 第 2 条）──
-  const toolviewSpec = probeSpec(ctx, SLOT_TOOLVIEW)
-  if (toolviewSpec?.kind !== 'keyed') {
-    markDegraded(`${SLOT_TOOLVIEW} spec missing or not keyed`, toolviewSpec)
-  } else {
-    for (const tool of RQ_TOOL_NAMES) {
-      safely(`toolview:${tool}`, () => {
-        ctx.slots.inject(SLOT_TOOLVIEW, () => ctx.slots.register({
+  // ── ① 四态执行卡：无条件 inject + 回调内 kind 校验（纪元机制，见头注第 2 条）──
+  for (const tool of RQ_TOOL_NAMES) {
+    safely(`toolview:${tool}`, () => {
+      ctx.slots.inject(SLOT_TOOLVIEW, () => injectBody(`toolview:${tool}`, () => {
+        const spec = probeSpec(ctx, SLOT_TOOLVIEW)
+        if (spec?.kind !== 'keyed') {
+          markDegradedOnce(`${SLOT_TOOLVIEW} spec missing or not keyed`, spec)
+          diagNote('inject-kind-mismatch:' + SLOT_TOOLVIEW)
+          return undefined
+        }
+        diagNote('inject-materialized:' + SLOT_TOOLVIEW)
+        return ctx.slots.register({
           name: SLOT_TOOLVIEW,
           key: tool,
           id: `${TOOLVIEW_ENTRY_PREFIX}${tool}`,
@@ -153,90 +228,104 @@ export function apply(ctx: ClientContext): void {
             // C2 表映射的唯一入口；healthSnapshot 为宿主半后续接线点。
             deriveState: deriveExecutionState,
           }),
-        }, ExecutionCard))
-      })
-    }
-  }
-
-  // ── ② 👍/👎 反馈条：list 条目，与 dsh 自带 'feedback' 并存 ──
-  const actionsSpec = probeSpec(ctx, SLOT_ASSISTANT_ACTIONS)
-  if (actionsSpec?.kind !== 'list') {
-    markDegraded(`${SLOT_ASSISTANT_ACTIONS} spec missing or not list`, actionsSpec)
-  } else {
-    safely('assistant-actions', () => {
-      ctx.slots.inject(SLOT_ASSISTANT_ACTIONS, () => {
-        const controllers = new Map<SessionId, RqFeedbackController>()
-        const controllerFor = (sessionId: SessionId): RqFeedbackController => {
-          let controller = controllers.get(sessionId)
-          if (controller === undefined) {
-            controller = new RqFeedbackController()
-            controllers.set(sessionId, controller)
-          }
-          return controller
-        }
-        const dispose = ctx.slots.register({
-          name: SLOT_ASSISTANT_ACTIONS,
-          id: FEEDBACK_ENTRY_ID,
-          order: 20,
-          locale: NS,
-          inject: (sessionId): RqFeedbackInjected => {
-            const controller = controllerFor(sessionId)
-            return {
-              hooks: { rqfb: controller },
-              rate: (messageId, score, note) => controller.rate(messageId, score, note),
-            }
-          },
-        }, RqFeedback)
-        return () => {
-          dispose()
-          controllers.clear()
-        }
-      })
+        }, ExecutionCard)
+      }))
+      // inject 返回后 spec 仍缺席 = 回调已挂起等声明（reconcile 只在声明在场时同步触发）
+      if (probeSpec(ctx, SLOT_TOOLVIEW) === undefined) diagNote('inject-pending:' + SLOT_TOOLVIEW)
     })
   }
 
-  // ── ③ 降级角标：仅当确有降级原因（spike §5 第 6 条）──
-  // 首选 shell.overlay 槽条目；槽不可用时退为直接挂 DOM 角标（QA BUG-G-01/T-14：
-  // 注入失效必须有用户可见信号，绝不静默消失——真实 dsh web 曾四项能力全失且无任何提示）。
-  if (DEGRADED.length > 0) {
-    const overlaySpec = probeSpec(ctx, SLOT_OVERLAY)
-    if (overlaySpec?.kind === 'list') {
-      safely('overlay-badge', () => {
-        ctx.slots.inject(SLOT_OVERLAY, () => ctx.slots.register({
-          name: SLOT_OVERLAY,
-          id: DEGRADED_BADGE_ID,
-          order: 90,
-        }, function RqCardDegradedBadge() {
-          // 无 props 依赖：任何 slot 契约变化都只会让角标空白，不会抛错。
-          // 本文件是 .ts（非 tsx），故用 createElement 而非 JSX 字面量。
-          return createElement('span', { className: 'rq-badge' }, '榕器卡片未生效（纯文本模式）')
-        }))
+  // ── ② 👍/👎 反馈条：list 条目，与 dsh 自带 'feedback' 并存 ──
+  safely('assistant-actions', () => {
+    ctx.slots.inject(SLOT_ASSISTANT_ACTIONS, () => injectBody('assistant-actions', () => {
+      const spec = probeSpec(ctx, SLOT_ASSISTANT_ACTIONS)
+      if (spec?.kind !== 'list') {
+        markDegraded(`${SLOT_ASSISTANT_ACTIONS} spec missing or not list`, spec)
+        diagNote('inject-kind-mismatch:' + SLOT_ASSISTANT_ACTIONS)
+        return undefined
+      }
+      diagNote('inject-materialized:' + SLOT_ASSISTANT_ACTIONS)
+      const controllers = new Map<SessionId, RqFeedbackController>()
+      const controllerFor = (sessionId: SessionId): RqFeedbackController => {
+        let controller = controllers.get(sessionId)
+        if (controller === undefined) {
+          controller = new RqFeedbackController()
+          controllers.set(sessionId, controller)
+        }
+        return controller
+      }
+      const dispose = ctx.slots.register({
+        name: SLOT_ASSISTANT_ACTIONS,
+        id: FEEDBACK_ENTRY_ID,
+        order: 20,
+        locale: NS,
+        inject: (sessionId): RqFeedbackInjected => {
+          const controller = controllerFor(sessionId)
+          return {
+            hooks: { rqfb: controller },
+            rate: (messageId, score, note) => controller.rate(messageId, score, note),
+          }
+        },
+      }, RqFeedback)
+      return () => {
+        dispose()
+        controllers.clear()
+      }
+    }))
+    if (probeSpec(ctx, SLOT_ASSISTANT_ACTIONS) === undefined) diagNote('inject-pending:' + SLOT_ASSISTANT_ACTIONS)
+  })
+
+  // ── ③ 降级角标：无条件注入 overlay 条目，组件渲染期读 DEGRADED 决定显隐（spike §5 第 6 条）──
+  // QA BUG-G-01/T-14：注入失效必须有用户可见信号，绝不静默消失——真实 dsh web 曾四项能力全失
+  // 且无任何提示。降级原因在 boot 声明波次内落账、角标组件在其后渲染，渲染期读取即为终值；
+  // overlay 槽 kind 失配或整批声明永不到来时走 DOM 直挂兜底（下方 mountDegradedDomBadge）。
+  let overlayMaterialized = false
+  safely('overlay-badge', () => {
+    ctx.slots.inject(SLOT_OVERLAY, () => injectBody('overlay-badge', () => {
+      const spec = probeSpec(ctx, SLOT_OVERLAY)
+      if (spec?.kind !== 'list') {
+        markDegraded(`${SLOT_OVERLAY} spec missing or not list`, spec)
+        diagNote('inject-kind-mismatch:' + SLOT_OVERLAY)
+        mountDegradedDomBadge()
+        return undefined
+      }
+      overlayMaterialized = true
+      diagNote('inject-materialized:' + SLOT_OVERLAY)
+      return ctx.slots.register({
+        name: SLOT_OVERLAY,
+        id: DEGRADED_BADGE_ID,
+        order: 90,
+      }, function RqCardDegradedBadge() {
+        // 无 props 依赖：任何 slot 契约变化都只会让角标空白，不会抛错。
+        // 本文件是 .ts（非 tsx），故用 createElement 而非 JSX 字面量。
+        if (DEGRADED.length === 0) return null
+        return createElement('span', { className: 'rq-badge', title: `降级原因：${DEGRADED.join('；')}` }, '榕器卡片未生效（纯文本模式）')
       })
-    } else {
-      safely('degraded-dom-badge', () => {
-        if (typeof document === 'undefined') return
-        if (document.querySelector('.rq-card-dom-badge')) return
-        const el = document.createElement('button')
-        el.type = 'button'
-        el.className = 'rq-card-dom-badge'
-        el.textContent = '榕器卡片未生效（部分能力不可用）'
-        el.title = `降级原因：${DEGRADED.join('；')}（点击刷新重试；详情见控制台 [rq-card] 日志）`
-        el.setAttribute('style', 'position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)')
-        el.onclick = () => { location.reload() }
-        document.body.appendChild(el)
-      })
+    }))
+    if (probeSpec(ctx, SLOT_OVERLAY) === undefined) diagNote('inject-pending:' + SLOT_OVERLAY)
+  })
+  // 终局兜底：apply 后 10s overlay 注入仍未落地且确有降级原因（属主包整批未声明/改名）
+  // → 不等 slots，直接挂 DOM 角标。
+  const fallbackTimer = setTimeout(() => {
+    if (!overlayMaterialized && DEGRADED.length > 0) {
+      diagNote('degraded-dom-badge-fallback')
+      mountDegradedDomBadge()
     }
-    console.warn(`[rq-card] degraded mode with ${DEGRADED.length} reason(s); markdown fallback remains available`)
-  }
+  }, 10_000)
+  ;(fallbackTimer as { unref?: () => void }).unref?.()
 
   // ── ④ 设置分区「榕器宿主」（M2）：状态丸 + 打开向导/工作台（ui-auth 同款挂载位）──
-  const settingsSpec = probeSpec(ctx, SLOT_SETTINGS)
   const t = (() => { try { return ctx.locale.bind(NS) } catch { return undefined } })()
-  if (settingsSpec?.kind !== 'list') {
-    markDegraded(`${SLOT_SETTINGS} spec missing or not list`, settingsSpec)
-  } else {
-    safely('settings-section', () => {
-      ctx.slots.inject(SLOT_SETTINGS, () => ctx.slots.register({
+  safely('settings-section', () => {
+    ctx.slots.inject(SLOT_SETTINGS, () => injectBody('settings-section', () => {
+      const spec = probeSpec(ctx, SLOT_SETTINGS)
+      if (spec?.kind !== 'list') {
+        markDegraded(`${SLOT_SETTINGS} spec missing or not list`, spec)
+        diagNote('inject-kind-mismatch:' + SLOT_SETTINGS)
+        return undefined
+      }
+      diagNote('inject-materialized:' + SLOT_SETTINGS)
+      return ctx.slots.register({
         name: SLOT_SETTINGS,
         id: 'rq-hostlink',
         order: 30,
@@ -246,45 +335,55 @@ export function apply(ctx: ClientContext): void {
           open: (url: string) => { try { window.open(url, '_blank', 'noopener') } catch { /* 拦截弹窗时静默 */ } },
           refresh: () => fetchHostLink(),
         }),
-      }, RqSettings))
-    })
-  }
+      }, RqSettings)
+    }))
+    if (probeSpec(ctx, SLOT_SETTINGS) === undefined) diagNote('inject-pending:' + SLOT_SETTINGS)
+  })
 
   // ── ⑤ 会话视图 Tab「榕器工作台」（M3）：整页内嵌 /rq/panel/（ui-trajectory 同款挂载位）──
-  const viewSpec = probeSpec(ctx, SLOT_VIEW)
-  if (viewSpec?.kind !== 'list') {
-    markDegraded(`${SLOT_VIEW} spec missing or not list`, viewSpec)
-  } else {
-    safely('workbench-view', () => {
-      ctx.slots.inject(SLOT_VIEW, () => ctx.slots.register({
+  safely('workbench-view', () => {
+    ctx.slots.inject(SLOT_VIEW, () => injectBody('workbench-view', () => {
+      const spec = probeSpec(ctx, SLOT_VIEW)
+      if (spec?.kind !== 'list') {
+        markDegraded(`${SLOT_VIEW} spec missing or not list`, spec)
+        diagNote('inject-kind-mismatch:' + SLOT_VIEW)
+        return undefined
+      }
+      diagNote('inject-materialized:' + SLOT_VIEW)
+      return ctx.slots.register({
         name: SLOT_VIEW,
         id: 'rq-workbench',
         order: 20,
         ...(t ? { label: () => t('view.workbench') } : {}),
         locale: NS,
         inject: (): object => ({}),
-      }, RqWorkbench))
-    })
-  }
+      }, RqWorkbench)
+    }))
+    if (probeSpec(ctx, SLOT_VIEW) === undefined) diagNote('inject-pending:' + SLOT_VIEW)
+  })
 
   // ── ⑥ 未连接角标（M3「主动连接」）：宿主连接为 none 时在全局浮层提醒，点击进向导 ──
   safely('unlinked-badge', () => {
-    void fetchHostLink().then((link) => {
-      if (link?.mode !== 'none') return
-      const overlaySpec2 = probeSpec(ctx, SLOT_OVERLAY)
-      if (overlaySpec2?.kind !== 'list') return
-      ctx.slots.inject(SLOT_OVERLAY, () => ctx.slots.register({
-        name: SLOT_OVERLAY,
-        id: UNLINKED_BADGE_ID,
-        order: 80,
-      }, function RqUnlinkedBadge() {
-        return createElement('button', {
-          type: 'button',
-          className: 'rq-unlinked',
-          onClick: () => { try { window.open(PANEL_URL, '_blank', 'noopener') } catch { /* 静默 */ } },
-        }, '榕器：未连接宿主，点击打开向导')
-      }))
-    })
+    ctx.slots.inject(SLOT_OVERLAY, () => injectBody('unlinked-badge', () => {
+      const spec = probeSpec(ctx, SLOT_OVERLAY)
+      if (spec?.kind !== 'list') return undefined
+      let disposed = false
+      void fetchHostLink().then((link) => {
+        if (disposed || link?.mode !== 'none') return
+        ctx.slots.register({
+          name: SLOT_OVERLAY,
+          id: UNLINKED_BADGE_ID,
+          order: 80,
+        }, function RqUnlinkedBadge() {
+          return createElement('button', {
+            type: 'button',
+            className: 'rq-unlinked',
+            onClick: () => { try { window.open(PANEL_URL, '_blank', 'noopener') } catch { /* 静默 */ } },
+          }, '榕器：未连接宿主，点击打开向导')
+        })
+      })
+      return () => { disposed = true }
+    }))
   })
 
   // 【冒烟自证（spike 风险 R8 的首个联调里程碑）】boot 后可在控制台确认：

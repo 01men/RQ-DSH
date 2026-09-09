@@ -674,6 +674,108 @@ try {
     check('行业场景图谱在场（platform-core/scenegraphs/*.json ≥1）',
       readdirSync('packages/platform-core/scenegraphs').filter((file) => file.endsWith('.json')).length >= 1)
     check('rq-card bundle 产物在场（lib/client.js）', pathExists('packages/plugin-rq-card/lib/client.js'))
+
+    // -- 5. 浏览器半 bundle 真执行（mock rc.7 SlotRegistry 纪元语义；QA BUG-G-01/H1 回归）--
+    // 此前 bundle 只被「解析」从不被「执行」——H1 的确定性根因（服务面 spec API 名错配 +
+    // 先 probe 后注册的时序缺口）在这类检查下不可见。现以 mock 宿主注入面把 apply 全链跑起来：
+    // apply 先于声明（挂起）→ 五槽声明落地（同步触发回调）→ 断言注册台账/降级台账/诊断台账。
+    {
+      const vm = await import('node:vm')
+      // mock 宿主注入面：rc.7 语义——inject 未声明时挂起、spec() 仅在声明后返回、register 即记台账
+      const makeHost = () => {
+        const declared = new Map()
+        const pending = new Map()
+        const registered = []
+        const slots = {
+          inject(key, callback) {
+            if (!declared.has(key)) {
+              const list = pending.get(key) ?? []
+              list.push(callback)
+              pending.set(key, list)
+              return () => {}
+            }
+            callback()
+            return () => {}
+          },
+          spec(key) { return declared.has(key) ? { kind: declared.get(key) } : undefined },
+          register(options) { registered.push({ name: options.name, key: options.key ?? '', id: options.id ?? '' }); return () => {} },
+        }
+        const declare = (key, kind) => {
+          declared.set(key, kind)
+          for (const callback of pending.get(key) ?? []) callback()
+          pending.delete(key)
+        }
+        const ctx = {
+          slots,
+          locale: { register() {}, bind() { return undefined } },
+          effect: (fn) => { const d = fn(); return typeof d === 'function' ? d : () => {} },
+        }
+        return { ctx, registered, declare }
+      }
+      // 独立 vm 环境：window===globalThis（banner 与 diagNote 双通道可达）、setTimeout 桩（10s 兜底定时器不拖进程）
+      const makeEnv = () => {
+        const diag = { installed: false, attempts: [] }
+        let captured = null
+        const sandbox = {
+          console: { info() {}, warn() {}, error() {} },
+          setTimeout: () => 0,
+          clearTimeout: () => {},
+          __RQ_CARD_DIAG__: diag,
+          __ModuleLoader__: { load: (arg) => { captured = arg } },
+        }
+        sandbox.window = sandbox
+        sandbox.globalThis = sandbox
+        vm.runInContext(readFileSync('packages/plugin-rq-card/lib/client.js', 'utf8'), vm.createContext(sandbox), { filename: 'rq-card-client.js' })
+        const createElement = (type, props, ...children) => ({ type, props, children })
+        const requireMock = (name) => {
+          if (name === 'react') return { createElement }
+          if (name === 'react/jsx-runtime') return { jsx: createElement, jsxs: createElement, Fragment: 'rq-fragment' }
+          return {} // @deepseek-ai/* 全部 type-only（纯度门禁保证），运行期零消费
+        }
+        if (!captured) throw new Error('bundle 未调用 __ModuleLoader__.load（closure-factory 形状破坏）')
+        const mod = captured.factory(requireMock)
+        diag.installed = true // banner 语义：工厂体完整执行成功才记安装
+        return { diag, mod }
+      }
+      // 场景 A：apply 先于声明（rc.7 条目并发创建的真实时序）→ 声明落地后五槽全部到位
+      {
+        const { diag, mod } = makeEnv()
+        const host = makeHost()
+        mod.apply(host.ctx)
+        check('rq-card 真执行：apply 先于声明时零注册（挂起等声明 + 诊断台账记 inject-pending）',
+          host.registered.length === 0 && diag.attempts.some((a) => a.stage === 'inject-pending:tool.call.toolview'),
+          JSON.stringify({ registered: host.registered.length, attempts: diag.attempts.map((a) => a.stage) }))
+        host.declare('tool.call.toolview', 'keyed')
+        host.declare('conversation.chat.assistant-actions', 'list')
+        host.declare('settings.section', 'list')
+        host.declare('conversation.view', 'list')
+        host.declare('shell.overlay', 'list')
+        const byName = {}
+        for (const entry of host.registered) byName[entry.name] = (byName[entry.name] ?? 0) + 1
+        const toolviewKeys = new Set(host.registered.filter((e) => e.name === 'tool.call.toolview').map((e) => e.key))
+        check('rq-card 真执行：五槽声明落地后全部注册（执行卡键位 ≥60 且不重复 + 反馈条 + 设置分区 + 工作台 + 角标）',
+          (byName['tool.call.toolview'] ?? 0) >= 60 && toolviewKeys.size === byName['tool.call.toolview']
+          && byName['conversation.chat.assistant-actions'] === 1
+          && byName['settings.section'] === 1
+          && byName['conversation.view'] === 1
+          && (byName['shell.overlay'] ?? 0) >= 1,
+          JSON.stringify(byName))
+        check('rq-card 真执行：诊断台账记录五槽注入落地（复测可定性）',
+          ['tool.call.toolview', 'conversation.chat.assistant-actions', 'settings.section', 'conversation.view', 'shell.overlay']
+            .every((key) => diag.attempts.some((a) => a.stage === `inject-materialized:${key}`)),
+          JSON.stringify(diag.attempts.map((a) => a.stage)))
+      }
+      // 场景 B（H1 确定性根因回归）：spec 查询必须走服务面 spec()——kind 失配折叠为降级台账，不崩宿主不静默
+      {
+        const { diag, mod } = makeEnv()
+        const host = makeHost()
+        mod.apply(host.ctx)
+        host.declare('settings.section', 'keyed')
+        check('rq-card 真执行：kind 失配记 inject-kind-mismatch 降级台账（不抛错外逃）',
+          diag.attempts.some((a) => a.stage === 'inject-kind-mismatch:settings.section'),
+          JSON.stringify(diag.attempts.map((a) => a.stage)))
+      }
+    }
     const declared = patchDirs.filter((dir) => pathExists(join('packages', dir, 'plugin.yaml')))
     check('声明位插件 plugin.yaml 与 manifest/api.yaml 成对在场',
       declared.length >= 15 && declared.every((dir) => pathExists(join('packages', dir, 'manifest', 'api.yaml'))),

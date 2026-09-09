@@ -1,4 +1,4 @@
-/* rq-card-build-id: 3e079c8448a1e41d */
+/* rq-card-build-id: 201492e1778a307b */
 (function () {
   var PLUGIN_ID = "@dsh-ops/plugin-rq-card";
   var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };
@@ -680,6 +680,22 @@ function markDegraded(what, error) {
   DEGRADED.push(what);
   console.warn(`[rq-card] degraded (${what}):`, error ?? "target slot unavailable");
 }
+var DEGRADED_SEEN = /* @__PURE__ */ new Set();
+function markDegradedOnce(what, error) {
+  if (DEGRADED_SEEN.has(what)) return;
+  DEGRADED_SEEN.add(what);
+  markDegraded(what, error);
+}
+var DIAG_SEEN = /* @__PURE__ */ new Set();
+function diagNote(stage) {
+  if (DIAG_SEEN.has(stage)) return;
+  DIAG_SEEN.add(stage);
+  try {
+    const diag = globalThis.__RQ_CARD_DIAG__;
+    diag?.attempts.push({ at: (/* @__PURE__ */ new Date()).toISOString(), stage });
+  } catch {
+  }
+}
 function safely(what, action) {
   try {
     action();
@@ -687,15 +703,42 @@ function safely(what, action) {
     markDegraded(what, error);
   }
 }
+function injectBody(what, body) {
+  try {
+    return body() ?? (() => {
+    });
+  } catch (error) {
+    markDegraded(what, error);
+    return () => {
+    };
+  }
+}
 function probeSpec(ctx, slot) {
   try {
-    const spec = ctx.slots.specDynamic?.(slot);
+    const face = ctx.slots;
+    const spec = typeof face.spec === "function" ? face.spec(slot) : face.specDynamic?.(slot);
     return typeof spec === "object" && spec !== null ? spec : void 0;
   } catch {
     return void 0;
   }
 }
 var inject = ["slots", "locale"];
+function mountDegradedDomBadge() {
+  safely("degraded-dom-badge", () => {
+    if (typeof document === "undefined") return;
+    if (document.querySelector(".rq-card-dom-badge")) return;
+    const el = document.createElement("button");
+    el.type = "button";
+    el.className = "rq-card-dom-badge";
+    el.textContent = "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u90E8\u5206\u80FD\u529B\u4E0D\u53EF\u7528\uFF09";
+    el.title = `\u964D\u7EA7\u539F\u56E0\uFF1A${DEGRADED.join("\uFF1B")}\uFF08\u70B9\u51FB\u5237\u65B0\u91CD\u8BD5\uFF1B\u8BE6\u60C5\u89C1\u63A7\u5236\u53F0 [rq-card] \u65E5\u5FD7\uFF09`;
+    el.setAttribute("style", "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)");
+    el.onclick = () => {
+      location.reload();
+    };
+    document.body.appendChild(el);
+  });
+}
 function apply(ctx) {
   safely("styles", () => {
     ensureStyles();
@@ -703,13 +746,17 @@ function apply(ctx) {
   safely("locale", () => {
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "rq-card: dictionaries");
   });
-  const toolviewSpec = probeSpec(ctx, SLOT_TOOLVIEW);
-  if (toolviewSpec?.kind !== "keyed") {
-    markDegraded(`${SLOT_TOOLVIEW} spec missing or not keyed`, toolviewSpec);
-  } else {
-    for (const tool of RQ_TOOL_NAMES) {
-      safely(`toolview:${tool}`, () => {
-        ctx.slots.inject(SLOT_TOOLVIEW, () => ctx.slots.register({
+  for (const tool of RQ_TOOL_NAMES) {
+    safely(`toolview:${tool}`, () => {
+      ctx.slots.inject(SLOT_TOOLVIEW, () => injectBody(`toolview:${tool}`, () => {
+        const spec = probeSpec(ctx, SLOT_TOOLVIEW);
+        if (spec?.kind !== "keyed") {
+          markDegradedOnce(`${SLOT_TOOLVIEW} spec missing or not keyed`, spec);
+          diagNote("inject-kind-mismatch:" + SLOT_TOOLVIEW);
+          return void 0;
+        }
+        diagNote("inject-materialized:" + SLOT_TOOLVIEW);
+        return ctx.slots.register({
           name: SLOT_TOOLVIEW,
           key: tool,
           id: `${TOOLVIEW_ENTRY_PREFIX}${tool}`,
@@ -718,76 +765,79 @@ function apply(ctx) {
             // C2 表映射的唯一入口；healthSnapshot 为宿主半后续接线点。
             deriveState: deriveExecutionState
           })
-        }, ExecutionCard));
-      });
-    }
-  }
-  const actionsSpec = probeSpec(ctx, SLOT_ASSISTANT_ACTIONS);
-  if (actionsSpec?.kind !== "list") {
-    markDegraded(`${SLOT_ASSISTANT_ACTIONS} spec missing or not list`, actionsSpec);
-  } else {
-    safely("assistant-actions", () => {
-      ctx.slots.inject(SLOT_ASSISTANT_ACTIONS, () => {
-        const controllers = /* @__PURE__ */ new Map();
-        const controllerFor = (sessionId) => {
-          let controller = controllers.get(sessionId);
-          if (controller === void 0) {
-            controller = new RqFeedbackController();
-            controllers.set(sessionId, controller);
-          }
-          return controller;
-        };
-        const dispose = ctx.slots.register({
-          name: SLOT_ASSISTANT_ACTIONS,
-          id: FEEDBACK_ENTRY_ID,
-          order: 20,
-          locale: NS,
-          inject: (sessionId) => {
-            const controller = controllerFor(sessionId);
-            return {
-              hooks: { rqfb: controller },
-              rate: (messageId, score, note) => controller.rate(messageId, score, note)
-            };
-          }
-        }, RqFeedback);
-        return () => {
-          dispose();
-          controllers.clear();
-        };
-      });
+        }, ExecutionCard);
+      }));
+      if (probeSpec(ctx, SLOT_TOOLVIEW) === void 0) diagNote("inject-pending:" + SLOT_TOOLVIEW);
     });
   }
-  if (DEGRADED.length > 0) {
-    const overlaySpec = probeSpec(ctx, SLOT_OVERLAY);
-    if (overlaySpec?.kind === "list") {
-      safely("overlay-badge", () => {
-        ctx.slots.inject(SLOT_OVERLAY, () => ctx.slots.register({
-          name: SLOT_OVERLAY,
-          id: DEGRADED_BADGE_ID,
-          order: 90
-        }, function RqCardDegradedBadge() {
-          return (0, import_react3.createElement)("span", { className: "rq-badge" }, "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u7EAF\u6587\u672C\u6A21\u5F0F\uFF09");
-        }));
+  safely("assistant-actions", () => {
+    ctx.slots.inject(SLOT_ASSISTANT_ACTIONS, () => injectBody("assistant-actions", () => {
+      const spec = probeSpec(ctx, SLOT_ASSISTANT_ACTIONS);
+      if (spec?.kind !== "list") {
+        markDegraded(`${SLOT_ASSISTANT_ACTIONS} spec missing or not list`, spec);
+        diagNote("inject-kind-mismatch:" + SLOT_ASSISTANT_ACTIONS);
+        return void 0;
+      }
+      diagNote("inject-materialized:" + SLOT_ASSISTANT_ACTIONS);
+      const controllers = /* @__PURE__ */ new Map();
+      const controllerFor = (sessionId) => {
+        let controller = controllers.get(sessionId);
+        if (controller === void 0) {
+          controller = new RqFeedbackController();
+          controllers.set(sessionId, controller);
+        }
+        return controller;
+      };
+      const dispose = ctx.slots.register({
+        name: SLOT_ASSISTANT_ACTIONS,
+        id: FEEDBACK_ENTRY_ID,
+        order: 20,
+        locale: NS,
+        inject: (sessionId) => {
+          const controller = controllerFor(sessionId);
+          return {
+            hooks: { rqfb: controller },
+            rate: (messageId, score, note) => controller.rate(messageId, score, note)
+          };
+        }
+      }, RqFeedback);
+      return () => {
+        dispose();
+        controllers.clear();
+      };
+    }));
+    if (probeSpec(ctx, SLOT_ASSISTANT_ACTIONS) === void 0) diagNote("inject-pending:" + SLOT_ASSISTANT_ACTIONS);
+  });
+  let overlayMaterialized = false;
+  safely("overlay-badge", () => {
+    ctx.slots.inject(SLOT_OVERLAY, () => injectBody("overlay-badge", () => {
+      const spec = probeSpec(ctx, SLOT_OVERLAY);
+      if (spec?.kind !== "list") {
+        markDegraded(`${SLOT_OVERLAY} spec missing or not list`, spec);
+        diagNote("inject-kind-mismatch:" + SLOT_OVERLAY);
+        mountDegradedDomBadge();
+        return void 0;
+      }
+      overlayMaterialized = true;
+      diagNote("inject-materialized:" + SLOT_OVERLAY);
+      return ctx.slots.register({
+        name: SLOT_OVERLAY,
+        id: DEGRADED_BADGE_ID,
+        order: 90
+      }, function RqCardDegradedBadge() {
+        if (DEGRADED.length === 0) return null;
+        return (0, import_react3.createElement)("span", { className: "rq-badge", title: `\u964D\u7EA7\u539F\u56E0\uFF1A${DEGRADED.join("\uFF1B")}` }, "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u7EAF\u6587\u672C\u6A21\u5F0F\uFF09");
       });
-    } else {
-      safely("degraded-dom-badge", () => {
-        if (typeof document === "undefined") return;
-        if (document.querySelector(".rq-card-dom-badge")) return;
-        const el = document.createElement("button");
-        el.type = "button";
-        el.className = "rq-card-dom-badge";
-        el.textContent = "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u90E8\u5206\u80FD\u529B\u4E0D\u53EF\u7528\uFF09";
-        el.title = `\u964D\u7EA7\u539F\u56E0\uFF1A${DEGRADED.join("\uFF1B")}\uFF08\u70B9\u51FB\u5237\u65B0\u91CD\u8BD5\uFF1B\u8BE6\u60C5\u89C1\u63A7\u5236\u53F0 [rq-card] \u65E5\u5FD7\uFF09`;
-        el.setAttribute("style", "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)");
-        el.onclick = () => {
-          location.reload();
-        };
-        document.body.appendChild(el);
-      });
+    }));
+    if (probeSpec(ctx, SLOT_OVERLAY) === void 0) diagNote("inject-pending:" + SLOT_OVERLAY);
+  });
+  const fallbackTimer = setTimeout(() => {
+    if (!overlayMaterialized && DEGRADED.length > 0) {
+      diagNote("degraded-dom-badge-fallback");
+      mountDegradedDomBadge();
     }
-    console.warn(`[rq-card] degraded mode with ${DEGRADED.length} reason(s); markdown fallback remains available`);
-  }
-  const settingsSpec = probeSpec(ctx, SLOT_SETTINGS);
+  }, 1e4);
+  fallbackTimer.unref?.();
   const t = (() => {
     try {
       return ctx.locale.bind(NS);
@@ -795,11 +845,16 @@ function apply(ctx) {
       return void 0;
     }
   })();
-  if (settingsSpec?.kind !== "list") {
-    markDegraded(`${SLOT_SETTINGS} spec missing or not list`, settingsSpec);
-  } else {
-    safely("settings-section", () => {
-      ctx.slots.inject(SLOT_SETTINGS, () => ctx.slots.register({
+  safely("settings-section", () => {
+    ctx.slots.inject(SLOT_SETTINGS, () => injectBody("settings-section", () => {
+      const spec = probeSpec(ctx, SLOT_SETTINGS);
+      if (spec?.kind !== "list") {
+        markDegraded(`${SLOT_SETTINGS} spec missing or not list`, spec);
+        diagNote("inject-kind-mismatch:" + SLOT_SETTINGS);
+        return void 0;
+      }
+      diagNote("inject-materialized:" + SLOT_SETTINGS);
+      return ctx.slots.register({
         name: SLOT_SETTINGS,
         id: "rq-hostlink",
         order: 30,
@@ -814,46 +869,58 @@ function apply(ctx) {
           },
           refresh: () => fetchHostLink()
         })
-      }, RqSettings));
-    });
-  }
-  const viewSpec = probeSpec(ctx, SLOT_VIEW);
-  if (viewSpec?.kind !== "list") {
-    markDegraded(`${SLOT_VIEW} spec missing or not list`, viewSpec);
-  } else {
-    safely("workbench-view", () => {
-      ctx.slots.inject(SLOT_VIEW, () => ctx.slots.register({
+      }, RqSettings);
+    }));
+    if (probeSpec(ctx, SLOT_SETTINGS) === void 0) diagNote("inject-pending:" + SLOT_SETTINGS);
+  });
+  safely("workbench-view", () => {
+    ctx.slots.inject(SLOT_VIEW, () => injectBody("workbench-view", () => {
+      const spec = probeSpec(ctx, SLOT_VIEW);
+      if (spec?.kind !== "list") {
+        markDegraded(`${SLOT_VIEW} spec missing or not list`, spec);
+        diagNote("inject-kind-mismatch:" + SLOT_VIEW);
+        return void 0;
+      }
+      diagNote("inject-materialized:" + SLOT_VIEW);
+      return ctx.slots.register({
         name: SLOT_VIEW,
         id: "rq-workbench",
         order: 20,
         ...t ? { label: () => t("view.workbench") } : {},
         locale: NS,
         inject: () => ({})
-      }, RqWorkbench));
-    });
-  }
+      }, RqWorkbench);
+    }));
+    if (probeSpec(ctx, SLOT_VIEW) === void 0) diagNote("inject-pending:" + SLOT_VIEW);
+  });
   safely("unlinked-badge", () => {
-    void fetchHostLink().then((link) => {
-      if (link?.mode !== "none") return;
-      const overlaySpec2 = probeSpec(ctx, SLOT_OVERLAY);
-      if (overlaySpec2?.kind !== "list") return;
-      ctx.slots.inject(SLOT_OVERLAY, () => ctx.slots.register({
-        name: SLOT_OVERLAY,
-        id: UNLINKED_BADGE_ID,
-        order: 80
-      }, function RqUnlinkedBadge() {
-        return (0, import_react3.createElement)("button", {
-          type: "button",
-          className: "rq-unlinked",
-          onClick: () => {
-            try {
-              window.open(PANEL_URL, "_blank", "noopener");
-            } catch {
+    ctx.slots.inject(SLOT_OVERLAY, () => injectBody("unlinked-badge", () => {
+      const spec = probeSpec(ctx, SLOT_OVERLAY);
+      if (spec?.kind !== "list") return void 0;
+      let disposed = false;
+      void fetchHostLink().then((link) => {
+        if (disposed || link?.mode !== "none") return;
+        ctx.slots.register({
+          name: SLOT_OVERLAY,
+          id: UNLINKED_BADGE_ID,
+          order: 80
+        }, function RqUnlinkedBadge() {
+          return (0, import_react3.createElement)("button", {
+            type: "button",
+            className: "rq-unlinked",
+            onClick: () => {
+              try {
+                window.open(PANEL_URL, "_blank", "noopener");
+              } catch {
+              }
             }
-          }
-        }, "\u6995\u5668\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC");
-      }));
-    });
+          }, "\u6995\u5668\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC");
+        });
+      });
+      return () => {
+        disposed = true;
+      };
+    }));
   });
   console.info("[rq-card] client plugin applied:", PLUGIN_ID2);
 }
