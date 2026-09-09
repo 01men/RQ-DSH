@@ -177,13 +177,14 @@ function renderLoginGuide() {
     return
   }
   // 回跳语义：登录成功后带 ?next= 回到面板（登录页消费一次），不再让业务员落在控制台后自己找路
+  // 尾斜杠不能省：/rq 不带斜杠会触发 302 → /rq/，重定向把 #/login fragment 与 next 参数一并吃掉
   const here = encodeURIComponent(location.pathname + location.search + location.hash)
   document.getElementById('app').innerHTML = `
     <div class="login-guide">
       <h1>🌳 榕器 · 部门 Agent 工作台</h1>
       <p>当前浏览器没有有效的平台会话。<br>
       请从控制台登录后进入，或从钉钉/门户的「打开即工作台」入口点入（自动票据免登）。</p>
-      <a href="${basePath() || '/'}?next=${here}#/login"><button class="btn primary">去控制台登录</button></a>
+      <a href="${basePath() || '/'}/?next=${here}#/login"><button class="btn primary">去控制台登录</button></a>
     </div>`
 }
 
@@ -264,19 +265,25 @@ function connectStream() {
   state.streamStale = false
   state.lastRealtimeAt = Date.now() // 建流观察窗：首轮数据到达前不误报中断
   renderLiveBadge()
+  // 远端形态（C）：数据面走本机代理——SSE 会被代理显式拒绝（代理不持流，403 触发既有降级），
+  // 轮询路径同样映射到代理（面板 REST 白名单内），请求须带向导头（/rqcard/* 免登命名空间防线）
+  const remote = Boolean(state.remoteHub)
+  const streamBase = remote ? `${basePath()}/rqcard/proxy` : basePath()
+  const headers = session.token ? { authorization: `Bearer ${session.token}` } : {}
+  if (remote && session.token) headers['x-rqcard-call'] = '1'
   void realtimeDep().then((mod) => {
     state.stream = mod.createEventStream({
-      url: `${basePath()}/api/panel/stream?dept=${state.dept}&token=${encodeURIComponent(session.token)}`,
-      pollPath: `${basePath()}/api/panel/${state.dept}/poll`,
+      url: `${streamBase}/api/panel/stream?dept=${state.dept}&token=${encodeURIComponent(session.token)}`,
+      pollPath: `${streamBase}/api/panel/${state.dept}/poll`,
       pollIntervalMs: 30_000,
-      headers: session.token ? { authorization: `Bearer ${session.token}` } : {},
+      headers,
       onMessage: (data) => handleRealtime(data),
       onDowngrade: () => {
         state.streamDowngraded = true
         renderLiveBadge()
       },
     })
-  })
+  }).catch(() => { /* realtime 依赖装载失败（异常环境）：静默，消息刷新退化为操作后手动拉取 */ })
 }
 
 /** 手动重连（QA BUG-U-02）：「连接中断」徽标点击后重建通道并给 95s 观察窗。 */

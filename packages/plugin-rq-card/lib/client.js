@@ -1,4 +1,4 @@
-/* rq-card-build-id: 7a706a83e602f93d */
+/* rq-card-build-id: 3e079c8448a1e41d */
 (function () {
   var PLUGIN_ID = "@dsh-ops/plugin-rq-card";
   var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };

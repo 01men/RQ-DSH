@@ -12,7 +12,7 @@
  * 远端登录经 /rqcard/proxy/api/auth/login（白名单内）。登录成功后 location.reload()
  * 重走 boot 链（作用域/代理/会话一次性就位）。
  */
-import { setConnectionScope, session } from './api.js'
+import { api, setConnectionScope, setRemoteProxy, session } from './api.js'
 
 const esc = (text) => String(text ?? '')
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -109,6 +109,10 @@ async function renderLocalCard(root, base, { localFirstRun }) {
       body.querySelector('#wzAdminErr').textContent = ''
       try {
         const data = await wfetch(base, 'POST', '/rqcard/local-init/admin', { username: 'admin', newPassword: pass })
+        // 作用域卫生（Bug2 修复）：远端登录尝试会把连接作用域粘在本页（模块级状态），
+        // 本机初始化的令牌必须落默认键——先显式清零再保存，否则重载后按默认键读不到
+        // 会被判成未登录（服务端成功、浏览器进不了工作台）。
+        setConnectionScope('')
         session.save(data.token, data.user)
         if (data.refreshToken) session.saveRefresh(data.refreshToken)
         await wfetch(base, 'POST', '/rqcard/link/local', {})
@@ -121,7 +125,7 @@ async function renderLocalCard(root, base, { localFirstRun }) {
   } else {
     body.innerHTML = `
       <div class="wz-ok">✅ 本机数据面已就绪（admin 已初始化）。</div>
-      <a href="${base || '/'}?next=${here}#/login"><button class="btn primary">在本机控制台登录</button></a>
+      <a href="${base || '/'}/?next=${here}#/login"><button class="btn primary">在本机控制台登录</button></a>
       <p class="wz-hint">支持账号密码与钉钉扫码（本机同源，登录后自动回到面板）。</p>`
   }
 
@@ -226,9 +230,14 @@ async function renderRemoteCard(root, base) {
   }
 }
 
-/** 远端连接成功后的登录步骤：账号密码（代理全闭环）+ 钉钉扫码（宿主页完成）。 */
+/** 远端连接成功后的登录步骤：账号密码（代理全闭环）+ 钉钉扫码（宿主页完成，G1 回跳前向兼容）。 */
 function renderRemoteLogin(body, base, { hubBase, hubMountPrefix, version }) {
   const hubPanelBase = `${hubBase}${hubMountPrefix}`
+  // G1 前向兼容（交接清单 handoff-f-remainder G1-a）：把本机面板绝对地址作为 next 带给宿主登录页——
+  // 宿主已采纳回跳增强时，扫码/登录完成即按 next 自动回到本机 dsh 并携带一次性 entry_ticket
+  // （boot.js 兑换建立会话）；未采纳的宿主按防 open redirect 白名单忽略跨源 next（落宿主默认页），
+  // 行为与从前一致、无害。
+  const localPanelUrl = `${location.origin}${base}/panel/`
   body.innerHTML = `
     <div class="wz-ok">✅ 已连接服务器 <b>${esc(hubBase)}</b>${version ? `（v${esc(version)}）` : ''}</div>
     <div class="wz-form">
@@ -237,11 +246,33 @@ function renderRemoteLogin(body, base, { hubBase, hubMountPrefix, version }) {
       <button class="btn primary" id="wzLoginGo">登录</button>
     </div>
     <button class="btn wz-dd" id="wzLoginDd">💬 用钉钉扫码登录</button>
-    <p class="wz-hint">没有账号？请联系管理员开通。钉钉扫码会打开登录页，扫码后回到本页即可。</p>
+    <p class="wz-hint">没有账号？请联系管理员开通。账号登录成功后自动进入本工作台；钉钉扫码会打开登录页，完成后自动回到本页，若未自动返回请点下方「我已完成扫码」。</p>
+    <button class="btn wz-back" id="wzLoginCheck">我已完成扫码——校验本机会话</button>
     <button class="btn wz-back" id="wzLoginBack">← 重新选择服务器</button>
     <div id="wzLoginErr" class="wz-err"></div>`
   body.querySelector('#wzLoginDd').onclick = () => {
-    window.open(`${hubPanelBase}/#/login`, '_blank', 'noopener')
+    window.open(`${hubPanelBase}/?next=${encodeURIComponent(localPanelUrl)}#/login`, '_blank', 'noopener')
+  }
+  // 回导校验（G1 未采纳期的诚实降级）：本机面板与宿主跨源，浏览器同源隔离使宿主页扫码会话
+  // 无法直接带回——这里只校验「本机是否已持有该连接的有效会话」：有效即进工作台；无效则如实
+  // 说明并导向账号密码登录，不假装能取回宿主侧会话。
+  body.querySelector('#wzLoginCheck').onclick = async () => {
+    const errBox = body.querySelector('#wzLoginErr')
+    errBox.textContent = ''
+    // 作用域与代理对齐当前连接：me 走代理白名单（api.js 自带 401 刷新重试与向导头）
+    setConnectionScope(hubBase)
+    setRemoteProxy(true)
+    if (!session.token) {
+      errBox.textContent = '本机没有该连接的会话：宿主页的扫码会话无法跨站带回（浏览器同源隔离）。请用上方账号密码登录（同一宿主账号，经本机代理全闭环）；宿主侧 G1 回跳增强上线后扫码将自动带回本机。'
+      return
+    }
+    try {
+      await api.get('/api/auth/me')
+      window.location.reload()
+    } catch {
+      session.clear()
+      errBox.textContent = '本机会话已失效：宿主页的扫码会话无法跨站带回（浏览器同源隔离）。请用上方账号密码重新登录（同一宿主账号，经本机代理全闭环）。'
+    }
   }
   body.querySelector('#wzLoginBack').onclick = () => {
     void wfetch(base, 'POST', '/rqcard/link/reset', {}).then(() => window.location.reload())

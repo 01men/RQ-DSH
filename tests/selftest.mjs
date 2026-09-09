@@ -4976,7 +4976,7 @@ try {
         JSON.stringify(linkNone.body))
 
       // -- stub 远端宿主 ×2：A=dsh 挂载形态（/rq 前缀），B=独立宿主形态（无前缀） --
-      const hubSeen = { authz: '', logins: 0, panelCalls: 0 }
+      const hubSeen = { authz: '', logins: 0, panelCalls: 0, tickets: 0, panelAuthz: '', panelHeader: '', polls: 0, pollAuthz: '', pollHeader: '' }
       const hubStubA = createServer(async (req, res) => {
         const url = req.url ?? ''
         const json = (status, payload) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(payload)) }
@@ -4986,14 +4986,51 @@ try {
           hubSeen.authz = String(req.headers.authorization ?? '')
           return json(200, { ok: true, data: { token: 'stub-hub-session', refreshToken: 'stub-hub-refresh', user: { id: 'u1', displayName: '远端管理员', permissions: ['*'] } } })
         }
-        if (url.startsWith('/rq/api/panel/')) { hubSeen.panelCalls += 1; return json(200, { ok: true, data: { stub: 'panel', path: url } }) }
+        // G1 回跳闭环（问题1）：宿主侧签发的一次性票据由代理回宿主兑换（形状对齐 console entry-ticket-session）
+        if (req.method === 'POST' && url === '/rq/api/auth/entry-ticket-session') {
+          hubSeen.tickets += 1
+          return json(200, { ok: true, data: { token: 'stub-g1-session', refreshToken: 'stub-g1-refresh', expiresAt: '2026-09-08T00:00:00Z', user: { id: 'u-g1', username: 'g1user', displayName: 'G1回跳用户', orgId: 'org1', roleIds: [], roles: ['业务'], permissions: ['panel.read', '*'] } } })
+        }
+        if (url === '/rq/api/auth/me') return json(200, { ok: true, data: { id: 'u-g1', displayName: 'G1回跳用户', permissions: ['*'] } })
+        if (url.startsWith('/rq/api/panel/')) {
+          hubSeen.panelCalls += 1
+          hubSeen.panelAuthz = String(req.headers.authorization ?? '')
+          hubSeen.panelHeader = String(req.headers['x-rqcard-call'] ?? '')
+          if (url.split('?')[0] === '/rq/api/panel/rd/poll') {
+            hubSeen.polls += 1
+            hubSeen.pollAuthz = hubSeen.panelAuthz
+            hubSeen.pollHeader = hubSeen.panelHeader
+          }
+          // 面板数据面最小全量形状：depts/industries/overview/channels 让真实前端 init 链路能走通
+          return json(200, { ok: true, data: {
+            stub: 'panel', path: url,
+            depts: [{ id: 'rd', label: '研发(Stub远端)', icon: '🔬', allowed: true, agents: [] }],
+            industries: [],
+            dept: { id: 'rd', label: '研发(Stub远端)', icon: '🔬', theme: 'stub', collab: '协作', agents: [] },
+            channels: [{ id: 'c1', name: '📢 综合(Stub)' }],
+            members: [], industry: null, models: [], tasks: [], artifacts: [], messages: [],
+            kpis: [], widgets: [],
+          } })
+        }
         return json(404, { ok: false })
       })
       const hubStubB = createServer((req, res) => {
         const url = req.url ?? ''
+        // 对抗性形态（Bug1 回归）：独立宿主对未匹配路径走 SPA 兜底——/rq/api/health 回 200 HTML，
+        // 探活若只看 200 会把挂载前缀误判成 '/rq'（钉钉登录跳错地址、代理打错路径）
+        if (req.method === 'GET' && (url === '/rq/api/health' || url.split('?')[0] === '/rq/api/health')) {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+          res.end('<!doctype html><html><body>standby console spa</body></html>')
+          return
+        }
         if (req.method === 'GET' && url === '/api/health') {
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: true, data: { version: '8.8.8-hubB' } }))
+          return
+        }
+        if (req.method === 'POST' && url === '/api/auth/logout') {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+          res.end('<!doctype html><html><body>spa fallback</body></html>')
           return
         }
         res.writeHead(404).end('{}')
@@ -5032,6 +5069,23 @@ try {
         const proxyStream = await wfetchSim('GET', '/rq/rqcard/proxy/api/panel/stream')
         check('hostlink：SSE 不透传（前端走既有 30s 轮询降级）', proxyStream.status === 403 && proxyStream.body?.error?.code === 'PROXY_PATH_DENIED')
 
+        // -- Bug1 回归：SPA HTML 兜底不得误判为健康宿主（/rq 前缀被独立宿主的 HTML 200 骗走）--
+        const linkFormA = await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: hubB } })
+        check('hostlink：Bug1 回归——独立宿主 /rq/api/health 回 200 HTML 不误判（mountPrefix 判为空串）',
+          linkFormA.status === 200 && linkFormA.body.data.config.hubMountPrefix === '' && linkFormA.body.data.probe.version === '8.8.8-hubB',
+          JSON.stringify(linkFormA.body?.data ?? linkFormA.body))
+        // -- 代理 HTML 防线：宿主回 HTML（地址/前缀错配的特征）显式 502，不透传整页 --
+        const proxyHtml = await wfetchSim('POST', '/rq/rqcard/proxy/api/auth/logout')
+        check('hostlink：宿主回 HTML 而非 JSON → 502 HUB_BAD_RESPONSE（不把整页 HTML 当数据透传）',
+          proxyHtml.status === 502 && proxyHtml.body?.error?.code === 'HUB_BAD_RESPONSE')
+        // 还原为宿主 A 连接供后续断言
+        await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: hubA } })
+        // -- G1 兑换通道：票据兑换端点在代理白名单内（boot.js 回跳闭环的服务端前提）--
+        const proxyTicket = await wfetchSim('POST', '/rq/rqcard/proxy/api/auth/entry-ticket-session', { body: { ticket: 'g1-selftest-ticket' } })
+        check('hostlink：票据兑换端点经代理白名单转发（G1 回跳兑换通道）',
+          proxyTicket.status === 200 && proxyTicket.body?.data?.token === 'stub-g1-session' && hubSeen.tickets === 1,
+          JSON.stringify({ status: proxyTicket.status, body: proxyTicket.body }))
+
         // -- 断开：回到未配置，代理即拒 --
         const resetRes = await wfetchSim('POST', '/rq/rqcard/link/reset')
         check('hostlink：断开回到未配置', resetRes.status === 200 && resetRes.body?.data?.config?.mode === 'none', JSON.stringify({ status: resetRes.status, body: resetRes.body }))
@@ -5061,6 +5115,168 @@ try {
         const listenPlan = await wfetchSim('POST', '/rq/rqcard/local-init/listen-plan', { body: { ip: '192.168.1.10' } })
         check('hostlink：监听指引生成（trusted-host 命令 + 说明，不热改宿主监听）',
           listenPlan.status === 200 && listenPlan.body?.data?.command.includes('--trusted-host 192.168.1.10:3080'), JSON.stringify({ status: listenPlan.status, body: listenPlan.body }))
+
+        // -- 向导 DOM 全链模拟（jsdom 驱动真实面板前端 × 真实向导端点：问题1/问题2 实机回归）--
+        // 用户在浏览器里的两段真实操作逐击复演：
+        //   A. 连接远端宿主 → 点「钉钉扫码登录」——打开地址必须按探测判定的真实挂载前缀构造
+        //      （独立宿主不多拼 /rq；dsh 挂载宿主必须带 /rq）；
+        //   B. 同页先做过远端登录尝试（连接作用域被污染）再点「设置口令并登录」——
+        //      令牌必须落默认键（heng_ops_token），重载后按默认键读到才进得了工作台；
+        //   C. 两条「去控制台登录」链接必须带尾斜杠（/rq 不带斜杠触发 302 → /rq/，
+        //      重定向吃掉 ?next 与 #/login 片段，地址栏一串百分号编码即用户所见的「乱码」）。
+        {
+          const { JSDOM, VirtualConsole } = await import('jsdom')
+          const vc = new VirtualConsole()
+          const domErrors = []
+          vc.on('jsdomError', (e) => { if (!/Not implemented/.test(String(e?.message ?? ''))) domErrors.push(String(e?.message ?? e)) })
+          const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
+            url: `${simOrigin}/rq/panel/`, pretendToBeVisual: true, virtualConsole: vc,
+          })
+          const openedUrls = []
+          dom.window.open = (url) => { openedUrls.push(String(url)); return null }
+          const savedGlobals = {
+            fetch: globalThis.fetch, document: globalThis.document, window: globalThis.window,
+            location: globalThis.location, localStorage: globalThis.localStorage,
+          }
+          globalThis.window = dom.window
+          globalThis.document = dom.window.document
+          globalThis.location = dom.window.location
+          globalThis.localStorage = dom.window.localStorage
+          globalThis.fetch = (input, init) => savedGlobals.fetch(new URL(String(input), simOrigin).href, init)
+          const waitForDom = async (cond, ms = 5000) => {
+            const t0 = Date.now()
+            while (Date.now() - t0 < ms) { if (cond()) return true; await new Promise((r) => setTimeout(r, 50)) }
+            return cond()
+          }
+          try {
+            const PANEL_JS = join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js')
+            const panelApi = await import(pathToFileURL(join(PANEL_JS, 'api.js')).href)
+            const wizard = await import(pathToFileURL(join(PANEL_JS, 'wizard.js')).href)
+            const panelApp = await import(pathToFileURL(join(PANEL_JS, 'app.js')).href)
+            const connectHub = async (hub) => {
+              await wizard.start({ base: '/rq' })
+              document.querySelector('#wzHubInput').value = hub
+              document.querySelector('#wzHubConnect').click()
+              await waitForDom(() => Boolean(document.querySelector('#wzLoginDd')))
+            }
+
+            // 场景 A（问题1 回归）：钉钉登录地址按真实挂载前缀构造，且携带 next=本机面板绝对地址
+            // （G1 前向兼容：宿主采纳回跳增强后扫码即自动回本机 dsh；未采纳宿主按防 open redirect
+            // 白名单忽略跨源 next，无害）
+            const g1Next = encodeURIComponent(`${simOrigin}/rq/panel/`)
+            await connectHub(hubB)
+            document.querySelector('#wzLoginDd').click()
+            check('向导DOM：连独立宿主，钉钉登录地址不多拼 /rq 且携带 next 回跳（问题1 回归）',
+              openedUrls.at(-1) === `${hubB}/?next=${g1Next}#/login`, openedUrls.at(-1))
+            // 回导校验降级：无本机会话时点击 → 如实说明（宿主扫码会话无法跨站带回）并导向账号登录
+            document.querySelector('#wzLoginCheck').click()
+            await waitForDom(() => /无法跨站带回/.test(document.querySelector('#wzLoginErr')?.textContent ?? ''))
+            check('向导DOM：回导校验无本机会话 → 诚实指引（不假装能取回宿主会话）',
+              /无法跨站带回/.test(document.querySelector('#wzLoginErr')?.textContent ?? ''),
+              document.querySelector('#wzLoginErr')?.textContent)
+            await connectHub(hubA)
+            document.querySelector('#wzLoginDd').click()
+            check('向导DOM：连 dsh 挂载宿主，钉钉登录地址正确携带 /rq 与 next 回跳',
+              openedUrls.at(-1) === `${hubA}/rq/?next=${g1Next}#/login`, openedUrls.at(-1))
+
+            // 场景 B（问题2 回归）：作用域污染 → 本机初始化 → 令牌落默认键
+            panelApi.setConnectionScope(hubA) // 同页先做过远端登录尝试的残留态
+            writeFileSync(join(mountCtx.opsStorage.dataDirPath, 'admin-initial-password.txt'),
+              '平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\nFreshPass123\n')
+            await wizard.start({ base: '/rq' })
+            await waitForDom(() => Boolean(document.querySelector('#wzAdminSet')))
+            check('向导DOM：本机首启表单随口令文件在场渲染', Boolean(document.querySelector('#wzAdminSet')))
+            document.querySelector('#wzAdminPass').value = 'DomPass12345'
+            document.querySelector('#wzAdminSet').click()
+            await waitForDom(() => Boolean(dom.window.localStorage.getItem('heng_ops_token')))
+            const domToken = dom.window.localStorage.getItem('heng_ops_token')
+            check('向导DOM：设口令即登录——令牌落默认键（重载即登录态，问题2 回归）', Boolean(domToken))
+            check('向导DOM：令牌未落入远端作用域隔离键（作用域卫生）',
+              dom.window.localStorage.getItem(`heng_ops_token@${hubA}`) === null)
+            const domTokenUse = await fetch(`${simOrigin}/rq/api/panel/depts`, { headers: { authorization: `Bearer ${domToken}` } })
+            check('向导DOM：初始化令牌直通面板 RBAC 面（/rq/api/panel/depts 200）', domTokenUse.status === 200, `status=${domTokenUse.status}`)
+
+            // 场景 C（链接形态回归：尾斜杠在，302 不再吃掉 ?next 与 #/login）
+            await wizard.start({ base: '/rq' }) // 口令文件已消费 → 非首启分支
+            await waitForDom(() => Boolean(document.querySelector('#wzLocalBody a[href]')))
+            const wizardLoginHref = document.querySelector('#wzLocalBody a[href]').getAttribute('href') ?? ''
+            check('向导DOM：向导「在本机控制台登录」链接带尾斜杠 + next 回跳 + #/login',
+              wizardLoginHref.startsWith('/rq/?next=') && wizardLoginHref.includes('#/login'), wizardLoginHref)
+            panelApi.session.clear()
+            panelApp.start({ base: '/rq' })
+            const guideHref = document.querySelector('.login-guide a')?.getAttribute('href') ?? ''
+            check('向导DOM：面板登录引导「去控制台登录」链接带尾斜杠 + next 回跳 + #/login',
+              guideHref.startsWith('/rq/?next=') && guideHref.includes('#/login'), guideHref)
+            check('向导DOM：jsdom 运行期零意外错误（reload 的 not-implemented 噪音已过滤）', domErrors.length === 0, domErrors.join(' | '))
+
+            // 场景 D（问题1 G1 回跳闭环回归）：宿主签发 entry_ticket → boot 按连接形态经代理兑换 →
+            // 会话落连接作用域键 → 面板数据面经代理携带宿主身份（Authorization + 向导头）。
+            // 用全新 JSDOM（URL 带 ?entry_ticket=）驱动真实 boot.js 全链。
+            await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: hubA } })
+            const dom2 = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
+              url: `${simOrigin}/rq/panel/?entry_ticket=g1-selftest-ticket`, pretendToBeVisual: true, virtualConsole: vc,
+            })
+            const saved2 = {
+              fetch: globalThis.fetch, document: globalThis.document, window: globalThis.window,
+              location: globalThis.location, localStorage: globalThis.localStorage,
+            }
+            globalThis.window = dom2.window
+            globalThis.document = dom2.window.document
+            globalThis.location = dom2.window.location
+            globalThis.localStorage = dom2.window.localStorage
+            globalThis.fetch = (input, init) => saved2.fetch(new URL(String(input), simOrigin).href, init)
+            try {
+              const bootMod = await import(pathToFileURL(join(PANEL_JS, 'boot.js')).href + '?g1test=1')
+              check('G1回跳：boot 模块装载（全新 JSDOM，URL 携带 ?entry_ticket=）', typeof bootMod === 'object')
+              await waitForDom(() => Boolean(dom2.window.localStorage.getItem(`heng_ops_token@${hubA}`)))
+              const g1Token = dom2.window.localStorage.getItem(`heng_ops_token@${hubA}`)
+              check('G1回跳：宿主票据经代理兑换，会话落连接作用域键（heng_ops_token@<hub>）',
+                g1Token === 'stub-g1-session', `token=${g1Token}`)
+              check('G1回跳：刷新令牌同样落作用域键', dom2.window.localStorage.getItem(`heng_ops_refresh@${hubA}`) === 'stub-g1-refresh')
+              check('G1回跳：地址栏票据即用即清（不常驻 URL）', dom2.window.location.search === '' && !dom2.window.location.hash.includes('entry_ticket'),
+                `${dom2.window.location.search}|${dom2.window.location.hash}`)
+              check('G1回跳：票据兑换打到宿主（hubSeen.tickets=2：白名单直测 1 + boot 回跳兑换 1）', hubSeen.tickets === 2, JSON.stringify(hubSeen))
+              await waitForDom(() => hubSeen.panelCalls >= 2)
+              check('G1回跳：面板数据面经代理抵达宿主并携带宿主身份（Authorization 透传 G1 会话；到达即证明已通过本机向导头守卫）',
+                hubSeen.panelAuthz === 'Bearer stub-g1-session', hubSeen.panelAuthz)
+              check('G1回跳：代理不向宿主转发向导头（防线在本机代理入口，非宿主侧）',
+                hubSeen.panelHeader === '', hubSeen.panelHeader)
+              check('G1回跳：未误入连接向导（remote 态直接进面板）', document.querySelector('.wizard') === null)
+              // 实时轮询代理路径（app.js connectStream 远端映射的服务端半部）：真实 console realtime.js
+              // 以代理轮询地址 + 向导头驱动，宿主应收到带身份的 /poll 请求
+              const realtime = await import(pathToFileURL(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'realtime.js')).href)
+              const streamHandle = realtime.createEventStream({
+                url: `${simOrigin}/rq/rqcard/proxy/api/panel/stream?dept=rd&token=${encodeURIComponent('stub-g1-session')}`,
+                pollPath: `${simOrigin}/rq/rqcard/proxy/api/panel/rd/poll`,
+                pollIntervalMs: 200,
+                headers: { authorization: 'Bearer stub-g1-session', 'x-rqcard-call': '1' },
+              })
+              await waitForDom(() => hubSeen.polls >= 1)
+              streamHandle.close()
+              check('G1回跳：实时轮询经代理直达宿主（SSE 被拒后 30s 轮询的远端承接路径）',
+                hubSeen.polls >= 1 && hubSeen.pollAuthz === 'Bearer stub-g1-session',
+                JSON.stringify({ polls: hubSeen.polls, pollAuthz: hubSeen.pollAuthz, pollHeader: hubSeen.pollHeader }))
+              // 收尾等待：boot 驱动的面板 init 链（overview 拉取 → switchDept 尾部写 localStorage）
+              // 必须在本作用域内走完——finally 恢复全局会删掉 localStorage，在途尾巴会
+              // ReferenceError 崩进程（renderMain 渲染 .tabs 即 init 完成的稳定标记）
+              await waitForDom(() => Boolean(document.querySelector('#colMain .tabs')))
+            } finally {
+              globalThis.fetch = saved2.fetch
+              globalThis.document = saved2.document
+              globalThis.window = saved2.window
+              globalThis.location = saved2.location
+              globalThis.localStorage = saved2.localStorage
+            }
+          } finally {
+            if (savedGlobals.fetch) globalThis.fetch = savedGlobals.fetch
+            if (savedGlobals.document === undefined) delete globalThis.document; else globalThis.document = savedGlobals.document
+            if (savedGlobals.window === undefined) delete globalThis.window; else globalThis.window = savedGlobals.window
+            if (savedGlobals.location === undefined) delete globalThis.location; else globalThis.location = savedGlobals.location
+            if (savedGlobals.localStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = savedGlobals.localStorage
+          }
+          // 收场：连接态还原 none（不干扰后续 rq_host_status 等断言）
+          await wfetchSim('POST', '/rq/rqcard/link/reset')
+        }
       } finally {
         await new Promise((resolve) => hubStubA.close(resolve))
         await new Promise((resolve) => hubStubB.close(resolve))
@@ -5082,6 +5298,24 @@ try {
       const wizardJs = readFileSync('packages/plugin-panel-core/public/js/wizard.js', 'utf8')
       check('前端契约：连接向导（扫描/手输连接/本机初始化/钉钉引导）',
         wizardJs.includes('link/scan') && wizardJs.includes('link/remote') && wizardJs.includes('local-init/admin') && wizardJs.includes('wzLoginDd'))
+      check('前端契约：Bug2 回归——本机初始化前显式清零连接作用域（防令牌落远端键）',
+        wizardJs.includes("setConnectionScope('')"), 'wizard.js 缺少作用域卫生处理')
+      check('前端契约：G1 前向兼容——钉钉登录打开宿主页携带 next=本机面板地址 + 回导校验降级在场',
+        wizardJs.includes('?next=') && wizardJs.includes('encodeURIComponent(localPanelUrl)') && wizardJs.includes('wzLoginCheck'),
+        'wizard.js 缺少 next 回跳或回导校验')
+      const bootJsSource = readFileSync('packages/plugin-panel-core/public/js/boot.js', 'utf8')
+      check('前端契约：G1 消费侧——boot 按连接形态路由票据兑换（远端经代理 + 作用域保存 + fragment 票据）',
+        bootJsSource.includes('rqcard/proxy/api/auth/entry-ticket-session') && bootJsSource.includes('exchangeEntryTicketRemote')
+        && bootJsSource.includes("where: 'hash'"),
+        'boot.js 缺少远端票据兑换路由')
+      const apiJsSource = readFileSync('packages/plugin-panel-core/public/js/api.js', 'utf8')
+      check('前端契约：Bug3 回归——api.js 代理形态请求附加向导头（x-rqcard-call）',
+        apiJsSource.includes("'x-rqcard-call'") && apiJsSource.includes('proxyHeaders'),
+        'api.js 缺少代理向导头，形态 C 数据面会被 403')
+      const appJsContract = readFileSync('packages/plugin-panel-core/public/js/app.js', 'utf8')
+      check('前端契约：远端实时通道映射——connectStream 轮询走代理并带向导头',
+        appJsContract.includes('rqcard/proxy`') && appJsContract.includes("headers['x-rqcard-call'] = '1'"),
+        'app.js connectStream 缺少远端代理映射')
       const cardClientSource = readFileSync('packages/plugin-rq-card/src/client/index.ts', 'utf8')
       check('注入面契约：settings.section + conversation.view + 未连接角标',
         cardClientSource.includes('SLOT_SETTINGS') && cardClientSource.includes('SLOT_VIEW') && cardClientSource.includes('UNLINKED_BADGE_ID'))

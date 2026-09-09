@@ -78,7 +78,7 @@ async function tryRefresh() {
       try {
         const response = await fetch(mapPath('/api/auth/refresh'), {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: proxyHeaders({ 'content-type': 'application/json' }),
           body: JSON.stringify({ refreshToken: session.refreshToken }),
           signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
         })
@@ -112,8 +112,17 @@ function networkError(error) {
   return new ApiError('NETWORK', '网络连接失败：请检查网络后重试（持续失败请联系管理员）', 0)
 }
 
+/**
+ * 代理形态附加头：远端模式请求经本机插件 /rqcard/proxy/* 转发，而 /rqcard/* 是免登
+ * 命名空间、要求 x-rqcard-call: 1 向导头（drive-by CSRF 防线）——同源页面可携带自定义头，
+ * 跨站网页发不出。漏带该头会让形态 C 的面板数据面整体 403（Bug3 修复）。
+ */
+const proxyHeaders = (headers) => (remoteProxy
+  ? { ...headers, 'x-rqcard-call': '1' }
+  : headers)
+
 async function request(method, path, body, opts = {}, retried = false) {
-  const headers = { 'content-type': 'application/json' }
+  const headers = proxyHeaders({ 'content-type': 'application/json' })
   if (session.token) headers.authorization = `Bearer ${session.token}`
   let response
   try {

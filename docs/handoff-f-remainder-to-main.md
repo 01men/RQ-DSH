@@ -99,8 +99,13 @@ selftest 对照：`审批 SLA 与公司级终审（WP-10）` 分节水印断言�
 | G2（可选） | `packages/plugin-modelgw/src/index.ts` | `invoke` 增 `stream` 变体（SSE，OpenAI 兼容流式透传） | 面板内置协作会话与 dsh 侧富卡可升级流式输出（非必须；现状单轮非流式诚实工作） |
 | G3 | dsh 侧 `vendor/loader`（或 main 侧预构建分发） | 拷贝安装形态（`dsh plugin add github:`，pnpm 装入 node_modules）下 Node（≥22.6）拒绝类型剥离 node_modules 内 TS（实测 `--experimental-transform-types` 亦不解除）——全部 `src/index.ts` 形式 loader entry 不可执行，**全仓架构级**限制。解法二选一：① dsh loader 在 import 前自行剥离 TS（vendor/loader Entry._init 预处理）；② 平台提供预构建分发（构建 JS 镜像 + 指向 .js 的安装补丁）。定制侧已实证：源码/链接形态（`link:` 安装，真实路径在 node_modules 外）完整体验 8/8 绿 | 「全新 dsh 拷贝安装完整体验」的最后一公里；定制侧根包已补 `@dsh-ops/plugin-rq-card` file: 依赖使包名在安装形态可解析（该修复与 G3 无关、始终需要） |
 
-定制侧对照降级路径：wizard.js「我已登录」回导校验（proxy `/api/auth/me`）。
-selftest 对照：`宿主连接向导` 分节（23 项）+ `panel_agent_invoke/board_digest`（4 项）+ `fresh-install 装机模拟`（13 项）。
+定制侧对照降级路径已实现（2026-09-08）：向导打开宿主登录页**已携带** `?next=<本机面板绝对地址>`（G1 前向兼容，
+未采纳宿主按防 open redirect 白名单忽略、无害）；boot.js 已按连接形态经代理兑换回跳票据（query/fragment 双形态、
+会话落连接作用域）——**G1 采纳即闭环，定制侧零后续改动**；未采纳期向导提供「我已完成扫码」回导校验诚实降级
+（proxy `/api/auth/me`：本机有有效会话即进工作台，无则如实说明并导向账号密码登录）。同批修复：探活严格判据
+（独立宿主 SPA 兜底 200 HTML 不再误判挂载前缀）、代理对宿主 HTML 响应显式 502、api.js 代理请求补向导头
+（形态 C 数据面防线内通行）、实时轮询远端代理映射。
+selftest 对照：`宿主连接向导` 分节（50 项，含向导 jsdom DOM 全链与 G1 回跳闭环回归）+ `panel_agent_invoke/board_digest`（4 项）+ `fresh-install 装机模拟`（13 项）。
 
 ## 决策回执（请 main 侧填写后回传）
 

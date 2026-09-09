@@ -31,6 +31,51 @@ async function exchangeEntryTicket(ticket) {
   saveSession(payload.data)
 }
 
+/**
+ * 远端形态票据兑换（G1 回跳闭环的消费侧）：宿主签发的回跳票据必须回宿主兑换
+ * （本机 authn 兑不了别家的票）——经本机插件代理转发（白名单端点 + 向导头），
+ * 兑得的宿主会话按连接作用域隔离保存（heng_ops_token@<hubBase>），与本机/其他连接互不串台。
+ */
+async function exchangeEntryTicketRemote(ticket, apiModule) {
+  const response = await fetch(`${BASE}/rqcard/proxy/api/auth/entry-ticket-session`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-rqcard-call': '1' },
+    body: JSON.stringify({ ticket }),
+  })
+  const payload = await response.json().catch(() => null)
+  if (!response.ok || payload?.ok === false) throw new Error(payload?.error?.message ?? '票据兑换失败')
+  apiModule.session.save(payload.data.token, payload.data.user)
+  if (payload.data.refreshToken) apiModule.session.saveRefresh(payload.data.refreshToken)
+}
+
+/**
+ * 一次性回跳票据提取：query `?entry_ticket=`（门户/钉钉「打开即工作台」传统入口）
+ * 与 fragment `#entry_ticket=`（G1 跨源回跳形态：宿主登录页按 next 回跳时把票据放
+ * fragment，避免服务端 302 携带）均收。
+ */
+function takeEntryTicket() {
+  const fromQuery = new URLSearchParams(location.search).get('entry_ticket')
+  if (fromQuery) return { ticket: fromQuery, where: 'query' }
+  if (location.hash.includes('entry_ticket=')) {
+    const raw = location.hash.replace(/^#/, '').replace(/^\/+/, '').replace(/^\?/, '')
+    const fromHash = new URLSearchParams(raw).get('entry_ticket')
+    if (fromHash) return { ticket: fromHash, where: 'hash' }
+  }
+  return null
+}
+
+/** 票据即用即清（不常驻地址栏）：query 形态仅剔除票据参数，fragment 形态整段移除。 */
+function clearEntryTicket(found) {
+  if (found.where === 'hash') {
+    window.history.replaceState(null, '', `${location.pathname}${location.search}`)
+    return
+  }
+  const params = new URLSearchParams(location.search)
+  params.delete('entry_ticket')
+  const rest = params.toString()
+  window.history.replaceState(null, '', `${location.pathname}${rest ? `?${rest}` : ''}${location.hash}`)
+}
+
 function saveSession(data) {
   localStorage.setItem(TOKEN_KEY, data.token)
   localStorage.setItem(USER_KEY, JSON.stringify(data.user))
@@ -76,29 +121,31 @@ async function probeHostLink() {
 }
 
 async function bootstrap() {
-  // 票据免登（dsh 宿主「打开即工作台」通道）：票据只进请求体，兑换后立即从地址栏清除
-  const params = new URLSearchParams(location.search)
-  const ticket = params.get('entry_ticket')
-  if (ticket) {
+  // 宿主连接探测先行：票据兑换的路由依赖连接形态（remote=宿主签发的票据须回宿主兑换）
+  const hostLink = await probeHostLink()
+  const apiModule = await import('./api.js')
+  const remoteMode = hostLink?.mode === 'remote' && Boolean(hostLink.hubBase)
+  if (remoteMode) {
+    apiModule.setConnectionScope(hostLink.hubBase)
+    apiModule.setRemoteProxy(true)
+  }
+  // 票据免登（「打开即工作台」/ G1 回跳通道）：票据只进请求体，兑换后立即从地址栏清除。
+  // 兑换路由按连接形态：remote 经代理回宿主（会话落连接作用域）；本机/独立形态本机兑换。
+  const found = takeEntryTicket()
+  if (found) {
     try {
-      await exchangeEntryTicket(ticket)
+      if (remoteMode) await exchangeEntryTicketRemote(found.ticket, apiModule)
+      else await exchangeEntryTicket(found.ticket)
     } catch { /* 兑换失败按未登录处理 */ }
-    params.delete('entry_ticket')
-    const rest = params.toString()
-    history.replaceState(null, '', `${path}${rest ? `?${rest}` : ''}${location.hash}`)
+    clearEntryTicket(found)
   }
   // 会话链：已有令牌 → 票据 → 宿主 Cookie 直通（dsh 宿主内点入面板零二次登录）
   const { hostBridge } = await hostBridgeSession()
 
-  // 宿主连接探测：remote 切换令牌作用域与代理；none 且无会话 → 连接向导（fresh-install 首启体验）
-  const hostLink = await probeHostLink()
-  const apiModule = await import('./api.js')
+  // 宿主连接探测结果落地：remote 时令牌作用域与代理已在上方就位；none 且无会话 → 连接向导
+  // （fresh-install 首启体验）
   let remoteHub = null
-  if (hostLink?.mode === 'remote' && hostLink.hubBase) {
-    remoteHub = { hubBase: hostLink.hubBase, hubMountPrefix: hostLink.hubMountPrefix ?? '' }
-    apiModule.setConnectionScope(hostLink.hubBase)
-    apiModule.setRemoteProxy(true)
-  }
+  if (remoteMode) remoteHub = { hubBase: hostLink.hubBase, hubMountPrefix: hostLink.hubMountPrefix ?? '' }
   if (hostLink?.mode === 'none' && !apiModule.session.token) {
     const wizard = await import('./wizard.js')
     document.getElementById('app').dataset.booted = '1'

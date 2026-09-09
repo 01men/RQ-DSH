@@ -172,6 +172,10 @@ export class HostLinkService {
   /**
    * 探测宿主：依次试 `${base}/rq/api/health`（dsh 挂载形态）与 `${base}/api/health`（独立宿主）。
    * 命中即返回，携带自动判定的挂载前缀。
+   *
+   * 【严格判据（Bug1 修复）】独立宿主对 `/rq/api/health` 这类未匹配路径会以 SPA 兜底返回
+   * 200 HTML——只看 HTTP 200 会把挂载前缀误判成 '/rq'（钉钉登录跳错地址、代理打错路径）。
+   * 必须解析出健康 JSON 信封（ok===true）才算命中，HTML/非 JSON 一律视为该前缀不可用。
    */
   async probeHub(hubBase: string): Promise<HubProbe> {
     for (const mountPrefix of ['/rq', '']) {
@@ -179,12 +183,11 @@ export class HostLinkService {
       try {
         const response = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 4), headers: { accept: 'application/json' } })
         if (!response.ok) continue
-        let version: string | undefined
-        try {
-          const payload = await response.json() as { data?: { version?: string } }
-          version = payload?.data?.version
-        } catch { /* 健康 payload 形状不拘 */ }
-        return { reachable: true, status: response.status, version, mountPrefix }
+        const contentType = String(response.headers.get('content-type') ?? '')
+        if (!contentType.includes('json')) continue
+        const payload = await response.json().catch(() => null) as { ok?: boolean; data?: { version?: string } } | null
+        if (payload?.ok !== true) continue
+        return { reachable: true, status: response.status, version: payload.data?.version, mountPrefix }
       } catch { /* 该前缀不可达，试下一个 */ }
     }
     return { reachable: false, status: 0 }
@@ -241,6 +244,7 @@ export class HostLinkService {
       return
     }
     const query = exchange.query.toString()
+    // 远端登录入口（钉钉扫码页）按宿主真实挂载前缀构造——前缀判定由 probeHub 严格判据保证
     const target = `${this.config.hubBase}${this.config.hubMountPrefix ?? ''}${path}${query ? `?${query}` : ''}`
     const headers: Record<string, string> = { accept: 'application/json' }
     const authorization = exchange.headers.authorization
@@ -262,6 +266,13 @@ export class HostLinkService {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       exchange.fail(502, 'HUB_UNREACHABLE', `远端宿主不可达：${message}`)
+      return
+    }
+    // 宿主数据面只会回 JSON；拿到 HTML 说明地址/挂载前缀不对（SPA 兜底）——透传只会让
+    // 前端把整页 HTML 当接口数据渲染，显式报错比静默错乱好（Bug1 的第二道防线）。
+    const responseContentType = String(response.headers.get('content-type') ?? '')
+    if (responseContentType.includes('text/html')) {
+      exchange.fail(502, 'HUB_BAD_RESPONSE', '宿主返回了 HTML 而非 JSON（地址或挂载前缀可能不匹配，请在向导里重新测试连接）')
       return
     }
     const text = await response.text().catch(() => '')
