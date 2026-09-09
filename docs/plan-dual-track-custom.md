@@ -156,6 +156,38 @@ cordis.yml / cordis.patch.yml 属宿主面（装配清单随 main 演进）；�
   或部署文档，不进版本化装配清单。
 - **北极星现状（对真上游 ff1a8de）**：宿主面剩余差异 = F 域余量（已登记，待主分支采纳/拆除闭环）；
   packages/ 差异仅剩定制自有包（plugin-panel-core 增量 + cardpacks 域文件）。
+- **后续批次（2026-09-08/09）**：QA 验收缺陷修复批（a774bff，P0 SSE 越权 + P1 全量闭环）→
+  交接清单 H1-H5 宿主侧落地吸收（527099e，对 37880a2）→ G1 回跳消费侧闭环 + Bug 修复批（edd3d21）→
+  H1 定制面配合批：rq-card 五处槽注册无条件 inject + bundle 真执行回归（bcd7a28）。
+  北极星锚点随合并推进 ff1a8de → 37880a2。
+
+### C1 第一波 · 一线面板极简（2026-09-09 交付）
+
+计划依据：《榕器开发计划-子分支-RQ-DSH.md》（D:/DSH-07/榕器开发计划-子分支-RQ-DSH.md）。
+
+- **C1-1 信息架构收敛 ✅**：/panel 进入即对话框（boot 固定落 chat Tab）；顶栏「工作台 | 战略看板」
+  双视图拆除，看板/面板设置/模型管理收进「☰ 更多」二级入口（`#/board` 深链保留）；用户可见文案
+  清除 dsh 内部术语；首启向导维持 ≤ 3 步（单屏双路径）。
+- **C1-2 执行卡 + Skill 点名直调 ✅**：`PanelService.invokeSkill` 服务原语（skillhub published +
+  组织可见 → SKILL.md 内容 → 模型网关单轮，诚实 ok:false 降级）+ `GET /api/panel/:dept/skills` /
+  `POST /api/panel/:dept/skills/invoke` 路由（降级=数据 200，鉴权/范围=传输 403/400；斜杠原文
+  skipAgentDispatch 留痕，成功落 `⚡ 技能名` agent 消息 / 失败落系统行）+ `panel_skill_invoke`
+  dsh 工具（J1 消费面与 panel_agent_invoke 并排）+ 前端技能 chips / `/技能名` 斜杠解析 / 内嵌形态
+  选技能直调 / ⌘K 技能源 / 执行卡调用中·异常阻断两态+重试。验收口径「面板内成功调用 ≥ 3 个已上架
+  Skill」以 selftest 种子直调达标。rq-card 执行卡四态维持 bcd7a28 交付（本批零改动）。
+  注：主分支 M1-1 契约 v1 尚未冻结（上游 37880a2 后无新增），按风险预案在定制面先行原语与 UI，
+  契约冻结后对表。
+- **C1-3 部门范围权限裁剪 ✅（前批已落地，本次复核）**：`deptOf` 全路由 + SSE 双通道同规 +
+  名册子树裁剪；看板为平台聚合面（非部门数据面），随 C1-1 收二级入口并标注经理视角。
+- **C1-4 移动端与易用性 ✅（前批已落地，本次复核 + 新组件同规）**：700px 断点 / 触控热区 ≥32-36px /
+  崩溃页友好化维持；本批新增 more-menu、执行卡样式全部同规（more-btn ≥32px、重试钮 ≥36px）。
+  钉钉 H5 真机走查留现场门禁（见 QA 报告 §5）。
+- **C1-5 QA 终版回归 ✅（自动化面）**：P0=0、P1 全量复测闭环（钉钉投递去重 / rq-card 装载器兜底 /
+  轮询静默 / 多标签互踩逐项对账）；selftest 1056 → **1071/1071** + lint:manifests 85/85 全绿。
+  报告：[qa-evidence/c1-final-regression-20260909.md](qa-evidence/c1-final-regression-20260909.md)。
+  现场门禁（3 名班组长 5 分钟上手实测、真机走查）留 C3-1 标杆现场执行。
+- **C2 接收条件就绪度**：boot 票据兑换 + probeHub 严格判据已交付（edd3d21），等主分支 M1-4/M1-5
+  （J2/J3）冻结后进入 C2-1/C2-2 接收验证；C2-4 跨仓联调待 C1-2/C2-1/C2-2 齐。
 
 ### ⚠ 踩坑记录：origin/main 追踪引用摆动（AGENTS.md「已知无害怪象」的实锤）
 

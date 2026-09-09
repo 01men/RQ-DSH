@@ -71,7 +71,8 @@ const state = {
   industry: null,
   ddStatus: null,
   bridges: [],
-  tab: localStorage.getItem('panel_tab') ?? 'chat',
+  // C1-1 信息架构收敛：进入即对话框——boot 不再恢复上次 Tab，班组长打开面板第一眼是对话
+  tab: 'chat',
   channelId: localStorage.getItem('panel_channel') ?? '',
   messages: [],
   tasks: [],
@@ -81,6 +82,8 @@ const state = {
   /** 模型目录（与 dsh 服务共用 modelgw 事实源）；chatModel='' 表示跟随各 Agent 资产配置。 */
   models: [],
   chatModel: localStorage.getItem('panel_chat_model') ?? '',
+  /** 可直调技能清单（C1-2：skillhub published 且对当前账号组织开放；空=不展示技能入口）。 */
+  skills: [],
   stream: null,
   streamDept: '',
   /** 实时通道健康（QA BUG-U-02）：downgraded=轮询降级态；lastRealtimeAt=最后收到数据时刻；
@@ -222,6 +225,7 @@ async function init() {
   void refreshDingtalk()
   renderShell()
   await refreshModels()
+  await loadSkills()
   await switchDept(state.dept, { keepTab: true })
   connectStream()
   window.addEventListener('keydown', (event) => {
@@ -250,6 +254,16 @@ async function refreshModels() {
     state.models = (await api.get('/api/panel/models')).models ?? []
   } catch {
     state.models = []
+  }
+}
+
+/** 可直调技能清单（C1-2，GET /api/panel/:dept/skills）：拿不到就置空——不展示技能入口，
+ *  不假装可用；直调本身的失败在执行卡里大声报（诚实降级分层：清单是便利性，直调是承诺）。 */
+async function loadSkills() {
+  try {
+    state.skills = (await api.get(`/api/panel/${state.dept}/skills`)).skills ?? []
+  } catch {
+    state.skills = []
   }
 }
 
@@ -364,9 +378,13 @@ function renderShell() {
   document.getElementById('app').innerHTML = `
     <div class="topbar">
       <div class="logo">🌳 榕器 <span class="badge">部门工作台</span></div>
-      <div class="view-tabs">
-        <span class="view-tab" data-v="workbench">工作台</span>
-        <span class="view-tab" data-v="board">战略看板</span>
+      <div class="more-sel">
+        <div class="more-btn" id="moreBtn">☰ 更多</div>
+        <div class="more-menu" id="moreMenu">
+          <div class="more-opt" data-m="board"><span>📈</span><span>战略看板<span class="sub">平台聚合视图（经理视角）</span></span></div>
+          ${session.can('panel.config.write') ? '<div class="more-opt" data-m="config"><span>⚙</span><span>面板设置<span class="sub">阵容 / 看板块 / KPI</span></span></div>' : ''}
+          <div class="more-opt" data-m="models"><span>🧠</span><span>模型管理<span class="sub">接入与连通性</span></span></div>
+        </div>
       </div>
       <div class="ind-sel">
         <div class="ind-btn" id="indBtn">
@@ -375,7 +393,7 @@ function renderShell() {
         </div>
         <div class="ind-menu" id="indMenu"></div>
       </div>
-      <div class="top-search" id="cmdkTrigger"><span>搜索 Agent / 频道 / 场景 / 同事…</span><span class="kbd">⌘K</span></div>
+      <div class="top-search" id="cmdkTrigger"><span>搜索 Agent / 技能 / 频道 / 场景 / 同事…</span><span class="kbd">⌘K</span></div>
       <div class="top-right" id="topRight"></div>
     </div>
     <div class="body">
@@ -384,11 +402,23 @@ function renderShell() {
       <div class="board" id="board" style="display:none"></div>
     </div>`
   document.getElementById('indBtn').onclick = (event) => { event.stopPropagation(); renderIndMenu(); document.getElementById('indMenu').classList.toggle('show') }
-  document.addEventListener('click', () => document.getElementById('indMenu')?.classList.remove('show'))
-  document.getElementById('cmdkTrigger').onclick = () => openCmdk()
-  document.querySelectorAll('.view-tab').forEach((el) => {
-    el.onclick = () => { location.hash = el.dataset.v === 'board' ? '#/board' : '#/workbench' }
+  document.addEventListener('click', () => {
+    document.getElementById('indMenu')?.classList.remove('show')
+    document.getElementById('moreMenu')?.classList.remove('show')
   })
+  // C1-1 信息架构收敛：战略看板/面板设置/模型管理收进「更多」二级入口——主界面只剩对话
+  // 与执行卡；#/board 深链保留（hash 直达看板不受影响）。
+  document.getElementById('moreBtn').onclick = (event) => { event.stopPropagation(); document.getElementById('moreMenu').classList.toggle('show') }
+  document.querySelectorAll('.more-opt').forEach((el) => {
+    el.onclick = (event) => {
+      event.stopPropagation()
+      document.getElementById('moreMenu')?.classList.remove('show')
+      if (el.dataset.m === 'board') location.hash = '#/board'
+      else if (el.dataset.m === 'config') void showConfig()
+      else if (el.dataset.m === 'models') void showModels()
+    }
+  })
+  document.getElementById('cmdkTrigger').onclick = () => openCmdk()
   applyView()
   renderTopRight()
 }
@@ -519,8 +549,8 @@ function renderRail() {
     </div>`
   }).join('') + `
     <div class="rail-spacer"></div>
-    ${state.hostBridge && !EMBEDDED ? `<div class="rail-console" id="railChat" title="切到 Agent 对话（dsh 标准对话，默认 Agent 交互面）" style="cursor:pointer">
-      <div class="ico">💬</div><div>Agent<br>对话</div></div>` : ''}
+    ${state.hostBridge && !EMBEDDED ? `<div class="rail-console" id="railChat" title="切到 AI 助手对话（默认对话入口）" style="cursor:pointer">
+      <div class="ico">💬</div><div>AI 助手<br>对话</div></div>` : ''}
     <a class="rail-console" href="${basePath() || '/'}" title="打开榕器管理控制台" style="text-decoration:none"
       data-landing="console">
       <div class="ico">🧩</div><div>管理<br>控制台</div></a>`
@@ -712,7 +742,7 @@ function renderMain() {
   const embedChat = state.tab === 'chat' && canEmbedDshChat()
   host.innerHTML = `
     <div class="tabs">
-      <div class="tab ${state.tab === 'chat' ? 'on' : ''}" data-tab="chat">💬 ${embedChat ? 'Agent 对话' : '协作会话'}<span class="mini">${embedChat ? 'dsh 标准对话 · 默认交互面' : '人 × Agent × 钉钉'}</span></div>
+      <div class="tab ${state.tab === 'chat' ? 'on' : ''}" data-tab="chat">💬 ${embedChat ? 'AI 助手' : '协作会话'}<span class="mini">${embedChat ? '默认对话 · 可 /技能名 直调' : '人 × 数字同事 × 钉钉'}</span></div>
       <div class="tab ${state.tab === 'tasks' ? 'on' : ''}" data-tab="tasks">📌 任务看板</div>
       <div class="tab ${state.tab === 'arts' ? 'on' : ''}" data-tab="arts">📁 部门知识</div>
       <div class="tab ${state.tab === 'scene' ? 'on' : ''}" data-tab="scene">🗺 场景图谱<span class="mini">${esc(industry?.code ?? '未激活')}</span></div>
@@ -745,17 +775,22 @@ function renderMain() {
 function renderChatEmbed(host) {
   const dept = state.overview.dept
   const industry = state.overview.industry
+  const skills = state.skills.slice(0, 4)
   host.innerHTML = `
     <div class="chat-embed">
       <div class="ce-bar">
-        <span class="ce-title">🤖 dsh 标准对话<span class="ce-sub">默认 Agent 交互面 · 面板 Agent 阵容可被点名调用</span></span>
+        <span class="ce-title">🤖 AI 助手对话<span class="ce-sub">默认对话入口 · 部门数字同事可 @ 点名协作</span></span>
         <span class="ce-acts">
+          ${skills.length > 0 ? `<select class="ce-act" id="ceSkillPick" title="选一个已上架技能，转到协作会话直调（执行卡展示进度与结果）">
+            <option value="">⚡ 选技能直调…</option>
+            ${skills.map((skill) => `<option value="${esc(skill.name)}">${esc(skill.name)}</option>`).join('')}
+          </select>` : ''}
           <button class="ce-act" id="ceHandoff" title="把当前部门/行业上下文复制到剪贴板，粘进对话即可继续">📋 携带部门上下文</button>
           <button class="ce-act" id="ceFallback">使用内置协作会话</button>
           <a class="ce-act" href="/" target="_blank" rel="noreferrer">在 dsh 中打开 ↗</a>
         </span>
       </div>
-      <iframe class="ce-frame" src="/" title="dsh Agent 对话" referrerpolicy="same-origin"></iframe>
+      <iframe class="ce-frame" src="/" title="AI 助手对话" referrerpolicy="same-origin"></iframe>
     </div>`
   document.getElementById('ceHandoff').onclick = async () => {
     const context = `【榕器·${dept.label}】行业 ${industry?.code ?? '未激活'} · 请围绕该部门场景协作（面板：${location.origin}${basePath()}/panel/?dept=${state.dept}）`
@@ -769,6 +804,17 @@ function renderChatEmbed(host) {
   document.getElementById('ceFallback').onclick = () => {
     localStorage.setItem('panel_chat_embed_off', '1')
     renderMain()
+  }
+  // 技能直调入口（C1-2）：内嵌形态选技能 → 转内置协作会话并预填 /技能名（执行卡在那里渲染）
+  const skillPick = document.getElementById('ceSkillPick')
+  if (skillPick) {
+    skillPick.onchange = () => {
+      const name = skillPick.value
+      if (!name) return
+      localStorage.setItem('panel_chat_embed_off', '1')
+      renderMain()
+      insertSkill(name)
+    }
   }
 }
 
@@ -810,9 +856,31 @@ function renderMessages(host) {
   wrap.querySelectorAll('[data-op]').forEach((el) => {
     el.onclick = () => void doCardAction(el.dataset.msg, el.dataset.op, el)
   })
+  // 技能执行卡「重试」（C1-2）：原样回填斜杠命令再走一次直调
+  wrap.querySelectorAll('[data-retry]').forEach((el) => {
+    el.onclick = async () => {
+      const input = document.querySelector('#composerInput')
+      if (!input) { void toast('请切到协作会话后重试'); return }
+      input.value = el.dataset.retry
+      await sendMessage(input)
+    }
+  })
 }
 
 function messageHtml(m, ddBound) {
+  // 技能执行卡（C1-2 本地瞬时态）：调用中转圈 / 异常阻断红卡（原因 + 重试）。
+  // 已完成态不落卡——应答消息本身（⚡ 技能名）就是结果，卡片即时移除避免双份展示。
+  if (m.kind === 'skill-exec') {
+    if (m.state === 'blocked') {
+      return `<div class="msg"><div class="m-av" style="background:#ef4444">⚡</div>
+        <div class="m-body"><div class="m-meta">${esc(m.skillName)} <span class="role" style="color:var(--err)">执行失败</span></div>
+        <div class="m-txt"><div class="skill-exec blocked"><b>调用没有成功：</b>${esc(m.reason ?? '未知原因（可下拉查看技术详情）')}
+          ${m.raw ? `<div class="se-ops"><button class="btn" data-retry="${esc(m.raw)}">↻ 重试</button></div>` : ''}</div></div></div></div>`
+    }
+    return `<div class="msg"><div class="m-av" style="background:#6366f1">⚡</div>
+      <div class="m-body"><div class="m-meta">${esc(m.skillName)} <span class="role">技能执行中</span></div>
+      <div class="m-txt"><div class="skill-exec calling"><span class="se-spin"></span> 正在执行「${esc(m.skillName)}」${esc(m.text ? `：${m.text.slice(0, 40)}` : '')}…</div></div></div></div>`
+  }
   if (m.senderType === 'system') return `<div class="sys-line"><span>⚡ ${md(m.text)}</span></div>`
   const ddBadge = m.ddSync === 'sent'
     ? '<div class="dd-sync">⇄ 已同步钉钉</div>'
@@ -886,6 +954,7 @@ function composerHtml() {
         ${onlineModels.map((model) => `<option value="${esc(model.slug)}" ${state.chatModel === model.slug ? 'selected' : ''}>${esc(model.displayName || model.slug)}</option>`).join('')}
       </select>`
     : '<span class="model-empty" id="modelEmptyHint" title="模型目录暂无在线模型——点此登记接入（与 dsh 服务共用模型目录）">🧠 未接入模型</span>'
+  const skills = state.skills.slice(0, 6)
   return `
     <div class="composer">
       <div class="at-row">
@@ -894,12 +963,18 @@ function composerHtml() {
         ${members.map((member) => `<span class="at-chip" data-at="${esc(member.name)}" title="${esc(member.title ?? '')}${member.orgName ? ` · ${esc(member.orgName)}` : ''}">🧑 ${esc(member.name)}</span>`).join('')}
         ${bound ? '<span class="at-chip ddu" data-at="钉群·全员">⇄ 钉群·全员</span>'
           : '<span class="at-chip" id="bindHint">🔗 绑定钉钉后可 @ 钉钉同事</span>'}
-        ${state.hostBridge && !EMBEDDED ? '<span class="at-chip" id="reembedHint" title="切回 dsh 标准对话（默认 Agent 交互面）">🤖 改用 dsh 对话</span>' : ''}
+        ${state.hostBridge && !EMBEDDED ? '<span class="at-chip" id="reembedHint" title="切回 AI 助手对话（默认对话入口）">🤖 改用 AI 助手</span>' : ''}
         <span class="dd-toggle" id="ddToggle"><span class="sw ${state.ddSync && bound ? 'on' : ''} ${bound ? '' : 'disabled'}" id="ddSw"></span>钉钉同步</span>
       </div>
+      ${skills.length > 0 ? `
+      <div class="at-row skill-row">
+        <span style="font-size:11px;color:var(--txt2)">⚡ 技能：</span>
+        ${skills.map((skill) => `<span class="at-chip sk" data-skill="${esc(skill.name)}" title="${esc(skill.summary)}（已上架 v${esc(skill.version)}）">⚡ ${esc(skill.name)}</span>`).join('')}
+        <span style="font-size:11px;color:var(--txt2)">输入 /技能名 也可直调</span>
+      </div>` : ''}
       <div class="input-row">
         ${modelSwitch}
-        <input id="composerInput" placeholder="发消息给同事 / @Agent 下达任务${bound && state.ddSync ? ' / 本条将同步钉钉群' : ''}…（Enter 发送）">
+        <input id="composerInput" placeholder="发消息 / @数字同事 下任务 / /技能名 直调${bound && state.ddSync ? ' / 本条将同步钉钉群' : ''}…（Enter 发送）">
         <button class="send" id="composerSend">发送</button>
       </div>
     </div>`
@@ -913,6 +988,10 @@ function wireComposer(host) {
   input.oninput = () => saveDraft(input)
   host.querySelectorAll('[data-at]').forEach((el) => {
     el.onclick = () => atMention(el.dataset.at, input)
+  })
+  // 技能 chips（C1-2）：点击把 /技能名 填进输入框——发送时按斜杠命令直调
+  host.querySelectorAll('[data-skill]').forEach((el) => {
+    el.onclick = () => insertSkill(el.dataset.skill, input)
   })
   const bindHint = host.querySelector('#bindHint')
   if (bindHint) bindHint.onclick = () => showBind()
@@ -957,9 +1036,66 @@ function atMention(name, inputEl) {
   input.focus()
 }
 
+/** 技能名填入输入框（C1-2：/技能名 斜杠形态，发送时直调）。 */
+function insertSkill(name, inputEl) {
+  const input = inputEl ?? document.querySelector('#composerInput')
+  if (!input) { void toast('请先切到「协作会话」再直调技能'); return }
+  input.value = `/${name} ${input.value}`
+  saveDraft(input)
+  input.focus()
+}
+
+/** 斜杠命令解析：/技能名 输入 → 匹配已上架技能（名全名优先，slug 兜底）；不匹配返回 null 走普通消息。 */
+function parseSkillCommand(text) {
+  const m = /^\/(.+?)(?:\s+([\s\S]*))?$/.exec(text)
+  if (!m) return null
+  const name = m[1].trim()
+  const skill = state.skills.find((item) => item.name === name || item.slug === name)
+  if (!skill) return null
+  return { skill, message: (m[2] ?? '').trim() }
+}
+
+/**
+ * 技能直调 + 面板侧执行卡（C1-2 四态）：调用中（本地瞬时卡）→ 已完成（应答以数字同事消息落频道）
+ * / 异常阻断（红卡原因 + 重试；服务端同时落失败系统行，全频道可见可回查）。
+ * 卡片是进度示意；结果（成功应答/失败原因）都已服务端持久化，刷新不丢。
+ */
+async function runSkillInvoke(skill, message, rawText) {
+  const exec = {
+    id: `local-skill-${Date.now()}`, kind: 'skill-exec', state: 'calling',
+    skillName: skill.name, text: message, raw: rawText, at: new Date().toISOString(),
+  }
+  state.messages.push(exec)
+  renderMessages()
+  try {
+    const result = await api.post(`/api/panel/${state.dept}/skills/invoke`, {
+      skill: skill.name, message, channelId: state.channelId,
+      ...(state.chatModel ? { model: state.chatModel } : {}),
+    })
+    state.messages = state.messages.filter((m) => m.id !== exec.id)
+    for (const m of [result.message, result.replyMessage]) {
+      if (m && !state.messages.some((x) => x.id === m.id)) state.messages.push(m)
+    }
+    if (!result.ok) state.messages.push({ ...exec, state: 'blocked', reason: result.reason })
+    renderMessages()
+    void refreshOverview()
+  } catch (error) {
+    state.messages = state.messages.filter((m) => m.id !== exec.id)
+    state.messages.push({ ...exec, state: 'blocked', reason: error.message })
+    renderMessages()
+  }
+}
+
 async function sendMessage(input) {
   const text = input.value.trim()
   if (!text || !state.channelId) return
+  const skillCmd = parseSkillCommand(text)
+  if (skillCmd) {
+    input.value = ''
+    clearDraft()
+    await runSkillInvoke(skillCmd.skill, skillCmd.message, text)
+    return
+  }
   input.value = ''
   try {
     const result = await api.post(`/api/panel/${state.dept}/messages`, {
@@ -1464,7 +1600,7 @@ async function openCmdk() {
   mask.className = 'cmdk-mask'
   mask.innerHTML = `
     <div class="cmdk">
-      <input id="cmdkInput" placeholder="搜索 Agent / 频道 / 场景 / 同事…">
+      <input id="cmdkInput" placeholder="搜索 Agent / 技能 / 频道 / 场景 / 同事…">
       <div class="cmdk-list" id="cmdkList"></div>
     </div>`
   document.body.appendChild(mask)
@@ -1483,6 +1619,10 @@ async function openCmdk() {
     for (const channel of state.overview?.dept?.id === dept.id ? state.overview.channels : []) {
       sources.push({ group: '频道', icon: '#', label: channel.name, sub: dept.label, act: () => { mask.remove(); void switchDept(dept.id).then(() => switchChannel(channel.id)) } })
     }
+  }
+  // 技能源（C1-2）：选中即回协作会话并把 /技能名 填进输入框
+  for (const skill of state.skills.slice(0, 8)) {
+    sources.push({ group: '技能', icon: '⚡', label: skill.name, sub: skill.summary || skill.category, act: () => { mask.remove(); state.tab = 'chat'; localStorage.setItem('panel_tab', 'chat'); insertSkill(skill.name) } })
   }
   try {
     const graph = state.industry ? await api.get(`/api/panel/scenegraph?industry=${state.industry.code.toUpperCase()}`) : null
@@ -1537,7 +1677,6 @@ function applyView() {
   rail.style.display = isBoard ? 'none' : ''
   dept.style.display = isBoard ? 'none' : ''
   board.style.display = isBoard ? '' : 'none'
-  document.querySelectorAll('.view-tab').forEach((el) => el.classList.toggle('active', el.dataset.v === state.view))
   if (isBoard) void renderBoardView()
 }
 

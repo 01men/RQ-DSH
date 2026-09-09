@@ -50,15 +50,30 @@ button { font-family:inherit; }
 .pill.dd-off { border-color:#7f1d1d; color:#fca5a5; }
 .pill.dd-on { border-color:var(--dd); color:#93c5fd; }
 
-.body { display:flex; flex:1; min-height:0; }
+/* ===== 「更多」二级菜单（C1-1 信息架构收敛：看板/设置/模型收进二级入口） ===== */
+.more-sel { position:relative; }
+.more-btn { display:flex; align-items:center; background:#1f2937; border:1px solid #374151; color:#e5e7eb; border-radius:8px; padding:6px 12px; font-size:12px; cursor:pointer; min-height:32px; box-sizing:border-box; }
+.more-btn:hover { border-color:#6b7280; }
+.more-menu { position:absolute; top:40px; left:0; width:264px; background:#fff; color:var(--txt); border-radius:12px; box-shadow:0 12px 40px rgba(0,0,0,.25); padding:8px; display:none; z-index:50; }
+.more-menu.show { display:block; }
+.more-opt { display:flex; align-items:center; gap:10px; padding:9px 10px; min-height:36px; box-sizing:border-box; border-radius:9px; cursor:pointer; font-size:13px; }
+.more-opt:hover { background:var(--bg); }
+.more-opt .sub { font-size:10px; color:var(--txt2); display:block; margin-top:1px; }
+
+/* ===== 技能执行卡（C1-2）：调用中转圈 / 异常阻断红卡；触控热区 ≥36px（QA BUG-U-08 同规） ===== */
+.skill-exec { border:1px solid var(--line); border-radius:10px; padding:10px 12px; font-size:12px; background:var(--bg); display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.skill-exec.blocked { border-color:#fca5a5; background:#fef2f2; color:#7f1d1d; display:block; }
+.skill-exec.blocked .se-ops { margin-top:8px; }
+.skill-exec .btn { min-height:36px; }
+.se-spin { width:14px; height:14px; border-radius:50%; border:2px solid #c7d2fe; border-top-color:#6366f1; display:inline-block; animation:se-rotate .9s linear infinite; flex-shrink:0; }
+@keyframes se-rotate { to { transform:rotate(360deg); } }
 
 /* ===== 手机窄屏（QA BUG-U-08）：375px 钉钉 webview 顶栏不再互相挤压裁切 ===== */
 @media (max-width:700px) {
   .topbar { padding:0 10px; gap:6px; }
   .logo { font-size:13px; }
   .logo .badge { display:none; }
-  .view-tabs { margin-left:2px; padding:2px; }
-  .view-tab { padding:5px 9px; font-size:12px; }
+  .more-btn { padding:6px 8px; font-size:11px; }
   .ind-btn { padding:6px 8px; font-size:11px; max-width:132px; }
   .ind-btn > span:nth-child(2) { max-width:60px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .top-right { gap:6px; }
@@ -343,10 +358,7 @@ button { font-family:inherit; }
 .login-guide h1 { font-size:18px; margin-bottom:10px; }
 .login-guide p { font-size:13px; color:var(--txt2); line-height:1.8; margin-bottom:18px; }
 
-/* ---- 战略看板视图（/panel 面双轨视图，/api/panel/board 数据面） ---- */
-.view-tabs { display:flex; gap:4px; background:#1f2937; border-radius:8px; padding:3px; margin-left:8px; }
-.view-tab { padding:5px 14px; border-radius:6px; font-size:13px; cursor:pointer; color:#9ca3af; user-select:none; }
-.view-tab.active { background:#374151; color:#fff; }
+/* ---- 战略看板视图（/panel 面，经「更多」二级入口或 #/board 深链进入） ---- */
 .board { flex:1; overflow:auto; padding:18px 24px; background:#f3f4f6; min-width:0; }
 .board-loading { padding:40px; text-align:center; color:#6b7280; font-size:13px; }
 .board-head { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:14px; }

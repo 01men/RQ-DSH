@@ -4310,6 +4310,15 @@ try {
     panelApp.includes('data-landing') && panelApp.includes('next='))
   check('面板模型面接线（composer 模型切换 #chatModel + 模型配置界面 showModels + 回包模型徽标）',
     panelApp.includes('#chatModel') && panelApp.includes('showModels') && panelApp.includes("role model"))
+  // C1-1 信息架构收敛（进入即对话 + 看板/设置收二级入口）+ C1-2 技能直调接线（静态面）
+  check('C1-1 前端：进入即对话（boot 固定落 chat Tab）+ 战略看板/设置收「更多」二级入口（view-tabs 已拆除）',
+    panelApp.includes(`tab: 'chat'`) && panelApp.includes('moreMenu') && panelApp.includes("data-m=\"board\"")
+    && !panelApp.includes('view-tab'),
+    JSON.stringify({ chat: panelApp.includes(`tab: 'chat'`), more: panelApp.includes('moreMenu'), board: panelApp.includes('data-m="board"'), legacy: panelApp.includes('view-tab') }))
+  check('C1-2 前端：技能直调接线（/dept/skills 清单 + 斜杠解析 + 执行卡四态渲染 + 重试回填 + ⌘K 技能源）',
+    panelApp.includes('/skills`' ) && panelApp.includes('parseSkillCommand') && panelApp.includes('skill-exec')
+    && panelApp.includes('data-retry') && panelApp.includes("group: '技能'"),
+    JSON.stringify({ list: panelApp.includes('/skills`'), parse: panelApp.includes('parseSkillCommand'), card: panelApp.includes('skill-exec'), retry: panelApp.includes('data-retry') }))
 
   // ================================================================ 宿主服务连接切换（docs/frontend-host-switching.md）
   section('宿主服务连接切换（前端多宿主 + 数据面跨域放行）')
@@ -4610,6 +4619,85 @@ try {
         JSON.stringify({ assets: digest.data?.value?.assets, err: digest.data?.error }))
       const digestBad = await api('POST', '/api/tools/execute', { token: panelAdmin, body: { name: 'panel_board_digest', args: { platform: 'nope' } } })
       check('panel_board_digest：非法 platform 诚实报错', digestBad.ok && digestBad.data.isError === true && /platform 非法/.test(JSON.stringify(digestBad.data)))
+
+      // -- C1-2 技能直调（J1 消费面）：≥3 个已上架技能面板内点名直调 + 诚实降级 + 频道留痕 --
+      const panelSkillSeeds = ['图纸问答助手', '质检报告助手', '排产问答助手']
+      const panelSkillIds = []
+      for (const [idx, name] of panelSkillSeeds.entries()) {
+        const submitted = await api('POST', '/api/skills', { token: panelAdmin, body: {
+          name, summary: `面板直调自测技能 ${idx + 1}`, category: '研发效能', version: '1.0.0',
+          content: `# ${name}\n\n## 步骤\n1. 读取输入\n2. 按部门面板口径作答并给出结论`,
+        } })
+        if (submitted.ok) {
+          await api('POST', `/api/skills/${submitted.data.id}/approve`, { token: panelAdmin, body: { decision: 'approve', level: 'domain', opinion: '面板直调自测' } })
+          const published = await api('POST', `/api/skills/${submitted.data.id}/publish`, { token: panelAdmin, body: {} })
+          if (published.ok) panelSkillIds.push(submitted.data.id)
+        }
+      }
+      // 组织不可见技能（visibility=orgs 指向其他组织）：面板清单不得出现、直调必须诚实拒绝
+      const hiddenSkill = await api('POST', '/api/skills', { token: panelAdmin, body: {
+        name: '隐藏技能（面板不可见）', summary: 'visibility=orgs 且不指向当前组织', category: '通用', version: '1.0.0',
+        content: '# 隐藏技能（面板不可见）\n\n## 何时使用\n仅指定组织的专属场景使用。\n\n## 步骤\n1. 读取输入\n2. 按指定组织口径作答并给出结论',
+        visibility: 'orgs', targetOrgs: ['org-not-exists'],
+      } })
+      if (hiddenSkill.ok) {
+        const hiddenApprove = await api('POST', `/api/skills/${hiddenSkill.data.id}/approve`, { token: panelAdmin, body: { decision: 'approve', level: 'domain', opinion: '面板直调自测' } })
+        const hiddenPublish = await api('POST', `/api/skills/${hiddenSkill.data.id}/publish`, { token: panelAdmin, body: {} })
+        if (!hiddenPublish.ok) console.error('隐藏技能上架链路：', JSON.stringify({ submit: hiddenSkill.error, approve: hiddenApprove.error ?? hiddenApprove.data, publish: hiddenPublish.error }))
+      }
+      check('技能直调：≥3 个技能完成上架（面板可点名面）+ 1 个组织不可见技能就位',
+        panelSkillIds.length >= 3 && hiddenSkill.ok, JSON.stringify({ ids: panelSkillIds, hidden: hiddenSkill.error }))
+      const panelSkills = await api('GET', '/api/panel/mfg/skills', { token: panelAdmin })
+      check('技能直调：GET /api/panel/:dept/skills 只下发 published 且组织可见技能（隐藏技能不出现）',
+        panelSkills.ok && panelSkillSeeds.every((name) => panelSkills.data.skills.some((s) => s.name === name))
+        && !panelSkills.data.skills.some((s) => s.name.includes('隐藏技能')),
+        JSON.stringify(panelSkills.data?.skills?.map((s) => s.name)))
+      for (const name of panelSkillSeeds) {
+        const invoked = await api('POST', '/api/panel/mfg/skills/invoke', { token: panelAdmin, body: { skill: name, message: `直调自测：${name}`, channelId: mainChannel.id, model: 'deepseek-chat' } })
+        check(`技能直调：/等价直调「${name}」成功（ok:true + stub 应答 + agent 型消息落频道）`,
+          invoked.ok && invoked.data.ok === true && /93\.2%/.test(String(invoked.data.reply ?? ''))
+          && invoked.data.replyMessage?.senderName === `⚡ ${name}` && invoked.data.replyMessage?.model === 'deepseek-chat',
+          JSON.stringify({ ok: invoked.data?.ok, err: invoked.error, reply: String(invoked.data?.reply ?? '').slice(0, 60) }))
+      }
+      const skillTraceList = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=50`, { token: panelAdmin })
+      check('技能直调：斜杠原文以 human 消息留痕 + 应答 agent 消息持久化（刷新/多端可回查）',
+        skillTraceList.ok && panelSkillSeeds.every((name) => {
+          const trace = skillTraceList.data.messages.find((m) => m.senderType === 'human' && m.text === `/${name} 直调自测：${name}`)
+          const reply = skillTraceList.data.messages.find((m) => m.agentName === name && m.senderIcon === '⚡')
+          return Boolean(trace && reply)
+        }))
+      const invokeUnknownSkill = await api('POST', '/api/panel/mfg/skills/invoke', { token: panelAdmin, body: { skill: '不存在的技能', message: 'x', channelId: mainChannel.id } })
+      check('技能直调：未知技能诚实降级（HTTP 200 + ok:false + 可用技能清单透出）',
+        invokeUnknownSkill.ok && invokeUnknownSkill.data.ok === false && /可用技能/.test(String(invokeUnknownSkill.data.reason ?? '')),
+        JSON.stringify(invokeUnknownSkill.data))
+      const invokeHiddenSkill = await api('POST', '/api/panel/mfg/skills/invoke', { token: panelAdmin, body: { skill: '隐藏技能（面板不可见）', message: 'x', channelId: mainChannel.id } })
+      check('技能直调：组织不可见技能诚实拒绝（不进清单也不可直调）',
+        invokeHiddenSkill.ok && invokeHiddenSkill.data.ok === false && /未对当前用户组织开放/.test(String(invokeHiddenSkill.data.reason ?? '')),
+        JSON.stringify(invokeHiddenSkill.data))
+      const hiddenFailRow = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=20`, { token: panelAdmin })
+      check('技能直调：失败原因落系统行（全频道可见可回查，不静默）',
+        hiddenFailRow.ok && hiddenFailRow.data.messages.some((m) => m.senderType === 'system' && m.text.includes('调用失败') && m.text.includes('隐藏技能')),
+        JSON.stringify(hiddenFailRow.data?.messages?.filter((m) => m.senderType === 'system')?.map((m) => m.text)?.slice(-2)))
+      const invokeBadModel = await api('POST', '/api/panel/mfg/skills/invoke', { token: panelAdmin, body: { skill: panelSkillSeeds[0], message: 'x', channelId: mainChannel.id, model: 'no-such-model' } })
+      check('技能直调：未登记模型被拒（400，同对话框口径）', invokeBadModel.status === 400, JSON.stringify(invokeBadModel.error))
+      const beforeGuardList = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=100`, { token: panelAdmin })
+      const beforeGuardCount = beforeGuardList.data.messages.filter((m) => m.agentName === '面板质检员').length
+      const skillMentionGuard = await api('POST', '/api/panel/mfg/skills/invoke', { token: panelAdmin, body: { skill: panelSkillSeeds[0], message: '顺带 @面板质检员 也不许重复唤起', channelId: mainChannel.id, model: 'deepseek-chat' } })
+      await new Promise((resolve) => setTimeout(resolve, 1200))
+      const afterGuardList = await api('GET', `/api/panel/mfg/messages?channelId=${mainChannel.id}&limit=100`, { token: panelAdmin })
+      const qcReplies = afterGuardList.data.messages.filter((m) => m.agentName === '面板质检员')
+      check('技能直调：skipAgentDispatch——斜杠留痕文本内 @Agent 不重复触发 Agent 通道（质检员回包数不增）',
+        skillMentionGuard.ok && skillMentionGuard.data.ok === true && qcReplies.length === beforeGuardCount,
+        JSON.stringify({ guard: skillMentionGuard.data?.ok, before: beforeGuardCount, after: qcReplies.length, err: skillMentionGuard.error }))
+      const panelSkillInvokeTool = await api('POST', '/api/tools/execute', { token: panelAdmin, body: { name: 'panel_skill_invoke', args: { skill: panelSkillSeeds[1], message: '工具面直调' } } })
+      check('panel_skill_invoke：dsh 工具面点名直调（与对话框同一服务原语，ok:true + 应答）',
+        panelSkillInvokeTool.ok && panelSkillInvokeTool.data.isError === false && panelSkillInvokeTool.data.value?.ok === true && /93\.2%/.test(String(panelSkillInvokeTool.data.value?.reply ?? '')),
+        JSON.stringify(panelSkillInvokeTool.data?.value ?? panelSkillInvokeTool.error))
+      const panelSkillInvokeUnknown = await api('POST', '/api/tools/execute', { token: panelAdmin, body: { name: 'panel_skill_invoke', args: { skill: '不存在技能', message: 'x' } } })
+      check('panel_skill_invoke：未知技能诚实失败（ok:false + 原因，不造假回复）',
+        panelSkillInvokeUnknown.ok && panelSkillInvokeUnknown.data.value?.ok === false && /可用技能/.test(String(panelSkillInvokeUnknown.data.value?.reason ?? '')),
+        JSON.stringify(panelSkillInvokeUnknown.data?.value))
+
       const panelModelDel = await api('DELETE', `/api/panel/models/${panelModelUpsert.data.id}`, { token: panelAdmin })
       check('面板：模型删除（DELETE /api/panel/models/:id，登记移除后目录不含）',
         panelModelDel.ok && panelModelDel.data.deleted === true

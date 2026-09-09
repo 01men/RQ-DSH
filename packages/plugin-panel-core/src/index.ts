@@ -471,6 +471,62 @@ export function apply(ctx: Context) {
     return result
   })
 
+  // -- 技能直调（C1-2 / J1 消费面：对话框 @技能名/斜杠命令） ---------------------------------
+
+  guarded('GET', '/api/panel/:dept/skills', 'panel.read', (exchange) => {
+    deptOf(exchange)
+    return { skills: panel.listInvokeableSkills(orgIdOf(exchange)) }
+  })
+
+  /**
+   * 技能点名直调（/技能名 问题 的服务端）。诚实降级语义（J1）：可预判的失败
+   * （技能不存在/未上架/不可见/网关失败）以 HTTP 200 + ok:false + reason 回包——
+   * 降级是数据不是传输错误；鉴权/部门范围失败仍走 403/400。
+   * 留痕：斜杠原文先落频道（skipAgentDispatch：同一条文本不重复触发 @Agent）；
+   * 成功落技能应答（agent 型消息），失败落系统行——失败原因全频道可见、可回查，不静默。
+   */
+  guarded('POST', '/api/panel/:dept/skills/invoke', 'panel.write', async (exchange) => {
+    const dept = deptOf(exchange)
+    const input = body<{ skill?: string; message?: string; channelId?: string; model?: string; uniqueKey?: string }>(exchange)
+    const skillName = input.skill?.trim() ?? ''
+    const message = input.message?.trim() ?? ''
+    if (!skillName) throw new Error('skill 必填（技能名或 slug）')
+    if (!message) throw new Error('message 必填（要交给技能的输入/问题）')
+    if (message.length > 10_000) throw new Error('消息内容过长（上限 10000 字符）')
+    const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id
+    if (!channelId) throw new Error('部门暂无频道，请先创建')
+    const requestedModel = input.model?.trim() ?? ''
+    if (requestedModel && !ctx.modelGateway.models().findOne((item) => item.slug === requestedModel)) {
+      throw new Error(`模型未在目录登记：${requestedModel}（可在「🧠 模型」中登记）`)
+    }
+    const info = caller(exchange)
+    const trace = await panel.sendMessage({
+      dept: dept.id, channelId, senderType: 'human', senderId: info.userId,
+      senderName: info.name, text: `/${skillName} ${message}`, ddSync: false,
+      ...(requestedModel ? { modelOverride: requestedModel } : {}),
+      ...(input.uniqueKey ? { uniqueKey: input.uniqueKey } : {}),
+      skipAgentDispatch: true,
+    })
+    changeLog(exchange, 'panel.skill.invoke', 'panel_message', trace.id, skillName, message.slice(0, 200))
+    const result = await panel.invokeSkill(skillName, message, {
+      userId: info.userId, ...(requestedModel ? { modelOverride: requestedModel } : {}),
+    })
+    if (!result.ok) {
+      await panel.sendMessage({
+        dept: dept.id, channelId, senderType: 'system', senderName: '榕器',
+        text: `⚡ 技能「${skillName}」调用失败：${result.reason}`, ddSync: false,
+      })
+      return { ok: false as const, reason: result.reason, message: trace }
+    }
+    const reply = await panel.sendMessage({
+      dept: dept.id, channelId, senderType: 'agent', senderName: `⚡ ${result.skill.name}`,
+      senderIcon: '⚡', agentName: result.skill.name, text: result.reply,
+      ddSync: false, ...(result.model ? { replyModel: result.model } : {}),
+      ...(trace.sceneCode ? { sceneCode: trace.sceneCode } : {}),
+    })
+    return { ok: true as const, reply: result.reply, model: result.model, skill: result.skill, message: trace, replyMessage: reply }
+  })
+
   // -- 任务看板 -----------------------------------------------------------------
 
   guarded('GET', '/api/panel/:dept/tasks', 'panel.read', (exchange) => ({
@@ -911,6 +967,32 @@ export function apply(ctx: Context) {
     async execute(args, exec) {
       const input = args as { dept: string; agent: string; message: string; context_note?: string }
       return await panel.askAgent(input.dept, input.agent, input.message, {
+        userId: exec.principal?.userId,
+        ...(input.context_note ? { contextNote: input.context_note } : {}),
+      })
+    },
+  })
+
+  // -- C1-2 技能直调：dsh 标准对话点名调用已上架 Skill（J1 契约的工具面） --
+  ctx.tools.register({
+    name: 'panel_skill_invoke',
+    description: '点名调用技能平台上架的某个 Skill 并同步取回执行结果（面板对话框 /技能名 直调的同一服务原语）：'
+      + '按技能名或 slug 全名匹配（须为已上架且对调用人组织开放的技能），取当前版本指令内容组装上下文，单轮调用模型网关。'
+      + '失败诚实返回 ok:false + 原因（不存在/未上架/不可见/无内容/网关失败），不造假回复。',
+    permission: 'panel.write',
+    parameters: {
+      type: 'object',
+      properties: {
+        skill: { type: 'string', description: '技能名或 slug（已上架 published 技能）' },
+        message: { type: 'string', description: '要交给技能的输入/问题' },
+        context_note: { type: 'string', description: '附加上下文说明（可选，拼入系统提示）' },
+      },
+      required: ['skill', 'message'],
+    },
+    output: { schema: { type: 'object' }, render: renderJson },
+    async execute(args, exec) {
+      const input = args as { skill: string; message: string; context_note?: string }
+      return await panel.invokeSkill(input.skill, input.message, {
         userId: exec.principal?.userId,
         ...(input.context_note ? { contextNote: input.context_note } : {}),
       })
