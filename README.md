@@ -445,7 +445,7 @@ packages/
   plugin-rq-card/           会话侧注入卡片（四态执行卡 + 反馈条；浏览器半需 node packages/plugin-rq-card/build.mjs 预构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   9 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（931 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点、宿主挂载/面板/桥接等功能分节；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（端到端断言全绿，数量以本次运行为准；含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点、宿主挂载/面板/桥接等功能分节；隔离实例 + DEMO_SEED）
 scripts/verify-live-host.mjs  已上线宿主真实性验证（运维持凭据执行）
 tests/full-chain-drill.mjs  四类资产「登记→审批→上架→授权→调用→计量回传」全链路演练
 tests/morning-peak-entry.mjs  早高峰入口并发演练（50 并发领票/兑换）
@@ -522,7 +522,7 @@ curl http://localhost:7300/docs/app-sso-integration.md
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **445 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，端到端断言全绿（数量以本次运行为准，历史计数作废——[M0 发布说明](docs/release-notes-2026-09-09-m0.md)口径）：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批（发起人可自审）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
@@ -562,3 +562,7 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 - 钱包/资金面已下线封存（M0-2，见 [docs/billing-archive-register.md](docs/billing-archive-register.md)）；OIDC 私钥存 data 目录，生产建议迁 KMS
 - NAS 文件操作全部经 MCP 文件网关（不直连 DSM 私有 API）；`fs_upload/fs_download` 在网关进程侧读写本地路径——平台与网关需同机部署，或把资产 `stagingDir` 配置为共享挂载点；`/mcp` 端点为无会话纯 JSON 形态（不提供 GET SSE 长流，主流客户端兼容）
 - Node ≥ 22.6（原生 TypeScript 运行，无需构建步骤；node:sqlite 在 Node 24 下为 Experimental，无害）
+
+---
+
+> 最近更新：2026-09-10 · 仓库对外呈现维护——新增 [llms.txt](llms.txt)（AI 引擎收录摘要）；selftest 断言计数口径对齐 M0（数量以本次运行为准，历史计数作废）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。

@@ -1,0 +1,46 @@
+# 榕器（ybkk-AIOS）· 企业 AI 资源管理平台
+
+> 榕器是基于 dsh/cordis「一切皆插件」架构的企业级 AI 资源统一管理平台：把 MCP 服务、Skill、Agent、AI 应用、模型路由、NAS 文件存储六类资产纳入一套身份（IAM/OIDC SSO）、一套权限、一套用量计量、一套审计；以「私有化年费 + 治理包」交付，对外只呈现用量透明与内部成本穿透，不含任何金额结算语义。
+
+RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: unified identity (IAM / OIDC SSO), permissions, usage metering and audit for six asset types — MCP services, skills, agents, AI apps, model routes and NAS file storage — delivered as private deployment (annual license + governance package).
+
+## 核心能力（均为已实现功能）
+
+- 统一身份与访问管理（IAM）：多级组织树、角色/用户组、权限点矩阵、钉钉连接器定时自动同步、全员名册 API（`GET /api/iam/roster`，PII 最小化）
+- 统一认证与 SSO：OIDC Provider（RS256/JWKS/PKCE S256/refresh 轮转/end_session/revoke）、应用上线门禁双点、owner 自助签发、钉钉免密登录
+- MCP 部署服务：草稿→验证→灰度→全量、版本不可变、一键回滚、令牌网关（权限组/Tool 粒度/只读约束）、熔断、P95 监控
+- Skill 市场：提交→静态扫描（恶意代码/密钥泄露自动驳回）→两级审批→版本化上架，Ed25519 契约验签，安装包可直传 NAS
+- Agent 本体与 AI 应用本体：注册颁发机器凭证、on-behalf-of 令牌链、编排拓扑一图穿透、PV/UV/DAU 指标（主动上报 + 公开访客埋点 beacon）
+- 用量计量：schema v1 幂等管道（死信重放/消费幂等）、零价快照价格簿、三方对账、能力漂移检测、成本穿透报表（单位 DAU 成本）
+- 模型接入网关：OpenAI 兼容真实转发（模型未配置 endpoint 时拒绝调用，不生成假 completion），实测 input/output tokens 计量
+- 审计与治理：四类审计日志、告警规则引擎、越权计数告警、L4 强制审批（上线/下线/下架/吊销，单人通过即执行、结果回写）
+- 连接器纳管：open-connector sidecar 作 SaaS 数据面（1,000+ Provider 目录、OAuth 代理、凭证保险库），平台侧双层授权镜像与计量对账
+- NAS 资产纳管与数据权限：经 Synology 文件 MCP 网关操作（不直连 DSM 私有 API）、mcpServers JSON 一键纳管、组织位置 + 角色层级 RBAC 判定引擎（默认 deny、全程留痕）
+- 平台即 MCP Server：`POST /mcp`（Streamable HTTP JSON 形态），40+ 运维工具对 ZCode/Claude/Cursor 等任意 MCP 客户端开放，复用 Bearer 令牌与工具级权限点
+- 远程 dsh 接入与自更新：接入码 enroll（哈希存储/一次性/TTL/失败锁定）、运维工具远程代理；平台自更新（上游版本检查→控制台一键升级，dry-run + 审计）
+
+## 快速开始
+
+- 环境要求：Node ≥ 22.6（原生 TypeScript 运行，无需构建步骤）
+- 启动：`npm install && npm start`（默认 http://127.0.0.1:7300，首次启动执行基线初始化：内置角色 + 根组织 + 平台管理员）
+- 演示模式：`DEMO_SEED=1 npm start`（注入演示组织树/账号/MCP/Skill/Agent/应用与 28 天历史数据）
+- 质量门：`npm run selftest` 端到端自测全绿（数量以本次运行为准）+ `npm run lint:manifests` 插件清单五面 YAML 校验
+- CLI：`node cli/dshctl.mjs --output json|table`（MCP/Skill/Agent/应用/NAS/凭证/审批全树命令）
+
+## 文档
+
+- [README](https://github.com/01men/ybkk-AIOS#readme)：产品全景、插件架构与能力对照
+- [企业部署与接入](https://github.com/01men/ybkk-AIOS/blob/main/docs/deploy-enterprise.md)：部署 runbook 与 dsh 运行时接入
+- [App SSO 接入指南](https://github.com/01men/ybkk-AIOS/blob/main/docs/app-sso-integration.md)：企业 AI 应用身份纳管全流程
+- [用量报表契约（J4）](https://github.com/01men/ybkk-AIOS/blob/main/docs/contract-j4-usage-report.md)：部门/Agent/Skill tokens 三维聚合月报与 CSV 导出
+- [连接器集成](https://github.com/01men/ybkk-AIOS/blob/main/docs/connector-integration.md)：open-connector sidecar 部署拓扑与故障排查
+- [NAS 数据权限](https://github.com/01men/ybkk-AIOS/blob/main/docs/nas-authz.md)：组织位置 + 角色层级 RBAC 设计与灰度
+- [M0 发布说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-09-m0.md)：当前商业模式口径与契约变更清单
+
+## 边界与口径
+
+- 商业模式为私有化年费 + 治理包；平台对外只呈现用量与内部成本穿透（价格簿零价快照 charge 恒 0 + 内部采购成本参考），钱包/充值/分账等结算语义已整体下线封存
+- 生产部署默认基线初始化（零演示数据）；演示数据仅 `DEMO_SEED=1` 显式注入，请勿在生产启用
+- 全部文件操作经 MCP 文件网关并按真实用户身份（X-On-Behalf-User）留痕；测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock
+
+（更新日期：2026-09-10）
