@@ -281,13 +281,12 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
           '',
         ].join('\n'))
         await writeFile('manifest/billing.yaml', [
-          '# L3 计费声明面（安装时写入平台价格簿）',
-          'model: usage',
+          '# 计量声明面（兼容字段：仅 meter key/单位参与计量登记，金额侧平台一律零价快照）',
+          'model: free',
           'usage:',
           `  - key: prompts.used`,
           `    unit: 次`,
-          `    price: 0.5`,
-          'commission: platform_default',
+          `    price: 0`,
           '',
         ].join('\n'))
         await fs.writeFile(path.join(dir, 'publisher-private-key.pem'), privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(), 'utf8')
@@ -334,7 +333,7 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       if (action === 'list' || !action) {
         await ensureToken()
         const data = await call('GET', '/api/market/plugins')
-        out(data.plugins.map((item) => ({ pluginId: item.pluginId, version: item.version, developer: item.developer, installs: item.installs, billing: item.billing.model })), ['pluginId', 'version', 'developer', 'installs', 'billing'])
+        out(data.plugins.map((item) => ({ pluginId: item.pluginId, version: item.version, developer: item.developer, installs: item.installs, usageKey: item.metering?.usageKey ?? '' })), ['pluginId', 'version', 'developer', 'installs', 'usageKey'])
         return
       }
 

@@ -8,7 +8,8 @@ import * as resourceCore from '@dsh-ops/plugin-resource-core'
 import * as iam from '@dsh-ops/plugin-iam'
 import * as authn from '@dsh-ops/plugin-authn'
 import * as usage from '@dsh-ops/plugin-usage'
-import * as billing from '@dsh-ops/plugin-billing'
+// plugin-billing 已下线封存（M0-2，2026-09-09）：钱包/复式分账功能面退出运行时，
+// 存量流水经 scripts/billing-archive-export.mjs 导出 CSV 只读封存 90 天（见 docs/billing-archive-register.md）。
 import * as audit from '@dsh-ops/plugin-audit'
 import * as market from '@dsh-ops/plugin-market'
 import * as connector from '@dsh-ops/plugin-connector'
@@ -40,10 +41,9 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   await ctx.plugin(iam)
   await ctx.plugin(authn)
   await ctx.plugin(usage)
-  await ctx.plugin(billing)
   await ctx.plugin(audit)
   await ctx.plugin(market)
-  // 连接器纳管（open-connector 数据面网关适配）：依赖 iam/usage/billing/audit，先于 mcp/modelgw
+  // 连接器纳管（open-connector 数据面网关适配）：依赖 iam/usage/audit，先于 mcp/modelgw
   await ctx.plugin(connector)
   await ctx.plugin(mcp)
   // NAS（FS 文件存储）资产：先于 skillhub 加载（skillhub 上架时经 nasRegistry 上传 skill.zip）

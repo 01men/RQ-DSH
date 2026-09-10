@@ -5,8 +5,14 @@
 [docs/ecosystem-design-v1.2.md](docs/ecosystem-design-v1.2.md)，后续路线见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)。
 
 > 组织账号（IAM）· 统一认证（Authn + OIDC Provider）· MCP 部署服务 · Skill/插件市场 · Agent 本体 ·
-> AI 应用本体 · 计量计费（usage）· 钱包与复式分账（billing）· 模型转售网关（modelgw）· 审计与告警
+> AI 应用本体 · 用量透明计量（usage）· 模型接入网关（modelgw）· 审计与告警
 > ——多类资源，一套身份、一套权限、一套计量、一套审计。
+>
+> **M0 合规收敛（2026-09-09）**：商业模式为**私有化年费 + 治理包**——钱包/复式分账（plugin-billing）已整体
+> 下线封存（存量流水 CSV 封存 90 天，见 [docs/billing-archive-register.md](docs/billing-archive-register.md)）；
+> 价格簿转「零价快照 + 内部成本参考」，平台与产品面对外**不呈现任何金额结算语义**；
+> 用量透明月度报表（部门/Agent/Skill tokens 三维聚合 + CSV 自助导出）见 J4 契约
+> [docs/contract-j4-usage-report.md](docs/contract-j4-usage-report.md)。
 
 ---
 
@@ -74,9 +80,8 @@ DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭
          dsh-plugin-agent          Agent 本体（resource-core 底座 + 机器凭证）
          dsh-plugin-app            AI 应用（编排拓扑 + 应用指标 + 成本穿透）
          dsh-plugin-usage          计量管道（schema v1 / 幂等 / 死信重放 / 价格簿 / 三方对账 / 能力漂移）
-         dsh-plugin-billing        钱包 + 只追加流水 + 复式分账 ledger（结转/试算平衡/红字冲正）
-         dsh-plugin-modelgw        模型转售网关（OpenAI 兼容真实转发 / 预检 / 实测 tokens 计量）
-         dsh-plugin-market         第三方与自营插件市场（契约五面 / Ed25519 验签 / L0 运行时 / 订阅代收）
+         dsh-plugin-modelgw        模型接入网关（OpenAI 兼容真实转发 / 零价快照计量 / 内部成本参考）
+         dsh-plugin-market         第三方与自营插件市场（契约五面 / Ed25519 验签 / L0 运行时 / 零价计量声明）
          dsh-plugin-audit          四类审计日志 + 告警规则 + 成本归集 + 审批中心
          dsh-plugin-connect        远程 dsh 接入（宿主角色：接入码/enroll/客户端管理；客户端角色：凭证申请 + 工具远程代理 + 本机配置页）
          dsh-plugin-update         平台自更新：上游版本检查（自动+手动）→ 通知 → source 形态一键升级（git pull + npm install，dry-run/审计/权限点）
@@ -234,14 +239,14 @@ loader entry 不可执行（全仓架构级限制，解法走交接清单 **G3**
 - **多租户最小集 + 计量管道（第 2/4 步）**：租户建模、schema v1 计量事件、先写后发、引擎级幂等、
   死信重放、价格簿（计价时点费率快照）、三方对账、运行时能力漂移检测。
 - **契约五面 + L0 市场（第 3/7 步）**：第三方开发者身份域、契约五面 Ed25519 验签、内容扫描、
-  L1 门禁、审批上架/安装/卸载、L0 提示词运行时与计量、自营首批供给与订阅代收登记。
-- **钱包与模型网关（第 5 步）**：余额+流水同事务、乐观锁、幂等键、月度预算预检、余额恒等式全量重放；
-  模型转售网关真实 OpenAI 兼容转发（无 endpoint 拒绝调用，不造假 completion）。
+  L1 门禁、审批上架/安装/卸载、L0 提示词运行时与计量、自营首批供给（M0-3 起零价计量声明）。
+- **模型接入网关（第 5 步，M0-3 改造后）**：真实 OpenAI 兼容转发（无 endpoint 拒绝调用，不造假 completion），
+  实测 input/output tokens 零价快照计量 + 内部采购成本参考。原「钱包/预算预检」随 plugin-billing 下线封存（M0-2）。
 - **OIDC Provider（第 6 步）**：RS256/JWKS/discovery/authorize（一次性 code）/token/id_token/userinfo，
   账号冻结令牌即时失效。
-- **复式分账 ledger（第 8 步）**：账期汇总结转（费率版本快照、尾差归平台）、试算平衡、红字冲正、开发者应收。
-- **资金红线（v1.2 §六过渡）**：对公收款/开票/开发者付款通道未就位——充值仅管理员手工录入（幂等键=转账单号），
-  订阅代收为 manual-settlement 登记，平台不自动扣外部资金。
+- **钱包/复式分账（原第 5/8 步）→ 已下线封存（M0-2，2026-09-09）**：功能面（充值/流水/预算/结转/冲正）与
+  API、权限点全部移除；存量流水导出 CSV 只读封存 90 天（登记与销毁日期见
+  [docs/billing-archive-register.md](docs/billing-archive-register.md)）。
 - 验收：`npm run selftest` **244/244**、`npm run lint:manifests` **60/60**；KBaaS/连接器市场/合规门户与
   L1 有码沙箱为下一迭代（设计见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)）。
 
@@ -249,8 +254,8 @@ loader entry 不可执行（全仓架构级限制，解法走交接清单 **G3**
 
 针对外部技术评审（严重 S1–S4 / 中等 M1–M5 / 轻微 L1–L4）逐项整改：
 
-- **S1 账期结算硬缺陷**：`settle()` 改 keyset 分页全量归集（不再单页 limit:1000 截断），
-  归集条数与 SQL COUNT 对账不符即拒绝结转；同一账期二次红字冲正被拒；钱包幂等键绑定主体（同键异主体拒绝）。
+- **S1 归集对账硬缺陷（原则沿用）**：归集/对账不符即拒绝的原则保留在 usage 管道（reconcile/消费水位）；
+  其原本针对的账期结算子系统已随 plugin-billing 下线封存（M0-2）。
 - **S2 密钥轮换宽限期**：轮换不再立即吊销全部令牌——旧密钥进入 24h 验签宽限期，在途请求不掉线，
   refresh 随时换取新密钥令牌，全局无感轮换。
 - **S3 暴力破解防护**：登录 / Client Credentials / SSO 绑定 / OIDC 授权与换牌全部接入失败锁定
@@ -258,20 +263,20 @@ loader entry 不可执行（全仓架构级限制，解法走交接清单 **G3**
 - **崩溃恢复**：认证类集合（令牌/主体/锁定计数）即时落盘并 fsync，登出/吊销返回 200 后被杀不丢失；
   坏 JSON 集合文件自动备份为 `*.corrupt-*` 并显式告警，不再静默当空集合。
 - **计量消费幂等（重放不双计）**：引擎级消费水位（usage_consumptions 唯一索引）——replay/死信重投
-  对 billing/audit 投影零重复副作用；消费失败真实即时重试 3 次后入死信，支持一键重投。
+  对 audit 投影零重复副作用；消费失败真实即时重试 3 次后入死信，支持一键重投。
 - **OIDC 收敛**：scope 白名单（openid/profile/email）、PKCE S256 全链路、JWT 校验 iss/aud/kid；
   issuer 支持 `OIDC_ISSUER` 环境变量对外声明。
 - **MCP 熔断业务化**：真实调用失败与探活失败共用连续失败计数（连续 3 次开熔断，业务成功即半闭合）；
   回滚目标版本校验（当前版本/已回滚版本不可作为目标）。
-- **多租户隔离补全（M1）**：钱包流水查询支持 tenant_id 过滤；审计/计量口径一致。
+- **多租户隔离补全（M1）**：计量事件查询支持 tenant_id 过滤；审计/计量口径一致。
 - **M2 撤销列表收敛**：吊销状态全量走持久化令牌记录（去掉进程内无限增长集合），
   过期令牌 7 天后物理清理（启动 + 每日巡检）；refresh 哈希索引化查询。
 - **企业 AI 资产运营（新）**：`资产运营` 控制台页 + REST——统一台账（MCP/Agent/应用/Skill/模型路由
   五类资产一处盘点，含归属组织、负责人、健康、近 N 天调用与消耗）、一键健康巡检（批量探活留审计）、
-  成本报表（Top 资产 / 主体分摊 / 日趋势，计量口径）、效益分析（毛利=列表价收入−采购成本、
-  单位 DAU 成本）与下架分析（弃用/下线原因聚合）。
-- **商业化放缓（决策）**：真实支付网关/对公收款/开票/开发者付款等资金通道**保持手工过渡态暂缓实施**，
-  插件市场变现（订阅代收/分账结算自动化）同样暂缓——本迭代优先企业内资产治理与运营能力。
+  用量与成本穿透报表（Top 资产 / 主体分摊 / 日趋势，零价快照 + 内部成本参考口径、单位 DAU 成本）
+  与下架分析（弃用/下线原因聚合）。
+- **商业模式收敛（M0 决策，2026-09-09）**：取消按用量计费/转售/分账形态，平台以**私有化年费 + 治理包**交付；
+  计量管道保留为用量透明与内部成本参考（J4 报表口径），对外不呈现任何金额结算语义。
 
 ## 三C、应用统一身份接入 App SSO（本迭代，v1.4）
 
@@ -349,7 +354,7 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
 
 - **Skill/NAS 进计量管道**：skill 下载/安装、nas 全部文件操作（读写在 `fsCall` 单点埋点）自动产生
   usage 事件（`skill:<ID>` / `nas:<ID>`，calls/bytes 口径）；价格簿逐条幂等播种 `skill:*` / `nas:*`
-  零费率默认规则（观测先行，是否计费由运营调价决定，存量部署升级自动补齐）。
+  零费率默认规则（观测先行，口径调整由运营决定，存量部署升级自动补齐）。
   跨机部署与中文 slug 兼容：skill 资源键用资产 ID（中文名 slug 含非 ASCII，过不了 resource 校验）。
 - **应用指标 PV/UV 口径**：`metrics-report` / `app_metrics_report` / `app report` 三端新增 `--pv/--uv`
   （同日 PV 累加、UV 取最大，与 DAU 同语义）；应用详情指标页展示 PV 柱图与 UV/DAU 双线。
@@ -358,16 +363,16 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
   （`?app=&vid=&uid=`，1x1 GIF / JSON，CORS `*`，未知应用不泄露存在性，IP+应用 60 次/分钟限流）——
   应用一行埋点即得 **PV/UV**（PV 逐次累加、UV 按 `vid` 同日去重），与主动上报经 max/累加语义自然合并
   （详见 [docs/app-sso-integration.md §十一](docs/app-sso-integration.md)）。
-- **效益分析**：`GET /api/assets/benefit`——按资产聚合 列表价收入/采购成本/**毛利**，应用类资产关联
-  窗口 DAU 派生**单位 DAU 成本**（指标×成本首次打通）；「资产运营」页新增效益表 + 主体分摊
-  （谁在花钱，byPrincipal 前端首次渲染）。
+- **成本穿透**：`GET /api/assets/benefit`——按资产聚合 用量/内部采购成本参考，应用类资产关联
+  窗口 DAU 派生**单位 DAU 成本**（指标×成本首次打通）；「资产运营」页新增成本穿透表 + 主体分摊
+  （谁在用、内部成本多少，byPrincipal 前端首次渲染）。M0-3 起金额口径仅内部成本参考。
 - **技能热力图**：`GET /api/skills/usage-heatmap`——skill × 日使用矩阵（usage 事件为主、计量接入前的
   下载流水按日回填去重）；Skill 市场页顶部热力图卡片（色深=当日使用次数）。
 - **下架分析闭环**：skill 弃用/MCP 下线 REST 层原因必填（与服务层 Agent/App 护栏对齐）；Skill 弃用原因
   落库持久化（详情抽屉可见）；`GET /api/assets/retire-reasons` 聚合 弃用/下线 原因（审计 change 日志 +
   生命周期留痕 + Skill 落库原因三源合一、去重），「资产运营」页新增下架分析卡片。
 - 验收：`npm run selftest` **405/405**（新增 10 项：skill/nas 计量入账与外部上报放行、PV/UV 累加语义、
-  毛利恒等、热力矩阵、弃用护栏与落库、下架原因聚合）。
+  成本穿透恒等、热力矩阵、弃用护栏与落库、下架原因聚合）。
 
 ## 三F、接入链路四项加固：凭证补权/计量硬校验/凭证治理/机器留痕（本迭代，v1.6）
 
@@ -461,6 +466,7 @@ packages/
       permissions.yaml      权限点（注册进统一 RBAC）
       events.yaml           发布/订阅事件
       ui.yaml               路由 + 菜单
+      （billing.yaml 为兼容保留的计量声明面：仅 meter key/单位参与计量登记，金额侧一律零价快照）
     src/index.ts            服务 + 插件装配
     src/tools.ts            对模型暴露的工具（dsh ToolRuntime 契约）
   plugin-connect/           远程 dsh 接入插件（宿主端点 + 客户端代理 + 本机配置页，一份代码两种角色）
@@ -552,8 +558,8 @@ curl http://localhost:7300/docs/app-sso-integration.md
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批（发起人可自审）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
-（真实 MCP/钉钉/OpenAI stub 往返、计量幂等与对账、钱包扣费与预算拦截、OIDC RS256/JWKS 全链路、
-市场验签/安装/卸载、复式分账试算平衡与红字冲正）+ 远程 dsh 接入
+（真实 MCP/钉钉/OpenAI stub 往返、计量幂等与对账、OIDC RS256/JWKS 全链路、
+市场验签/安装/卸载）+ 远程 dsh 接入
 （接入码创建/掩码存储/伪造拒绝/一次性消费、机器凭证换牌、operator 模板越权拦截、
 工具桥代理路径、客户端禁用联动吊销、管理工具 RBAC）+ **App SSO 全链**
 （浏览器授权流：校验失败一律平台错误页不开放重定向、授权请求单次消费/TTL/consent 门禁、
@@ -569,7 +575,7 @@ Skill 包上架自动上传（字节级校验 / 无包现场打包 / NAS 未上�
 （应用指标上报：当日写入/历史补录累加/日期格式与应用存在性校验/RBAC 403/`app_metrics_report` 工具；
 接入客户端心跳：机器令牌上报与宿主可见、非客户端身份 404、无令牌 401）+ **观测与分析补齐**
 （Skill 下载/安装与 NAS 文件操作进计量管道（calls/bytes）、`skill:`/`nas:` 资源外部上报放行、
-PV 同日累加与 UV/DAU 取最大、效益分析毛利恒等、技能热力矩阵、skill 弃用原因必填与落库、
+PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、skill 弃用原因必填与落库、
 下架原因三源聚合并去重）+ **接入链路加固**
 （Agent 凭证默认含 usage.write 且机器令牌自推计量 200、计量键与价格簿不符 400（错误携带期望键）
 与匹配路径计价恒等、skill 事件 meters 含计价键 calls、scopes 调整后旧令牌联动吊销/拼错权限点与
@@ -580,11 +586,11 @@ PV 同日累加与 UV/DAU 取最大、效益分析毛利恒等、技能热力矩
 ## 八、说明与边界
 
 - 生产部署默认**基线初始化**（内置角色 + 根组织 + `admin`，零演示数据）；完整演示数据仅在 `DEMO_SEED=1` 时注入，请勿在生产环境启用
-- 业务配置存储为 JSON 集合（原子落盘）；计量/资金/分账类数据存 SQLite（`data/txnstore.db`，WAL + 事务 + 幂等唯一索引）
-- MCP 执行层支持真实 HTTP 传输（`exec: real`，JSON-RPC tools/call + initialize 探活）；`exec: demo` 为显式降级演示传输层（确定性模拟、不计费不计 SLO）
+- 业务配置存储为 JSON 集合（原子落盘）；计量与用量报表数据存 SQLite（`data/txnstore.db`，WAL + 事务 + 幂等唯一索引）
+- MCP 执行层支持真实 HTTP 传输（`exec: real`，JSON-RPC tools/call + initialize 探活）；`exec: demo` 为显式降级演示传输层（确定性模拟、不计入计量与 SLO）
 - 钉钉连接器支持真实 OpenAPI（`mode: real` + `apiBase`）与 mock 演示（显式标注）；通讯录按连接器
   「同步频率」定时自动同步（下限 5 分钟，填 0 仅手动；`IAM_CONNECTOR_AUTO_SYNC=off` 停用定时器）
 - 模型网关仅转发 OpenAI 兼容 chat/completions；模型未配置 endpoint 时拒绝调用（不生成假 completion）
-- 资金通道为手工过渡形态（见「三A」资金红线）；OIDC 私钥存 data 目录，生产建议迁 KMS
+- 钱包/资金面已下线封存（M0-2，见 [docs/billing-archive-register.md](docs/billing-archive-register.md)）；OIDC 私钥存 data 目录，生产建议迁 KMS
 - NAS 文件操作全部经 MCP 文件网关（不直连 DSM 私有 API）；`fs_upload/fs_download` 在网关进程侧读写本地路径——平台与网关需同机部署，或把资产 `stagingDir` 配置为共享挂载点；`/mcp` 端点为无会话纯 JSON 形态（不提供 GET SSE 长流，主流客户端兼容）
 - Node ≥ 22.6（原生 TypeScript 运行，无需构建步骤；node:sqlite 在 Node 24 下为 Experimental，无害）

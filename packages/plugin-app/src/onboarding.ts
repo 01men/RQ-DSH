@@ -53,8 +53,14 @@ curl -s -X POST ${origin}/api/apps/${app.id}/metrics-report \\
 终端用户登录一律走平台 OIDC（授权码 + 强制 PKCE S256），身份以平台账号体系 sub 为准；
 钉钉扫码等三方登录由平台登录页承接，应用不直接对接钉钉 SDK。接入文档（含 SDK 一行接入示例）：
 ${origin}/docs/app-sso-integration.md
-a. 把应用侧回调地址（redirect_uri）交给平台管理员（应用 owner），由其在控制台
-   「AI 应用 → 应用详情 → SSO 配置」签发 OIDC 客户端后取回 client_id / client_secret（机器身份自签一律 403）；
+a. 签发 SSO 客户端（OIDC client_id / client_secret，与上方平台机器凭证是两套凭据，勿混用）：
+   · 回调地址为本机环回（http://127.0.0.1:端口/…、http://localhost:端口/…、http://0.0.0.0:端口/…）时，
+     可凭上方平台机器凭证自助签发，无需管理员/owner 到控制台代办：
+     POST ${origin}/api/apps/${app.id}/sso-client -H "Authorization: Bearer <token>"
+     -d '{"redirectUris":["http://127.0.0.1:5000/oauth/cb"]}' → 响应含 client_id / client_secret（仅此一次）；
+     本地开发联调推荐直接走此通道（含改回调 PATCH 同路径、换 secret POST …/rotate）；
+   · 非环回回调（内网 IP / 公网域名）仍须应用 owner 在控制台「AI 应用 → 应用详情 → SSO 配置」签发或改配；
+   · 已签发的 SSO 配置可自行获取：GET ${origin}/api/apps/${app.id} 的 sso 块（discovery / client_id / 回调清单，不含 secret）；
 b. 应用按 discovery 接入：GET ${origin}/.well-known/openid-configuration
    （换牌 POST /oauth/token、用户身份 GET /oauth/userinfo；302 跳授权页 → 带 code 回回调地址）；
 c. userinfo 返回的 sub/org 即用户唯一关联键，业务权限（谁能用哪些功能）由应用基于 sub 自建；

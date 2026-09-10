@@ -12,7 +12,7 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'model_list',
-    description: '列出模型网关目录（转售模型、计价与状态）。',
+    description: '列出模型网关目录（接入模型、内部成本参考与状态）。',
     parameters: {},
     output: { type: 'object', additionalProperties: true },
     async execute() {
@@ -21,7 +21,7 @@ export function apply(ctx: Context) {
         total: models.length,
         models: models.map((item) => ({
           slug: item.slug, provider: item.provider, status: item.status,
-          listCentsPerKTokens: item.listCentsPerKTokens, configured: item.endpoint !== '',
+          costCentsPerKTokens: item.costCentsPerKTokens, configured: item.endpoint !== '',
         })),
       }
     },

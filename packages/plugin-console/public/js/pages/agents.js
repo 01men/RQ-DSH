@@ -688,6 +688,7 @@ function renderAgentSsoTab(holder, agent, ctx, refresh) {
         </div>
         ${enforced ? `<div class="muted-box mb-14" style="display:flex;gap:8px;border-color:var(--warn-border);background:var(--warn-bg)">${icon('alert', 15)}<span><b>Agent 上线门禁</b>：${mode === 'oidc' ? '未完成 SSO 签发前，上线审批将被拒绝。' : '既无 SSO 客户端也未登记 entryUrl 时，上线审批将被拒绝。'}</span></div>` : ''}
         <button class="btn btn-primary" id="ag-sso-issue">${icon('key', 14)}签发 SSO 客户端</button>
+        <div class="form-hint mt-8">本机联调免控制台：回调地址为环回（127.0.0.1 / localhost / 0.0.0.0）时，Agent 机器凭证可直接 <code class="mono">POST /api/agents/${esc(agent.id)}/sso-client</code> 自助签发（改回调 PATCH 同路径）。</div>
       </div>
       ${entryCard}`
     holder.querySelector('#ag-sso-issue').onclick = () => openAgentIssueSsoModal(agent, refresh)

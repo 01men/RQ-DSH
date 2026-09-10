@@ -92,8 +92,8 @@ export interface ConnectorPermGroupRecord extends RecordBase {
   policies: Record<string, ProviderPolicy>
   subjects: Array<{ type: 'user_group' | 'agent' | 'app'; id: string; name?: string }>
   rateLimitPerMin: number
-  /** billing.precheck 预估分额；0=仅做余额非负检查（零费率连接器默认直通）。 */
-  precheckCents: number
+  /** 已废止（M0-2 billing 下线，2026-09-09）：存量行的 legacy 字段，仅兼容保留、运行时不再读取。 */
+  precheckCents?: number
 }
 
 export interface TokenLedgerRecord extends RecordBase {
@@ -819,7 +819,6 @@ export class ConnectorHubService extends Service {
     policies: Record<string, ProviderPolicy>
     subjects: ConnectorPermGroupRecord['subjects']
     rateLimitPerMin?: number
-    precheckCents?: number
   }): ConnectorPermGroupRecord {
     if (!input.name?.trim()) throw new Error('权限组名称不能为空')
     if (this.permGroups().findOne((group) => group.name === input.name)) throw new Error(`权限组已存在：${input.name}`)
@@ -831,14 +830,13 @@ export class ConnectorHubService extends Service {
       policies: this.normalizePolicies(input.policies),
       subjects: input.subjects,
       rateLimitPerMin: Math.max(1, input.rateLimitPerMin ?? 60),
-      precheckCents: Math.max(0, input.precheckCents ?? 0),
       createdAt: nowIso(), updatedAt: nowIso(),
     })
     this.afterPermGroupChange(group)
     return group
   }
 
-  updatePermGroup(id: string, patch: Partial<Pick<ConnectorPermGroupRecord, 'name' | 'description' | 'policies' | 'subjects' | 'rateLimitPerMin' | 'precheckCents'>>): ConnectorPermGroupRecord {
+  updatePermGroup(id: string, patch: Partial<Pick<ConnectorPermGroupRecord, 'name' | 'description' | 'policies' | 'subjects' | 'rateLimitPerMin'>>): ConnectorPermGroupRecord {
     const group = this.requirePermGroup(id)
     if (patch.policies) this.validatePolicies(group.orgId, patch.policies)
     const normalizedPatch: Partial<ConnectorPermGroupRecord> = {
@@ -1163,12 +1161,6 @@ export class ConnectorHubService extends Service {
     }
     bucket.push(minuteMark)
     this.rateBuckets.set(bucketKey, bucket)
-
-    // ⑥ billing.precheck
-    const precheck = this.ctx.billing.precheck(group.orgId, group.precheckCents)
-    if (!precheck.ok) {
-      return { ok: false, status: 'quota_exceeded', error: precheck.reason, latencyMs: Date.now() - started }
-    }
 
     // 连接级下线闸：指定别名或策略唯一绑定连接处于维护下线态 → 平台侧直接拒绝
     const effectiveAlias = params.alias ?? (policy.connections?.length === 1 ? policy.connections[0]! : undefined)
@@ -1499,7 +1491,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'connector'
-export const inject = ['opsStorage', 'platformBus', 'iam', 'audit', 'usage', 'billing', 'txnStore', 'authn', 'resourceCore']
+export const inject = ['opsStorage', 'platformBus', 'iam', 'audit', 'usage', 'txnStore', 'authn', 'resourceCore']
 
 export function apply(ctx: Context) {
   // 与 plugin-mcp 相同的装配形态：构造即注册（provide='connectorHub'），

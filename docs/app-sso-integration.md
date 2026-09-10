@@ -22,6 +22,16 @@
 | 4. 应用侧接入 | 按下方「SDK 一行接入」或端点直连完成授权码模式（强制 PKCE S256） | 应用代码 |
 | 5. 业务权限自理 | `userinfo` 的 `sub` 是稳定关联键；应用内自主映射业务角色 | 应用代码 |
 
+> **环回自助（免控制台）**：回调地址为本机环回（`127.0.0.1` / `localhost` / `0.0.0.0`）时，无需 owner/管理员到控制台代办——应用凭注册时自动签发的机器凭证直接自助签发并取回 `client_id` / `client_secret`（响应仅此一次）：
+>
+> ```
+> POST /api/apps/<应用ID>/sso-client     （Bearer 机器凭证令牌，凭证默认含 app.write）
+> body {"redirectUris":["http://127.0.0.1:5000/oauth/cb"]}
+> → 200 { clientId, clientSecret, redirectUris }
+> ```
+>
+> 改回调 `PATCH` 同路径、换 secret `POST …/rotate`、已签发配置 `GET /api/apps/:id` 的 `sso` 块（discovery / client_id / 回调清单，不含 secret）。机器自助仅限环回回调；非环回回调（内网 IP / 公网域名）仍须 owner 或管理员在控制台操作（`APP_SSO_MACHINE_LOOPBACK=0` 可整体关闭该自助通道）。
+
 ## 二、SDK 一行式接入（推荐）
 
 ### 后端 / BFF（confidential 客户端，默认形态）
@@ -126,7 +136,8 @@ OIDC_ISSUER=https://sso.yourcompany.com   # discovery/JWKS/端点全部按此拼
 - **state**：平台强制必填并原样回传（CSRF 防护）；SDK 自动处理，直连时自行生成并校验。
 - **PKCE S256**：平台对所有客户端强制；`code_challenge` 43–128 位 base64url。
 - **client_secret 保管**：仅存应用后端（环境变量 / KMS）；轮换入口在应用详情「SSO 配置」，旧值立即失效。
-- **HTTPS**：redirect_uri 允许 `https://` 任意主机；`http://` 仅放行内网地址（`localhost` / `127.0.0.1` / `10.x.x.x` / `172.16-31.x.x` / `192.168.x.x`，含内网 IPv6 ULA）。纯内网部署可设 `APP_SSO_ALLOW_HTTP=1` 放开全部 http 主机。
+- **HTTPS**：redirect_uri 允许 `https://` 任意主机；`http://` 仅放行内网地址（`localhost` / `127.0.0.1` / `0.0.0.0` / `10.x.x.x` / `172.16-31.x.x` / `192.168.x.x`，含内网 IPv6 ULA）。纯内网部署可设 `APP_SSO_ALLOW_HTTP=1` 放开全部 http 主机。
+- **机器环回自助**：绑定应用的机器凭证可自助签发/管理回调全为环回（loopback）的 SSO 客户端——本机回调不跨机，强制 PKCE 下第三者截码无利可图（RFC 8252 口径）；非环回回调一律需要 human owner / 管理员，`APP_SSO_MACHINE_LOOPBACK=0` 可整体关闭该通道（操作全程 `app.sso.*` 审计）。
 - **登出联动**：应用登出时应调 `end_session`，平台会吊销该用户在本应用下的 refresh 链（否则登出后应用仍可静默续期）。回跳规则：显式携带 `post_logout_redirect_uri` 必须命中客户端登记的登出白名单（未命中拒绝）；未携带时，客户端仅登记一个登出地址则按该地址回跳，未登记或登记多个则停留在平台登出页。
 - **冻结即时失效**：平台账号冻结 / 离职 → `userinfo` 与 `refresh` 立即拒绝（实时校验用户状态）。
 - **门禁**：`web`/`h5` 应用上线前必须持有 active SSO 客户端；审批挂单期间客户端被禁用会在执行期复核失败。
@@ -147,7 +158,7 @@ OIDC_ISSUER=https://sso.yourcompany.com   # discovery/JWKS/端点全部按此拼
 
 ## 八、FAQ
 
-- **本机调试**：redirect_uri 用 `http://localhost:<port>/cb` 即可过白名单；issuer 保持默认 `http://127.0.0.1:<port>`。
+- **本机调试**：redirect_uri 用 `http://localhost:<port>/cb`、`http://127.0.0.1:<port>/cb`（或 `http://0.0.0.0:<port>/cb`）即可过白名单；issuer 保持默认 `http://127.0.0.1:<port>`。本地联调无需控制台权限：应用机器凭证直接 `POST /api/apps/:id/sso-client` 自助签发（见 §一「环回自助」）。
 - **多环境 issuer**：一套应用对接多套平台环境时，按环境变量注入不同 issuer / client；`iss` 回跳参数与 id_token `iss` 可用于 mix-up 防护校验。
 - **id_token vs userinfo**：只关心登录身份 → 验 `id_token`（本地 JWKS 验签）即可；需要最新组织/角色/状态 → 调 `userinfo`（实时、且能感知冻结）。
 - **回调后拿到的 roles 是业务角色吗**：不是。`roles` 是平台治理角色；业务角色请应用内自理。

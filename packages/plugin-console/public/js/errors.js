@@ -7,7 +7,7 @@
  * 原因码全集（初始六条 + 绑定族 + 会话侧兜底码，来源：docs/action-plan-dsh-frontend.md §三 C2/C3 + spike E3）：
  *   nas-authz-deny    NAS 数据权限五步判定 deny（fail-closed）
  *   breaker-open      MCP 服务熔断器开启（连续失败≥3 次置位）
- *   quota-exhausted   钱包余额/月度预算耗尽（quota.exceeded）
+ *   quota-exhausted   调用额度耗尽（quota.exceeded；billing 下线后保留 wire 兼容文案）
  *   pdp-unreachable   权限判定点不可达（保护性拒绝，P0-2 红线）
  *   degraded          服务健康 degraded（延迟>800ms，30s 轮询探活）
  *   binding-invalid   平台身份绑定失效（含 no_cookie / expired / account_inactive 细分）
@@ -41,8 +41,8 @@ const COPY = {
   'quota-exhausted': {
     tone: 'danger',
     title: '额度已耗尽',
-    message: '本主体余额或月度预算已用完，调用被暂停。可查看用量明细，或联系管理员调整预算。',
-    action: { label: '查看用量与额度', href: '#/assets' },
+    message: '本主体调用额度已用完，调用被暂停。可查看用量明细，或联系管理员调整限额。',
+    action: { label: '查看用量', href: '#/assets' },
   },
   'pdp-unreachable': {
     tone: 'warn',
