@@ -22,7 +22,7 @@
  *
  * 【配置落盘】<dataDir>/gate01-host-link.json（0600，参照 connect-client.json 惯例）。
  */
-import { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync } from 'node:fs'
+import { readFileSync, writeFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { networkInterfaces } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
@@ -288,71 +288,11 @@ export class HostLinkService {
     }
   }
 
-  // ---------------------------------------------------------------- 本机初始化（形态 B 首启）
+  // ---------------------------------------------------------------- 落盘
 
-  /** admin 初始口令文件路径（console seed 在首启时一次性写入）。 */
-  private initialPasswordFile(): string {
-    return join(this.ctx.opsStorage.dataDirPath, 'admin-initial-password.txt')
-  }
-
-  /** 是否本机首启（admin 初始口令文件在场 = 尚无人登录过）。 */
-  localFirstRun(): boolean {
-    return existsSync(this.initialPasswordFile())
-  }
-
-  /** 本机对外候选地址（向导「选择 IP」数据源：非内部 IPv4 网卡）。 */
-  localInterfaces(): Array<{ address: string; iface: string }> {
-    const out: Array<{ address: string; iface: string }> = []
-    for (const [iface, addrs] of Object.entries(networkInterfaces())) {
-      for (const addr of addrs ?? []) {
-        if (addr.family === 'IPv4' && !addr.internal) out.push({ address: addr.address, iface })
-      }
-    }
-    return out
-  }
-
-  /**
-   * 本机首启 admin 口令初始化：服务端读取一次性初始口令完成首登 + 改密 + 重登，
-   * 口令全程不出服务端；成功后删除初始口令文件（防重放）。
-   * 返回形状与 console /api/auth/login 对齐（面板 saveSession 直接可用）。
-   */
-  localInitAdmin(newPassword: string, username = 'admin'): Record<string, unknown> {
-    const file = this.initialPasswordFile()
-    if (!existsSync(file)) {
-      throw new Error('初始化向导仅首次启动可用（初始口令文件已消费或不存在；请用常规登录）')
-    }
-    if (typeof newPassword !== 'string' || newPassword.trim().length < 8) throw new Error('新口令长度不得少于 8 位')
-    if (/[\u4e00-\u9fff]/.test(newPassword)) throw new Error('口令不得包含中文')
-    // 文件格式（console seed）：首行为中文标签说明行，口令在其后——过滤标签行取口令
-    const initialPassword = readFileSync(file, 'utf8').split(/\r?\n/).map((line) => line.trim())
-      .filter((line) => line !== '' && !line.startsWith('平台管理员'))[0] ?? ''
-    if (initialPassword === '') throw new Error('初始口令文件为空，请用常规登录后自行改密')
-    const first = this.ctx.authn.login(username, initialPassword)
-    this.ctx.iam.resetPassword(first.userId, newPassword)
-    // 一次性消费（防重放，QA SEC-05）：必须用 unlinkSync——Windows 实测 rmSync(force:true)
-    // 会静默失败（不抛错、文件原地不动），口令文件残留=初始口令可被重放，防线破。
-    try { unlinkSync(file) } catch { /* 文件已被并发消费 */ }
-    const session = this.ctx.authn.login(username, newPassword)
-    return {
-      token: session.token,
-      refreshToken: session.refreshToken,
-      expiresAt: session.record.expiresAt,
-      user: this.userPayload(session.userId),
-    }
-  }
-
-  /** 组装与 console /api/auth/login 同形的 user 载荷。 */
-  private userPayload(userId: string): Record<string, unknown> {
-    const user = this.ctx.iam.users().get(userId)
-    if (!user) throw new Error('用户不存在')
-    return {
-      id: user.id, username: user.username, displayName: user.displayName,
-      orgId: user.orgId, roleIds: user.roleIds,
-      roles: user.roleIds.map((roleId) => this.ctx.iam.roles().get(roleId)?.name).filter(Boolean),
-      permissions: this.ctx.iam.userPermissions(user.id),
-    }
-  }
-
+  // plan-gate01 决策 1（2026-09-10）：「本机初始化」整链（形态 B 设口令：admin 初始口令文件判定、
+  // 首登改密重登、对外网卡枚举）已删除——本机/远端统一为「连接宿主」流程，登录在宿主侧完成，
+  // 本插件不再持有 iam/authn 依赖（inject 已收缩为 httpServer/tools/opsStorage）。
   // ---------------------------------------------------------------- 落盘
 
   private load(): HostLinkConfig {

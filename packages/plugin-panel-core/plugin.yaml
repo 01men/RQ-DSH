@@ -1,8 +1,12 @@
 # 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+# plan-gate01 Phase 2（2026-09-10）：inject 瘦身为数据面基座 5 键（httpServer/opsStorage/
+# platformBus/tools/scenegraphs，全部由 dsh-plugin-platform-core 或 dsh 原生提供），depends
+# 随之收敛——iam/authn/audit/usage/modelgw/mcp/skillhub 转为运行期软依赖（缺席时端点级
+# 诚实降级，见 docs/gate01-degradation-ledger.md），不再是装载级硬依赖。
 id: dsh-plugin-panel-core
-version: 1.2.0
+version: 1.3.0
 label: 部门 Agent 工作台面板（骨架+数据面）
-depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam', 'dsh-plugin-audit', 'dsh-plugin-usage', 'dsh-plugin-modelgw', 'dsh-plugin-mcp', 'dsh-plugin-skillhub']
+depends: ['dsh-plugin-platform-core']
 provides:
   services:
     - panel

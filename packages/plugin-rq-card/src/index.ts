@@ -80,7 +80,10 @@ export interface RqCardConfig {
 }
 
 export const name = 'rq-card'
-export const inject = ['httpServer', 'tools', 'opsStorage', 'authn', 'iam']
+// plan-gate01 Phase 2.3 瘦身：去掉 authn/iam——它们仅被已删除的「本机初始化」链路
+// （形态 B 设口令）使用；连接统一为「连接宿主」流程（本机=localhost 连接目标），登录在宿主侧完成。
+// cordis inject 是装载级硬依赖（缺提供者=永久挂起，spike 定稿），01门装态无宿主面包，必须能缺席。
+export const inject = ['httpServer', 'tools', 'opsStorage']
 
 /**
  * 宿主插件体：装配 HostLinkService（/rqcard/* 免登向导端点 + 远端代理）与 rq_host_status 工具。
@@ -118,7 +121,6 @@ export function apply(ctx: Context, config: RqCardConfig = {}) {
       label: cfg.label ?? null,
       savedAt: cfg.savedAt ?? null,
       probe,
-      localFirstRun: link.localFirstRun(),
     })
   })
 
@@ -151,36 +153,6 @@ export function apply(ctx: Context, config: RqCardConfig = {}) {
     } catch (error) {
       fail(exchange, 'LINK_SCAN_FAILED', error)
     }
-  })
-
-  // -- 本机初始化（形态 B 首启：admin 口令 / 对外地址 / 监听指引） -------------
-  http.register('GET', '/rqcard/local-init', (exchange) => {
-    if (!wizardGuard(exchange)) return
-    exchange.ok({ firstRun: link.localFirstRun(), interfaces: link.localInterfaces() })
-  })
-
-  http.register('POST', '/rqcard/local-init/admin', (exchange) => {
-    if (!wizardGuard(exchange)) return
-    const input = json<{ username?: string; newPassword?: string }>(exchange)
-    try {
-      exchange.ok(link.localInitAdmin(String(input.newPassword ?? ''), input.username || 'admin'))
-    } catch (error) {
-      fail(exchange, 'LOCAL_INIT_FAILED', error)
-    }
-  })
-
-  http.register('POST', '/rqcard/local-init/listen-plan', (exchange) => {
-    if (!wizardGuard(exchange)) return
-    const input = json<{ ip?: string; port?: number }>(exchange)
-    const ip = String(input.ip ?? '').trim() || '0.0.0.0'
-    const port = Number.isFinite(Number(input.port)) && Number(input.port) > 0 ? Number(input.port) : 3080
-    exchange.ok({
-      ip,
-      port,
-      command: `--trusted-host ${ip}:${port}`,
-      note: 'dsh webServer 的监听地址须在 harness 配置直写 host（dsh CLI 刻意拒绝 --host 0.0.0.0），'
-        + `重启后局域网经 http://<本机IP>:${port}/ 访问；详见 docs/deploy-enterprise.md 形态 B。本插件不热改宿主监听。`,
-    })
   })
 
   // -- 远端数据代理：通配路径走中间件拦截（路由表按段精确匹配表达不了任意深度） --

@@ -3,9 +3,10 @@
  *
  * 触发：boot.js 探测到宿主连接为 none 且浏览器无会话时渲染本向导。
  * 两条路径（B/C 双形态）：
- *   - 本机初始化（形态 B）：本机即宿主。首启时可在此直接设置 admin 口令（初始口令
- *     全程不出服务端）；可选对外 IP 并生成本机监听指引；随后本机登录。
- *   - 连接远端宿主（形态 C）：手输/扫描宿主地址（IP:port）→ 测试连接 → 账号密码登录
+ *   - 连接宿主（统一语义）：本机（localhost 预填）与远端地址同一流程——地址输入/扫描 →
+     probe → 登录（登录在宿主侧完成）；探测到本机数据面时提供「在本机控制台登录」直达链接；
+ *   - 连接远端宿主：手动输入/扫描宿主地址（IP:port）→ 测试连接 → 账号密码登录
+     （经本机插件代理，浏览器零跨域）；钉钉扫码引导到宿主登录页完成。
  *     （经本机插件代理，浏览器零跨域）；钉钉扫码引导到宿主登录页完成。
  *
  * 数据面：全部经 /rqcard/* 免登向导端点（须带 x-rqcard-call 头，服务端 CSRF 防线）；
@@ -54,7 +55,7 @@ function rememberHub(hubBase, label) {
   localStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(0, 6)))
 }
 
-export async function start({ base, hostBridge = false, localFirstRun = false }) {
+export async function start({ base, hostBridge = false }) {
   const root = document.getElementById('app')
   root.innerHTML = `
     <div class="wizard">
@@ -78,85 +79,36 @@ export async function start({ base, hostBridge = false, localFirstRun = false })
       <p class="wz-foot">登录支持账号密码与钉钉扫码；使用中的问题请联系管理员。数据与权限统一由服务器管理。</p>
     </div>`
 
-  renderLocalCard(root, base, { hostBridge, localFirstRun })
+  renderLocalCard(root, base)
   renderRemoteCard(root, base)
 }
 
-// ---------------------------------------------------------------- 本机宿主（形态 B）
+// ---------------------------------------------------------------- 本机（连接统一语义的一侧）
+// plan-gate01 决策 1（2026-09-10）：「本机初始化」（形态 B 设口令）已随服务端向导本机链路整体
+// 删除——本机与远端统一为「连接宿主」流程，登录在宿主侧完成。本卡片只做两件事：
+//   1. 探测本机数据面（同源 /api/health 的 JSON 信封）：在场 = 全量开发形态 → 给「在本机控制台登录」直达链接；
+//   2. 缺席 = 纯 01门 装态 → 诚实引导去右侧「连接公司已有的服务器」。
 
-async function renderLocalCard(root, base, { localFirstRun }) {
+async function renderLocalCard(root, base) {
   const body = root.querySelector('#wzLocalBody')
-  let init = null
-  try {
-    init = await wfetch(base, 'GET', '/rqcard/local-init')
-  } catch { /* 端点不可用时按已知信息渲染 */ }
-  const firstRun = init?.firstRun ?? localFirstRun
   const here = encodeURIComponent(location.pathname + location.search + location.hash)
-
-  if (firstRun) {
+  let hubReachable = false
+  try {
+    const response = await fetch(`${base}/api/health`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(3000) })
+    const payload = await response.json().catch(() => null)
+    hubReachable = response.ok && payload?.ok === true
+  } catch { /* 本机数据面缺席 = 纯 01门 装态 */ }
+  if (hubReachable) {
     body.innerHTML = `
-      <div class="wz-ok">🚀 检测到本机首次启动——先为平台管理员（admin）设置登录口令：</div>
-      <div class="wz-form">
-        <input type="password" id="wzAdminPass" placeholder="新口令（≥8 位，不含中文）" autocomplete="new-password">
-        <button class="btn primary" id="wzAdminSet">设置口令并登录</button>
-      </div>
-      <p class="wz-hint">初始口令文件由服务端一次性消费，全程不经过浏览器；设置成功即完成本机初始化。</p>
-      <div id="wzAdminErr" class="wz-err"></div>`
-    body.querySelector('#wzAdminSet').onclick = async (event) => {
-      const button = event.target
-      const pass = body.querySelector('#wzAdminPass').value
-      button.disabled = true
-      body.querySelector('#wzAdminErr').textContent = ''
-      try {
-        const data = await wfetch(base, 'POST', '/rqcard/local-init/admin', { username: 'admin', newPassword: pass })
-        // 作用域卫生（Bug2 修复）：远端登录尝试会把连接作用域粘在本页（模块级状态），
-        // 本机初始化的令牌必须落默认键——先显式清零再保存，否则重载后按默认键读不到
-        // 会被判成未登录（服务端成功、浏览器进不了工作台）。
-        setConnectionScope('')
-        session.save(data.token, data.user)
-        if (data.refreshToken) session.saveRefresh(data.refreshToken)
-        await wfetch(base, 'POST', '/rqcard/link/local', {})
-        window.location.reload()
-      } catch (error) {
-        button.disabled = false
-        body.querySelector('#wzAdminErr').textContent = error.message
-      }
-    }
-  } else {
-    body.innerHTML = `
-      <div class="wz-ok">✅ 本机数据面已就绪（admin 已初始化）。</div>
+      <div class="wz-ok">✅ 本机数据面已就绪。</div>
       <a href="${base || '/'}/?next=${here}#/login"><button class="btn primary">在本机控制台登录</button></a>
       <p class="wz-hint">支持账号密码与钉钉扫码（本机同源，登录后自动回到面板）。</p>`
-  }
-
-  // 对外访问（选 IP → 生成监听指引；插件不热改 dsh webServer 监听）
-  const interfaces = init?.interfaces ?? []
-  if (interfaces.length > 0 || firstRun) {
-    body.insertAdjacentHTML('beforeend', `
-      <details class="wz-details" id="wzListen">
-        <summary>📡 局域网访问（选择对外 IP）</summary>
-        <div class="wz-ifaces">${interfaces.map((item, index) => `
-          <button class="wz-iface" data-addr="${esc(item.address)}" data-idx="${index}">
-            ${esc(item.address)}<span class="sub">${esc(item.iface)}</span>
-          </button>`).join('') || '<span class="wz-hint">未枚举到非内部网卡</span>'}
-        </div>
-        <pre class="wz-cmd" id="wzListenCmd" hidden></pre>
-      </details>`)
-    body.querySelectorAll('.wz-iface').forEach((el) => {
-      el.onclick = async () => {
-        try {
-          const plan = await wfetch(base, 'POST', '/rqcard/local-init/listen-plan', { ip: el.dataset.addr })
-          const cmd = body.querySelector('#wzListenCmd')
-          cmd.hidden = false
-          cmd.textContent = `${plan.command}\n# ${plan.note}`
-        } catch (error) {
-          void alert(error.message)
-        }
-      }
-    })
+  } else {
+    body.innerHTML = `
+      <div class="wz-ok">🖥 这台电脑还没有可登录的控制台。</div>
+      <p class="wz-hint">在右侧「连接公司已有的服务器」输入地址开始使用；首次部署的管理员请先在宿主服务器上完成安装。</p>`
   }
 }
-
 // ---------------------------------------------------------------- 远端宿主（形态 C）
 
 async function renderRemoteCard(root, base) {

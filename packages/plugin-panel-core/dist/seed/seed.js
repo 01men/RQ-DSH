@@ -22,11 +22,12 @@ function mapOps(labels) {
 function seedPanel(ctx) {
   const logger = ctx.logger("panel-seed");
   if (ctx.panel.deptConfigs().count() > 0) return;
+  const iam = ctx.reflect.get("iam", false);
   for (const meta of DEPT_META) {
-    const matchedOrg = ctx.iam.orgs().findOne((org) => org.name === meta.label);
+    const matchedOrg = iam?.orgs().findOne((org) => org.name === meta.label);
     ctx.panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...matchedOrg ? { orgId: matchedOrg.id } : {} });
   }
-  const rootOrg = ctx.iam.orgs().find((org) => org.parentId === null).at(0);
+  const rootOrg = iam?.orgs().find((org) => org.parentId === null).at(0);
   if (rootOrg) {
     for (const code of ["QB01", "GCJX"]) {
       ctx.panel.activations().insert({

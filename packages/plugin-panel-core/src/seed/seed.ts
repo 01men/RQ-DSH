@@ -40,15 +40,18 @@ export function seedPanel(ctx: Context): void {
   if (ctx.panel.deptConfigs().count() > 0) return
 
   // -- 基线：五部门骨架 + 内置行业激活 + 组织名自动绑定（账号组织打通） ------------
+  // 组织目录缺席（01门演示态）→ 部门不绑组织（范围权限全开放）+ 跳过内置激活登记，
+  // 骨架与演示内容照常播种（plan-gate01 决策 2：未连接宿主时内置演示看板）
+  const iam = ctx.reflect.get('iam', false) as any | undefined
   for (const meta of DEPT_META) {
     // 组织名与部门名一致时自动绑定（真实部署按企业组织树命名即可零配置打通）；
     // 不一致时由管理员经 PUT /api/panel/:dept/config 手工绑定
-    const matchedOrg = ctx.iam.orgs().findOne((org) => org.name === meta.label)
+    const matchedOrg = iam?.orgs().findOne((org: { name: string }) => org.name === meta.label)
     ctx.panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...(matchedOrg ? { orgId: matchedOrg.id } : {}) })
   }
   // 内置图谱资产（packages/platform-core/scenegraphs/ 随平台分发）默认授权根组织；
   // 其余组织/行业走「申请 → 审批（industry.activation，high）→ 激活」链路
-  const rootOrg = ctx.iam.orgs().find((org) => org.parentId === null).at(0)
+  const rootOrg = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0)
   if (rootOrg) {
     for (const code of ['QB01', 'GCJX']) {
       ctx.panel.activations().insert({

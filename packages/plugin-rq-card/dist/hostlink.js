@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { networkInterfaces } from "node:os";
 const RQCARD_CALL_HEADER = "x-rqcard-call";
@@ -197,67 +197,10 @@ class HostLinkService {
       exchange.res.end(text);
     }
   }
-  // ---------------------------------------------------------------- 本机初始化（形态 B 首启）
-  /** admin 初始口令文件路径（console seed 在首启时一次性写入）。 */
-  initialPasswordFile() {
-    return join(this.ctx.opsStorage.dataDirPath, "admin-initial-password.txt");
-  }
-  /** 是否本机首启（admin 初始口令文件在场 = 尚无人登录过）。 */
-  localFirstRun() {
-    return existsSync(this.initialPasswordFile());
-  }
-  /** 本机对外候选地址（向导「选择 IP」数据源：非内部 IPv4 网卡）。 */
-  localInterfaces() {
-    const out = [];
-    for (const [iface, addrs] of Object.entries(networkInterfaces())) {
-      for (const addr of addrs ?? []) {
-        if (addr.family === "IPv4" && !addr.internal) out.push({ address: addr.address, iface });
-      }
-    }
-    return out;
-  }
-  /**
-   * 本机首启 admin 口令初始化：服务端读取一次性初始口令完成首登 + 改密 + 重登，
-   * 口令全程不出服务端；成功后删除初始口令文件（防重放）。
-   * 返回形状与 console /api/auth/login 对齐（面板 saveSession 直接可用）。
-   */
-  localInitAdmin(newPassword, username = "admin") {
-    const file = this.initialPasswordFile();
-    if (!existsSync(file)) {
-      throw new Error("\u521D\u59CB\u5316\u5411\u5BFC\u4EC5\u9996\u6B21\u542F\u52A8\u53EF\u7528\uFF08\u521D\u59CB\u53E3\u4EE4\u6587\u4EF6\u5DF2\u6D88\u8D39\u6216\u4E0D\u5B58\u5728\uFF1B\u8BF7\u7528\u5E38\u89C4\u767B\u5F55\uFF09");
-    }
-    if (typeof newPassword !== "string" || newPassword.trim().length < 8) throw new Error("\u65B0\u53E3\u4EE4\u957F\u5EA6\u4E0D\u5F97\u5C11\u4E8E 8 \u4F4D");
-    if (/[\u4e00-\u9fff]/.test(newPassword)) throw new Error("\u53E3\u4EE4\u4E0D\u5F97\u5305\u542B\u4E2D\u6587");
-    const initialPassword = readFileSync(file, "utf8").split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("\u5E73\u53F0\u7BA1\u7406\u5458"))[0] ?? "";
-    if (initialPassword === "") throw new Error("\u521D\u59CB\u53E3\u4EE4\u6587\u4EF6\u4E3A\u7A7A\uFF0C\u8BF7\u7528\u5E38\u89C4\u767B\u5F55\u540E\u81EA\u884C\u6539\u5BC6");
-    const first = this.ctx.authn.login(username, initialPassword);
-    this.ctx.iam.resetPassword(first.userId, newPassword);
-    try {
-      unlinkSync(file);
-    } catch {
-    }
-    const session = this.ctx.authn.login(username, newPassword);
-    return {
-      token: session.token,
-      refreshToken: session.refreshToken,
-      expiresAt: session.record.expiresAt,
-      user: this.userPayload(session.userId)
-    };
-  }
-  /** 组装与 console /api/auth/login 同形的 user 载荷。 */
-  userPayload(userId) {
-    const user = this.ctx.iam.users().get(userId);
-    if (!user) throw new Error("\u7528\u6237\u4E0D\u5B58\u5728");
-    return {
-      id: user.id,
-      username: user.username,
-      displayName: user.displayName,
-      orgId: user.orgId,
-      roleIds: user.roleIds,
-      roles: user.roleIds.map((roleId) => this.ctx.iam.roles().get(roleId)?.name).filter(Boolean),
-      permissions: this.ctx.iam.userPermissions(user.id)
-    };
-  }
+  // ---------------------------------------------------------------- 落盘
+  // plan-gate01 决策 1（2026-09-10）：「本机初始化」整链（形态 B 设口令：admin 初始口令文件判定、
+  // 首登改密重登、对外网卡枚举）已删除——本机/远端统一为「连接宿主」流程，登录在宿主侧完成，
+  // 本插件不再持有 iam/authn 依赖（inject 已收缩为 httpServer/tools/opsStorage）。
   // ---------------------------------------------------------------- 落盘
   load() {
     try {

@@ -14,19 +14,19 @@ const inject = [
   "opsStorage",
   "platformBus",
   "tools",
-  "iam",
-  "authn",
-  "audit",
-  "usage",
-  "modelGateway",
-  "resourceCore",
-  "scenegraphs",
-  "behavior",
-  "mcpRegistry",
-  "skillHub"
+  "scenegraphs"
 ];
+const DEMO_PRINCIPAL = {
+  kind: "human",
+  principalId: "demo-visitor",
+  name: "\u6F14\u793A\u8BBF\u5BA2",
+  permissions: ["panel.read", "scenegraph.read"],
+  actChain: []
+};
+const soft = (ctx, key) => ctx.reflect.get(key, false);
 const DEPT_RE = /^[a-z]{2,12}$/;
-function apply(ctx) {
+function apply(ctx, config = {}) {
+  const demoAuth = config.demoAuth === true;
   const http = ctx.httpServer;
   ctx.plugin(PanelService);
   ctx.plugin(CardpackService);
@@ -34,6 +34,16 @@ function apply(ctx) {
   const panel = new PanelService(ctx);
   const caller = (exchange) => exchange.principal;
   const requirePermission = (exchange, point) => {
+    if (demoAuth) {
+      if (!["GET", "HEAD", "OPTIONS"].includes(exchange.method.toUpperCase())) {
+        exchange.fail(403, "DEMO_READONLY", "\u6F14\u793A\u6570\u636E\u53EA\u8BFB\uFF1A\u8FDE\u63A5\u5BBF\u4E3B\u5E76\u767B\u5F55\u540E\u89E3\u9501\u5199\u64CD\u4F5C");
+        return false;
+      }
+      if (!exchange.principal) exchange.principal = DEMO_PRINCIPAL;
+    } else if (!exchange.principal) {
+      exchange.fail(401, "UNAUTHENTICATED", "\u672A\u8BA4\u8BC1\uFF1A\u8BF7\u5148\u767B\u5F55\uFF08\u9274\u6743\u4E2D\u95F4\u4EF6\u672A\u8986\u76D6\u8BE5\u8BF7\u6C42\uFF09");
+      return false;
+    }
     const info = caller(exchange);
     if (info.permissions.includes("*") || info.permissions.includes(point)) return true;
     ctx.platformBus.emit("audit.authz.denied", {
@@ -44,6 +54,10 @@ function apply(ctx) {
     });
     exchange.fail(403, "FORBIDDEN", `\u7F3A\u5C11\u6743\u9650\u70B9 ${point}\uFF0C\u8BF7\u8054\u7CFB\u7BA1\u7406\u5458\u8C03\u6574\u89D2\u8272`, { permission: point });
     return false;
+  };
+  const degraded = (exchange, capability) => {
+    exchange.fail(503, "DEGRADED", `\u300C${capability}\u300D\u80FD\u529B\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528`);
+    return null;
   };
   const guarded = (method, path, permission, handler) => {
     http.register(method, path, async (exchange) => {
@@ -60,7 +74,7 @@ function apply(ctx) {
   const body = (exchange) => exchange.body ?? {};
   const changeLog = (exchange, action, resourceType, resourceId, resourceName, detail = "") => {
     const info = caller(exchange);
-    ctx.audit.record({
+    soft(ctx, "audit")?.record({
       type: "change",
       actorType: info.kind === "human" ? "human" : "machine",
       actorId: info.userId ?? info.principalId,
@@ -77,16 +91,17 @@ function apply(ctx) {
   const deptOf = (exchange) => {
     const dept = String(exchange.params.dept ?? "");
     if (!DEPT_RE.test(dept)) throw new Error(`\u90E8\u95E8\u6807\u8BC6\u975E\u6CD5\uFF1A${dept}`);
-    const config = panel.dept(dept);
-    if (!panel.deptScopeAllowed(caller(exchange), config)) {
-      exchange.fail(403, "FORBIDDEN", `\u90E8\u95E8\u8303\u56F4\u53D7\u9650\uFF1A${config.label} \u5DF2\u7ED1\u5B9A\u7EC4\u7EC7\u6CBB\u7406\uFF0C\u4EC5\u8BE5\u7EC4\u7EC7\u5B50\u6811\u6210\u5458\u53EF\u8BBF\u95EE`, { permission: "panel.read", deptScope: config.orgId });
+    const config2 = panel.dept(dept);
+    if (!panel.deptScopeAllowed(caller(exchange), config2)) {
+      exchange.fail(403, "FORBIDDEN", `\u90E8\u95E8\u8303\u56F4\u53D7\u9650\uFF1A${config2.label} \u5DF2\u7ED1\u5B9A\u7EC4\u7EC7\u6CBB\u7406\uFF0C\u4EC5\u8BE5\u7EC4\u7EC7\u5B50\u6811\u6210\u5458\u53EF\u8BBF\u95EE`, { permission: "panel.read", deptScope: config2.orgId });
       throw new Error("\u90E8\u95E8\u8303\u56F4\u53D7\u9650");
     }
-    return config;
+    return config2;
   };
   const orgIdOf = (exchange) => {
     const info = caller(exchange);
-    return (info.userId ? ctx.iam.users().get(info.userId)?.orgId : void 0) ?? ctx.iam.orgs().find((org) => org.parentId === null).at(0)?.id ?? "";
+    const iam = soft(ctx, "iam");
+    return (info.userId ? iam?.users().get(info.userId)?.orgId : void 0) ?? iam?.orgs().find((org) => org.parentId === null).at(0)?.id ?? "";
   };
   guarded("GET", "/api/panel/depts", "panel.read", (exchange) => {
     const info = caller(exchange);
@@ -98,14 +113,18 @@ function apply(ctx) {
       }))
     };
   });
-  guarded("GET", "/api/panel/orgs", "panel.config.write", (exchange) => ({
-    orgs: ctx.iam.orgs().all().map((org) => ({ id: org.id, name: org.name, parentId: org.parentId }))
-  }));
+  guarded("GET", "/api/panel/orgs", "panel.config.write", (exchange) => {
+    const iam = soft(ctx, "iam");
+    if (!iam) return degraded(exchange, "\u7EC4\u7EC7\u76EE\u5F55");
+    return { orgs: iam.orgs().all().map((org) => ({ id: org.id, name: org.name, parentId: org.parentId })) };
+  });
   guarded("PUT", "/api/panel/:dept/config", "panel.config.write", (exchange) => {
+    const iam = soft(ctx, "iam");
+    if (!iam) return degraded(exchange, "\u7EC4\u7EC7\u76EE\u5F55");
     const dept = panel.dept(String(exchange.params.dept ?? ""));
     const input = body(exchange);
     if (input.orgId !== void 0 && input.orgId !== null && input.orgId !== "") {
-      if (!ctx.iam.orgs().get(input.orgId)) throw new Error(`\u7EC4\u7EC7\u4E0D\u5B58\u5728\uFF1A${input.orgId}`);
+      if (!iam.orgs().get(input.orgId)) throw new Error(`\u7EC4\u7EC7\u4E0D\u5B58\u5728\uFF1A${input.orgId}`);
       ctx.panel.deptConfigs().update(dept.id, { orgId: input.orgId });
     } else {
       ctx.panel.deptConfigs().update(dept.id, { orgId: void 0 });
@@ -131,7 +150,7 @@ function apply(ctx) {
       agents: dept.agents.map((agent) => panel.agentWithAsset(agent)),
       kpis: dept.kpis,
       widgets: panel.board(dept),
-      pendingActivations: ctx.audit.approvals().find((item) => item.kind === "industry.activation" && item.status === "pending").map((item) => ({ id: item.id, code: String(item.payload.code ?? ""), orgId: String(item.payload.orgId ?? "") })).filter((item) => !orgId || item.orgId === orgId)
+      pendingActivations: soft(ctx, "audit")?.approvals().find((item) => item.kind === "industry.activation" && item.status === "pending").map((item) => ({ id: item.id, code: String(item.payload.code ?? ""), orgId: String(item.payload.orgId ?? "") })).filter((item) => !orgId || item.orgId === orgId) ?? []
     };
   });
   guarded("GET", "/api/panel/:dept/board", "panel.read", (exchange) => ({
@@ -181,10 +200,14 @@ function apply(ctx) {
     ...model,
     apiKey: model.apiKey.startsWith("env:") ? model.apiKey : "***"
   });
-  guarded("GET", "/api/panel/models", "panel.read", () => ({
-    models: ctx.modelGateway.models().all().map(maskedModel)
-  }));
+  guarded("GET", "/api/panel/models", "panel.read", (exchange) => {
+    const gateway = soft(ctx, "modelGateway");
+    if (!gateway) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
+    return { models: gateway.models().all().map(maskedModel) };
+  });
   guarded("POST", "/api/panel/models", "panel.config.write", (exchange) => {
+    const gateway = soft(ctx, "modelGateway");
+    if (!gateway) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
     const input = body(exchange);
     const slug = input.slug?.trim() ?? "";
     if (!slug) throw new Error("\u6A21\u578B slug \u5FC5\u586B\uFF08\u5982 deepseek-chat\uFF09");
@@ -192,8 +215,8 @@ function apply(ctx) {
     if (!input.endpoint?.trim()) throw new Error("endpoint \u5FC5\u586B\uFF08OpenAI \u517C\u5BB9\u57FA\u5740\uFF1B\u672A\u914D\u7F6E\u4E0D\u53EF\u8C03\u7528\uFF0C\u7EDD\u4E0D\u9020\u5047\u56DE\u590D\uFF09");
     if (!Number.isFinite(input.listCentsPerKTokens) || (input.listCentsPerKTokens ?? -1) < 0) throw new Error("listCentsPerKTokens \u5FC5\u987B\u662F\u975E\u8D1F\u6570\uFF08\u6302\u724C\u4EF7\uFF0C\u5206/\u5343 tokens\uFF09");
     const status = input.status === "offline" ? "offline" : "online";
-    const existing = ctx.modelGateway.models().findOne((item) => item.slug === slug);
-    const model = ctx.modelGateway.upsertModel({
+    const existing = gateway.models().findOne((item) => item.slug === slug);
+    const model = gateway.upsertModel({
       slug,
       displayName: input.displayName?.trim() || slug,
       provider: input.provider?.trim() || "external",
@@ -207,20 +230,24 @@ function apply(ctx) {
     return maskedModel(model);
   });
   guarded("DELETE", "/api/panel/models/:id", "panel.config.write", (exchange) => {
+    const gateway = soft(ctx, "modelGateway");
+    if (!gateway) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
     const id = exchange.params["id"];
-    const model = ctx.modelGateway.models().get(id);
+    const model = gateway.models().get(id);
     if (!model) throw new Error(`\u6A21\u578B\u4E0D\u5B58\u5728\uFF1A${id}`);
-    ctx.modelGateway.models().remove(id);
+    gateway.models().remove(id);
     changeLog(exchange, "panel.model.delete", "model", id, model.slug);
     return { deleted: true };
   });
   guarded("POST", "/api/panel/models/:slug/test", "panel.config.write", async (exchange) => {
+    const gateway = soft(ctx, "modelGateway");
+    if (!gateway) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
     const slug = String(exchange.params.slug ?? "");
     const info = caller(exchange);
     const orgId = orgIdOf(exchange);
     if (!orgId) throw new Error("\u65E0\u6CD5\u786E\u5B9A\u8BA1\u8D39\u7EC4\u7EC7\uFF08orgId\uFF09\uFF0C\u65E0\u6CD5\u6267\u884C\u771F\u5B9E\u8C03\u7528\u6D4B\u8BD5");
     try {
-      const result = await ctx.modelGateway.invoke({
+      const result = await gateway.invoke({
         model: slug,
         messages: [{ role: "user", content: "\u6A21\u578B\u8FDE\u901A\u6027\u6D4B\u8BD5\uFF0C\u8BF7\u76F4\u63A5\u56DE\u590D\uFF1AOK" }],
         orgId,
@@ -237,13 +264,17 @@ function apply(ctx) {
     const type = ref.slice(0, colon);
     const id = ref.slice(colon + 1);
     const matches = (item) => item.id === id || item.slug === id;
+    if (!soft(ctx, "resourceCore") && ["agent", "app", "nas"].includes(type)) return true;
+    if (!soft(ctx, "mcpRegistry") && type === "mcp") return true;
+    if (!soft(ctx, "skillHub") && type === "skill") return true;
+    if (!soft(ctx, "iam") && type === "kb") return true;
     try {
       if (type === "agent" || type === "app" || type === "nas") {
-        return ctx.resourceCore.list(type).some(matches);
+        return soft(ctx, "resourceCore").list(type).some(matches);
       }
-      if (type === "mcp") return ctx.mcpRegistry.services().all().some(matches);
-      if (type === "skill") return ctx.skillHub.skills().all().some(matches);
-      if (type === "kb") return ctx.iam.orgs().get(id) !== void 0;
+      if (type === "mcp") return soft(ctx, "mcpRegistry").services().all().some(matches);
+      if (type === "skill") return soft(ctx, "skillHub").skills().all().some(matches);
+      if (type === "kb") return soft(ctx, "iam").orgs().get(id) !== void 0;
       return true;
     } catch {
       return true;
@@ -258,8 +289,9 @@ function apply(ctx) {
       return;
     }
     const platform = requested;
-    const user = info.userId ? ctx.iam.users().get(info.userId) : void 0;
-    const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code) => Boolean(code)) : [];
+    const iam = soft(ctx, "iam");
+    const user = info.userId ? iam?.users().get(info.userId) : void 0;
+    const roles = user ? user.roleIds.map((roleId) => iam?.roles().get(roleId)?.code).filter((code) => Boolean(code)) : [];
     cardpacks.setRefAliveResolver(refAlive);
     const packs = cardpacks.forPlatform(platform);
     const { cards, droppedDeadRefs } = filterCards({ packs, roles, refAlive });
@@ -273,27 +305,19 @@ function apply(ctx) {
     }
     const weekAgo = new Date(Date.now() - 7 * 24 * 36e5).toISOString();
     const behaviorCount = (type) => {
-      try {
-        return ctx.behavior.query({ type, from: weekAgo }).total;
-      } catch {
-        return 0;
-      }
+      return soft(ctx, "behavior")?.query({ type, from: weekAgo }).total ?? 0;
     };
     let usageCount = 0;
     let chargeCents = 0;
     let byDay = [];
-    try {
-      const totals = ctx.usage.totals({ from: weekAgo });
+    const usageAgg = soft(ctx, "usage");
+    if (usageAgg) {
+      const totals = usageAgg.totals({ from: weekAgo });
       usageCount = totals.count;
       chargeCents = totals.charge_cents;
-      byDay = ctx.usage.breakdown(weekAgo).byDay;
-    } catch {
+      byDay = usageAgg.breakdown(weekAgo).byDay;
     }
-    let completedCalls = 0;
-    try {
-      completedCalls = ctx.mcpRegistry.calls().all().filter((call) => call.ok && call.at >= weekAgo).length;
-    } catch {
-    }
+    const completedCalls = soft(ctx, "mcpRegistry")?.calls().all().filter((call) => call.ok && call.at >= weekAgo).length ?? 0;
     return {
       generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
       windowDays: 7,
@@ -305,12 +329,12 @@ function apply(ctx) {
       totalPacks: packs.length,
       availablePlatforms: available,
       droppedDeadRefs,
-      // 聚合面（战略看板）
+      // 聚合面（战略看板）——资产目录缺席（演示态）→ 全 0（看板诚实降级为演示数据视图）
       assets: {
-        appsOnline: ctx.resourceCore.list("app").filter((item) => item.status === "online").length,
-        agentsOnline: ctx.resourceCore.list("agent").filter((item) => item.status === "online").length,
-        skillsPublished: ctx.skillHub.skills().all().filter((item) => item.status === "published").length,
-        mcpServing: ctx.mcpRegistry.services().all().filter((service) => service.status === "online" || service.status === "gray").length
+        appsOnline: soft(ctx, "resourceCore")?.list("app").filter((item) => item.status === "online").length ?? 0,
+        agentsOnline: soft(ctx, "resourceCore")?.list("agent").filter((item) => item.status === "online").length ?? 0,
+        skillsPublished: soft(ctx, "skillHub")?.skills().all().filter((item) => item.status === "published").length ?? 0,
+        mcpServing: soft(ctx, "mcpRegistry")?.services().all().filter((service) => service.status === "online" || service.status === "gray").length ?? 0
       },
       waic: { count: usageCount, chargeCents },
       byDay,
@@ -375,7 +399,7 @@ function apply(ctx) {
     const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id;
     if (!channelId) throw new Error("\u90E8\u95E8\u6682\u65E0\u9891\u9053\uFF0C\u8BF7\u5148\u521B\u5EFA");
     const requestedModel = input.model?.trim() ?? "";
-    if (requestedModel && !ctx.modelGateway.models().findOne((item) => item.slug === requestedModel)) {
+    if (requestedModel && !soft(ctx, "modelGateway")?.models().findOne((item) => item.slug === requestedModel)) {
       throw new Error(`\u6A21\u578B\u672A\u5728\u76EE\u5F55\u767B\u8BB0\uFF1A${requestedModel}\uFF08\u53EF\u5728\u300C\u{1F9E0} \u6A21\u578B\u300D\u4E2D\u767B\u8BB0\uFF09`);
     }
     const info = caller(exchange);
@@ -427,7 +451,7 @@ function apply(ctx) {
     const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id;
     if (!channelId) throw new Error("\u90E8\u95E8\u6682\u65E0\u9891\u9053\uFF0C\u8BF7\u5148\u521B\u5EFA");
     const requestedModel = input.model?.trim() ?? "";
-    if (requestedModel && !ctx.modelGateway.models().findOne((item) => item.slug === requestedModel)) {
+    if (requestedModel && !soft(ctx, "modelGateway")?.models().findOne((item) => item.slug === requestedModel)) {
       throw new Error(`\u6A21\u578B\u672A\u5728\u76EE\u5F55\u767B\u8BB0\uFF1A${requestedModel}\uFF08\u53EF\u5728\u300C\u{1F9E0} \u6A21\u578B\u300D\u4E2D\u767B\u8BB0\uFF09`);
     }
     const info = caller(exchange);
@@ -553,10 +577,12 @@ function apply(ctx) {
   });
   guarded("GET", "/api/panel/industries", "panel.read", (exchange) => {
     const orgId = orgIdOf(exchange);
-    const pendingCodes = ctx.audit.approvals().find((item) => item.kind === "industry.activation" && item.status === "pending" && String(item.payload.orgId ?? "") === orgId).map((item) => String(item.payload.code ?? ""));
+    const pendingCodes = soft(ctx, "audit")?.approvals().find((item) => item.kind === "industry.activation" && item.status === "pending" && String(item.payload.orgId ?? "") === orgId).map((item) => String(item.payload.code ?? "")) ?? [];
     return { industries: panel.industryStates(orgId, pendingCodes) };
   });
   guarded("POST", "/api/panel/industries/:code/activate-requests", "panel.write", (exchange) => {
+    const audit = soft(ctx, "audit");
+    if (!audit) return degraded(exchange, "\u5BA1\u6279\u4E2D\u5FC3");
     const code = String(exchange.params.code ?? "").toUpperCase();
     const registry = panel.industryStates("", []).find((item) => item.code === code);
     if (!registry) throw new Error(`\u672A\u767B\u8BB0\u884C\u4E1A\uFF1A${code}`);
@@ -565,7 +591,7 @@ function apply(ctx) {
     const existing = panel.activations().findOne((item) => item.orgId === orgId && item.code === code && item.status === "active");
     if (existing) throw new Error(`\u884C\u4E1A ${code} \u5BF9\u672C\u7EC4\u7EC7\u5DF2\u662F\u6FC0\u6D3B\u6001`);
     const info = caller(exchange);
-    const approval = ctx.audit.createApproval({
+    const approval = audit.createApproval({
       kind: "industry.activation",
       title: `\u884C\u4E1A\u529F\u80FD\u5305\u6388\u6743\u6FC0\u6D3B\uFF1A${registry.name}\uFF08${code}\uFF09`,
       payload: { code, orgId, requestedBy: info.name, sub: registry.sub, graphLoaded: registry.graphLoaded },
@@ -640,8 +666,10 @@ function apply(ctx) {
       const token = exchange.query.get("token") ?? "";
       if (!token) return fail(401, "\u7F3A\u5C11 token \u67E5\u8BE2\u53C2\u6570");
       if (!DEPT_RE.test(dept)) return fail(400, `\u90E8\u95E8\u6807\u8BC6\u975E\u6CD5\uFF1A${dept}`);
+      const authn = soft(ctx, "authn");
+      if (!authn) return fail(401, "\u8BA4\u8BC1\u4E2D\u5FC3\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u8BA2\u9605\u5B9E\u65F6\u6D41");
       try {
-        const verified = ctx.authn.verify(token);
+        const verified = authn.verify(token);
         exchange.principal = {
           kind: verified.principal.type,
           principalId: verified.principal.id,
@@ -695,7 +723,8 @@ function apply(ctx) {
       unsubscribe();
     });
   }, { access: "public", selfValidated: true });
-  const offExecutor = ctx.audit.registerExecutor("industry.activation", panel.buildActivationExecutor());
+  const offExecutor = soft(ctx, "audit")?.registerExecutor("industry.activation", panel.buildActivationExecutor()) ?? (() => {
+  });
   panel.wireEventBus();
   const offDelivered = ctx.platformBus.on(PlatformEvents.DingtalkDelivered, (payload) => {
     const { messageId, ok, error } = payload ?? {};
@@ -709,7 +738,7 @@ function apply(ctx) {
     if (message.ddSync !== "pending") return;
     panel.messages().update(messageId, { ddSync: "failed" });
     if (error) {
-      ctx.audit.fire({ severity: "warning", title: "\u9489\u9489\u6865\u63A5\u6295\u9012\u5931\u8D25", message: `\u6D88\u606F ${messageId} \u6295\u9012\u5931\u8D25\uFF1A${error}`, resourceType: "panel_message", resourceId: messageId });
+      soft(ctx, "audit")?.fire({ severity: "warning", title: "\u9489\u9489\u6865\u63A5\u6295\u9012\u5931\u8D25", message: `\u6D88\u606F ${messageId} \u6295\u9012\u5931\u8D25\uFF1A${error}`, resourceType: "panel_message", resourceId: messageId });
     }
   });
   ctx.effect(() => () => {
@@ -738,7 +767,7 @@ function apply(ctx) {
     async execute(args) {
       const dept = args.dept;
       const configs = dept ? [panel.dept(dept)] : panel.deptConfigs().all();
-      return configs.map((config) => ({ dept: config.id, label: config.label, agents: config.agents }));
+      return configs.map((config2) => ({ dept: config2.id, label: config2.label, agents: config2.agents }));
     }
   });
   ctx.tools.register({
@@ -918,32 +947,20 @@ function apply(ctx) {
       }
       const platform = requested;
       const info = exec.principal;
-      const user = info?.userId ? ctx.iam.users().get(info.userId) : void 0;
-      const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code) => Boolean(code)) : [];
+      const iam = soft(ctx, "iam");
+      const user = info?.userId ? iam?.users().get(info.userId) : void 0;
+      const roles = user ? user.roleIds.map((roleId) => iam?.roles().get(roleId)?.code).filter((code) => Boolean(code)) : [];
       cardpacks.setRefAliveResolver(refAlive);
       const packs = cardpacks.forPlatform(platform);
       const { cards } = filterCards({ packs, roles, refAlive });
       const weekAgo = new Date(Date.now() - 7 * 24 * 36e5).toISOString();
       const behaviorCount = (type) => {
-        try {
-          return ctx.behavior.query({ type, from: weekAgo }).total;
-        } catch {
-          return 0;
-        }
+        return soft(ctx, "behavior")?.query({ type, from: weekAgo }).total ?? 0;
       };
-      let usageCount = 0;
-      let chargeCents = 0;
-      try {
-        const totals = ctx.usage.totals({ from: weekAgo });
-        usageCount = totals.count;
-        chargeCents = totals.charge_cents;
-      } catch {
-      }
-      let completedCalls = 0;
-      try {
-        completedCalls = ctx.mcpRegistry.calls().all().filter((call) => call.ok && call.at >= weekAgo).length;
-      } catch {
-      }
+      const usageTotals = soft(ctx, "usage")?.totals({ from: weekAgo });
+      const usageCount = usageTotals?.count ?? 0;
+      const chargeCents = usageTotals?.charge_cents ?? 0;
+      const completedCalls = soft(ctx, "mcpRegistry")?.calls().all().filter((call) => call.ok && call.at >= weekAgo).length ?? 0;
       const minutesPerCall = Number(process.env.ROI_MINUTES_PER_CALL ?? 3);
       const callBase = completedCalls > 0 ? completedCalls : usageCount;
       return {
@@ -951,10 +968,10 @@ function apply(ctx) {
         windowDays: 7,
         platform,
         assets: {
-          appsOnline: ctx.resourceCore.list("app").filter((item) => item.status === "online").length,
-          agentsOnline: ctx.resourceCore.list("agent").filter((item) => item.status === "online").length,
-          skillsPublished: ctx.skillHub.skills().all().filter((item) => item.status === "published").length,
-          mcpServing: ctx.mcpRegistry.services().all().filter((service) => service.status === "online" || service.status === "gray").length
+          appsOnline: soft(ctx, "resourceCore")?.list("app").filter((item) => item.status === "online").length ?? 0,
+          agentsOnline: soft(ctx, "resourceCore")?.list("agent").filter((item) => item.status === "online").length ?? 0,
+          skillsPublished: soft(ctx, "skillHub")?.skills().all().filter((item) => item.status === "published").length ?? 0,
+          mcpServing: soft(ctx, "mcpRegistry")?.services().all().filter((service) => service.status === "online" || service.status === "gray").length ?? 0
         },
         funnel: {
           exposed: behaviorCount("card.exposed"),

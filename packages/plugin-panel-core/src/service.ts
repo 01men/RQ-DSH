@@ -194,6 +194,17 @@ export class PanelService extends Service {
     void config
   }
 
+  /**
+   * 可选宿主服务软读（plan-gate01 Phase 2 瘦身）：cordis 4.x 无 optional inject 语法，
+   * 未声明键的 ctx.<key> 访问在激活插件内硬抛 without inject（spike 定稿）——9 个可选键
+   * （iam/authn/audit/usage/modelGateway/resourceCore/behavior/mcpRegistry/skillHub）统一走
+   * ctx.reflect.get(key, false)：有提供者=实例（全量形态语义不变），无=undefined
+   * （01门演示态两级降级：记录类空记录 / 能力类诚实降级），绝不裸访问。
+   */
+  soft<T = any>(key: string): T | undefined {
+    return this.ctx.reflect.get(key, false) as T | undefined
+  }
+
   // -- 集合 -----------------------------------------------------------------
 
   deptConfigs(): Collection<DeptConfigRecord> {
@@ -246,21 +257,23 @@ export class PanelService extends Service {
 
   // -- 账号组织打通：部门 ↔ 平台组织 -----------------------------------------
 
-  /** 组织子树包含判定（orgId 沿 parentId 上溯到 rootId）。 */
+  /** 组织子树包含判定（orgId 沿 parentId 上溯到 rootId）。组织目录缺失（演示态）fail-closed。 */
   orgSubtreeContains(rootId: string, orgId: string): boolean {
-    let current = this.ctx.iam.orgs().get(orgId)
+    const iam = this.soft('iam')
+    if (!iam) return false
+    let current = iam.orgs().get(orgId)
     let guard = 0
     while (current && guard++ < 32) {
       if (current.id === rootId) return true
-      current = current.parentId ? this.ctx.iam.orgs().get(current.parentId) : undefined
+      current = current.parentId ? iam.orgs().get(current.parentId) : undefined
     }
     return false
   }
 
-  /** 绑定组织信息（名称实时解析，组织改名不落陈旧数据）。 */
+  /** 绑定组织信息（名称实时解析，组织改名不落陈旧数据）。组织目录缺失时诚实显示未绑定。 */
   deptOrg(dept: DeptConfigRecord): { id: string; name: string } | undefined {
     if (!dept.orgId) return undefined
-    const org = this.ctx.iam.orgs().get(dept.orgId)
+    const org = this.soft('iam')?.orgs().get(dept.orgId)
     return org ? { id: org.id, name: org.name } : undefined
   }
 
@@ -274,9 +287,10 @@ export class PanelService extends Service {
     if (exchangeCaller.kind === 'machine') return true
     if (!dept.orgId) return true
     if (exchangeCaller.userId) {
-      const user = this.ctx.iam.users().get(exchangeCaller.userId)
+      const iam = this.soft('iam')
+      const user = iam?.users().get(exchangeCaller.userId)
       if (user) {
-        const isOrgAdmin = user.roleIds.some((roleId) => this.ctx.iam.roles().get(roleId)?.code === 'org_admin')
+        const isOrgAdmin = user.roleIds.some((roleId) => iam?.roles().get(roleId)?.code === 'org_admin')
         if (isOrgAdmin) return true
         return this.orgSubtreeContains(dept.orgId, user.orgId)
       }
@@ -284,13 +298,15 @@ export class PanelService extends Service {
     return false
   }
 
-  /** 部门名册：绑定组织（或全组织兜底）子树内的成员（最小 PII：姓名/职务/组织名）。 */
+  /** 部门名册：绑定组织（或全组织兜底）子树内的成员（最小 PII：姓名/职务/组织名）。组织目录缺失（演示态）→ 空名册。 */
   deptMembers(dept: DeptConfigRecord, limit = 50): Array<{ id: string; name: string; title?: string; orgName?: string }> {
-    const orgRoot = dept.orgId ?? this.ctx.iam.orgs().find((org) => org.parentId === null).at(0)?.id
+    const iam = this.soft('iam')
+    if (!iam) return []
+    const orgRoot = dept.orgId ?? iam.orgs().find((org) => org.parentId === null).at(0)?.id
     if (!orgRoot) return []
     const inScope = (orgId: string): boolean => this.orgSubtreeContains(orgRoot, orgId)
-    const orgName = (orgId: string): string => this.ctx.iam.orgs().get(orgId)?.name ?? ''
-    return this.ctx.iam.users().all()
+    const orgName = (orgId: string): string => iam.orgs().get(orgId)?.name ?? ''
+    return iam.users().all()
       .filter((user) => user.status === 'active' && inScope(user.orgId))
       .slice(0, limit)
       .map((user) => ({ id: user.id, name: user.displayName, ...(user.title ? { title: user.title } : {}), orgName: orgName(user.orgId) }))
@@ -330,18 +346,18 @@ export class PanelService extends Service {
         this.activations().insert({ id: newId('act'), code, orgId, status: 'active', activatedAt: new Date().toISOString(), approvalId: String(payload.approvalId ?? ''), activatedBy: approverId })
       }
       try {
-        this.ctx.usage.grantCapabilities(`org:${orgId}`, [`panel:${code.toLowerCase()}`], 'industry-activation')
-      } catch { /* usage 缺失时不阻断激活（计费面独立降级） */ }
+        this.soft('usage')?.grantCapabilities(`org:${orgId}`, [`panel:${code.toLowerCase()}`], 'industry-activation')
+      } catch { /* 计量运行期故障不阻断激活（计费面独立降级） */ }
       this.ctx.platformBus.emit(PlatformEvents.PanelIndustryActivated, { code, orgId, activatedBy: approverId })
       return { code, orgId, status: 'active' }
     }
   }
 
-  /** Agent 阵容 × Agent 资产联动：绑定资产的存在性与生命周期状态实时解析（宿主数字员工在线面）。 */
+  /** Agent 阵容 × Agent 资产联动：绑定资产的存在性与生命周期状态实时解析（宿主数字员工在线面）。资产目录缺失（演示态）→ 未绑定展示。 */
   agentWithAsset(agentCard: DeptAgent): DeptAgent & { asset?: { id: string; slug?: string; name: string; status: string; model?: string } } {
     const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
     if (!ref) return { ...agentCard }
-    const asset = this.ctx.resourceCore.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref)
+    const asset = this.soft('resourceCore')?.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref)
     if (!asset) return { ...agentCard }
     const attrs = asset.attrs as Record<string, unknown> | undefined
     return {
@@ -490,9 +506,9 @@ export class PanelService extends Service {
         lane: 'todo', assigneeType: 'human', createdBy: `agent:${agentCard.name}`, messageId: trigger.id,
       })
     }
-    // 解析 Agent 资产（agentRef = agent:<idOrSlug>）
+    // 解析 Agent 资产（agentRef = agent:<idOrSlug>）；资产目录缺失（演示态）等同未绑定 → 诚实转人工
     const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
-    const asset = ref ? this.ctx.resourceCore.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
+    const asset = ref ? this.soft('resourceCore')?.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
     if (!asset) return void fallbackToHuman('未绑定 Agent 资产（请在控制台「Agent 本体」登记并在此配置 agentRef）')
     // 模型取向：对话框显式切换的模型优先，未指定则跟随 Agent 资产的 model 属性
     const model = modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
@@ -507,7 +523,9 @@ export class PanelService extends Service {
       `以下是频道「${channel?.name ?? ''}」最近对话：\n${contextText}`,
     ].filter(Boolean).join('\n\n')
     try {
-      const result = await this.ctx.modelGateway.invoke({
+      const gateway = this.soft('modelGateway')
+      if (!gateway) throw new Error('模型网关未接入（01门演示态）——连接宿主后可用')
+      const result = await gateway.invoke({
         model, orgId, subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
         messages: [
           { role: 'system', content: systemPrompt },
@@ -522,7 +540,7 @@ export class PanelService extends Service {
       // 面板协作计量（D1 裁决键格式）：org 主键缺省时跳过计量（计量面不阻塞协作面）
       if (orgId) {
         try {
-          this.ctx.usage.record({
+          this.soft('usage')?.record({
             org: orgId,
             subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
             principal: `org:${orgId}`,
@@ -537,12 +555,8 @@ export class PanelService extends Service {
 
   private callerOrgId(userId?: string): string {
     if (!userId) return ''
-    try {
-      const user = this.ctx.iam.users().get(userId)
-      return user?.orgId ?? ''
-    } catch {
-      return ''
-    }
+    const user = this.soft('iam')?.users().get(userId)
+    return user?.orgId ?? ''
   }
 
   /**
@@ -563,7 +577,7 @@ export class PanelService extends Service {
       return { ok: false, reason: `部门 ${dept.id}（${dept.label}）名册无此 Agent。可用阵容：${names.join('、') || '（无）'}` }
     }
     const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
-    const asset = ref ? this.ctx.resourceCore.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
+    const asset = ref ? this.soft('resourceCore')?.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
     if (!asset) return { ok: false, reason: `Agent「${agentName}」未绑定 Agent 资产（agentRef），无法自主应答` }
     const model = options.modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
     if (!model) return { ok: false, reason: `Agent「${agentName}」未配置模型（model 属性为空），且本次未指定模型` }
@@ -575,7 +589,9 @@ export class PanelService extends Service {
       options.contextNote ?? '',
     ].filter(Boolean).join('\n\n')
     try {
-      const result = await this.ctx.modelGateway.invoke({
+      const gateway = this.soft('modelGateway')
+      if (!gateway) throw new Error('模型网关未接入（01门演示态）——连接宿主后可用')
+      const result = await gateway.invoke({
         model, orgId, subject: options.userId ? `user:${options.userId}` : 'panel:tool',
         messages: [
           { role: 'system', content: systemPrompt },
@@ -590,7 +606,7 @@ export class PanelService extends Service {
       // 与 invokeAgent 同风格的协作计量（org 主键缺省跳过；失败不阻塞应答）
       if (orgId) {
         try {
-          this.ctx.usage.record({
+          this.soft('usage')?.record({
             org: orgId,
             subject: options.userId ? `user:${options.userId}` : 'panel:tool',
             principal: `org:${orgId}`,
@@ -611,7 +627,9 @@ export class PanelService extends Service {
    * 仅 published 可直调（deprecated/offline 不给面板点名）。
    */
   listInvokeableSkills(viewerOrgId?: string): Array<{ id: string; name: string; slug: string; summary: string; category: string; version: string }> {
-    return this.ctx.skillHub.skills().all()
+    const hub = this.soft('skillHub')
+    if (!hub) return []
+    return hub.skills().all()
       .filter((skill) => {
         if (skill.status !== 'published') return false
         if (skill.visibility === 'orgs') {
@@ -644,12 +662,12 @@ export class PanelService extends Service {
     // 按名全名匹配优先，slug 兜底（技能名常含中文与空格，通用 regex 兜不了）
     const skill = invokeable.find((item) => item.name === name) ?? invokeable.find((item) => item.slug === name)
     if (!skill) {
-      const hint = this.ctx.skillHub.skills().all().find((item) => item.status === 'published' && (item.name === name || item.slug === name))
+      const hint = this.soft('skillHub')?.skills().all().find((item) => item.status === 'published' && (item.name === name || item.slug === name))
       if (hint) return { ok: false, reason: `技能「${name}」未对当前用户组织开放（visibility=${hint.visibility}），无法直调` }
       const names = invokeable.slice(0, 8).map((item) => item.name)
       return { ok: false, reason: `没有已上架且对您开放的技能「${name}」。可用技能：${names.join('、') || '（无）'}` }
     }
-    const record = this.ctx.skillHub.skills().get(skill.id)
+    const record = this.soft('skillHub')?.skills().get(skill.id)
     const version = record?.versions.find((item) => item.version === skill.version && item.status === 'published')
     const content = version?.content?.trim() ?? ''
     if (!content) return { ok: false, reason: `技能「${skill.name}」当前版本（${skill.version}）无指令内容，无法直调` }
@@ -657,7 +675,7 @@ export class PanelService extends Service {
     // （班组长没选过模型也要能一把直调——目录为空才诚实拒绝）
     let model = options.modelOverride?.trim() ?? ''
     if (!model) {
-      const online = this.ctx.modelGateway.models().all().filter((item) => item.status === 'online')
+      const online = this.soft('modelGateway')?.models().all().filter((item) => item.status === 'online') ?? []
       if (online.length === 0) return { ok: false, reason: '模型目录暂无在线模型——请管理员在「模型管理」中接入后再直调技能' }
       model = online[0]!.slug
     }
@@ -667,7 +685,9 @@ export class PanelService extends Service {
       options.contextNote ?? '',
     ].filter(Boolean).join('\n\n')
     try {
-      const result = await this.ctx.modelGateway.invoke({
+      const gateway = this.soft('modelGateway')
+      if (!gateway) throw new Error('模型网关未接入（01门演示态）——连接宿主后可用')
+      const result = await gateway.invoke({
         model, orgId, subject: options.userId ? `user:${options.userId}` : 'panel:tool',
         messages: [
           { role: 'system', content: systemPrompt },
@@ -682,7 +702,7 @@ export class PanelService extends Service {
       // 与 askAgent 同风格的协作计量（org 主键缺省跳过；失败不阻塞回包）
       if (orgId) {
         try {
-          this.ctx.usage.record({
+          this.soft('usage')?.record({
             org: orgId,
             subject: options.userId ? `user:${options.userId}` : 'panel:tool',
             principal: `org:${orgId}`,
@@ -698,7 +718,7 @@ export class PanelService extends Service {
   /** 部门挂载活动的场景图谱摘要（注入 Agent 系统提示；图谱未装载则空串）。 */
   sceneSummaryForDept(dept: DeptConfigRecord): string {
     try {
-      const orgId = this.ctx.iam.orgs().all()[0]?.id ?? ''
+      const orgId = this.soft('iam')?.orgs().all()[0]?.id ?? ''
       const active = this.activeIndustry(orgId)
       if (!active) return ''
       const pack = this.ctx.scenegraphs.get(active.code.toUpperCase())
@@ -734,7 +754,9 @@ export class PanelService extends Service {
       this.transitionTask(task.id, op.lane ?? 'doing', input.actorId)
       result = `任务 ${task.title} → ${LANE_LABELS[op.lane ?? 'doing']}`
     } else if (action === 'approval.request') {
-      const approval = this.ctx.audit.createApproval({
+      const audit = this.soft('audit')
+      if (!audit) throw new Error('审批中心未接入（01门演示态）——连接宿主后可走审批链')
+      const approval = audit.createApproval({
         kind: 'panel.card-action',
         title: `${message.card.title} · ${op.label}`,
         payload: { messageId: message.id, dept: message.dept, opId: op.id, opLabel: op.label, reason: input.reason ?? '' },

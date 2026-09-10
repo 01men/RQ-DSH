@@ -13,7 +13,6 @@ export interface HostLinkView {
   hubBase?: string | null
   hubMountPrefix?: string | null
   probe?: { reachable: boolean; status?: number; version?: string } | null
-  localFirstRun?: boolean
 }
 
 /** 读取宿主连接状态；任何失败折叠为 null（调用方按未知降级，绝不抛错炸宿主）。 */

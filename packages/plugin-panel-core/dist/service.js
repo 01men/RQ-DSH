@@ -18,6 +18,16 @@ class PanelService extends Service {
     super(ctx, "panel");
     void config;
   }
+  /**
+   * 可选宿主服务软读（plan-gate01 Phase 2 瘦身）：cordis 4.x 无 optional inject 语法，
+   * 未声明键的 ctx.<key> 访问在激活插件内硬抛 without inject（spike 定稿）——9 个可选键
+   * （iam/authn/audit/usage/modelGateway/resourceCore/behavior/mcpRegistry/skillHub）统一走
+   * ctx.reflect.get(key, false)：有提供者=实例（全量形态语义不变），无=undefined
+   * （01门演示态两级降级：记录类空记录 / 能力类诚实降级），绝不裸访问。
+   */
+  soft(key) {
+    return this.ctx.reflect.get(key, false);
+  }
   // -- 集合 -----------------------------------------------------------------
   deptConfigs() {
     return this.ctx.opsStorage.collection("panel:deptConfigs");
@@ -58,20 +68,22 @@ class PanelService extends Service {
     return { code: activation.code.toLowerCase(), name: registry?.name ?? activation.code };
   }
   // -- 账号组织打通：部门 ↔ 平台组织 -----------------------------------------
-  /** 组织子树包含判定（orgId 沿 parentId 上溯到 rootId）。 */
+  /** 组织子树包含判定（orgId 沿 parentId 上溯到 rootId）。组织目录缺失（演示态）fail-closed。 */
   orgSubtreeContains(rootId, orgId) {
-    let current = this.ctx.iam.orgs().get(orgId);
+    const iam = this.soft("iam");
+    if (!iam) return false;
+    let current = iam.orgs().get(orgId);
     let guard = 0;
     while (current && guard++ < 32) {
       if (current.id === rootId) return true;
-      current = current.parentId ? this.ctx.iam.orgs().get(current.parentId) : void 0;
+      current = current.parentId ? iam.orgs().get(current.parentId) : void 0;
     }
     return false;
   }
-  /** 绑定组织信息（名称实时解析，组织改名不落陈旧数据）。 */
+  /** 绑定组织信息（名称实时解析，组织改名不落陈旧数据）。组织目录缺失时诚实显示未绑定。 */
   deptOrg(dept) {
     if (!dept.orgId) return void 0;
-    const org = this.ctx.iam.orgs().get(dept.orgId);
+    const org = this.soft("iam")?.orgs().get(dept.orgId);
     return org ? { id: org.id, name: org.name } : void 0;
   }
   /**
@@ -84,22 +96,25 @@ class PanelService extends Service {
     if (exchangeCaller.kind === "machine") return true;
     if (!dept.orgId) return true;
     if (exchangeCaller.userId) {
-      const user = this.ctx.iam.users().get(exchangeCaller.userId);
+      const iam = this.soft("iam");
+      const user = iam?.users().get(exchangeCaller.userId);
       if (user) {
-        const isOrgAdmin = user.roleIds.some((roleId) => this.ctx.iam.roles().get(roleId)?.code === "org_admin");
+        const isOrgAdmin = user.roleIds.some((roleId) => iam?.roles().get(roleId)?.code === "org_admin");
         if (isOrgAdmin) return true;
         return this.orgSubtreeContains(dept.orgId, user.orgId);
       }
     }
     return false;
   }
-  /** 部门名册：绑定组织（或全组织兜底）子树内的成员（最小 PII：姓名/职务/组织名）。 */
+  /** 部门名册：绑定组织（或全组织兜底）子树内的成员（最小 PII：姓名/职务/组织名）。组织目录缺失（演示态）→ 空名册。 */
   deptMembers(dept, limit = 50) {
-    const orgRoot = dept.orgId ?? this.ctx.iam.orgs().find((org) => org.parentId === null).at(0)?.id;
+    const iam = this.soft("iam");
+    if (!iam) return [];
+    const orgRoot = dept.orgId ?? iam.orgs().find((org) => org.parentId === null).at(0)?.id;
     if (!orgRoot) return [];
     const inScope = (orgId) => this.orgSubtreeContains(orgRoot, orgId);
-    const orgName = (orgId) => this.ctx.iam.orgs().get(orgId)?.name ?? "";
-    return this.ctx.iam.users().all().filter((user) => user.status === "active" && inScope(user.orgId)).slice(0, limit).map((user) => ({ id: user.id, name: user.displayName, ...user.title ? { title: user.title } : {}, orgName: orgName(user.orgId) }));
+    const orgName = (orgId) => iam.orgs().get(orgId)?.name ?? "";
+    return iam.users().all().filter((user) => user.status === "active" && inScope(user.orgId)).slice(0, limit).map((user) => ({ id: user.id, name: user.displayName, ...user.title ? { title: user.title } : {}, orgName: orgName(user.orgId) }));
   }
   /** 计量键（D1 裁决）：panel:<dept>.<行业code 小写>；无激活行业回落 panel:<dept>.core。 */
   meterResource(dept, orgId) {
@@ -132,18 +147,18 @@ class PanelService extends Service {
         this.activations().insert({ id: newId("act"), code, orgId, status: "active", activatedAt: (/* @__PURE__ */ new Date()).toISOString(), approvalId: String(payload.approvalId ?? ""), activatedBy: approverId });
       }
       try {
-        this.ctx.usage.grantCapabilities(`org:${orgId}`, [`panel:${code.toLowerCase()}`], "industry-activation");
+        this.soft("usage")?.grantCapabilities(`org:${orgId}`, [`panel:${code.toLowerCase()}`], "industry-activation");
       } catch {
       }
       this.ctx.platformBus.emit(PlatformEvents.PanelIndustryActivated, { code, orgId, activatedBy: approverId });
       return { code, orgId, status: "active" };
     };
   }
-  /** Agent 阵容 × Agent 资产联动：绑定资产的存在性与生命周期状态实时解析（宿主数字员工在线面）。 */
+  /** Agent 阵容 × Agent 资产联动：绑定资产的存在性与生命周期状态实时解析（宿主数字员工在线面）。资产目录缺失（演示态）→ 未绑定展示。 */
   agentWithAsset(agentCard) {
     const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
     if (!ref) return { ...agentCard };
-    const asset = this.ctx.resourceCore.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref);
+    const asset = this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref);
     if (!asset) return { ...agentCard };
     const attrs = asset.attrs;
     return {
@@ -289,7 +304,7 @@ class PanelService extends Service {
       });
     };
     const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
-    const asset = ref ? this.ctx.resourceCore.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
+    const asset = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
     if (!asset) return void fallbackToHuman("\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08\u8BF7\u5728\u63A7\u5236\u53F0\u300CAgent \u672C\u4F53\u300D\u767B\u8BB0\u5E76\u5728\u6B64\u914D\u7F6E agentRef\uFF09");
     const model = modelOverride ?? String(asset.attrs?.model ?? "");
     if (!model) return void fallbackToHuman("Agent \u8D44\u4EA7\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u4F1A\u8BDD\u672A\u6307\u5B9A\u6A21\u578B");
@@ -304,7 +319,9 @@ ${sceneSummary}` : "",
 ${contextText}`
     ].filter(Boolean).join("\n\n");
     try {
-      const result = await this.ctx.modelGateway.invoke({
+      const gateway = this.soft("modelGateway");
+      if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
+      const result = await gateway.invoke({
         model,
         orgId,
         subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime",
@@ -320,7 +337,7 @@ ${contextText}`
     } finally {
       if (orgId) {
         try {
-          this.ctx.usage.record({
+          this.soft("usage")?.record({
             org: orgId,
             subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime",
             principal: `org:${orgId}`,
@@ -335,12 +352,8 @@ ${contextText}`
   }
   callerOrgId(userId) {
     if (!userId) return "";
-    try {
-      const user = this.ctx.iam.users().get(userId);
-      return user?.orgId ?? "";
-    } catch {
-      return "";
-    }
+    const user = this.soft("iam")?.users().get(userId);
+    return user?.orgId ?? "";
   }
   /**
    * 面板 Agent 点名问答（M3：panel_agent_invoke 工具的服务原语——dsh 标准对话协作主通道）。
@@ -355,7 +368,7 @@ ${contextText}`
       return { ok: false, reason: `\u90E8\u95E8 ${dept.id}\uFF08${dept.label}\uFF09\u540D\u518C\u65E0\u6B64 Agent\u3002\u53EF\u7528\u9635\u5BB9\uFF1A${names.join("\u3001") || "\uFF08\u65E0\uFF09"}` };
     }
     const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
-    const asset = ref ? this.ctx.resourceCore.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
+    const asset = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
     if (!asset) return { ok: false, reason: `Agent\u300C${agentName}\u300D\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08agentRef\uFF09\uFF0C\u65E0\u6CD5\u81EA\u4E3B\u5E94\u7B54` };
     const model = options.modelOverride ?? String(asset.attrs?.model ?? "");
     if (!model) return { ok: false, reason: `Agent\u300C${agentName}\u300D\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u672A\u6307\u5B9A\u6A21\u578B` };
@@ -368,7 +381,9 @@ ${sceneSummary}` : "",
       options.contextNote ?? ""
     ].filter(Boolean).join("\n\n");
     try {
-      const result = await this.ctx.modelGateway.invoke({
+      const gateway = this.soft("modelGateway");
+      if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
+      const result = await gateway.invoke({
         model,
         orgId,
         subject: options.userId ? `user:${options.userId}` : "panel:tool",
@@ -384,7 +399,7 @@ ${sceneSummary}` : "",
     } finally {
       if (orgId) {
         try {
-          this.ctx.usage.record({
+          this.soft("usage")?.record({
             org: orgId,
             subject: options.userId ? `user:${options.userId}` : "panel:tool",
             principal: `org:${orgId}`,
@@ -404,7 +419,9 @@ ${sceneSummary}` : "",
    * 仅 published 可直调（deprecated/offline 不给面板点名）。
    */
   listInvokeableSkills(viewerOrgId) {
-    return this.ctx.skillHub.skills().all().filter((skill) => {
+    const hub = this.soft("skillHub");
+    if (!hub) return [];
+    return hub.skills().all().filter((skill) => {
       if (skill.status !== "published") return false;
       if (skill.visibility === "orgs") {
         if (!viewerOrgId || !skill.targetOrgs.includes(viewerOrgId)) return false;
@@ -432,18 +449,18 @@ ${sceneSummary}` : "",
     const invokeable = this.listInvokeableSkills(orgId || void 0);
     const skill = invokeable.find((item) => item.name === name) ?? invokeable.find((item) => item.slug === name);
     if (!skill) {
-      const hint = this.ctx.skillHub.skills().all().find((item) => item.status === "published" && (item.name === name || item.slug === name));
+      const hint = this.soft("skillHub")?.skills().all().find((item) => item.status === "published" && (item.name === name || item.slug === name));
       if (hint) return { ok: false, reason: `\u6280\u80FD\u300C${name}\u300D\u672A\u5BF9\u5F53\u524D\u7528\u6237\u7EC4\u7EC7\u5F00\u653E\uFF08visibility=${hint.visibility}\uFF09\uFF0C\u65E0\u6CD5\u76F4\u8C03` };
       const names = invokeable.slice(0, 8).map((item) => item.name);
       return { ok: false, reason: `\u6CA1\u6709\u5DF2\u4E0A\u67B6\u4E14\u5BF9\u60A8\u5F00\u653E\u7684\u6280\u80FD\u300C${name}\u300D\u3002\u53EF\u7528\u6280\u80FD\uFF1A${names.join("\u3001") || "\uFF08\u65E0\uFF09"}` };
     }
-    const record = this.ctx.skillHub.skills().get(skill.id);
+    const record = this.soft("skillHub")?.skills().get(skill.id);
     const version = record?.versions.find((item) => item.version === skill.version && item.status === "published");
     const content = version?.content?.trim() ?? "";
     if (!content) return { ok: false, reason: `\u6280\u80FD\u300C${skill.name}\u300D\u5F53\u524D\u7248\u672C\uFF08${skill.version}\uFF09\u65E0\u6307\u4EE4\u5185\u5BB9\uFF0C\u65E0\u6CD5\u76F4\u8C03` };
     let model = options.modelOverride?.trim() ?? "";
     if (!model) {
-      const online = this.ctx.modelGateway.models().all().filter((item) => item.status === "online");
+      const online = this.soft("modelGateway")?.models().all().filter((item) => item.status === "online") ?? [];
       if (online.length === 0) return { ok: false, reason: "\u6A21\u578B\u76EE\u5F55\u6682\u65E0\u5728\u7EBF\u6A21\u578B\u2014\u2014\u8BF7\u7BA1\u7406\u5458\u5728\u300C\u6A21\u578B\u7BA1\u7406\u300D\u4E2D\u63A5\u5165\u540E\u518D\u76F4\u8C03\u6280\u80FD" };
       model = online[0].slug;
     }
@@ -453,7 +470,9 @@ ${sceneSummary}` : "",
       options.contextNote ?? ""
     ].filter(Boolean).join("\n\n");
     try {
-      const result = await this.ctx.modelGateway.invoke({
+      const gateway = this.soft("modelGateway");
+      if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
+      const result = await gateway.invoke({
         model,
         orgId,
         subject: options.userId ? `user:${options.userId}` : "panel:tool",
@@ -469,7 +488,7 @@ ${sceneSummary}` : "",
     } finally {
       if (orgId) {
         try {
-          this.ctx.usage.record({
+          this.soft("usage")?.record({
             org: orgId,
             subject: options.userId ? `user:${options.userId}` : "panel:tool",
             principal: `org:${orgId}`,
@@ -485,7 +504,7 @@ ${sceneSummary}` : "",
   /** 部门挂载活动的场景图谱摘要（注入 Agent 系统提示；图谱未装载则空串）。 */
   sceneSummaryForDept(dept) {
     try {
-      const orgId = this.ctx.iam.orgs().all()[0]?.id ?? "";
+      const orgId = this.soft("iam")?.orgs().all()[0]?.id ?? "";
       const active = this.activeIndustry(orgId);
       if (!active) return "";
       const pack = this.ctx.scenegraphs.get(active.code.toUpperCase());
@@ -523,7 +542,9 @@ ${sceneSummary}` : "",
       this.transitionTask(task.id, op.lane ?? "doing", input.actorId);
       result = `\u4EFB\u52A1 ${task.title} \u2192 ${LANE_LABELS[op.lane ?? "doing"]}`;
     } else if (action === "approval.request") {
-      const approval = this.ctx.audit.createApproval({
+      const audit = this.soft("audit");
+      if (!audit) throw new Error("\u5BA1\u6279\u4E2D\u5FC3\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u8D70\u5BA1\u6279\u94FE");
+      const approval = audit.createApproval({
         kind: "panel.card-action",
         title: `${message.card.title} \xB7 ${op.label}`,
         payload: { messageId: message.id, dept: message.dept, opId: op.id, opLabel: op.label, reason: input.reason ?? "" },

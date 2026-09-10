@@ -8,7 +8,7 @@
  * M2 宿主连接探测（fresh-install 铁律）：装好插件的全新 dsh 上，面板启动时向本机
  * 插件的 /rqcard/link 问一次「连的哪个宿主」——
  *   - remote：令牌作用域切到该宿主 + 全部 API 走本机远端代理（api.js setRemoteProxy）；
- *   - none 且无会话：渲染连接向导（wizard.js）——选宿主/扫描 IP/本机初始化/登录；
+ *   - none 且无会话：渲染连接向导（wizard.js）——地址输入/扫描/登录（连接统一语义）；
  *   - local / 探测失败（独立形态未装 rq-card）：维持既有行为。
  * 向导端点在 /gate01（非 /api）命名空间，须带 x-rqcard-call 头（服务端 CSRF 防线）。
  */
@@ -149,7 +149,7 @@ async function bootstrap() {
   if (hostLink?.mode === 'none' && !apiModule.session.token) {
     const wizard = await import('./wizard.js')
     document.getElementById('app').dataset.booted = '1'
-    wizard.start({ base: BASE, hostBridge, localFirstRun: hostLink.localFirstRun === true })
+    wizard.start({ base: BASE, hostBridge })
     return
   }
 

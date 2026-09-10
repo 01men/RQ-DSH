@@ -27,13 +27,37 @@ export { CardpackService, CARD_PLATFORMS, filterCards } from './cardpacks.ts'
 import { seedPanel } from './seed/seed.ts'
 
 export const name = 'panel-core'
+// plan-gate01 Phase 2 瘦身：硬依赖只保留数据面基座 5 键（platform-core / dsh 原生提供）。
+// 其余 9 键（iam/authn/audit/usage/modelGateway/resourceCore/behavior/mcpRegistry/skillHub）
+// 走 soft() 软读降级——cordis 的 inject 是加载前硬依赖（缺提供者=永久挂起，spike 定稿），
+// 声明即要求提供者在场；01门装态无宿主面包，这些键必须能缺席。
+// 注意：panel 服务不可自 inject（自依赖=永久挂起）——内部直接 new PanelService(ctx) 使用。
 export const inject = [
-  'httpServer', 'opsStorage', 'platformBus', 'tools',
-  'iam', 'authn', 'audit', 'usage', 'modelGateway', 'resourceCore', 'scenegraphs',
-  'behavior', 'mcpRegistry', 'skillHub',
+  'httpServer', 'opsStorage', 'platformBus', 'tools', 'scenegraphs',
 ]
-// 注意：panel 服务不可自 inject（cordis 的 inject 是加载前硬依赖，自依赖=永久挂起）——
-// 本插件内部直接 new PanelService(ctx) 使用；类经 ctx.plugin 注册供 dingtalk-bridge 注入。
+
+/** panel-core 装配配置。 */
+export interface PanelConfig {
+  /**
+   * 演示鉴权开关（fail-closed，缺省 false=严格鉴权）：仅 cordis.patch.yml 的 01门 4-entry
+   * 装配声明 true——放行只读动词（GET/HEAD/OPTIONS）以演示访客身份读内置演示数据，
+   * 写动词一律 403；全量形态（cordis.yml / boot-all）永不声明，走 console 中间件严格鉴权。
+   * 严禁运行时探测 authn 是否在场来放行——那会把「全量形态中间件未覆盖」误判为演示态（fail-open）。
+   */
+  demoAuth?: boolean
+}
+
+/** 演示访客身份（只读权限点：面板读 + 场景图谱读）。 */
+const DEMO_PRINCIPAL = {
+  kind: 'human' as const,
+  principalId: 'demo-visitor',
+  name: '演示访客',
+  permissions: ['panel.read', 'scenegraph.read'],
+  actChain: [],
+}
+
+/** 可选宿主服务软读（与 PanelService.soft 同规；模块级供路由面使用）。 */
+const soft = (ctx: Context, key: string): any => ctx.reflect.get(key, false)
 
 interface CallerInfo {
   kind: 'human' | 'machine'
@@ -46,7 +70,8 @@ interface CallerInfo {
 
 const DEPT_RE = /^[a-z]{2,12}$/
 
-export function apply(ctx: Context) {
+export function apply(ctx: Context, config: PanelConfig = {}) {
+  const demoAuth = config.demoAuth === true
   const http = ctx.httpServer
   ctx.plugin(PanelService)
   // 卡片包服务（双轨迁移自 platform-core 装配）：面板是看板/卡片包域唯一消费方与宿主（不可自 inject，同 PanelService 惯例）
@@ -56,8 +81,23 @@ export function apply(ctx: Context) {
 
   const caller = (exchange: HttpExchange): CallerInfo => exchange.principal as CallerInfo
 
-  // 与 console 同款 requirePermission：缺权限 403 + audit.authz.denied 留痕（RBAC 探针的判定面）
+  // 与 console 同款 requirePermission：缺权限 403 + audit.authz.denied 留痕（RBAC 探针的判定面）。
+  // 两道前置守卫（plan-gate01 Phase 2.2）：
+  //   1. 严格态 principal 兜底——console 鉴权中间件缺位/装配序异常时 exchange.principal 未写入，
+  //      此前会 TypeError→500；现干净 401（fail-closed），绝不放行；
+  //   2. demoAuth（缺省 false）演示放行——仅只读动词、仅演示身份（DEMO_PRINCIPAL 最小只读权限点），
+  //      写动词 403；该开关只由 01门 patch 装配声明，全量形态永不声明。
   const requirePermission = (exchange: HttpExchange, point: string): boolean => {
+    if (demoAuth) {
+      if (!['GET', 'HEAD', 'OPTIONS'].includes(exchange.method.toUpperCase())) {
+        exchange.fail(403, 'DEMO_READONLY', '演示数据只读：连接宿主并登录后解锁写操作')
+        return false
+      }
+      if (!exchange.principal) exchange.principal = DEMO_PRINCIPAL
+    } else if (!exchange.principal) {
+      exchange.fail(401, 'UNAUTHENTICATED', '未认证：请先登录（鉴权中间件未覆盖该请求）')
+      return false
+    }
     const info = caller(exchange)
     if (info.permissions.includes('*') || info.permissions.includes(point)) return true
     ctx.platformBus.emit('audit.authz.denied', {
@@ -68,6 +108,12 @@ export function apply(ctx: Context) {
     })
     exchange.fail(403, 'FORBIDDEN', `缺少权限点 ${point}，请联系管理员调整角色`, { permission: point })
     return false
+  }
+
+  /** 能力型可选服务缺席（演示态）的端点级诚实降级：503 DEGRADED（非 500、非静默空数据）。 */
+  const degraded = (exchange: HttpExchange, capability: string): null => {
+    exchange.fail(503, 'DEGRADED', `「${capability}」能力未接入（01门演示态）——连接宿主后可用`)
+    return null
   }
 
   const guarded = (method: string, path: string, permission: string, handler: (exchange: HttpExchange) => unknown | Promise<unknown>): void => {
@@ -87,7 +133,8 @@ export function apply(ctx: Context) {
   const body = <T extends Record<string, any>>(exchange: HttpExchange): T => (exchange.body ?? {}) as T
   const changeLog = (exchange: HttpExchange, action: string, resourceType: string, resourceId: string, resourceName: string, detail = ''): void => {
     const info = caller(exchange)
-    ctx.audit.record({
+    // 审计中心缺席（01门演示态）→ 空记录（null-object 降级）：操作本身照常执行
+    soft(ctx, 'audit')?.record({
       type: 'change',
       actorType: info.kind === 'human' ? 'human' : 'machine',
       actorId: info.userId ?? info.principalId,
@@ -116,8 +163,9 @@ export function apply(ctx: Context) {
 
   const orgIdOf = (exchange: HttpExchange): string => {
     const info = caller(exchange)
-    return (info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined)
-      ?? ctx.iam.orgs().find((org) => org.parentId === null).at(0)?.id
+    const iam = soft(ctx, 'iam')
+    return (info.userId ? iam?.users().get(info.userId)?.orgId : undefined)
+      ?? iam?.orgs().find((org) => org.parentId === null).at(0)?.id
       ?? ''
   }
 
@@ -135,16 +183,20 @@ export function apply(ctx: Context) {
   })
 
   // 组织树（配置抽屉的部门↔组织绑定选择器；最小字段，panel.config.write 管理面）
-  guarded('GET', '/api/panel/orgs', 'panel.config.write', (exchange) => ({
-    orgs: ctx.iam.orgs().all().map((org) => ({ id: org.id, name: org.name, parentId: org.parentId })),
-  }))
+  guarded('GET', '/api/panel/orgs', 'panel.config.write', (exchange) => {
+    const iam = soft(ctx, 'iam')
+    if (!iam) return degraded(exchange, '组织目录')
+    return { orgs: iam.orgs().all().map((org) => ({ id: org.id, name: org.name, parentId: org.parentId })) }
+  })
 
   /** 部门↔组织绑定（账号组织打通的管理动作）：设置后部门范围权限即刻生效。 */
   guarded('PUT', '/api/panel/:dept/config', 'panel.config.write', (exchange) => {
+    const iam = soft(ctx, 'iam')
+    if (!iam) return degraded(exchange, '组织目录')
     const dept = panel.dept(String(exchange.params.dept ?? ''))
     const input = body<{ orgId?: string | null }>(exchange)
     if (input.orgId !== undefined && input.orgId !== null && input.orgId !== '') {
-      if (!ctx.iam.orgs().get(input.orgId)) throw new Error(`组织不存在：${input.orgId}`)
+      if (!iam.orgs().get(input.orgId)) throw new Error(`组织不存在：${input.orgId}`)
       ctx.panel.deptConfigs().update(dept.id, { orgId: input.orgId })
     } else {
       ctx.panel.deptConfigs().update(dept.id, { orgId: undefined })
@@ -171,9 +223,9 @@ export function apply(ctx: Context) {
       agents: dept.agents.map((agent) => panel.agentWithAsset(agent)),
       kpis: dept.kpis,
       widgets: panel.board(dept),
-      pendingActivations: ctx.audit.approvals().find((item) => item.kind === 'industry.activation' && item.status === 'pending')
+      pendingActivations: soft(ctx, 'audit')?.approvals().find((item) => item.kind === 'industry.activation' && item.status === 'pending')
         .map((item) => ({ id: item.id, code: String(item.payload.code ?? ''), orgId: String(item.payload.orgId ?? '') }))
-        .filter((item) => !orgId || item.orgId === orgId),
+        .filter((item) => !orgId || item.orgId === orgId) ?? [],
     }
   })
 
@@ -236,11 +288,15 @@ export function apply(ctx: Context) {
     apiKey: model.apiKey.startsWith('env:') ? model.apiKey : '***',
   })
 
-  guarded('GET', '/api/panel/models', 'panel.read', () => ({
-    models: ctx.modelGateway.models().all().map(maskedModel),
-  }))
+  guarded('GET', '/api/panel/models', 'panel.read', (exchange) => {
+    const gateway = soft(ctx, 'modelGateway')
+    if (!gateway) return degraded(exchange, '模型网关')
+    return { models: gateway.models().all().map(maskedModel) }
+  })
 
   guarded('POST', '/api/panel/models', 'panel.config.write', (exchange) => {
+    const gateway = soft(ctx, 'modelGateway')
+    if (!gateway) return degraded(exchange, '模型网关')
     const input = body<{ slug?: string; displayName?: string; provider?: string; endpoint?: string; apiKey?: string; listCentsPerKTokens?: number; costCentsPerKTokens?: number; status?: string }>(exchange)
     const slug = input.slug?.trim() ?? ''
     if (!slug) throw new Error('模型 slug 必填（如 deepseek-chat）')
@@ -249,8 +305,8 @@ export function apply(ctx: Context) {
     if (!Number.isFinite(input.listCentsPerKTokens) || (input.listCentsPerKTokens ?? -1) < 0) throw new Error('listCentsPerKTokens 必须是非负数（挂牌价，分/千 tokens）')
     const status = input.status === 'offline' ? 'offline' as const : 'online' as const
     // 编辑时密钥留空 = 保持既有密钥（表单不回填密钥的约定），不得覆盖为默认引用
-    const existing = ctx.modelGateway.models().findOne((item) => item.slug === slug)
-    const model = ctx.modelGateway.upsertModel({
+    const existing = gateway.models().findOne((item) => item.slug === slug)
+    const model = gateway.upsertModel({
       slug,
       displayName: input.displayName?.trim() || slug,
       provider: input.provider?.trim() || 'external',
@@ -266,22 +322,26 @@ export function apply(ctx: Context) {
 
   /** 删除登记：从模型目录移除；计量与审计数据保留。 */
   guarded('DELETE', '/api/panel/models/:id', 'panel.config.write', (exchange) => {
+    const gateway = soft(ctx, 'modelGateway')
+    if (!gateway) return degraded(exchange, '模型网关')
     const id = exchange.params['id']!
-    const model = ctx.modelGateway.models().get(id)
+    const model = gateway.models().get(id)
     if (!model) throw new Error(`模型不存在：${id}`)
-    ctx.modelGateway.models().remove(id)
+    gateway.models().remove(id)
     changeLog(exchange, 'panel.model.delete', 'model', id, model.slug)
     return { deleted: true }
   })
 
   /** 连通性测试：真实走 modelgw.invoke 全链（预检/转发/计量），失败如实回传，不造假成功。 */
   guarded('POST', '/api/panel/models/:slug/test', 'panel.config.write', async (exchange) => {
+    const gateway = soft(ctx, 'modelGateway')
+    if (!gateway) return degraded(exchange, '模型网关')
     const slug = String(exchange.params.slug ?? '')
     const info = caller(exchange)
     const orgId = orgIdOf(exchange)
     if (!orgId) throw new Error('无法确定计费组织（orgId），无法执行真实调用测试')
     try {
-      const result = await ctx.modelGateway.invoke({
+      const result = await gateway.invoke({
         model: slug,
         messages: [{ role: 'user', content: '模型连通性测试，请直接回复：OK' }],
         orgId,
@@ -302,13 +362,18 @@ export function apply(ctx: Context) {
     const type = ref.slice(0, colon)
     const id = ref.slice(colon + 1)
     const matches = (item: { id?: string; slug?: string }): boolean => item.id === id || item.slug === id
+    // 资产目录缺失（01门演示态）→ 视为存活（卡片全部展示，不因降级隐藏入口）
+    if (!soft(ctx, 'resourceCore') && ['agent', 'app', 'nas'].includes(type)) return true
+    if (!soft(ctx, 'mcpRegistry') && type === 'mcp') return true
+    if (!soft(ctx, 'skillHub') && type === 'skill') return true
+    if (!soft(ctx, 'iam') && type === 'kb') return true
     try {
       if (type === 'agent' || type === 'app' || type === 'nas') {
-        return ctx.resourceCore.list(type).some(matches)
+        return soft(ctx, 'resourceCore').list(type).some(matches)
       }
-      if (type === 'mcp') return ctx.mcpRegistry.services().all().some(matches)
-      if (type === 'skill') return ctx.skillHub.skills().all().some(matches)
-      if (type === 'kb') return ctx.iam.orgs().get(id) !== undefined
+      if (type === 'mcp') return soft(ctx, 'mcpRegistry').services().all().some(matches)
+      if (type === 'skill') return soft(ctx, 'skillHub').skills().all().some(matches)
+      if (type === 'kb') return soft(ctx, 'iam').orgs().get(id) !== undefined
       return true
     } catch {
       return true
@@ -326,8 +391,9 @@ export function apply(ctx: Context) {
       return
     }
     const platform = requested as CardPlatform
-    const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
-    const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
+    const iam = soft(ctx, 'iam')
+    const user = info.userId ? iam?.users().get(info.userId) : undefined
+    const roles = user ? user.roleIds.map((roleId) => iam?.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
     cardpacks.setRefAliveResolver(refAlive)
     const packs = cardpacks.forPlatform(platform)
     const { cards, droppedDeadRefs } = filterCards({ packs, roles, refAlive })
@@ -341,35 +407,33 @@ export function apply(ctx: Context) {
     // -- 聚合面（原 portal board 语义：漏斗=曝光/点击→调用→完成；WAIC=usage 周聚合） --
     const weekAgo = new Date(Date.now() - 7 * 24 * 3600_000).toISOString()
     const behaviorCount = (type: string): number => {
-      try { return ctx.behavior.query({ type, from: weekAgo }).total } catch { return 0 }
+      return soft(ctx, 'behavior')?.query({ type, from: weekAgo }).total ?? 0
     }
     let usageCount = 0
     let chargeCents = 0
     let byDay: Array<{ day: string; count: number; charge_cents: number }> = []
-    try {
-      const totals = ctx.usage.totals({ from: weekAgo })
+    const usageAgg = soft(ctx, 'usage')
+    if (usageAgg) {
+      const totals = usageAgg.totals({ from: weekAgo })
       usageCount = totals.count
       chargeCents = totals.charge_cents
-      byDay = ctx.usage.breakdown(weekAgo).byDay
-    } catch { /* usage 缺失时看板降级为资产视图 */ }
-    let completedCalls = 0
-    try {
-      completedCalls = ctx.mcpRegistry.calls().all()
-        .filter((call) => call.ok && call.at >= weekAgo).length
-    } catch { /* mcp 缺失时漏斗降级 */ }
+      byDay = usageAgg.breakdown(weekAgo).byDay
+    }
+    const completedCalls = soft(ctx, 'mcpRegistry')?.calls().all()
+      .filter((call) => call.ok && call.at >= weekAgo).length ?? 0
 
     return {
       generatedAt: new Date().toISOString(),
       windowDays: 7,
       // 卡片包面（顶层平铺，控制台工作台卡片消费方零改动换端点即可用）
       platform, label: packs[0]?.label ?? '', roles, cards, totalPacks: packs.length, availablePlatforms: available, droppedDeadRefs,
-      // 聚合面（战略看板）
+      // 聚合面（战略看板）——资产目录缺席（演示态）→ 全 0（看板诚实降级为演示数据视图）
       assets: {
-        appsOnline: ctx.resourceCore.list('app').filter((item) => item.status === 'online').length,
-        agentsOnline: ctx.resourceCore.list('agent').filter((item) => item.status === 'online').length,
-        skillsPublished: ctx.skillHub.skills().all().filter((item) => item.status === 'published').length,
-        mcpServing: ctx.mcpRegistry.services().all()
-          .filter((service) => service.status === 'online' || service.status === 'gray').length,
+        appsOnline: soft(ctx, 'resourceCore')?.list('app').filter((item) => item.status === 'online').length ?? 0,
+        agentsOnline: soft(ctx, 'resourceCore')?.list('agent').filter((item) => item.status === 'online').length ?? 0,
+        skillsPublished: soft(ctx, 'skillHub')?.skills().all().filter((item) => item.status === 'published').length ?? 0,
+        mcpServing: soft(ctx, 'mcpRegistry')?.services().all()
+          .filter((service) => service.status === 'online' || service.status === 'gray').length ?? 0,
       },
       waic: { count: usageCount, chargeCents },
       byDay,
@@ -439,7 +503,7 @@ export function apply(ctx: Context) {
     if (!channelId) throw new Error('部门暂无频道，请先创建')
     // 对话框模型切换：显式指定 model 时必须是模型目录已登记的 slug（未指定则跟随 Agent 资产配置）
     const requestedModel = input.model?.trim() ?? ''
-    if (requestedModel && !ctx.modelGateway.models().findOne((item) => item.slug === requestedModel)) {
+    if (requestedModel && !soft(ctx, 'modelGateway')?.models().findOne((item) => item.slug === requestedModel)) {
       throw new Error(`模型未在目录登记：${requestedModel}（可在「🧠 模型」中登记）`)
     }
     const info = caller(exchange)
@@ -496,7 +560,7 @@ export function apply(ctx: Context) {
     const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id
     if (!channelId) throw new Error('部门暂无频道，请先创建')
     const requestedModel = input.model?.trim() ?? ''
-    if (requestedModel && !ctx.modelGateway.models().findOne((item) => item.slug === requestedModel)) {
+    if (requestedModel && !soft(ctx, 'modelGateway')?.models().findOne((item) => item.slug === requestedModel)) {
       throw new Error(`模型未在目录登记：${requestedModel}（可在「🧠 模型」中登记）`)
     }
     const info = caller(exchange)
@@ -607,13 +671,15 @@ export function apply(ctx: Context) {
 
   guarded('GET', '/api/panel/industries', 'panel.read', (exchange) => {
     const orgId = orgIdOf(exchange)
-    const pendingCodes = ctx.audit.approvals()
+    const pendingCodes = soft(ctx, 'audit')?.approvals()
       .find((item) => item.kind === 'industry.activation' && item.status === 'pending' && String(item.payload.orgId ?? '') === orgId)
-      .map((item) => String(item.payload.code ?? ''))
+      .map((item) => String(item.payload.code ?? '')) ?? []
     return { industries: panel.industryStates(orgId, pendingCodes) }
   })
 
   guarded('POST', '/api/panel/industries/:code/activate-requests', 'panel.write', (exchange) => {
+    const audit = soft(ctx, 'audit')
+    if (!audit) return degraded(exchange, '审批中心')
     const code = String(exchange.params.code ?? '').toUpperCase()
     const registry = panel.industryStates('', []).find((item) => item.code === code)
     if (!registry) throw new Error(`未登记行业：${code}`)
@@ -622,7 +688,7 @@ export function apply(ctx: Context) {
     const existing = panel.activations().findOne((item) => item.orgId === orgId && item.code === code && item.status === 'active')
     if (existing) throw new Error(`行业 ${code} 对本组织已是激活态`)
     const info = caller(exchange)
-    const approval = ctx.audit.createApproval({
+    const approval = audit.createApproval({
       kind: 'industry.activation',
       title: `行业功能包授权激活：${registry.name}（${code}）`,
       payload: { code, orgId, requestedBy: info.name, sub: registry.sub, graphLoaded: registry.graphLoaded },
@@ -716,8 +782,10 @@ export function apply(ctx: Context) {
       const token = exchange.query.get('token') ?? ''
       if (!token) return fail(401, '缺少 token 查询参数')
       if (!DEPT_RE.test(dept)) return fail(400, `部门标识非法：${dept}`)
+      const authn = soft(ctx, 'authn')
+      if (!authn) return fail(401, '认证中心未接入（01门演示态）——连接宿主后可订阅实时流')
       try {
-        const verified = ctx.authn.verify(token)
+        const verified = authn.verify(token)
         // principal 形状与 console 鉴权中间件同规（human → userId=refId）：deptScopeAllowed
         // 的组织子树判定依赖 userId，缺了它所有人类用户都会被误判为无组织归属。
         exchange.principal = {
@@ -770,7 +838,8 @@ export function apply(ctx: Context) {
 
   // -- 行业激活审批执行器（审批通过 → 置 active + grantCapabilities + 事件） ----------------
 
-  const offExecutor = ctx.audit.registerExecutor('industry.activation', panel.buildActivationExecutor())
+  // 审批中心缺席（01门演示态）→ 不注册执行器（幂等 no-op 注销函数）
+  const offExecutor = soft(ctx, 'audit')?.registerExecutor('industry.activation', panel.buildActivationExecutor()) ?? (() => {})
 
   // 事件扇出（SSE 数据源）+ 桥接回执联动（ddSync 状态回写）
   panel.wireEventBus()
@@ -788,7 +857,7 @@ export function apply(ctx: Context) {
     if (message.ddSync !== 'pending') return
     panel.messages().update(messageId, { ddSync: 'failed' })
     if (error) {
-      ctx.audit.fire({ severity: 'warning', title: '钉钉桥接投递失败', message: `消息 ${messageId} 投递失败：${error}`, resourceType: 'panel_message', resourceId: messageId })
+      soft(ctx, 'audit')?.fire({ severity: 'warning', title: '钉钉桥接投递失败', message: `消息 ${messageId} 投递失败：${error}`, resourceType: 'panel_message', resourceId: messageId })
     }
   })
 
@@ -1019,27 +1088,21 @@ export function apply(ctx: Context) {
       }
       const platform = requested as CardPlatform
       const info = exec.principal as { userId?: string } | undefined
-      const user = info?.userId ? ctx.iam.users().get(info.userId) : undefined
-      const roles = user ? user.roleIds.map((roleId) => ctx.iam.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
+      const iam = soft(ctx, 'iam')
+      const user = info?.userId ? iam?.users().get(info.userId) : undefined
+      const roles = user ? user.roleIds.map((roleId) => iam?.roles().get(roleId)?.code).filter((code): code is string => Boolean(code)) : []
       cardpacks.setRefAliveResolver(refAlive)
       const packs = cardpacks.forPlatform(platform)
       const { cards } = filterCards({ packs, roles, refAlive })
 
       const weekAgo = new Date(Date.now() - 7 * 24 * 3600_000).toISOString()
       const behaviorCount = (type: string): number => {
-        try { return ctx.behavior.query({ type, from: weekAgo }).total } catch { return 0 }
+        return soft(ctx, 'behavior')?.query({ type, from: weekAgo }).total ?? 0
       }
-      let usageCount = 0
-      let chargeCents = 0
-      try {
-        const totals = ctx.usage.totals({ from: weekAgo })
-        usageCount = totals.count
-        chargeCents = totals.charge_cents
-      } catch { /* usage 缺失时降级为资产视图 */ }
-      let completedCalls = 0
-      try {
-        completedCalls = ctx.mcpRegistry.calls().all().filter((call) => call.ok && call.at >= weekAgo).length
-      } catch { /* mcp 缺失时漏斗降级 */ }
+      const usageTotals = soft(ctx, 'usage')?.totals({ from: weekAgo })
+      const usageCount = usageTotals?.count ?? 0
+      const chargeCents = usageTotals?.charge_cents ?? 0
+      const completedCalls = soft(ctx, 'mcpRegistry')?.calls().all().filter((call) => call.ok && call.at >= weekAgo).length ?? 0
       const minutesPerCall = Number(process.env.ROI_MINUTES_PER_CALL ?? 3)
       const callBase = completedCalls > 0 ? completedCalls : usageCount
       return {
@@ -1047,10 +1110,10 @@ export function apply(ctx: Context) {
         windowDays: 7,
         platform,
         assets: {
-          appsOnline: ctx.resourceCore.list('app').filter((item) => item.status === 'online').length,
-          agentsOnline: ctx.resourceCore.list('agent').filter((item) => item.status === 'online').length,
-          skillsPublished: ctx.skillHub.skills().all().filter((item) => item.status === 'published').length,
-          mcpServing: ctx.mcpRegistry.services().all().filter((service) => service.status === 'online' || service.status === 'gray').length,
+          appsOnline: soft(ctx, 'resourceCore')?.list('app').filter((item) => item.status === 'online').length ?? 0,
+          agentsOnline: soft(ctx, 'resourceCore')?.list('agent').filter((item) => item.status === 'online').length ?? 0,
+          skillsPublished: soft(ctx, 'skillHub')?.skills().all().filter((item) => item.status === 'published').length ?? 0,
+          mcpServing: soft(ctx, 'mcpRegistry')?.services().all().filter((service) => service.status === 'online' || service.status === 'gray').length ?? 0,
         },
         funnel: {
           exposed: behaviorCount('card.exposed'),

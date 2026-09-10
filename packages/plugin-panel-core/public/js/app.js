@@ -175,7 +175,7 @@ function renderLoginGuide() {
       </div>`
     document.getElementById('reopenWizard').onclick = async () => {
       const wizard = await import('./wizard.js')
-      wizard.start({ base: basePath(), hostBridge: state.hostBridge, localFirstRun: false })
+      wizard.start({ base: basePath(), hostBridge: state.hostBridge })
     }
     return
   }

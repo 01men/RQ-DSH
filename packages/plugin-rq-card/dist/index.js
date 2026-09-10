@@ -16,7 +16,7 @@ function summarizeForToolResult(input) {
   return lines.join("\n");
 }
 const name = "rq-card";
-const inject = ["httpServer", "tools", "opsStorage", "authn", "iam"];
+const inject = ["httpServer", "tools", "opsStorage"];
 function apply(ctx, config = {}) {
   const http = ctx.httpServer;
   const link = new HostLinkService(ctx, { dataDir: config.dataDir, scanPorts: config.scanPorts });
@@ -43,8 +43,7 @@ function apply(ctx, config = {}) {
       hubMountPrefix: cfg.hubMountPrefix ?? null,
       label: cfg.label ?? null,
       savedAt: cfg.savedAt ?? null,
-      probe,
-      localFirstRun: link.localFirstRun()
+      probe
     });
   });
   http.register("POST", "/rqcard/link/local", (exchange) => {
@@ -73,31 +72,6 @@ function apply(ctx, config = {}) {
     } catch (error) {
       fail(exchange, "LINK_SCAN_FAILED", error);
     }
-  });
-  http.register("GET", "/rqcard/local-init", (exchange) => {
-    if (!wizardGuard(exchange)) return;
-    exchange.ok({ firstRun: link.localFirstRun(), interfaces: link.localInterfaces() });
-  });
-  http.register("POST", "/rqcard/local-init/admin", (exchange) => {
-    if (!wizardGuard(exchange)) return;
-    const input = json(exchange);
-    try {
-      exchange.ok(link.localInitAdmin(String(input.newPassword ?? ""), input.username || "admin"));
-    } catch (error) {
-      fail(exchange, "LOCAL_INIT_FAILED", error);
-    }
-  });
-  http.register("POST", "/rqcard/local-init/listen-plan", (exchange) => {
-    if (!wizardGuard(exchange)) return;
-    const input = json(exchange);
-    const ip = String(input.ip ?? "").trim() || "0.0.0.0";
-    const port = Number.isFinite(Number(input.port)) && Number(input.port) > 0 ? Number(input.port) : 3080;
-    exchange.ok({
-      ip,
-      port,
-      command: `--trusted-host ${ip}:${port}`,
-      note: `dsh webServer \u7684\u76D1\u542C\u5730\u5740\u987B\u5728 harness \u914D\u7F6E\u76F4\u5199 host\uFF08dsh CLI \u523B\u610F\u62D2\u7EDD --host 0.0.0.0\uFF09\uFF0C\u91CD\u542F\u540E\u5C40\u57DF\u7F51\u7ECF http://<\u672C\u673AIP>:${port}/ \u8BBF\u95EE\uFF1B\u8BE6\u89C1 docs/deploy-enterprise.md \u5F62\u6001 B\u3002\u672C\u63D2\u4EF6\u4E0D\u70ED\u6539\u5BBF\u4E3B\u76D1\u542C\u3002`
-    });
   });
   http.use(async (exchange) => {
     if (!exchange.path.startsWith("/rqcard/proxy")) return;

@@ -5235,7 +5235,7 @@ try {
     // ================================================================ M2/M3 宿主连接向导（plugin-rq-card hostlink + 注入面契约）
     // 复用 mount 台架：本段全部经 sim（/rq 前缀 → bridge → 数据面分发），覆盖免登命名空间、
     // 向导头防线、扫描发现、远端代理白名单、本机首启初始化、rq_host_status 工具与前端契约。
-    section('宿主连接向导（rq-card hostlink：免登命名空间 / 扫描 / 远端代理 / 本机初始化）')
+    section('宿主连接向导（rq-card hostlink：免登命名空间 / 扫描 / 远端代理）')
     {
       await mountCtx.plugin(rqCard, {})
       const wfetchSim = async (method, wpath, { headers = {}, body } = {}) => {
@@ -5251,8 +5251,8 @@ try {
       const noHeader = await fetch(`${simOrigin}/gate01/rqcard/link`)
       check('hostlink：缺 x-rqcard-call 头 403（跨站 drive-by 防线）', noHeader.status === 403, `status=${noHeader.status}`)
       const linkNone = await wfetchSim('GET', '/gate01/rqcard/link')
-      check('hostlink：未配置态（mode=none + 本机首启标记，免登可达）',
-        linkNone.status === 200 && linkNone.body?.data?.mode === 'none' && linkNone.body.data.localFirstRun === true,
+      check('hostlink：未配置态（mode=none，免登可达）',
+        linkNone.status === 200 && linkNone.body?.data?.mode === 'none',
         JSON.stringify(linkNone.body))
 
       // -- stub 远端宿主 ×2：A=dsh 挂载形态（/rq 前缀），B=独立宿主形态（无前缀） --
@@ -5372,29 +5372,8 @@ try {
         const proxyAfterReset = await wfetchSim('GET', '/gate01/rqcard/proxy/api/panel/depts')
         check('hostlink：未连接时代理 409 NOT_REMOTE', proxyAfterReset.status === 409 && proxyAfterReset.body?.error?.code === 'NOT_REMOTE')
 
-        // -- 本机初始化（形态 B 首启：admin 口令设置，初始口令不出服务端）--
-        const initInfo = await wfetchSim('GET', '/gate01/rqcard/local-init')
-        check('hostlink：本机首启检测 + 网卡清单', initInfo.status === 200 && initInfo.body?.data?.firstRun === true && Array.isArray(initInfo.body?.data?.interfaces), JSON.stringify({ status: initInfo.status, body: initInfo.body }))
-        mountCtx.iam.resetPassword(adminUser.id, 'InitKnown123')
-        writeFileSync(join(bridgeDataDir, 'admin-initial-password.txt'),
-          '平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\nInitKnown123\n')
-        const initWeak = await wfetchSim('POST', '/gate01/rqcard/local-init/admin', { body: { newPassword: 'short' } })
-        check('hostlink：弱口令被拒（≥8 位）', initWeak.status === 400, JSON.stringify({ status: initWeak.status, body: initWeak.body }))
-        const initOk = await wfetchSim('POST', '/gate01/rqcard/local-init/admin', { body: { newPassword: 'FreshPass123' } })
-        check('hostlink：首启 admin 口令初始化（返回与 console 登录同形会话：token + user.permissions）',
-          initOk.status === 200 && Boolean(initOk.body.data?.token) && Array.isArray(initOk.body.data?.user?.permissions),
-          JSON.stringify(initOk.body?.error))
-        check('hostlink：初始口令文件一次性消费（防重放）', !existsSync(join(bridgeDataDir, 'admin-initial-password.txt')))
-        const initAgain = await wfetchSim('POST', '/gate01/rqcard/local-init/admin', { body: { newPassword: 'AnotherPass123' } })
-        check('hostlink：二次初始化被拒（仅首次启动可用）', initAgain.status === 400 && /仅首次启动/.test(String(initAgain.body?.error?.message ?? '')))
-        const reLogin = await fetch(`${simOrigin}/gate01/api/auth/login`, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ username: 'admin', password: 'FreshPass123' }),
-        })
-        check('hostlink：新口令可正常登录（改密真实生效）', reLogin.status === 200, String(reLogin.status))
-        const listenPlan = await wfetchSim('POST', '/gate01/rqcard/local-init/listen-plan', { body: { ip: '192.168.1.10' } })
-        check('hostlink：监听指引生成（trusted-host 命令 + 说明，不热改宿主监听）',
-          listenPlan.status === 200 && listenPlan.body?.data?.command.includes('--trusted-host 192.168.1.10:3080'), JSON.stringify({ status: listenPlan.status, body: listenPlan.body }))
+        // plan-gate01 决策 1：本机初始化端点（/rqcard/local-init*）已下线——登录统一在宿主侧完成。
+        // 对应的 7 条端点断言（首启检测/弱口令/初始化/一次性消费/二次拒绝/新口令登录/监听指引）随之退役。
 
         // -- 向导 DOM 全链模拟（jsdom 驱动真实面板前端 × 真实向导端点：问题1/问题2 实机回归）--
         // 用户在浏览器里的两段真实操作逐击复演：
@@ -5459,25 +5438,11 @@ try {
             check('向导DOM：连 dsh 挂载宿主，钉钉登录地址正确携带 /rq 与 next 回跳',
               openedUrls.at(-1) === `${hubA}/rq/?next=${g1Next}#/login`, openedUrls.at(-1))
 
-            // 场景 B（问题2 回归）：作用域污染 → 本机初始化 → 令牌落默认键
-            panelApi.setConnectionScope(hubA) // 同页先做过远端登录尝试的残留态
-            writeFileSync(join(mountCtx.opsStorage.dataDirPath, 'admin-initial-password.txt'),
-              '平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\nFreshPass123\n')
-            await wizard.start({ base: '/gate01' })
-            await waitForDom(() => Boolean(document.querySelector('#wzAdminSet')))
-            check('向导DOM：本机首启表单随口令文件在场渲染', Boolean(document.querySelector('#wzAdminSet')))
-            document.querySelector('#wzAdminPass').value = 'DomPass12345'
-            document.querySelector('#wzAdminSet').click()
-            await waitForDom(() => Boolean(dom.window.localStorage.getItem('gate01_token')))
-            const domToken = dom.window.localStorage.getItem('gate01_token')
-            check('向导DOM：设口令即登录——令牌落默认键（重载即登录态，问题2 回归）', Boolean(domToken))
-            check('向导DOM：令牌未落入远端作用域隔离键（作用域卫生）',
-              dom.window.localStorage.getItem(`gate01_token@${hubA}`) === null)
-            const domTokenUse = await fetch(`${simOrigin}/gate01/api/panel/depts`, { headers: { authorization: `Bearer ${domToken}` } })
-            check('向导DOM：初始化令牌直通面板 RBAC 面（/gate01/api/panel/depts 200）', domTokenUse.status === 200, `status=${domTokenUse.status}`)
+            // plan-gate01 决策 1：场景 B（本机初始化令牌落默认键）随形态 B 下线退役——
+            // 写令牌统一经远端登录代理通道（作用域键），默认键只由票据兑换/直登通道写入。
 
             // 场景 C（链接形态回归：尾斜杠在，302 不再吃掉 ?next 与 #/login）
-            await wizard.start({ base: '/gate01' }) // 口令文件已消费 → 非首启分支
+            await wizard.start({ base: '/gate01' })
             await waitForDom(() => Boolean(document.querySelector('#wzLocalBody a[href]')))
             const wizardLoginHref = document.querySelector('#wzLocalBody a[href]').getAttribute('href') ?? ''
             check('向导DOM：向导「在本机控制台登录」链接带尾斜杠 + next 回跳 + #/login',
@@ -5576,10 +5541,9 @@ try {
       check('前端契约：Agent 对话内嵌 dsh（iframe + 嵌套防护 + 可退回内置）',
         appJsSource.includes('canEmbedDshChat') && appJsSource.includes('ce-frame') && appJsSource.includes('panel_chat_embed_off') && appJsSource.includes('EMBEDDED'))
       const wizardJs = readFileSync('packages/plugin-panel-core/public/js/wizard.js', 'utf8')
-      check('前端契约：连接向导（扫描/手输连接/本机初始化/钉钉引导）',
-        wizardJs.includes('link/scan') && wizardJs.includes('link/remote') && wizardJs.includes('local-init/admin') && wizardJs.includes('wzLoginDd'))
-      check('前端契约：Bug2 回归——本机初始化前显式清零连接作用域（防令牌落远端键）',
-        wizardJs.includes("setConnectionScope('')"), 'wizard.js 缺少作用域卫生处理')
+      check('前端契约：连接向导（扫描/手输连接/本机数据面探测/钉钉引导；形态 B 设口令链路已退役）',
+        wizardJs.includes('link/scan') && wizardJs.includes('link/remote') && wizardJs.includes('/api/health')
+        && wizardJs.includes('wzLoginDd') && !wizardJs.includes('local-init'))
       check('前端契约：G1 前向兼容——钉钉登录打开宿主页携带 next=本机面板地址 + 回导校验降级在场',
         wizardJs.includes('?next=') && wizardJs.includes('encodeURIComponent(localPanelUrl)') && wizardJs.includes('wzLoginCheck'),
         'wizard.js 缺少 next 回跳或回导校验')
@@ -5602,6 +5566,66 @@ try {
     }
 
     await new Promise((resolve) => sim.close(resolve))
+  }
+
+  // ================================================================ 01门 5 键装态（plan-gate01 Phase 2）
+  // 等价于 cordis.patch.yml 4-entry 装配的最小形态：仅数据面基座（platform-core 5 键）+ panel-core。
+  // iam/authn/audit/usage/modelgw/mcp/skillhub 全缺席——spike 定稿：裸访问=硬抛 without inject，
+  // 任何漏改的访问点都会在这里以 500/400 现形；demoAuth 的 fail-closed 边界也在这里断言。
+  section('01门 5 键装态（可选服务缺席不炸 + demoAuth fail-closed）')
+  {
+    const mkGate = async (port, demoAuth) => {
+      const gateCtx = new Context()
+      const dataDir = join('data-selftest', `gate01-${demoAuth ? 'demo' : 'strict'}-${port}`)
+      await mkdir(dataDir, { recursive: true })
+      await gateCtx.plugin(platformCore, { dataDir, http: { port, host: '127.0.0.1' }, startHttp: true })
+      await gateCtx.plugin(panelCore, demoAuth ? { demoAuth: true } : {})
+      await new Promise((resolve) => setTimeout(resolve, 150)) // fiber 激活 + 种子
+      return gateCtx
+    }
+    const strictBase = 'http://127.0.0.1:7395'
+    const demoBase = 'http://127.0.0.1:7396'
+    await mkGate(7395, false)
+    await mkGate(7396, true)
+    const g = async (base, path, init) => { const r = await fetch(`${base}${path}`, init); return { status: r.status, body: await r.json().catch(() => null) } }
+
+    // -- 严格态（demoAuth 缺省=false）：console 鉴权中间件缺位 → principal 缺失 → 干净 401（原 TypeError→500）--
+    const strictBoard = await g(strictBase, '/api/panel/board')
+    check('01门严格态：principal 缺失 → 干净 401 UNAUTHENTICATED（不再 TypeError 500）',
+      strictBoard.status === 401 && strictBoard.body?.error?.code === 'UNAUTHENTICATED', JSON.stringify(strictBoard.body))
+    const strictWrite = await g(strictBase, '/api/panel/rd/messages', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: 'x' }) })
+    check('01门严格态：写动词同样 401 fail-closed', strictWrite.status === 401, JSON.stringify(strictWrite.body))
+    const strictStream = await fetch(`${strictBase}/api/panel/stream?dept=rd&token=whatever`).then((r) => r.json().catch(() => null))
+    check('01门严格态：SSE ?token= 自校验失败（authn 缺席 → 干净 401）',
+      strictStream?.error?.code === 'STREAM_AUTH_FAILED', JSON.stringify(strictStream))
+
+    // -- 演示态（demoAuth:true）：只读放行（内置演示数据），写动词干净 403 --
+    const demoDepts = await g(demoBase, '/api/panel/depts')
+    check('01门演示态：GET depts 200（只读放行 + 部门骨架播种，iam 缺席零惊扰）',
+      demoDepts.status === 200 && Array.isArray(demoDepts.body?.data?.depts) && demoDepts.body.data.depts.length === 5,
+      JSON.stringify(demoDepts.body?.error ?? demoDepts.body?.data?.depts?.length))
+    const demoBoard = await g(demoBase, '/api/panel/board')
+    check('01门演示态：board 端点不 500（5 键形态下卡片包面 200 + 资产聚合诚实降级全 0）',
+      demoBoard.status === 200 && demoBoard.body?.data?.assets?.appsOnline === 0 && demoBoard.body.data.funnel.exposed === 0,
+      JSON.stringify(demoBoard.body?.error ?? demoBoard.body?.data?.assets))
+    const demoOverview = await g(demoBase, '/api/panel/rd/overview')
+    check('01门演示态：overview 端点不 500（名册/审批面空聚合降级）', demoOverview.status === 200, JSON.stringify(demoOverview.body?.error))
+    const demoModels = await g(demoBase, '/api/panel/models')
+    check('01门演示态：模型目录 → 503 DEGRADED（能力类端点诚实降级，非 500）',
+      demoModels.status === 503 && demoModels.body?.error?.code === 'DEGRADED', JSON.stringify(demoModels.body))
+    const demoIndustries = await g(demoBase, '/api/panel/industries')
+    check('01门演示态：行业三态 200（scenegraphs 硬依赖在场 → 图谱面可用）', demoIndustries.status === 200, JSON.stringify(demoIndustries.body?.error))
+    const demoWriteMsg = await g(demoBase, '/api/panel/rd/messages', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: '演示写入' }) })
+    check('01门演示态：POST 写动词 → 403 DEMO_READONLY（写边界=GET/HEAD/OPTIONS）',
+      demoWriteMsg.status === 403 && demoWriteMsg.body?.error?.code === 'DEMO_READONLY', JSON.stringify(demoWriteMsg.body))
+    const demoPutWidgets = await g(demoBase, '/api/panel/rd/widgets', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ widgets: [] }) })
+    check('01门演示态：PUT 写动词 → 403 DEMO_READONLY', demoPutWidgets.status === 403 && demoPutWidgets.body?.error?.code === 'DEMO_READONLY', JSON.stringify(demoPutWidgets.body))
+    const demoDelete = await g(demoBase, '/api/panel/models/none', { method: 'DELETE' })
+    check('01门演示态：DELETE 写动词 → 403 DEMO_READONLY（写边界优先于能力 503）',
+      demoDelete.status === 403 && demoDelete.body?.error?.code === 'DEMO_READONLY', JSON.stringify(demoDelete.body))
+    const demoStream = await fetch(`${demoBase}/api/panel/stream?dept=rd&token=whatever`).then((r) => r.json().catch(() => null))
+    check('01门演示态：SSE ?token= 自校验失败（验收断言：前端 30s 轮询承接）',
+      demoStream?.error?.code === 'STREAM_AUTH_FAILED', JSON.stringify(demoStream))
   }
 
   // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
