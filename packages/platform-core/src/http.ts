@@ -315,6 +315,10 @@ export class HttpServerService extends Service {
       file(absolutePath, contentType) {
         void (async () => {
           try {
+            // 幂等守卫（与 ok/fail 同款）：错误处理器已写过响应时忽略——本方法体运行在
+            // 异步 IIFE 中，二次 writeHead 抛 ERR_HTTP_HEADERS_SENT 且无人接，会以
+            // uncaughtException 打死整个宿主进程（gate01-smoke 真机实证，2026-09-10）
+            if (res.headersSent) return
             const info = await stat(absolutePath)
             if (!info.isFile()) {
               res.writeHead(404).end('not found')
@@ -324,7 +328,7 @@ export class HttpServerService extends Service {
             res.writeHead(200, { 'content-type': type, 'content-length': info.size, 'cache-control': 'no-cache' })
             createReadStream(absolutePath).pipe(res)
           } catch {
-            res.writeHead(404).end('not found')
+            if (!res.headersSent) res.writeHead(404).end('not found')
           }
         })()
       },

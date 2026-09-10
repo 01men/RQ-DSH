@@ -145,6 +145,12 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
 | 根 `package.json` files | 精确闭包 `[cordis.patch.yml, packages/platform-core, packages/plugin-dsh-bridge, packages/plugin-panel-core, packages/plugin-rq-card, README.md, LICENSE]` | plan-gate01 原稿清单漏列 plugin-dsh-bridge（4 entry 却列 3 包），真机实装暴露后修正 |
 | `packages/plugin-rq-card/package.json` exports | `.` → `./dist/index.js` | 两形态统一包名，build:dist 入开发重建仪式（selftest dist 新鲜度断言覆盖） |
 
+## K. 紧急缺陷修复漂移（2026-09-10 晚，真机运行期实证）——建议 main 尽快采纳
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `packages/platform-core/src/http.ts`（`file()`） | 补 `res.headersSent` 幂等守卫（与同文件 `ok`/`fail` 同款） | `file()` 方法体运行在异步 IIFE 中，双写路径下二次 `writeHead` 抛 `ERR_HTTP_HEADERS_SENT` 且无人接——以 uncaughtException 打死整个宿主进程（gate01-smoke 真机运行期崩溃实证，栈=dist/http.js:228）。`ok`/`fail` 已有守卫，`file` 是遗漏点 |
+
 ## 决策回执（请 main 侧填写后回传）
 
 | 域 | 采纳？ | 备注 |
@@ -160,5 +166,6 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
 | G3 拷贝安装形态 TS 装载（dsh loader 预剥离 / 平台预构建分发） | | 「全新 dsh 拷贝安装完整体验」最后一公里；源码/链接形态已实证闭环。**01门产物已自解**（预构建 dist 入库，plan-gate01 Phase 1）；宿主面包仍挂起 |
 | I 01门改名装配漂移 | | 定性 PLATFORM_PACKAGE/boot-all/cordis 装配是否随根包名演进 |
 | J 01门 Phase 3 追加漂移（dsh-bridge inject 收缩 / rq-card 内联 / files 闭包） | | 定性 dsh-bridge 声明面收缩与 rq-card 值导入内联是否回浸 main |
+| K http.ts file() headersSent 守卫（宿主崩溃级缺陷） | | **建议尽快采纳**——异步双写即 whole-process 崩溃 |
 
 未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）。

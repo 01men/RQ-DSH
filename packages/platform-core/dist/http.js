@@ -216,6 +216,7 @@ class HttpServerService extends Service {
       file(absolutePath, contentType) {
         void (async () => {
           try {
+            if (res.headersSent) return;
             const info = await stat(absolutePath);
             if (!info.isFile()) {
               res.writeHead(404).end("not found");
@@ -225,7 +226,7 @@ class HttpServerService extends Service {
             res.writeHead(200, { "content-type": type, "content-length": info.size, "cache-control": "no-cache" });
             createReadStream(absolutePath).pipe(res);
           } catch {
-            res.writeHead(404).end("not found");
+            if (!res.headersSent) res.writeHead(404).end("not found");
           }
         })();
       }
