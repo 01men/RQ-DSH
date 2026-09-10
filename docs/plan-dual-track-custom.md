@@ -19,9 +19,9 @@
 **北极星（收敛判据）**：定制轨对宿主轨的**代码差异收敛为零**——
 
 ```bash
-# 锚点=真上游 main 头（当前 37880a2；上游前进后更新锚点哈希）。
+# 锚点=真上游 main 头（当前 33f786a；上游前进后更新锚点哈希）。
 # 不用 origin/main 追踪引用——它在 push/fetch 之间摇摆（见 AGENTS.md「已知无害怪象」），自比较会假绿。
-git diff 37880a2 custom/dsh-rq -- \
+git diff 33f786a custom/dsh-rq -- \
   packages/platform-core packages/plugin-console packages/plugin-portal \
   packages/plugin-authn packages/plugin-agent packages/plugin-audit packages/plugin-iam \
   packages/plugin-usage packages/plugin-skillhub packages/plugin-app \
@@ -159,7 +159,9 @@ cordis.yml / cordis.patch.yml 属宿主面（装配清单随 main 演进）；�
 - **后续批次（2026-09-08/09）**：QA 验收缺陷修复批（a774bff，P0 SSE 越权 + P1 全量闭环）→
   交接清单 H1-H5 宿主侧落地吸收（527099e，对 37880a2）→ G1 回跳消费侧闭环 + Bug 修复批（edd3d21）→
   H1 定制面配合批：rq-card 五处槽注册无条件 inject + bundle 真执行回归（bcd7a28）。
-  北极星锚点随合并推进 ff1a8de → 37880a2。
+  北极星锚点随合并推进 ff1a8de → 37880a2 → 33f786a（e6b951b：吸收 31b02ff m0 合规四件套 +
+  e0dd5b4 封存记录回填 + 33f786a SSO 机器环回自助；assets/dashboard 冲突按铁律 5 取 main m0
+  语义 + 保留 F 域余量结构，flow 卡片字段随 main 改 costCents；selftest 1080/1080 + 清单 85/85）。
 
 ### C1 第一波 · 一线面板极简（2026-09-09 交付）
 
