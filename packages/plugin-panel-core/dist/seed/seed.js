@@ -32,26 +32,30 @@ function seedPanel(ctx, autoDemo = false) {
     ctx.panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...matchedOrg ? { orgId: matchedOrg.id } : {} });
   }
   const rootOrg = iam?.orgs().find((org) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : void 0);
-  if (rootOrg) {
-    for (const code of ["QB01", "GCJX"]) {
-      if (ctx.panel.activations().findOne((item) => item.orgId === rootOrg.id && item.code === code)) continue;
-      ctx.panel.activations().insert({
-        id: newId("act"),
-        code,
-        orgId: rootOrg.id,
-        status: "active",
-        activatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        activatedBy: "seed\uFF08\u5185\u7F6E\u8D44\u4EA7\u5305\u9ED8\u8BA4\u6388\u6743\uFF09"
-      });
-    }
-  }
+  if (rootOrg) seedActivations(ctx, rootOrg.id);
   logger.info("\u9762\u677F\u57FA\u7EBF\uFF1A\u4E94\u90E8\u95E8\u9AA8\u67B6 + \u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/GCJX\uFF09\u5B8C\u6210");
   if (process.env.DEMO_SEED !== "1" && !autoDemo) return;
   seedDemoContent(ctx, logger);
 }
+function seedActivations(ctx, orgId) {
+  for (const code of ["QB01", "GCJX"]) {
+    if (ctx.panel.activations().findOne((item) => item.orgId === orgId && item.code === code)) continue;
+    ctx.panel.activations().insert({
+      id: newId("act"),
+      code,
+      orgId,
+      status: "active",
+      activatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      activatedBy: "seed\uFF08\u5185\u7F6E\u8D44\u4EA7\u5305\u9ED8\u8BA4\u6388\u6743\uFF09"
+    });
+  }
+}
 function seedDemoContent(ctx, logger) {
   const demoPath = join(dirname(fileURLToPath(import.meta.url)), "demo-content.json");
   const demo = JSON.parse(readFileSync(demoPath, "utf8"));
+  const iam = ctx.reflect.get("iam", false);
+  const demoOrgId = iam?.orgs().find((org) => org.parentId === null).at(0)?.id ?? DEMO_ORG_ID;
+  seedActivations(ctx, demoOrgId);
   for (const [deptId, content] of Object.entries(demo.depts)) {
     const config = ctx.panel.deptConfigs().get(deptId);
     if (!config) continue;

@@ -60,16 +60,7 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
   // 内置图谱资产（packages/platform-core/scenegraphs/ 随平台分发）默认授权根组织；
   // 其余组织/行业走「申请 → 审批（industry.activation，high）→ 激活」链路
   const rootOrg = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : undefined)
-  if (rootOrg) {
-    for (const code of ['QB01', 'GCJX']) {
-      // 幂等：同 org×code 已登记则跳过（loader 热重载会重放 apply）
-      if (ctx.panel.activations().findOne((item) => item.orgId === rootOrg.id && item.code === code)) continue
-      ctx.panel.activations().insert({
-        id: newId('act'), code, orgId: rootOrg.id, status: 'active',
-        activatedAt: new Date().toISOString(), activatedBy: 'seed（内置资产包默认授权）',
-      })
-    }
-  }
+  if (rootOrg) seedActivations(ctx, rootOrg.id)
   logger.info('面板基线：五部门骨架 + 内置行业激活（QB01/GCJX）完成')
 
   // 演示内容门控：DEMO_SEED=1（全量形态显式演示）或 autoDemo（01门 demoAuth 装态自动演示）
@@ -82,6 +73,17 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
  * 频道/会话/任务/知识。以「部门是否已有频道」为该部门演示内容已播标记（频道不空即跳过该
  * 部门全量演示），agents/kpis/widgets 单独按空判——重复 apply / 热重载 / 部分失败重放全部安全。
  */
+/** 内置行业激活幂等登记（QB01/GCJX 默认授权）：demoAuth 装态下 demo-org 兜底，重放安全。 */
+function seedActivations(ctx: Context, orgId: string): void {
+  for (const code of ['QB01', 'GCJX']) {
+    if (ctx.panel.activations().findOne((item) => item.orgId === orgId && item.code === code)) continue
+    ctx.panel.activations().insert({
+      id: newId('act'), code, orgId, status: 'active',
+      activatedAt: new Date().toISOString(), activatedBy: 'seed（内置资产包默认授权）',
+    })
+  }
+}
+
 function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(msg: string): void }): void {
   type DemoMsg = { t: string; n?: string; icon?: string; x: string; dd?: boolean | string; card?: { t: string; ops: string[] } }
   type DemoDept = {
@@ -93,6 +95,11 @@ function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(m
   }
   const demoPath = join(dirname(fileURLToPath(import.meta.url)), 'demo-content.json')
   const demo = JSON.parse(readFileSync(demoPath, 'utf8')) as { depts: Record<string, DemoDept> }
+
+  // 行业激活面幂等补齐（「有骨架无激活」中间态——如宿主强杀丢失部分持久层——也能恢复）
+  const iam = ctx.reflect.get('iam', false) as any | undefined
+  const demoOrgId = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0)?.id ?? DEMO_ORG_ID
+  seedActivations(ctx, demoOrgId)
 
   for (const [deptId, content] of Object.entries(demo.depts)) {
     const config = ctx.panel.deptConfigs().get(deptId)
