@@ -4,6 +4,18 @@
 > rq-card 经 bundledDependencies 随包自包含（file: 依赖在 npm/tgz 通道不可移植，真机实证）。
 > github 通道（`dsh plugin add github:01men/RQ-DSH`）不依赖 npm，已随仓库推送天然可用。
 
+## 发布记录
+
+| 版本 | 日期 | 通道 | 备注 |
+|---|---|---|---|
+| @ybkk/gate-01@1.1.1 | 2026-09-10 | npm（latest） | 首个可用版本：幂等演示播种修复 + @ybkk scope 定版（npm org `01men` 已被占用，用户创建 `ybkk`） |
+| @ybkk/gate-01@1.1.0 | 2026-09-10 | npm | **已 deprecated**（演示播种缺陷，消息指向 1.1.1）——不要安装 |
+
+发布流程实证（2026-09-10）：`npm login` → `npm publish --access public` 触发 **web 浏览器认证**
+（npm 2026 政策：发布必须本人 2FA 浏览器确认，Enter 开链接 → Authorize → 终端自动继续；
+granular token 绕行方案已被 npm 限制，不再可用）。npm org 占用名检查：`npm view <name>` 404
+仅说明未发布过，org 占用需在 npmjs.com/org/create 实测。
+
 ## 用户侧配合（仅 2 步，涉及凭据必须本人操作）
 
 1. **npm 组织**：在 npmjs.com 确认/创建 org **`01men`**（名称必须与包 scope 完全一致，免费 plan 即可），
