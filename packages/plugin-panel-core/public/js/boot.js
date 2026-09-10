@@ -83,6 +83,30 @@ function saveSession(data) {
 }
 
 /**
+ * 同源控制台会话直通（独立形态 G1 补环）：控制台已登录（同源可见 heng_ops_token）而面板
+ * 无会话时，自助签发一次性 entry_ticket（≤120s，console.login 权限面）并即兑面板会话——
+ * 管理员从控制台导航进面板零二次登录，不再落「无有效平台会话 → 去控制台登录 →
+ * next 被已登录态忽略」的死循环。remote 连接形态不走本机票（作用域隔离，天然无同源控制台
+ * 会话）；签票/兑换任一步失败诚实降级为既有引导页，不阻断启动。
+ */
+async function consoleSessionPassthrough() {
+  let consoleToken = ''
+  try { consoleToken = localStorage.getItem('heng_ops_token') ?? '' } catch { return }
+  if (!consoleToken || localStorage.getItem(TOKEN_KEY)) return
+  try {
+    const response = await fetch(`${BASE}/api/auth/entry-tickets/self`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${consoleToken}` },
+      body: JSON.stringify({}),
+    })
+    const payload = await response.json().catch(() => null)
+    const ticket = payload?.data?.ticket
+    if (!response.ok || !ticket) return
+    await exchangeEntryTicket(ticket)
+  } catch { /* 直通失败按未登录处理（引导页仍可用） */ }
+}
+
+/**
  * 宿主桥探测 + 宿主会话直通（登录打通）：dsh 宿主下 rq_sid Cookie 已绑定宿主身份时，
  * 经 POST /dsh-bridge/session（同源收紧）兑换平台会话——零二次登录。
  * 路径必须根绝对（不带 BASE）：/dsh-bridge/* 注册在 dsh webServer 根上，挂载形态并不落在 /gate01 之内
@@ -139,7 +163,9 @@ async function bootstrap() {
     } catch { /* 兑换失败按未登录处理 */ }
     clearEntryTicket(found)
   }
-  // 会话链：已有令牌 → 票据 → 宿主 Cookie 直通（dsh 宿主内点入面板零二次登录）
+  // 会话链：已有令牌 → 票据 → 同源控制台会话直通（独立形态管理员零二次登录）
+  // → 宿主 Cookie 直通（dsh 宿主内点入面板零二次登录）
+  if (!remoteMode && !apiModule.session.token) await consoleSessionPassthrough()
   const { hostBridge } = await hostBridgeSession()
 
   // 宿主连接探测结果落地：remote 时令牌作用域与代理已在上方就位；none 且无会话 → 连接向导
