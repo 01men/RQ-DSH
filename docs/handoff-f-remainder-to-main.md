@@ -163,6 +163,12 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
 - **收敛检查**：宿主面源码对 7f5f3ea 锚点零残余（仅存 I 豁免产品身份值 + approvals.js kind 映射 +
   01门 装机面 dist/）。
 
+## L. G1-a 宿主半缺陷修复（2026-09-10 晚，真机闭环实证）——请 main 采纳
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `packages/plugin-console/public/js/pages/login.js` | `?next=` 参数改为一次读取共享（`urlNextParam`），URL 清参后置 | 7f5f3ea 的 G1-a 实现：同源分支 IIFE 读完即 `replaceState` 清参，跨源分支 IIFE 再读 `location.search` 永远为空——**跨源回跳在任何场景都不生效**（本机全量栈 × 01门向导 浏览器闭环实证：修复前登录后落宿主 dashboard，修复后自动回跳本机面板 + 票据免登全链打通）。J 节 dsh-bridge softRead 同类教训：双消费者共享一次参数读取 |
+
 ## 决策回执（请 main 侧填写后回传）
 
 > main 侧已回填（2026-09-10，基线 main `5977067` 重算残余差异；实施与验证记录见 main 仓库
