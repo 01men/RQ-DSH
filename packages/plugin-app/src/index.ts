@@ -42,6 +42,19 @@ export interface AppVisitRecord extends RecordBase {
   vids: string[]
 }
 
+/** SSO 管理授权的调用方快照（human 用户或机器凭证；与控制台 CallerInfo 对齐的最小面）。 */
+export interface AppRegistryServiceSsoCaller {
+  kind: 'human' | 'machine'
+  /** machine 专属：凭证主体 ID（ownerId 以此登记时视为绑定）。 */
+  principalId?: string
+  /** machine 专属：凭证关联资源（refType='app'|'agent' 且 refId 命中即绑定）。 */
+  refType?: string
+  refId?: string
+  /** human 专属：平台用户 ID（与资源 ownerId 比对）。 */
+  userId?: string
+  permissions: string[]
+}
+
 export class AppRegistryService extends Service {
   static readonly provide = 'appRegistry'
 
@@ -174,7 +187,7 @@ export class AppRegistryService extends Service {
     if (!enforce.includes(appType)) return this.activeSsoClient(app.id)?.clientId
     const active = this.activeSsoClient(app.id)
     if (!active) {
-      throw new Error(`上线门禁：${appType} 形态应用上线前必须完成身份纳管——请在「AI 应用 → 应用详情 → SSO 配置」签发 OIDC 客户端（当前门禁形态：${enforce.join('/')}）`)
+      throw new Error(`上线门禁：${appType} 形态应用上线前必须完成身份纳管——请在「AI 应用 → 应用详情 → SSO 配置」签发 OIDC 客户端（当前门禁形态：${enforce.join('/')}）；回调地址为本机环回（127.0.0.1 / localhost / 0.0.0.0）时，应用可凭自身机器凭证直接调 POST /api/apps/:id/sso-client 自助签发`)
     }
     return active.clientId
   }
@@ -258,19 +271,95 @@ export class AppRegistryService extends Service {
       try { parsed = new URL(uri) } catch { throw new Error(`回调地址非法：${uri}`) }
       if (parsed.protocol === 'https:') continue
       if (parsed.protocol === 'http:' && (allowAnyHttp || AppRegistryService.isIntranetHost(parsed.hostname))) continue
-      throw new Error(`回调地址必须为 https://，或 http:// 的内网地址（localhost / 127.0.0.1 / 10.x / 172.16-31.x / 192.168.x）（收到：${uri}）`)
+      throw new Error(`回调地址必须为 https://，或 http:// 的内网地址（localhost / 127.0.0.1 / 0.0.0.0 / 10.x / 172.16-31.x / 192.168.x）（收到：${uri}）`)
     }
   }
 
   /** 内网主机判定：环回、RFC1918 私网、链路本地、IPv6 ULA。 */
   private static isIntranetHost(hostname: string): boolean {
     const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
-    if (host === 'localhost' || host === '::1') return true
+    if (host === 'localhost' || host === '::1' || host === '0.0.0.0') return true
     if (host.includes(':')) return host.startsWith('f') || host.startsWith('fd') // fc00::/7 ULA
     const parts = host.split('.')
     if (parts.length !== 4 || parts.some((part) => !/^\d+$/.test(part))) return false // 非点分 IPv4 一律按公网处理
     const [a, b] = parts.map(Number) as [number, number]
     return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
+  }
+
+  /** 环回主机判定（本机回调）：localhost / *.localhost / 127.0.0.0/8 / ::1 / 0.0.0.0。 */
+  static isLoopbackHost(hostname: string): boolean {
+    const host = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+    if (host === 'localhost' || host === '::1' || host === '0.0.0.0' || host.endsWith('.localhost')) return true
+    if (host.startsWith('127.')) return true
+    return false
+  }
+
+  /** 回调地址全集是否均为环回（空集不算——机器自助必须显式登记环回回调）。 */
+  static isLoopbackOnlyCallback(uris: string[] | undefined): boolean {
+    if (!Array.isArray(uris) || uris.length === 0) return false
+    return uris.every((uri) => {
+      try { return AppRegistryService.isLoopbackHost(new URL(uri).hostname) } catch { return false }
+    })
+  }
+
+  /**
+   * 机器身份环回自助开关（默认开，APP_SSO_MACHINE_LOOPBACK=0 关闭）：
+   * 应用/Agent 的机器凭证（或登记 owner principal）可自行签发/管理回调地址全为环回的 SSO 客户端——
+   * 本机回调不跨机，授权码 + 强制 PKCE 下第三者截码无利可图（RFC 8252 loopback 口径）；
+   * 非环回回调（内网 IP / 公网域名）仍须 human owner 或管理员操作。
+   */
+  static machineSsoSelfServiceEnabled(): boolean {
+    return String(process.env.APP_SSO_MACHINE_LOOPBACK ?? '1') !== '0'
+  }
+
+  /**
+   * SSO 管理授权决策（app/agent 两侧控制台路由共用口径）：
+   * - human：资源 owner（ownerId === userId）或持 authn.oidc.write（管理员兜底）→ 放行；
+   * - machine：开关开启时，绑定本资源的凭证（refType/refId 命中或 ownerId === principalId）可放行——
+   *   create/update 按本次生效回调集判定，rotate/enable 按现存回调集判定，disable（纯降险）恒放行；
+   *   回调集必须全为环回（isLoopbackOnlyCallback），否则仅 human 可操作。
+   */
+  static ssoManageDecision(
+    resource: { id: string; name: string; ownerId: string },
+    caller: AppRegistryServiceSsoCaller,
+    effective: { redirectUris: string[]; postLogoutUris: string[] },
+    op: 'create' | 'update' | 'rotate' | 'enable' | 'disable',
+  ): { allowed: true } | { allowed: false; reason: string } {
+    if (caller.kind !== 'human') {
+      if (!AppRegistryService.machineSsoSelfServiceEnabled()) {
+        return { allowed: false, reason: 'SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作' }
+      }
+      const bound = (caller.refType !== undefined && caller.refId === resource.id)
+        || resource.ownerId === caller.principalId
+      if (!bound) {
+        return { allowed: false, reason: `机器身份仅可管理自身绑定资源的 SSO 客户端（「${resource.name}」须为凭证 refType/refId 命中或登记 owner）` }
+      }
+      if (op === 'disable') return { allowed: true } // 禁用纯降险，恒放行
+      if (!AppRegistryService.isLoopbackOnlyCallback([...effective.redirectUris, ...effective.postLogoutUris])) {
+        return { allowed: false, reason: '机器身份自助仅限环回回调地址（http://127.0.0.1:PORT、http://localhost:PORT、0.0.0.0）；非环回回调请由应用 owner 或管理员在控制台操作' }
+      }
+      return { allowed: true }
+    }
+    const isOwner = Boolean(caller.userId) && resource.ownerId === caller.userId
+    const hasAdmin = caller.permissions.includes('*') || caller.permissions.includes('authn.oidc.write')
+    if (!isOwner && !hasAdmin) {
+      return { allowed: false, reason: `仅资源 owner 或持有 authn.oidc.write 的管理员可管理「${resource.name}」的 SSO 客户端` }
+    }
+    return { allowed: true }
+  }
+
+  /**
+   * owner-based 授权（全库首例，非 permission-point 制）+ 机器环回自助例外（ssoManageDecision）。
+   * 服务层兜底校验：控制台路由层已先行调用 ssoManageDecision 并 403，此处保持同口径防绕行。
+   */
+  static assertSsoManage(
+    app: { id: string; name: string; ownerId: string },
+    caller: AppRegistryServiceSsoCaller,
+    effective?: { redirectUris: string[]; postLogoutUris: string[] },
+    op: 'create' | 'update' | 'rotate' | 'enable' | 'disable' = 'update',
+  ): void {
+    const decision = AppRegistryService.ssoManageDecision(app, caller, effective ?? { redirectUris: [], postLogoutUris: [] }, op)
+    if (!decision.allowed) throw new Error(decision.reason)
   }
 
   activeSsoClient(appId: string) {

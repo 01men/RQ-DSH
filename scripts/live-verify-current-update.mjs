@@ -141,7 +141,7 @@ check('登记 entryUrl（零成本逃生门）', entryUrlSet.status === 200, `st
 const gatePass = await api('POST', `/api/agents/${agentId}/transition`, { token: admin, body: { action: 'online' } })
 check('上线门禁：登记 entryUrl 后放行（产生审批单）', gatePass.status === 200 && !!gatePass.json?.data?.approval, `status=${gatePass.status} ${JSON.stringify(gatePass.json?.error)}`)
 
-// 机器身份不可管理 SSO 客户端（assertSsoManage：仅限 human owner/管理员）
+// 机器身份不可签发非环回回调 SSO 客户端（机器自助仅限环回回调，ssoManageDecision）
 if (machineCred?.clientId && machineCred?.clientSecret) {
   const machineLogin = await api('POST', '/api/auth/client-credentials', {
     body: { clientId: machineCred.clientId, clientSecret: machineCred.clientSecret },
@@ -152,10 +152,10 @@ if (machineCred?.clientId && machineCred?.clientSecret) {
     token: machineToken,
     body: { redirectUris: ['https://a.example/cb'] },
   })
-  check('机器身份管理 SSO 客户端 → 403（human 身份限定）', ssoAsMachine.status === 403,
+  check('机器身份签发非环回回调 SSO 客户端 → 403（机器自助仅限环回）', ssoAsMachine.status === 403,
     `status=${ssoAsMachine.status} ${JSON.stringify(ssoAsMachine.json?.error)}`)
 } else {
-  check('机器身份管理 SSO 客户端 → 403（human 身份限定）', false, '无机器凭证返回')
+  check('机器身份签发非环回回调 SSO 客户端 → 403（机器自助仅限环回）', false, '无机器凭证返回')
 }
 
 // ── 5. OIDC 协议端点（authn 插件）────────────────────────────────

@@ -2898,31 +2898,48 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     return { id: agent.id, name: agent.name, ownerId: agent.ownerId }
   }
 
-  /** owner 校验（human 且 agent.ownerId === userId，或持 authn.oidc.write）；机器一律 403。 */
-  const requireAgentSsoOwner = (exchange: HttpExchange): boolean => {
-    const agent = ssoAgent(exchange)
-    const info = caller(exchange)
-    const isOwner = info.kind === 'human' && Boolean(info.userId) && agent.ownerId === info.userId
-    const isAdmin = info.permissions.includes('*') || info.permissions.includes('authn.oidc.write')
-    if (info.kind !== 'human' || (!isOwner && !isAdmin)) {
+  /**
+   * SSO 管理守卫工厂（app/agent 两侧路由共用，授权口径统一在 AppRegistryService.ssoManageDecision）：
+   * human = 资源 owner 或持 authn.oidc.write；机器身份绑定本资源（凭证 refType/refId 或登记 owner）
+   * 时可自助签发/管理，但本次生效的回调集必须全为环回（localhost / 127.0.0.0/8 / ::1 / 0.0.0.0，
+   * APP_SSO_MACHINE_LOOPBACK=0 可整体关闭该例外）；disable 纯降险恒放行。
+   * 返回 false 表示已回 403（并发 audit.authz.denied 事件）。
+   */
+  const ssoManageGuard = (refType: 'app' | 'agent') => {
+    const kindName = refType === 'app' ? '应用' : 'Agent'
+    const resourceOf = (exchange: HttpExchange): { id: string; name: string; ownerId: string } => {
+      const record = ctx.resourceCore.get(refType, exchange.params['id']!) as { id: string; name: string; ownerId: string } | undefined
+      if (!record) throw new Error(`${kindName}不存在：${exchange.params['id']}`)
+      return { id: record.id, name: record.name, ownerId: record.ownerId }
+    }
+    const existingClientOf = (id: string): { redirectUris?: string[]; postLogoutUris?: string[] } | undefined =>
+      refType === 'app' ? ctx.oidc.clientsForApp(id)[0] : ctx.oidc.clientsForAgent(id)[0]
+    return (exchange: HttpExchange, op: 'create' | 'update' | 'rotate' | 'enable' | 'disable', input?: { redirectUris?: string[]; postLogoutUris?: string[] }): boolean => {
+      const resource = resourceOf(exchange)
+      const info = caller(exchange)
+      const existing = existingClientOf(resource.id)
+      const decision = AppRegistryService.ssoManageDecision(resource, info, {
+        redirectUris: input?.redirectUris ?? existing?.redirectUris ?? [],
+        postLogoutUris: input?.postLogoutUris ?? existing?.postLogoutUris ?? [],
+      }, op)
+      if (decision.allowed) return true
       ctx.platformBus.emit('audit.authz.denied', {
         actorId: info.userId ?? info.principalId,
         actorName: info.name,
-        point: `agent.sso(owner:${agent.id})`,
+        point: `${refType}.sso(owner:${resource.id})`,
         path: exchange.path,
       })
-      exchange.fail(403, 'FORBIDDEN', info.kind !== 'human'
-        ? 'SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作'
-        : `仅 Agent owner 或持有 authn.oidc.write 的管理员可管理「${agent.name}」的 SSO 客户端`)
+      exchange.fail(403, 'FORBIDDEN', decision.reason)
       return false
     }
-    return true
   }
+  const agentSsoGuard = ssoManageGuard('agent')
+  const appSsoGuard = ssoManageGuard('app')
 
   guarded('POST', '/api/agents/:id/sso-client', 'agent.write', (exchange) => {
-    if (!requireAgentSsoOwner(exchange)) return
-    const agent = ssoAgent(exchange)
     const input = body<{ redirectUris: string[]; clientType?: 'confidential' | 'public'; consentRequired?: boolean; postLogoutUris?: string[]; description?: string }>(exchange)
+    if (!agentSsoGuard(exchange, 'create', { redirectUris: input.redirectUris, postLogoutUris: input.postLogoutUris })) return
+    const agent = ssoAgent(exchange)
     const created = ctx.agentRegistry.createSsoClient(agent.id, input)
     changeLog(exchange, 'agent.sso.create', 'oidc_client', created.client.id, created.client.name, `Agent ${agent.name} 签发（${input.clientType ?? 'confidential'}）`)
     return {
@@ -2934,16 +2951,16 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   })
 
   guarded('PATCH', '/api/agents/:id/sso-client', 'agent.write', (exchange) => {
-    if (!requireAgentSsoOwner(exchange)) return
-    const agent = ssoAgent(exchange)
     const input = body<{ redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    if (!agentSsoGuard(exchange, 'update', { redirectUris: input.redirectUris, postLogoutUris: input.postLogoutUris })) return
+    const agent = ssoAgent(exchange)
     const updated = ctx.agentRegistry.updateSsoClient(agent.id, input)
     changeLog(exchange, 'agent.sso.update', 'oidc_client', updated.id, updated.name)
     return updated
   })
 
   guarded('POST', '/api/agents/:id/sso-client/rotate', 'agent.write', (exchange) => {
-    if (!requireAgentSsoOwner(exchange)) return
+    if (!agentSsoGuard(exchange, 'rotate')) return
     const agent = ssoAgent(exchange)
     const rotated = ctx.agentRegistry.rotateSsoSecret(agent.id)
     changeLog(exchange, 'agent.sso.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
@@ -2952,7 +2969,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
 
   for (const action of ['disable', 'enable'] as const) {
     guarded('POST', `/api/agents/:id/sso-client/${action}`, 'agent.write', (exchange) => {
-      if (!requireAgentSsoOwner(exchange)) return
+      if (!agentSsoGuard(exchange, action)) return
       const agent = ssoAgent(exchange)
       const { reason } = body<{ reason?: string }>(exchange)
       const client = action === 'disable'
@@ -3123,38 +3140,17 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     throw new Error(`未知操作：${action}`)
   })
 
-  // -- 应用 ↔ SSO 打通（owner 自助签发；全库首例 owner-based 授权） ----------------
+  // -- 应用 ↔ SSO 打通（owner 自助签发 + 机器环回自助，口径见 ssoManageGuard） ----
   const ssoApp = (exchange: HttpExchange): { id: string; name: string; ownerId: string } => {
     const app = ctx.resourceCore.get('app', exchange.params['id']!)
     if (!app) throw new Error(`应用不存在：${exchange.params['id']}`)
     return { id: app.id, name: app.name, ownerId: app.ownerId }
   }
 
-  /** owner 校验（human 且 app.ownerId === userId，或持 authn.oidc.write）；机器一律 403。 */
-  const requireSsoOwner = (exchange: HttpExchange): boolean => {
-    const app = ssoApp(exchange)
-    const info = caller(exchange)
-    const isOwner = info.kind === 'human' && Boolean(info.userId) && app.ownerId === info.userId
-    const isAdmin = info.permissions.includes('*') || info.permissions.includes('authn.oidc.write')
-    if (info.kind !== 'human' || (!isOwner && !isAdmin)) {
-      ctx.platformBus.emit('audit.authz.denied', {
-        actorId: info.userId ?? info.principalId,
-        actorName: info.name,
-        point: `app.sso(owner:${app.id})`,
-        path: exchange.path,
-      })
-      exchange.fail(403, 'FORBIDDEN', info.kind !== 'human'
-        ? 'SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作'
-        : `仅应用 owner 或持有 authn.oidc.write 的管理员可管理「${app.name}」的 SSO 客户端`)
-      return false
-    }
-    return true
-  }
-
   guarded('POST', '/api/apps/:id/sso-client', 'app.write', (exchange) => {
-    if (!requireSsoOwner(exchange)) return
-    const app = ssoApp(exchange)
     const input = body<{ redirectUris: string[]; clientType?: 'confidential' | 'public'; consentRequired?: boolean; postLogoutUris?: string[]; description?: string }>(exchange)
+    if (!appSsoGuard(exchange, 'create', { redirectUris: input.redirectUris, postLogoutUris: input.postLogoutUris })) return
+    const app = ssoApp(exchange)
     const created = ctx.appRegistry.createSsoClient(app.id, input)
     changeLog(exchange, 'app.sso.create', 'oidc_client', created.client.id, created.client.name, `应用 ${app.name} 签发（${input.clientType ?? 'confidential'}）`)
     return {
@@ -3166,16 +3162,16 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   })
 
   guarded('PATCH', '/api/apps/:id/sso-client', 'app.write', (exchange) => {
-    if (!requireSsoOwner(exchange)) return
-    const app = ssoApp(exchange)
     const input = body<{ redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }>(exchange)
+    if (!appSsoGuard(exchange, 'update', { redirectUris: input.redirectUris, postLogoutUris: input.postLogoutUris })) return
+    const app = ssoApp(exchange)
     const updated = ctx.appRegistry.updateSsoClient(app.id, input)
     changeLog(exchange, 'app.sso.update', 'oidc_client', updated.id, updated.name)
     return updated
   })
 
   guarded('POST', '/api/apps/:id/sso-client/rotate', 'app.write', (exchange) => {
-    if (!requireSsoOwner(exchange)) return
+    if (!appSsoGuard(exchange, 'rotate')) return
     const app = ssoApp(exchange)
     const rotated = ctx.appRegistry.rotateSsoSecret(app.id)
     changeLog(exchange, 'app.sso.rotate', 'oidc_client', rotated.client.id, rotated.client.name, '旧 secret 立即失效')
@@ -3184,7 +3180,7 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
 
   for (const action of ['disable', 'enable'] as const) {
     guarded('POST', `/api/apps/:id/sso-client/${action}`, 'app.write', (exchange) => {
-      if (!requireSsoOwner(exchange)) return
+      if (!appSsoGuard(exchange, action)) return
       const app = ssoApp(exchange)
       const { reason } = body<{ reason?: string }>(exchange)
       const client = action === 'disable'

@@ -16,7 +16,7 @@ import {
 import * as agentTools from './tools.ts'
 import { AGENT_TYPE_SPEC } from './schema.ts'
 import { buildAgentOnboardingPrompt, type AgentOnboardingCredential } from './onboarding.ts'
-import { AppRegistryService } from '../../plugin-app/src/index.ts'
+import { AppRegistryService, type AppRegistryServiceSsoCaller } from '../../plugin-app/src/index.ts'
 import { OidcService } from '../../plugin-authn/src/oidc.ts'
 
 // ---------------------------------------------------------------------------
@@ -246,16 +246,19 @@ export class AgentRegistryService extends Service {
     return '1'
   }
 
-  /** owner-based 授权（对齐 app 侧）：human 且 agent.ownerId === userId，或持 authn.oidc.write；机器一律 403。 */
-  assertSsoManage(agent: { id: string; name: string; ownerId: string }, caller: { kind: string; userId?: string; permissions: string[] }): void {
-    if (caller.kind !== 'human' || !caller.userId) {
-      throw new Error('SSO 客户端管理仅限用户身份（owner 校验），机器身份不可操作')
-    }
-    const isOwner = agent.ownerId === caller.userId
-    const hasAdmin = caller.permissions.includes('*') || caller.permissions.includes('authn.oidc.write')
-    if (!isOwner && !hasAdmin) {
-      throw new Error(`仅 Agent owner 或持有 authn.oidc.write 的管理员可管理「${agent.name}」的 SSO 客户端`)
-    }
+  /**
+   * owner-based 授权（对齐 app 侧）+ 机器环回自助例外：口径统一在 AppRegistryService.ssoManageDecision
+   * （human = owner / authn.oidc.write；机器绑定本 Agent 时可自助，但回调集须全为环回）。
+   * 控制台路由层已先行调用同口径守卫并 403，此处服务层兜底防绕行。
+   */
+  assertSsoManage(
+    agent: { id: string; name: string; ownerId: string },
+    caller: AppRegistryServiceSsoCaller,
+    effective?: { redirectUris: string[]; postLogoutUris: string[] },
+    op: 'create' | 'update' | 'rotate' | 'enable' | 'disable' = 'update',
+  ): void {
+    const decision = AppRegistryService.ssoManageDecision(agent, caller, effective ?? { redirectUris: [], postLogoutUris: [] }, op)
+    if (!decision.allowed) throw new Error(decision.reason)
   }
 
   activeSsoClient(agentId: string) {
