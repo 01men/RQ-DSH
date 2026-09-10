@@ -17,9 +17,10 @@
   },
   "files": [
     "cordis.patch.yml",
-    "cordis.yml",
-    "packages",
-    "src",
+    "packages/platform-core",
+    "packages/plugin-dsh-bridge",
+    "packages/plugin-panel-core",
+    "packages/plugin-rq-card",
     "README.md",
     "LICENSE"
   ],

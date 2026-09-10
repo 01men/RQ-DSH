@@ -26,7 +26,8 @@
  * 建议把摘要文本放在结果首块，富卡片与纯文本两个世界读同一份信息。
  */
 
-import { defineTool, type HttpExchange } from '../../platform-core/src/index.ts'
+import type { HttpExchange } from '../../platform-core/src/index.ts'
+import { defineTool } from './tool.ts'
 import { CONSOLE_BASE } from './wire.ts'
 import { HostLinkService, RQCARD_CALL_HEADER } from './hostlink.ts'
 export { HostLinkService, RQCARD_CALL_HEADER } from './hostlink.ts'

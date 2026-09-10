@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Service } from "@deepseek-ai/cordis";
 const name = "dsh-bridge";
-const inject = ["webServer", "httpServer", "entryTickets", "oidc", "opsStorage", "iam", "authn", "audit"];
+const inject = ["webServer", "httpServer", "opsStorage"];
 const BIND_TOKEN_PREFIX = "rbs_";
 const DEFAULT_COOKIE = "rq_sid";
 const DEFAULT_TTL_SECONDS = 24 * 3600;
@@ -126,7 +126,8 @@ class IdentityBindingService extends Service {
   }
   isAccountActive(userId) {
     try {
-      const user = this.ctx.iam?.users().get(userId);
+      const iam = this.ctx.reflect.get("iam", false);
+      const user = iam?.users().get(userId);
       if (!user) return false;
       return user.status === void 0 || user.status === "active";
     } catch {
@@ -176,7 +177,7 @@ function apply(ctx, config = {}) {
   });
   ctx.logger("dsh-bridge").info(`\u6995\u5668\u6570\u636E\u9762\u5DF2\u6302\u8F7D\u81F3 dsh webServer\uFF1A${mountPath}/*\uFF08\u5355\u8FDB\u7A0B\u5355\u5165\u53E3\uFF09`);
   const binding = bindingService;
-  const entryTickets = ctx.entryTickets;
+  const entryTickets = ctx.reflect.get("entryTickets", false);
   if (!binding || !entryTickets) {
     ctx.logger("dsh-bridge").warn("\u8EAB\u4EFD\u534A\u672A\u88C5\u914D\uFF1A\u7F3A\u5C11 identityBinding \u6216 entryTickets \u670D\u52A1\uFF08\u4EC5\u6302\u8F7D\u534A\u751F\u6548\uFF09");
     return;
@@ -285,7 +286,17 @@ function apply(ctx, config = {}) {
             json(401, { ok: false, error: { code: "NOT_BOUND", message: `\u5BBF\u4E3B\u4F1A\u8BDD\u672A\u7ED1\u5B9A\uFF08${status.reason ?? "unknown"}\uFF09\u2014\u2014\u8BF7\u4ECE dsh \u5BBF\u4E3B\u5165\u53E3\u8FDB\u5165\u6216\u4F7F\u7528\u5165\u573A\u7968\u636E` } });
             return;
           }
-          const deps = ctx;
+          const deps = {
+            get authn() {
+              return ctx.reflect.get("authn", false);
+            },
+            get iam() {
+              return ctx.reflect.get("iam", false);
+            },
+            get audit() {
+              return ctx.reflect.get("audit", false);
+            }
+          };
           if (!deps.authn || !deps.iam) {
             json(503, { ok: false, error: { code: "AUTHN_UNAVAILABLE", message: "authn \u670D\u52A1\u4E0D\u53EF\u7528\uFF08\u6302\u8F7D\u5F62\u6001\u88C5\u914D\u4E0D\u5B8C\u6574\uFF09" } });
             return;
@@ -336,7 +347,7 @@ function apply(ctx, config = {}) {
       json(404, { ok: false, error: { code: "NOT_FOUND", message: `\u672A\u77E5\u7AEF\u70B9\uFF1A${req.method} /dsh-bridge/${endpoint}` } });
     }
   });
-  const oidc = ctx.oidc;
+  const oidc = ctx.reflect.get("oidc", false);
   const dataDirPath = ctx.opsStorage?.dataDirPath;
   const credFile = config.oidcCredentialFile ?? (dataDirPath ? join(dataDirPath, "dsh-agent-credential.json") : void 0);
   const pendingOidc = /* @__PURE__ */ new Map();

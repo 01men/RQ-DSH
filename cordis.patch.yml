@@ -1,91 +1,46 @@
-# cordis.patch.yml —— dsh.bundle 安装补丁（dsh plugin add github:01men/ybkk-AIOS）。
+# cordis.patch.yml —— dsh.bundle 安装补丁（dsh plugin add github:01men/RQ-DSH / @01men/gate-01）。
 #
-# 与 cordis.yml 的区别：
-#   - cordis.yml       面向本仓库源码检出，name 为替换 <PROJECT_ROOT> 后的 file:// 绝对路径（--patch overlay）
-#   - cordis.patch.yml 面向 `dsh plugin add` 安装场景，name 为「包名 + 子路径」模块说明符：
-#                      Node 从 profile 目录出发沿 node_modules 解析（本包被 pnpm 安装在
-#                      <profile>/node_modules/@01men/gate-01，向上还有 $DSH_HOME/profiles/node_modules
-#                      扁平回退层），因此无需感知安装位置，开箱可解析。
-#                      ⚠ 不要写 ./packages/... 相对路径——loader 以 profile 目录（而非本包根）为基准
-#                      解析相对路径，而本包的 packages/ 不在 profile 根下；该写法曾导致全部 entry
-#                      ERR_MODULE_NOT_FOUND、整棵插件树加载失败。
+# plan-gate01 Phase 3（2026-09-10）产物收缩：本补丁从 22×src（TS 直载）收缩为 4×dist
+# （预构建纯 JS，提交入库，安装形态零 TS 装载、零生命周期脚本、零构建依赖——G3 自解）。
+# 源码开发形态（22 entry 全量栈）见 cordis.yml，两文件服务面等价（selftest 三链断言监管）。
 #
-# 行为与 cordis.yml 一致：
+# name 形态（包名 + 子路径模块说明符）：
+#   - Node 从 profile 目录出发沿 node_modules 解析（本包被安装在 <profile>/node_modules/@01men/gate-01，
+#     向上还有 $DSH_HOME/profiles/node_modules 扁平回退层），无需感知安装位置，开箱可解析。
+#   - ⚠ 不要写 ./packages/... 相对路径——loader 以 profile 目录（而非本包根）为基准解析；
+#     该写法曾导致全部 entry ERR_MODULE_NOT_FOUND、整棵插件树加载失败。
+#   - rq-card 必须写包名（client-modules 走 require.resolve('<条目>/package.json') 解析包元数据，
+#     文件路径会被负判为「非 client 包」且永久缓存，spike §4.2）。
+#
+# 行为要点：
 #   - provideToolRuntime=false：复用 dsh 原生 ToolRuntime（服务键 tools），
 #     平台插件注册的全部运维工具将直接进入 dsh 工具注册表、对模型可见、可被调用
-#   - startHttp=false + plugin-dsh-bridge：榕器数据面（REST/控制台 SPA/docs/mcp）
-#     以 /gate01 前缀挂进 dsh webServer——单进程单入口，无需另起独立进程
+#   - startHttp=false + ops-dsh-bridge：数据面（REST/面板 SPA/docs/mcp）以 /gate01 前缀
+#     挂进 dsh webServer——单进程单入口，无需另起独立进程
+#   - ops-panel-core.demoAuth=true：演示鉴权开关（缺省 false=严格）——本补丁专属声明，
+#     仅放行只读动词渲染内置演示看板；cordis.yml 与全量形态永不声明（fail-closed 边界见
+#     docs/gate01-degradation-ledger.md）
 - insert:
     - id: ops-platform-core
-      name: @01men/gate-01/packages/platform-core/src/index.ts
+      name: '@01men/gate-01/packages/platform-core/dist/index.js'
       config:
         provideToolRuntime: false
         startHttp: false
         http:
           # 对外前缀：OIDC 授权页 302 等「根绝对路径」构造据此保持 /gate01 自洽
           externalBase: /gate01
-    # connect 必须先于业务插件加载：client 角色要在业务工具注册前完成代理包裹。
-    # 安装后自动向宿主申请口令的三条通道：
-    #   1. dsh 界面对 Agent 说「接入宿主 <地址>，接入码 <enr_…>」→ connect_setup
-    #   2. 浏览器打开本机配置页 http://127.0.0.1:7390 可视化填写/更新
-    #   3. 已有机器凭证时 connect_login 直接配置
-    - id: ops-connect
-      name: @01men/gate-01/packages/plugin-connect/src/index.ts
-      config:
-        role: client
-    - id: ops-resource-core
-      name: @01men/gate-01/packages/plugin-resource-core/src/index.ts
-    - id: ops-iam
-      name: @01men/gate-01/packages/plugin-iam/src/index.ts
-    - id: ops-authn
-      name: @01men/gate-01/packages/plugin-authn/src/index.ts
-    - id: ops-usage
-      name: @01men/gate-01/packages/plugin-usage/src/index.ts
-    - id: ops-audit
-      name: @01men/gate-01/packages/plugin-audit/src/index.ts
-    - id: ops-market
-      name: @01men/gate-01/packages/plugin-market/src/index.ts
-    # 连接器纳管（open-connector 数据面网关适配）：依赖 iam/usage/audit，先于 mcp/modelgw（billing 已下线封存，M0-2）
-    - id: ops-connector
-      name: @01men/gate-01/packages/plugin-connector/src/index.ts
-    - id: ops-mcp
-      name: @01men/gate-01/packages/plugin-mcp/src/index.ts
-    # NAS（FS 文件存储）资产：先于 skillhub 加载（skillhub 上架时经 nasRegistry 上传 skill.zip）
-    - id: ops-nas
-      name: @01men/gate-01/packages/plugin-nas/src/index.ts
-    - id: ops-skillhub
-      name: @01men/gate-01/packages/plugin-skillhub/src/index.ts
-    - id: ops-agent
-      name: @01men/gate-01/packages/plugin-agent/src/index.ts
-    - id: ops-app
-      name: @01men/gate-01/packages/plugin-app/src/index.ts
-    - id: ops-modelgw
-      name: @01men/gate-01/packages/plugin-modelgw/src/index.ts
-    # 平台自更新：上游版本检查 + Agent 工具（发现新版本提示升级，source 形态可一键执行）
-    - id: ops-update
-      name: @01men/gate-01/packages/plugin-update/src/index.ts
-    # 门户数据通道（公开只读拉取端点）：必须先于 console 装配——在其鉴权中间件之前截获 /api/portal/*
-    - id: ops-portal
-      name: @01men/gate-01/packages/plugin-portal/src/index.ts
-    # 控制台 REST 网关 + SPA（Bearer 鉴权/工具桥/MCP 端点/静态托管）
-    - id: ops-console
-      name: @01men/gate-01/packages/plugin-console/src/index.ts
-    # 部门 Agent 工作台面板（/panel 静态 + /api/panel/* REST）：REST 鉴权依赖 console 中间件，须在其后装配
+    # 部门面板（01门 主交付面）：/gate01/panel/ 静态 + /api/panel/* REST + 演示看板（只读）。
+    # demoAuth 仅在此声明：安装形态未连宿主时可只读预览演示数据，写动词一律 403
     - id: ops-panel-core
-      name: @01men/gate-01/packages/plugin-panel-core/src/index.ts
-    # 钉钉桥接（群桥/出向投递/审批推送/告警通道）：订阅 panel.message.created / audit.alert.fired
-    - id: ops-dingtalk-bridge
-      name: @01men/gate-01/packages/plugin-dingtalk-bridge/src/index.ts
-    # 单进程单入口：把榕器数据面挂进 dsh webServer（/gate01 前缀），必须在 console 之后装配
+      name: '@01men/gate-01/packages/plugin-panel-core/dist/index.js'
+      config:
+        demoAuth: true
+    # 单进程单入口：把数据面挂进 dsh webServer（/gate01 前缀）
     - id: ops-dsh-bridge
-      name: @01men/gate-01/packages/plugin-dsh-bridge/src/index.ts
+      name: '@01men/gate-01/packages/plugin-dsh-bridge/dist/index.js'
       config:
         mountPath: /gate01
-    # 会话侧注入插件（WP-06）：四态执行卡 + 👍/👎 反馈条（dsh.client 双面插件）。
-    # name 必须写包名（client-modules 走 require.resolve 解析包元数据，文件路径
-    # 会被负判为「非 client 包」且永久缓存，spike §4.2）；安装形态下要求 profile
-    # 的 node_modules 能解析 @01men/plugin-rq-card（workspace 包随发布/安装链路就位）。
-    # 启动前必须先构建浏览器半（激活期缺 bundle 会响亮抛错、宿主启动失败，spike §4.4）：
-    #   node packages/plugin-rq-card/build.mjs   →  packages/plugin-rq-card/lib/client.js
+    # 会话侧注入插件：四态执行卡 + 👍/👎 反馈条 + 连接向导（dsh.client 双面插件）。
+    # 浏览器半无需现场构建（lib/client.js 随包入库）；连接宿主向导经 /gate01/rqcard/*。
     - id: rq-card
       name: '@01men/plugin-rq-card'

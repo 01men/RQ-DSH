@@ -1,4 +1,4 @@
-import { defineTool } from "../../platform-core/dist/index.js";
+import { defineTool } from "./tool.js";
 import { CONSOLE_BASE } from "./wire.js";
 import { HostLinkService, RQCARD_CALL_HEADER } from "./hostlink.js";
 import { HostLinkService as HostLinkService2, RQCARD_CALL_HEADER as RQCARD_CALL_HEADER2 } from "./hostlink.js";
