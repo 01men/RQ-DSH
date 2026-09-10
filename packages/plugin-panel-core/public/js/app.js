@@ -380,9 +380,9 @@ function renderShell() {
   const activeIndustry = state.industry
   document.getElementById('app').innerHTML = `
     ${state.demoMode ? `
-    <div id="demoBanner" style="position:sticky;top:0;z-index:900;display:flex;align-items:center;gap:10px;justify-content:center;padding:7px 14px;background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;font-size:12.5px">
+    <div id="demoBanner" class="demo-banner">
       <span>🧪 当前展示的是<b>内置演示数据</b>——连接宿主后自动切换为真实看板</span>
-      <button class="btn primary" id="demoOpenWizard" style="padding:3px 12px;font-size:12px">连接宿主</button>
+      <button class="btn primary" id="demoOpenWizard">连接宿主</button>
     </div>` : ''}
     <div class="topbar">
       <div class="logo">🌳 01门 <span class="badge">部门工作台</span></div>

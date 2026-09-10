@@ -191,6 +191,6 @@ window.addEventListener('error', (event) => {
   // 预启动脚本异常：一线用户不需要原始报错——只留一条中性提示（详情在浏览器控制台）
   const app = document.getElementById('app')
   if (app && !app.dataset.booted) {
-    app.insertAdjacentHTML('beforeend', '<div style="position:fixed;bottom:8px;left:50%;transform:translateX(-50%);font-size:12px;color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:12px;padding:4px 12px;z-index:999">页面加载出现异常，请刷新重试；若反复出现请联系管理员（详情见浏览器控制台）</div>')
+    app.insertAdjacentHTML('beforeend', '<div class="boot-alert">页面加载出现异常，请刷新重试；若反复出现请联系管理员（详情见浏览器控制台）</div>')
   }
 })
