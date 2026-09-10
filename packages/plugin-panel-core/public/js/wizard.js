@@ -60,7 +60,7 @@ export async function start({ base, hostBridge = false }) {
   root.innerHTML = `
     <div class="wizard">
       <div class="wz-head">
-        <div class="wz-logo">🌳 榕器 <span class="badge">开始使用</span></div>
+        <div class="wz-logo">🌳 01门 <span class="badge">开始使用</span></div>
         <p>欢迎使用部门工作台！只需两步：选择「把这台电脑作为工作台」或「连接公司已有的服务器」，
         完成后即可使用部门工作台、战略看板和 Agent 协作。不确定选哪个？问一下公司里负责系统的人。</p>
       </div>
@@ -146,7 +146,7 @@ async function renderRemoteCard(root, base) {
         ? result.hosts.map((host) => `
           <button class="wz-host" data-hub="${esc(host.endpoint)}">
             <b>${esc(host.endpoint)}</b>
-            <span class="sub">榕器服务器${host.version ? ` · v${esc(host.version)}` : ''}</span>
+            <span class="sub">01门服务器${host.version ? ` · v${esc(host.version)}` : ''}</span>
           </button>`).join('')
         : '<span class="wz-hint">没有找到服务器——请确认服务器已开机、防火墙已放行，或直接输入地址。</span>'
       found.querySelectorAll('.wz-host').forEach((el) => {

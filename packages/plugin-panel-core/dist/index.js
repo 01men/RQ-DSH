@@ -64,7 +64,10 @@ function apply(ctx, config = {}) {
       if (!requirePermission(exchange, permission)) return;
       try {
         const result = await handler(exchange);
-        if (!exchange.res.writableEnded) exchange.ok(result);
+        if (!exchange.res.writableEnded) {
+          const demoMarked = demoAuth && result !== null && typeof result === "object" && !Array.isArray(result) ? { ...result, demo: true } : result;
+          exchange.ok(demoMarked);
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         exchange.fail(400, "BAD_REQUEST", message);
@@ -477,7 +480,7 @@ function apply(ctx, config = {}) {
         dept: dept.id,
         channelId,
         senderType: "system",
-        senderName: "\u6995\u5668",
+        senderName: "01\u95E8",
         text: `\u26A1 \u6280\u80FD\u300C${skillName}\u300D\u8C03\u7528\u5931\u8D25\uFF1A${result.reason}`,
         ddSync: false
       });

@@ -1,5 +1,5 @@
 /**
- * 设置页「榕器宿主」分区（M2）：连接状态丸 + 打开向导/工作台入口。
+ * 设置页「01门宿主」分区（M2）：连接状态丸 + 打开向导/工作台入口。
  *
  * 形态对齐 ui-auth 的 AccountSection（settings.section list 条目）：
  * 状态读取走同源 /gate01/rqcard/link（hostStatus.ts），动作是打开

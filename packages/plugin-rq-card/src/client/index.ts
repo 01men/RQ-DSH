@@ -2,13 +2,13 @@
  * 浏览器半：slot 注册 + 降级探测（WP-06 交付物 1/3，spike §4.3 伪代码落地；M2/M3 扩展）。
  *
  * 【注入面】
- *   ① 四态执行卡：为榕器工具名（RQ_TOOL_NAMES）逐一注册 `tool.call.toolview`
+ *   ① 四态执行卡：为01门工具名（RQ_TOOL_NAMES）逐一注册 `tool.call.toolview`
  *      键位条目——加法式，未列名的工具回落 dsh 的 GenericToolCard；
  *   ② 👍/👎 反馈条：`conversation.chat.assistant-actions` list 条目
  *      （id 'rq-feedback'，与 dsh 自带 'feedback' 并存，order 20 排其后）；
- *   ③ 设置分区「榕器宿主」（M2）：`settings.section` list 条目（id 'rq-hostlink'，
+ *   ③ 设置分区「01门宿主」（M2）：`settings.section` list 条目（id 'rq-hostlink'，
  *      ui-auth 同款挂载位）——连接状态丸 + 打开向导/工作台；
- *   ④ 会话视图 Tab「榕器工作台」（M3）：`conversation.view` list 条目
+ *   ④ 会话视图 Tab「01门工作台」（M3）：`conversation.view` list 条目
  *      （id 'rq-workbench'，ui-trajectory 同款挂载位）——整页内嵌 /rq/panel/；
  *   ⑤ 未连接宿主角标（M3「主动连接」）：宿主连接为 none 时 `shell.overlay`
  *      挂可点击提醒，点击打开面板（未连接且未登录时面板首屏即连接向导）。
@@ -65,7 +65,7 @@ const NS = 'rq-card'
 const PLUGIN_ID = '@01men/plugin-rq-card'
 
 /**
- * 榕器工具名名录（各插件包 tools.ts 的登记清单，截至 WP-06）。
+ * 01门工具名名录（各插件包 tools.ts 的登记清单，截至 WP-06）。
  * 四态执行卡为这些工具注册键位；新增工具不自动获得卡片（回落 GenericToolCard），
  * 在此追加一行即可覆盖。核心主角是 mcp_invoke（资产调运四态主战场）。
  */
@@ -187,7 +187,7 @@ function mountDegradedDomBadge(): void {
     const el = document.createElement('button')
     el.type = 'button'
     el.className = 'rq-card-dom-badge'
-    el.textContent = '榕器卡片未生效（部分能力不可用）'
+    el.textContent = '01门卡片未生效（部分能力不可用）'
     el.title = `降级原因：${DEGRADED.join('；')}（点击刷新重试；详情见控制台 [rq-card] 日志）`
     el.setAttribute('style', 'position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)')
     el.onclick = () => { location.reload() }
@@ -299,7 +299,7 @@ export function apply(ctx: ClientContext): void {
         // 无 props 依赖：任何 slot 契约变化都只会让角标空白，不会抛错。
         // 本文件是 .ts（非 tsx），故用 createElement 而非 JSX 字面量。
         if (DEGRADED.length === 0) return null
-        return createElement('span', { className: 'rq-badge', title: `降级原因：${DEGRADED.join('；')}` }, '榕器卡片未生效（纯文本模式）')
+        return createElement('span', { className: 'rq-badge', title: `降级原因：${DEGRADED.join('；')}` }, '01门卡片未生效（纯文本模式）')
       })
     }))
     if (probeSpec(ctx, SLOT_OVERLAY) === undefined) diagNote('inject-pending:' + SLOT_OVERLAY)
@@ -314,7 +314,7 @@ export function apply(ctx: ClientContext): void {
   }, 10_000)
   ;(fallbackTimer as { unref?: () => void }).unref?.()
 
-  // ── ④ 设置分区「榕器宿主」（M2）：状态丸 + 打开向导/工作台（ui-auth 同款挂载位）──
+  // ── ④ 设置分区「01门宿主」（M2）：状态丸 + 打开向导/工作台（ui-auth 同款挂载位）──
   const t = (() => { try { return ctx.locale.bind(NS) } catch { return undefined } })()
   safely('settings-section', () => {
     ctx.slots.inject(SLOT_SETTINGS, () => injectBody('settings-section', () => {
@@ -340,7 +340,7 @@ export function apply(ctx: ClientContext): void {
     if (probeSpec(ctx, SLOT_SETTINGS) === undefined) diagNote('inject-pending:' + SLOT_SETTINGS)
   })
 
-  // ── ⑤ 会话视图 Tab「榕器工作台」（M3）：整页内嵌 /rq/panel/（ui-trajectory 同款挂载位）──
+  // ── ⑤ 会话视图 Tab「01门工作台」（M3）：整页内嵌 /rq/panel/（ui-trajectory 同款挂载位）──
   safely('workbench-view', () => {
     ctx.slots.inject(SLOT_VIEW, () => injectBody('workbench-view', () => {
       const spec = probeSpec(ctx, SLOT_VIEW)
@@ -379,7 +379,7 @@ export function apply(ctx: ClientContext): void {
             type: 'button',
             className: 'rq-unlinked',
             onClick: () => { try { window.open(PANEL_URL, '_blank', 'noopener') } catch { /* 静默 */ } },
-          }, '榕器：未连接宿主，点击打开向导')
+          }, '01门：未连接宿主，点击打开向导')
         })
       })
       return () => { disposed = true }

@@ -45,8 +45,8 @@ export const zh = {
   'fb.dislike': '没帮助',
   'fb.done': '已记录，感谢反馈',
 
-  // ── 设置分区「榕器宿主」（M2）──
-  'settings.nav': '榕器宿主',
+  // ── 设置分区「01门宿主」（M2）──
+  'settings.nav': '01门宿主',
   'settings.mode.local': '本机即宿主',
   'settings.mode.remote': '已连接远端宿主',
   'settings.mode.none': '未连接宿主',
@@ -54,15 +54,15 @@ export const zh = {
   'settings.probe.fail': '不可达',
   'settings.refresh': '刷新状态',
   'settings.open.wizard': '打开连接向导',
-  'settings.open.panel': '打开榕器工作台',
+  'settings.open.panel': '打开01门工作台',
   'settings.hint': '连接宿主（选择 IP）并在面板完成钉钉/账号登录；面板地址 /gate01/panel/。',
 
-  // ── 会话视图 Tab「榕器工作台」（M3）──
-  'view.workbench': '榕器工作台',
+  // ── 会话视图 Tab「01门工作台」（M3）──
+  'view.workbench': '01门工作台',
   'view.open.external': '在浏览器打开',
 
   // ── 未连接角标（M3，shell.overlay）──
-  'overlay.unlinked': '榕器：未连接宿主，点击打开向导',
+  'overlay.unlinked': '01门：未连接宿主，点击打开向导',
 } satisfies Record<string, string>
 
 /** `rq-card` 命名空间键联合。 */
@@ -70,7 +70,7 @@ export type RqCardKey = keyof typeof zh
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    /** 榕器执行卡与反馈条的文案。 */
+    /** 01门执行卡与反馈条的文案。 */
     'rq-card': RqCardKey
   }
 }

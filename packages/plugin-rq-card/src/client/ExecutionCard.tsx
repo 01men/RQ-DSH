@@ -2,7 +2,7 @@
  * 四态执行卡：`tool.call.toolview` 键位槽条目（WP-06 泳道 C 的 C1/C2）。
  *
  * 注册形态与 dsh ui-tool 的原子 toolview 同构（spike §2.3 证据 C3、§4.3 伪代码）：
- * 为榕器工具名逐一注册 key，未列名的工具自动回落 GenericToolCard（加法式，
+ * 为01门工具名逐一注册 key，未列名的工具自动回落 GenericToolCard（加法式，
  * 不抢占任何已有键位）。四态判定全部经 deriveExecutionState 纯函数（C2 表），
  * 本组件只做纯渲染：
  *   调用中   → 骨架 + 可取消占位（取消通道待宿主半接线，占位钮禁用并说明）

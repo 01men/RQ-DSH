@@ -1,5 +1,5 @@
 /**
- * 会话视图 Tab「榕器工作台」（M3 对话打通）：整页内嵌 /gate01/panel/（同源 iframe）。
+ * 会话视图 Tab「01门工作台」（M3 对话打通）：整页内嵌 /gate01/panel/（同源 iframe）。
  *
  * 嵌套防护：面板侧带 ?embed=1 打开——panel boot 链检测 embed/被嵌套时，其自身的
  * 「Agent 对话」回落内置聊天并隐藏再次内嵌 dsh 的入口（防 iframe 递归）。

@@ -11,7 +11,7 @@ function summarizeForToolResult(input) {
     lines.push(`- ${key}\uFF1A${String(value)}`);
   }
   if (input.consoleHash !== void 0) {
-    lines.push(`\u{1F449} [\u5230\u6995\u5668\u63A7\u5236\u53F0\u5904\u7406](${CONSOLE_BASE}${input.consoleHash})`);
+    lines.push(`\u{1F449} [\u523001\u95E8\u63A7\u5236\u53F0\u5904\u7406](${CONSOLE_BASE}${input.consoleHash})`);
   }
   return lines.join("\n");
 }
@@ -80,7 +80,7 @@ function apply(ctx, config = {}) {
   });
   ctx.tools.register(defineTool({
     name: "rq_host_status",
-    description: "\u67E5\u770B\u6995\u5668\u5BBF\u4E3B\u8FDE\u63A5\u72B6\u6001\uFF1A\u672C\u673A\u5373\u5BBF\u4E3B\uFF08local\uFF09/ \u8FDE\u63A5\u8FDC\u7AEF\u5BBF\u4E3B\uFF08remote\uFF0C\u542B\u5730\u5740\u4E0E\u9762\u677F\u5165\u53E3\uFF09/ \u672A\u914D\u7F6E\uFF08none\uFF0C\u6253\u5F00\u9762\u677F\u4F1A\u8FDB\u5165\u8FDE\u63A5\u5411\u5BFC\uFF09\u3002",
+    description: "\u67E5\u770B01\u95E8\u5BBF\u4E3B\u8FDE\u63A5\u72B6\u6001\uFF1A\u672C\u673A\u5373\u5BBF\u4E3B\uFF08local\uFF09/ \u8FDE\u63A5\u8FDC\u7AEF\u5BBF\u4E3B\uFF08remote\uFF0C\u542B\u5730\u5740\u4E0E\u9762\u677F\u5165\u53E3\uFF09/ \u672A\u914D\u7F6E\uFF08none\uFF0C\u6253\u5F00\u9762\u677F\u4F1A\u8FDB\u5165\u8FDE\u63A5\u5411\u5BFC\uFF09\u3002",
     parameters: {},
     output: { type: "object", additionalProperties: true },
     async execute() {

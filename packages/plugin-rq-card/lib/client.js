@@ -1,4 +1,4 @@
-/* rq-card-build-id: 4bddcdd676dfaa0e */
+/* rq-card-build-id: f832390ac9438940 */
 (function () {
   var PLUGIN_ID = "@01men/plugin-rq-card";
   var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };
@@ -15,7 +15,7 @@
       el.type = "button";
       el.className = "rq-card-diag-badge";
       el.textContent = text;
-      el.title = "榕器卡片注入失败——诊断信息见 window.__RQ_CARD_DIAG__，请截图反馈给管理员。点击刷新重试。";
+      el.title = "01门卡片注入失败——诊断信息见 window.__RQ_CARD_DIAG__，请截图反馈给管理员。点击刷新重试。";
       el.setAttribute("style", "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)");
       el.onclick = function () { location.reload(); };
       (document.body || document.documentElement).appendChild(el);
@@ -444,8 +444,8 @@ var zh = {
   "fb.like": "\u6709\u5E2E\u52A9",
   "fb.dislike": "\u6CA1\u5E2E\u52A9",
   "fb.done": "\u5DF2\u8BB0\u5F55\uFF0C\u611F\u8C22\u53CD\u9988",
-  // ── 设置分区「榕器宿主」（M2）──
-  "settings.nav": "\u6995\u5668\u5BBF\u4E3B",
+  // ── 设置分区「01门宿主」（M2）──
+  "settings.nav": "01\u95E8\u5BBF\u4E3B",
   "settings.mode.local": "\u672C\u673A\u5373\u5BBF\u4E3B",
   "settings.mode.remote": "\u5DF2\u8FDE\u63A5\u8FDC\u7AEF\u5BBF\u4E3B",
   "settings.mode.none": "\u672A\u8FDE\u63A5\u5BBF\u4E3B",
@@ -453,13 +453,13 @@ var zh = {
   "settings.probe.fail": "\u4E0D\u53EF\u8FBE",
   "settings.refresh": "\u5237\u65B0\u72B6\u6001",
   "settings.open.wizard": "\u6253\u5F00\u8FDE\u63A5\u5411\u5BFC",
-  "settings.open.panel": "\u6253\u5F00\u6995\u5668\u5DE5\u4F5C\u53F0",
+  "settings.open.panel": "\u6253\u5F0001\u95E8\u5DE5\u4F5C\u53F0",
   "settings.hint": "\u8FDE\u63A5\u5BBF\u4E3B\uFF08\u9009\u62E9 IP\uFF09\u5E76\u5728\u9762\u677F\u5B8C\u6210\u9489\u9489/\u8D26\u53F7\u767B\u5F55\uFF1B\u9762\u677F\u5730\u5740 /gate01/panel/\u3002",
-  // ── 会话视图 Tab「榕器工作台」（M3）──
-  "view.workbench": "\u6995\u5668\u5DE5\u4F5C\u53F0",
+  // ── 会话视图 Tab「01门工作台」（M3）──
+  "view.workbench": "01\u95E8\u5DE5\u4F5C\u53F0",
   "view.open.external": "\u5728\u6D4F\u89C8\u5668\u6253\u5F00",
   // ── 未连接角标（M3，shell.overlay）──
-  "overlay.unlinked": "\u6995\u5668\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC"
+  "overlay.unlinked": "01\u95E8\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC"
 };
 var en = {
   "card.state.calling": "Calling",
@@ -730,7 +730,7 @@ function mountDegradedDomBadge() {
     const el = document.createElement("button");
     el.type = "button";
     el.className = "rq-card-dom-badge";
-    el.textContent = "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u90E8\u5206\u80FD\u529B\u4E0D\u53EF\u7528\uFF09";
+    el.textContent = "01\u95E8\u5361\u7247\u672A\u751F\u6548\uFF08\u90E8\u5206\u80FD\u529B\u4E0D\u53EF\u7528\uFF09";
     el.title = `\u964D\u7EA7\u539F\u56E0\uFF1A${DEGRADED.join("\uFF1B")}\uFF08\u70B9\u51FB\u5237\u65B0\u91CD\u8BD5\uFF1B\u8BE6\u60C5\u89C1\u63A7\u5236\u53F0 [rq-card] \u65E5\u5FD7\uFF09`;
     el.setAttribute("style", "position:fixed;right:12px;bottom:12px;z-index:2147483000;padding:6px 12px;border-radius:14px;border:1px solid #f59e0b;background:#fffbeb;color:#92400e;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.12)");
     el.onclick = () => {
@@ -826,7 +826,7 @@ function apply(ctx) {
         order: 90
       }, function RqCardDegradedBadge() {
         if (DEGRADED.length === 0) return null;
-        return (0, import_react3.createElement)("span", { className: "rq-badge", title: `\u964D\u7EA7\u539F\u56E0\uFF1A${DEGRADED.join("\uFF1B")}` }, "\u6995\u5668\u5361\u7247\u672A\u751F\u6548\uFF08\u7EAF\u6587\u672C\u6A21\u5F0F\uFF09");
+        return (0, import_react3.createElement)("span", { className: "rq-badge", title: `\u964D\u7EA7\u539F\u56E0\uFF1A${DEGRADED.join("\uFF1B")}` }, "01\u95E8\u5361\u7247\u672A\u751F\u6548\uFF08\u7EAF\u6587\u672C\u6A21\u5F0F\uFF09");
       });
     }));
     if (probeSpec(ctx, SLOT_OVERLAY) === void 0) diagNote("inject-pending:" + SLOT_OVERLAY);
@@ -914,7 +914,7 @@ function apply(ctx) {
               } catch {
               }
             }
-          }, "\u6995\u5668\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC");
+          }, "01\u95E8\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC");
         });
       });
       return () => {
@@ -938,7 +938,7 @@ function apply(ctx) {
     // load() 被接受 ≠ 工厂被物化：5s 后仍未安装即亮角标（rc.7 消费链缺陷指纹）
     if (!DIAG.installed) {
       setTimeout(function () {
-        if (!DIAG.installed) { note("materialize-missing"); badge("榕器卡片未生效（宿主未装载插件）"); }
+        if (!DIAG.installed) { note("materialize-missing"); badge("01门卡片未生效（宿主未装载插件）"); }
       }, 5000);
     }
     return;
@@ -948,7 +948,7 @@ function apply(ctx) {
   var timer = setInterval(function () {
     if (mount() || ++tries >= 40) {
       clearInterval(timer);
-      if (!DIAG.installed) { note("loader-missing-persistent"); badge("榕器卡片未生效（装载器不可达）"); }
+      if (!DIAG.installed) { note("loader-missing-persistent"); badge("01门卡片未生效（装载器不可达）"); }
     }
   }, 250);
 })();

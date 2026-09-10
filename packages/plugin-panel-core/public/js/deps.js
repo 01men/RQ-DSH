@@ -1,7 +1,7 @@
 /**
- * 共享组件复用通道（review F-清单「可直接复用」项）：console 的 ui.js（modal/drawer/toast/表单）
- * 与 realtime.js（SSE 优先 + 30s 轮询降级，钉钉 webview 铁律）按 BASE 动态装载——
- * console 在两种部署形态都挂在 <BASE>/ 下，面板不复制代码，只做同源 ESM 引用。
+ * 自持组件通道（plan-gate01 Phase 4.2）：面板自带 ui.js（modal/drawer/toast/表单）与
+ * realtime.js（SSE 优先 + 30s 轮询降级，钉钉 webview 铁律）副本（自 console 侧拷贝，见文件头），
+ * 按 BASE 动态装载——纯前台形态（01门 装态）无 console 可借用，两形态同一路径自持。
  */
 const cache = {}
 
@@ -16,12 +16,12 @@ export function setBase(value) {
   BASE = value
 }
 
-/** console ui.js：toast/openModal/openDrawer/confirmDialog 等（0 依赖拷贝引用）。 */
+/** 面板自持 ui.js：toast/openModal/openDrawer/confirmDialog 等（0 依赖拷贝引用）。 */
 export function ui() {
-  return load('/js/ui.js')
+  return load('/panel/js/ui.js')
 }
 
-/** console realtime.js：createEventStream({url, pollPath, ...})。 */
+/** 面板自持 realtime.js：createEventStream({url, pollPath, ...})。 */
 export function realtime() {
-  return load('/js/realtime.js')
+  return load('/panel/js/realtime.js')
 }

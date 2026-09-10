@@ -59,6 +59,8 @@ const ART_KINDS = { report: '报告', order: '工单', quote: '报价', diagnosi
 
 const state = {
   hostBridge: false,
+  /** 演示态（plan-gate01 决策 2）：宿主连接为 none 时展示内置演示数据横幅。 */
+  demoMode: false,
   /** 远端宿主连接（形态 C）：{ hubBase, hubMountPrefix }；null=本机/未连接。 */
   remoteHub: null,
   /** 双轨视图：workbench=部门工作台（三栏） / board=战略看板（/panel 面自持看板）。 */
@@ -96,7 +98,7 @@ const state = {
 /** 实时平台 chip 展示名（QA P2-6）：此前直接显示英文原始 id。 */
 const PLATFORM_LABELS = { strategy: '战略', marketing: '营销', manufacturing: '制造', rd: '研发', quality: '质量' }
 
-/** 嵌套防护（M3）：?embed=1（dsh「榕器工作台」视图 Tab 内嵌本面板）或自身已在 iframe 中 = 嵌入形态——
+/** 嵌套防护（M3）：?embed=1（dsh「01门工作台」视图 Tab 内嵌本面板）或自身已在 iframe 中 = 嵌入形态——
  *  嵌入态不再内嵌 dsh 对话（防 iframe 递归），侧栏「Agent 对话」入口隐藏。 */
 const EMBEDDED = new URLSearchParams(location.search).has('embed') || (() => {
   try { return window.self !== window.top } catch { return true }
@@ -128,11 +130,12 @@ function hideModal() {
 // 启动
 // ---------------------------------------------------------------------------
 
-export function start({ base, hostBridge = false, remoteHub = null }) {
+export function start({ base, hostBridge = false, remoteHub = null, demoMode = false }) {
   apiSetBase(base)
   depsSetBase(base)
   state.hostBridge = hostBridge
   state.remoteHub = remoteHub
+  state.demoMode = demoMode
   if (!session.token) {
     renderLoginGuide()
     return
@@ -140,6 +143,18 @@ export function start({ base, hostBridge = false, remoteHub = null }) {
   // 先落外壳骨架（数据慢/失败时页面不再是白屏），数据加载失败显式提示
   renderShell()
   renderTopRight()
+  // 演示态横幅（plan-gate01 决策 2）：未连接宿主时数据为内置演示内容，向导常驻引导连接
+  if (state.demoMode) {
+    document.getElementById('app').insertAdjacentHTML('afterbegin', `
+      <div id="demoBanner" style="position:sticky;top:0;z-index:900;display:flex;align-items:center;gap:10px;justify-content:center;padding:7px 14px;background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;font-size:12.5px">
+        <span>🧪 当前展示的是<b>内置演示数据</b>——连接宿主后自动切换为真实看板</span>
+        <button class="btn primary" id="demoOpenWizard" style="padding:3px 12px;font-size:12px">连接宿主</button>
+      </div>`)
+    document.getElementById('demoOpenWizard').onclick = async () => {
+      const wizard = await import('./wizard.js')
+      wizard.start({ base })
+    }
+  }
   window.addEventListener('hashchange', () => {
     state.view = location.hash === '#/board' ? 'board' : 'workbench'
     applyView()
@@ -169,7 +184,7 @@ function renderLoginGuide() {
   if (state.remoteHub) {
     document.getElementById('app').innerHTML = `
       <div class="login-guide">
-        <h1>🌳 榕器 · 部门 Agent 工作台</h1>
+        <h1>🌳 01门 · 部门 Agent 工作台</h1>
         <p>与远端宿主（${esc(state.remoteHub.hubBase)}）的会话已失效。</p>
         <button class="btn primary" id="reopenWizard">重新连接 / 登录</button>
       </div>`
@@ -184,7 +199,7 @@ function renderLoginGuide() {
   const here = encodeURIComponent(location.pathname + location.search + location.hash)
   document.getElementById('app').innerHTML = `
     <div class="login-guide">
-      <h1>🌳 榕器 · 部门 Agent 工作台</h1>
+      <h1>🌳 01门 · 部门 Agent 工作台</h1>
       <p>当前浏览器没有有效的平台会话。<br>
       请从控制台登录后进入，或从钉钉/门户的「打开即工作台」入口点入（自动票据免登）。</p>
       <a href="${basePath() || '/'}/?next=${here}#/login"><button class="btn primary">去控制台登录</button></a>
@@ -377,7 +392,7 @@ function renderShell() {
   const activeIndustry = state.industry
   document.getElementById('app').innerHTML = `
     <div class="topbar">
-      <div class="logo">🌳 榕器 <span class="badge">部门工作台</span></div>
+      <div class="logo">🌳 01门 <span class="badge">部门工作台</span></div>
       <div class="more-sel">
         <div class="more-btn" id="moreBtn">☰ 更多</div>
         <div class="more-menu" id="moreMenu">
@@ -551,7 +566,7 @@ function renderRail() {
     <div class="rail-spacer"></div>
     ${state.hostBridge && !EMBEDDED ? `<div class="rail-console" id="railChat" title="切到 AI 助手对话（默认对话入口）" style="cursor:pointer">
       <div class="ico">💬</div><div>AI 助手<br>对话</div></div>` : ''}
-    <a class="rail-console" href="${basePath() || '/'}" title="打开榕器管理控制台" style="text-decoration:none"
+    <a class="rail-console" href="${basePath() || '/'}" title="打开01门管理控制台" style="text-decoration:none"
       data-landing="console">
       <div class="ico">🧩</div><div>管理<br>控制台</div></a>`
   rail.querySelectorAll('.rail-item').forEach((el) => {
@@ -793,7 +808,7 @@ function renderChatEmbed(host) {
       <iframe class="ce-frame" src="/" title="AI 助手对话" referrerpolicy="same-origin"></iframe>
     </div>`
   document.getElementById('ceHandoff').onclick = async () => {
-    const context = `【榕器·${dept.label}】行业 ${industry?.code ?? '未激活'} · 请围绕该部门场景协作（面板：${location.origin}${basePath()}/panel/?dept=${state.dept}）`
+    const context = `【01门·${dept.label}】行业 ${industry?.code ?? '未激活'} · 请围绕该部门场景协作（面板：${location.origin}${basePath()}/panel/?dept=${state.dept}）`
     try {
       await navigator.clipboard.writeText(context)
       void toast('上下文已复制——粘贴到对话即可让 Agent 进入该部门语境')

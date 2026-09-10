@@ -4,6 +4,14 @@ import { join } from "node:path";
 import { Service } from "@deepseek-ai/cordis";
 const name = "dsh-bridge";
 const inject = ["webServer", "httpServer", "opsStorage"];
+const softRead = (ctx, key) => {
+  try {
+    if (typeof ctx?.reflect?.get === "function") return ctx.reflect.get(key, false);
+    return ctx?.[key];
+  } catch {
+    return void 0;
+  }
+};
 const BIND_TOKEN_PREFIX = "rbs_";
 const DEFAULT_COOKIE = "rq_sid";
 const DEFAULT_TTL_SECONDS = 24 * 3600;
@@ -126,7 +134,7 @@ class IdentityBindingService extends Service {
   }
   isAccountActive(userId) {
     try {
-      const iam = this.ctx.reflect.get("iam", false);
+      const iam = softRead(this.ctx, "iam");
       const user = iam?.users().get(userId);
       if (!user) return false;
       return user.status === void 0 || user.status === "active";
@@ -177,7 +185,7 @@ function apply(ctx, config = {}) {
   });
   ctx.logger("dsh-bridge").info(`\u6995\u5668\u6570\u636E\u9762\u5DF2\u6302\u8F7D\u81F3 dsh webServer\uFF1A${mountPath}/*\uFF08\u5355\u8FDB\u7A0B\u5355\u5165\u53E3\uFF09`);
   const binding = bindingService;
-  const entryTickets = ctx.reflect.get("entryTickets", false);
+  const entryTickets = softRead(ctx, "entryTickets");
   if (!binding || !entryTickets) {
     ctx.logger("dsh-bridge").warn("\u8EAB\u4EFD\u534A\u672A\u88C5\u914D\uFF1A\u7F3A\u5C11 identityBinding \u6216 entryTickets \u670D\u52A1\uFF08\u4EC5\u6302\u8F7D\u534A\u751F\u6548\uFF09");
     return;
@@ -288,13 +296,13 @@ function apply(ctx, config = {}) {
           }
           const deps = {
             get authn() {
-              return ctx.reflect.get("authn", false);
+              return softRead(ctx, "authn");
             },
             get iam() {
-              return ctx.reflect.get("iam", false);
+              return softRead(ctx, "iam");
             },
             get audit() {
-              return ctx.reflect.get("audit", false);
+              return softRead(ctx, "audit");
             }
           };
           if (!deps.authn || !deps.iam) {
@@ -347,7 +355,7 @@ function apply(ctx, config = {}) {
       json(404, { ok: false, error: { code: "NOT_FOUND", message: `\u672A\u77E5\u7AEF\u70B9\uFF1A${req.method} /dsh-bridge/${endpoint}` } });
     }
   });
-  const oidc = ctx.reflect.get("oidc", false);
+  const oidc = softRead(ctx, "oidc");
   const dataDirPath = ctx.opsStorage?.dataDirPath;
   const credFile = config.oidcCredentialFile ?? (dataDirPath ? join(dataDirPath, "dsh-agent-credential.json") : void 0);
   const pendingOidc = /* @__PURE__ */ new Map();

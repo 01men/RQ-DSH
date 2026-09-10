@@ -3,7 +3,7 @@
  *
  * 双面结构：
  *   - 浏览器半（src/client/** → lib/client.js）：四态执行卡 + 👍/👎 反馈条 +（M2/M3）
- *     设置分区「榕器宿主连接」、会话视图 Tab「榕器工作台」、未连接角标；
+ *     设置分区「01门宿主连接」、会话视图 Tab「01门工作台」、未连接角标；
  *   - 宿主半（本文件）：WP-06 时代是纯占位（空 apply）；M2 起承担「装好插件即可用」的
  *     连接半部——HostLinkService 的免登向导端点 /rqcard/*（连接宿主/选 IP/本机初始化/
  *     远端数据代理），详见 hostlink.ts 文件头。
@@ -19,7 +19,7 @@
  * 源码文件路径会被负判为「非 client 包」且永久缓存，spike §4.2）。
  *
  * 【markdown 兜底契约（spike §5 降级预案第 5 条，宿主工具侧义务）】
- * 榕器工具的 tool/result 文本内容必须始终携带纯 markdown 摘要 + /gate01 控制台链接：
+ * 01门工具的 tool/result 文本内容必须始终携带纯 markdown 摘要 + /gate01 控制台链接：
  * 客户端富卡片只是把同一信息「升级」呈现；上游升级导致注入面失效时，用户
  * 体验自动回落为该文本，无需发版。summarizeForToolResult() 是该契约的参考
  * 实现，供工具侧（platform-core / plugin-mcp 等）在组织工具结果时复用——
@@ -56,7 +56,7 @@ export interface ToolResultSummaryInput {
  *   **mcp_invoke** ⚠ 执行受阻 —— 无访问权限
  *   - 服务：inventory（online）
  *   - 原因：nas-authz deny
- *   👉 [到榕器控制台处理](/gate01#/nas-authz)
+ *   👉 [到01门控制台处理](/gate01#/nas-authz)
  *
  * 返回值直接作为 tool/result 文本内容的一部分（不依赖任何客户端插件）。
  */
@@ -68,7 +68,7 @@ export function summarizeForToolResult(input: ToolResultSummaryInput): string {
     lines.push(`- ${key}：${String(value)}`)
   }
   if (input.consoleHash !== undefined) {
-    lines.push(`👉 [到榕器控制台处理](${CONSOLE_BASE}${input.consoleHash})`)
+    lines.push(`👉 [到01门控制台处理](${CONSOLE_BASE}${input.consoleHash})`)
   }
   return lines.join('\n')
 }
@@ -166,7 +166,7 @@ export function apply(ctx: Context, config: RqCardConfig = {}) {
   // -- Agent 工具：会话里能问「连的哪个宿主」 ----------------------------------
   ctx.tools.register(defineTool({
     name: 'rq_host_status',
-    description: '查看榕器宿主连接状态：本机即宿主（local）/ 连接远端宿主（remote，含地址与面板入口）/ 未配置（none，打开面板会进入连接向导）。',
+    description: '查看01门宿主连接状态：本机即宿主（local）/ 连接远端宿主（remote，含地址与面板入口）/ 未配置（none，打开面板会进入连接向导）。',
     parameters: {},
     output: { type: 'object', additionalProperties: true },
     async execute() {

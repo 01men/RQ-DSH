@@ -155,7 +155,7 @@ async function bootstrap() {
 
   const app = await import('./app.js')
   document.getElementById('app').dataset.booted = '1'
-  app.start({ base: BASE, hostBridge, remoteHub })
+  app.start({ base: BASE, hostBridge, remoteHub, demoMode: hostLink?.mode === 'none' })
 }
 
 bootstrap().catch((error) => {

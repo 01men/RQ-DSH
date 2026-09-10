@@ -122,7 +122,14 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
       if (!requirePermission(exchange, permission)) return
       try {
         const result = await handler(exchange)
-        if (!exchange.res.writableEnded) exchange.ok(result)
+        if (!exchange.res.writableEnded) {
+          // 演示态标记（plan-gate01 Phase 4）：demoAuth 放行的只读响应一律带 demo:true——
+          // 前端与消费方可据此区分「内置演示数据」与「宿主真实数据」
+          const demoMarked = demoAuth && result !== null && typeof result === 'object' && !Array.isArray(result)
+            ? { ...result, demo: true }
+            : result
+          exchange.ok(demoMarked)
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         exchange.fail(400, 'BAD_REQUEST', message)
@@ -577,7 +584,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     })
     if (!result.ok) {
       await panel.sendMessage({
-        dept: dept.id, channelId, senderType: 'system', senderName: '榕器',
+        dept: dept.id, channelId, senderType: 'system', senderName: '01门',
         text: `⚡ 技能「${skillName}」调用失败：${result.reason}`, ddSync: false,
       })
       return { ok: false as const, reason: result.reason, message: trace }

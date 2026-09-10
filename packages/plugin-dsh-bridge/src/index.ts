@@ -72,6 +72,23 @@ export const name = 'dsh-bridge'
 // 读取」，缺席即诚实降级「仅挂载半生效」/ 503 AUTHN_UNAVAILABLE / audit?.record 可选调用），
 // 与收缩后的声明面正好对齐；全量形态（cordis.yml 22 entry）服务全在，行为不变。
 export const inject = ['webServer', 'httpServer', 'opsStorage']
+
+/**
+ * 可选服务软读（plan-gate01 Phase 3）：双形态兼容——
+ *   - 真实 cordis ctx：ctx.reflect.get(key, false)（绕过 inject 检查；未声明键的属性
+ *     访问会被 get trap 硬抛「without inject」，形状断言 `(ctx as {k?}).k` 防不了它）；
+ *   - 服务视图对象（selftest 台架 / 轻量装配手工拼的 plain object）：无 reflect 面，
+ *     直接属性读取（plain object 无 trap，缺席即 undefined）。
+ * 两形态缺席一律 undefined = 桥接身份功能诚实降级。
+ */
+const softRead = (ctx: any, key: string): any => {
+  try {
+    if (typeof ctx?.reflect?.get === 'function') return ctx.reflect.get(key, false)
+    return ctx?.[key]
+  } catch {
+    return undefined
+  }
+}
 // 注：identityBinding 由本插件内部的 IdentityBindingService 直挂提供（不经 inject 声明，
 // 避免「自提供自依赖」死锁）；iam/authn/audit 走防御式软访问（缺席 = 桥接身份功能诚实降级）。
 
@@ -248,7 +265,7 @@ export class IdentityBindingService extends Service {
 
   private isAccountActive(userId: string): boolean {
     try {
-      const iam = this.ctx.reflect.get('iam', false) as { users(): { get(id: string): { status?: string } | undefined } } | undefined
+      const iam = softRead(this.ctx, 'iam') as { users(): { get(id: string): { status?: string } | undefined } } | undefined
       const user = iam?.users().get(userId)
       if (!user) return false
       return user.status === undefined || user.status === 'active'
@@ -311,7 +328,7 @@ export function apply(ctx: Context, config: DshBridgeConfig = {}) {
   // ---- 身份半：票据兑换 + 绑定 + 会话关联 ------------------------------------
   const binding = bindingService
   // EntryTicketService（provide 'entryTickets'）与 authn 平级，由 plugin-authn 装配
-  const entryTickets = (ctx.reflect.get('entryTickets', false) as unknown as {
+  const entryTickets = (softRead(ctx, 'entryTickets') as unknown as {
     redeem(ticket: string, clientIp: string): { refType: string; refId: string; identity: { sub: string; name?: string; roles?: string[]; org?: { id?: string } } }
   } | undefined)
   if (!binding || !entryTickets) {
@@ -426,9 +443,9 @@ export function apply(ctx: Context, config: DshBridgeConfig = {}) {
             return
           }
           const deps = {
-            get authn() { return ctx.reflect.get('authn', false) },
-            get iam() { return ctx.reflect.get('iam', false) },
-            get audit() { return ctx.reflect.get('audit', false) },
+            get authn() { return softRead(ctx, 'authn') },
+            get iam() { return softRead(ctx, 'iam') },
+            get audit() { return softRead(ctx, 'audit') },
           } as unknown as BridgeSessionDeps
           if (!deps.authn || !deps.iam) {
             json(503, { ok: false, error: { code: 'AUTHN_UNAVAILABLE', message: 'authn 服务不可用（挂载形态装配不完整）' } })
@@ -470,7 +487,7 @@ export function apply(ctx: Context, config: DshBridgeConfig = {}) {
   // ---- OIDC 授权码通道（/auth/oidc/start → 平台授权页 → /auth/oidc/callback） --------
   // 未带票据直开 dsh web 的用户：浏览器半插件（或手工）指向 /auth/oidc/start →
   // 服务端生成 PKCE 并 302 平台授权页（本地口令/钉钉扫码）→ 回跳换码 → userinfo → 绑定 Cookie。
-  const oidc = ctx.reflect.get('oidc', false) as { issuer(): string } | undefined
+  const oidc = softRead(ctx, 'oidc') as { issuer(): string } | undefined
   const dataDirPath = (ctx as unknown as { opsStorage?: { dataDirPath?: string } }).opsStorage?.dataDirPath
   const credFile = config.oidcCredentialFile ?? (dataDirPath ? join(dataDirPath, 'dsh-agent-credential.json') : undefined)
   const pendingOidc = new Map<string, { verifier: string; redirectUri: string; issuedAt: number }>()
