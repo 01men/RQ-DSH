@@ -182,15 +182,19 @@ function renderLoginGuide() {
     }
     return
   }
-  // 回跳语义：登录成功后带 ?next= 回到面板（登录页消费一次），不再让业务员落在控制台后自己找路
-  // 尾斜杠不能省：/gate01 不带斜杠会触发 302 → /gate01/，重定向把 #/login fragment 与 next 参数一并吃掉
-  const here = encodeURIComponent(location.pathname + location.search + location.hash)
+  // 回跳语义：登录成功后带 next 回到面板（登录页消费一次）。next 必须传**绝对 URL**——
+  // 控制台登录页只对回环/私网绝对地址走 G1 票据签发分支（#entry_ticket= 回跳，boot.js 兑换建会话）；
+  // 同源相对路径只落裸跳转，而面板与控制台令牌存储键不同（gate01_token vs heng_ops_token），
+  // 裸跳回面板仍是无会话死循环（独立形态真机实证，2026-09-11 交互测试修复）。
+  // 尾斜杠不能省：/gate01 不带斜杠会触发 302 → /gate01/，重定向把 #/login fragment 与 next 参数一并吃掉。
+  // basePath 为空（独立形态 /panel/）时直接用根相对 /?next=——不可拼出 //?next（协议相对空 host，非法 URL 点击无效）
+  const here = encodeURIComponent(location.origin + location.pathname + location.search + location.hash)
   document.getElementById('app').innerHTML = `
     <div class="login-guide">
       <h1>🌳 01门 · 部门 Agent 工作台</h1>
       <p>当前浏览器没有有效的平台会话。<br>
       请从控制台登录后进入，或从钉钉/门户的「打开即工作台」入口点入（自动票据免登）。</p>
-      <a href="${basePath() || '/'}/?next=${here}#/login"><button class="btn primary">去控制台登录</button></a>
+      <a href="${basePath()}/?next=${here}#/login"><button class="btn primary">去控制台登录</button></a>
     </div>`
 }
 
@@ -663,6 +667,9 @@ function renderDept() {
   const toggle = (cls) => document.body.classList.toggle(cls)
   document.getElementById('btnLeftDrawer').onclick = () => toggle('left-open')
   document.getElementById('btnRightDrawer').onclick = () => toggle('right-open')
+  // rail（部门档位列）：renderDept 每次重渲染外壳后必须同步刷新——此前 renderRail 定义了
+  // 却无任何调用点，rail 永远空白（2026-09-11 交互测试发现修复）
+  renderRail()
   renderColLeft()
   renderColRight()
 }

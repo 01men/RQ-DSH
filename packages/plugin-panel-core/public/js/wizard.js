@@ -91,7 +91,8 @@ export async function start({ base, hostBridge = false }) {
 
 async function renderLocalCard(root, base) {
   const body = root.querySelector('#wzLocalBody')
-  const here = encodeURIComponent(location.pathname + location.search + location.hash)
+  // next 传绝对 URL（G1 票据分支白名单 = 回环/私网）：同源相对路径只落裸跳转，面板拿不到会话
+  const here = encodeURIComponent(location.origin + location.pathname + location.search + location.hash)
   let hubReachable = false
   try {
     const response = await fetch(`${base}/api/health`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(3000) })
@@ -101,7 +102,7 @@ async function renderLocalCard(root, base) {
   if (hubReachable) {
     body.innerHTML = `
       <div class="wz-ok">✅ 本机数据面已就绪。</div>
-      <a href="${base || '/'}/?next=${here}#/login"><button class="btn primary">在本机控制台登录</button></a>
+      <a href="${base}/?next=${here}#/login"><button class="btn primary">在本机控制台登录</button></a>
       <p class="wz-hint">支持账号密码与钉钉扫码（本机同源，登录后自动回到面板）。</p>`
   } else {
     body.innerHTML = `
