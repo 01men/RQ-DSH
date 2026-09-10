@@ -4,6 +4,17 @@
    无需（也不得整分支）合并回主分支
 2. 本工作区备份推送仓库：01men/RQ-DSH
 
+## 产品定义：本分支唯一交付物 = 「01门」（2026-09-10 定版）
+
+**01门——AI 代理与人类的协作前台**。定制分支（custom/dsh-rq）收缩为唯一产品：
+cordis 插件形态一键装进 dsh（`dsh plugin add github:01men/RQ-DSH` / npm `@01men/gate-01` /
+`link:` / `file:` 四通道），安装→启动→打开 `http://127.0.0.1:<端口>/gate01/panel/` 直接见到
+内置演示看板；连接宿主后全量数据经本机代理接入（浏览器零跨域），登录在宿主侧完成；
+`dsh plugin remove` 卸载干净、重装即恢复。安装产物为预构建 dist（零 TS 装载/零生命周期脚本）。
+
+产品与实施定版：`docs/plan-gate01.md`；降级台账：`docs/gate01-degradation-ledger.md`；
+cordis 可选依赖语义定稿：`docs/spike-cordis-optional-inject.md`。
+
 ## 双轨开发模型（2026-09 定版）
 
 - **宿主轨**（上游 `ybkk-AIOS` main）：宿主平台/控制台开发线——platform-core、console、

@@ -1,10 +1,16 @@
-# plan-gate01 —— 「01门」架构改造计划（修订稿 v2）
+# plan-gate01 —— 「01门」架构改造计划（定版·实施完成）
 
-> 状态：**修订稿 v2，待用户终审**。2026-09-10 架构审查结论＝修改后批准。审查发现 6 项问题
-> （P0 阶段顺序矛盾 / P1 降级清扫面低估 / P2 dist 非 TS 资产遗漏 / P3 演示态写边界缺失 /
-> P4 rq-card src 路径方案与 spike §4.2 冲突 / P5 改名清单遗漏）与终审修订 4 项
-> （spike 前置 Phase 0 / 路径改写规范化一等化 / platform-core 值导入全集内联 / 鉴权配置标志化），
-> 已全部吸收进本稿。终审通过后按 Phase 分批落地，每批 selftest 全绿再进下一批。
+> 状态：**定版·实施完成**（2026-09-10）。Phase 0–6 全部落地，每批 selftest 全绿推进；
+> 真机实装验证（gate01-smoke profile，dsh 0.1.2-alpha.5）通过：四通道安装→启动→演示看板→
+> 连接向导→写边界（403/401/503）→插拔→重装恢复全链闭环（浏览器截图验收）。
+> 实施修订记录（相对本稿的偏差，全部有据）：① Phase 2.5 值导入内联——仅 rq-card 执行
+> （defineTool 内联为 src/tool.ts；panel-core 在 gate-01 包内跨包相对导入成立，无需内联），
+> 真机 ERR_MODULE_NOT_FOUND 实证；② Phase 3 files 清单修正——原稿漏列 packages/plugin-dsh-bridge，
+> 真机装机暴露后补齐，并加 bundledDependencies 打包 rq-card（file: 依赖在 npm/tgz 通道不可移植）；
+> ③ plugin-dsh-bridge inject 8→3 键（宿主面受控漂移，F 清单 J 节）——4-entry 形态下
+> entryTickets/oidc/iam/authn/audit 无提供者即永久挂起，运行期五处软访问改 ctx.reflect/softRead；
+> ④ 演示首启直达看板：demoAuth 装态探测（只读 API 匿名可达）→ 直接进看板 + 横幅引导，
+> seedPanel(ctx, autoDemo) 自动播种演示内容 + DEMO_ORG_ID 演示组织兜底。
 > 产品定义：本分支（custom/dsh-rq）收缩为唯一交付物——**01门**：AI 代理与人类的协作前台。
 > 关联：`docs/plan-dsh-plugin-first.md`（前序定版）、`docs/handoff-f-remainder-to-main.md`（G3/F 清单）、`AGENTS.md`（同步铁律）。
 
