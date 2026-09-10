@@ -4351,8 +4351,10 @@ try {
   check('控制台启动链含宿主会话直通 + 落地分诊（exchangeBridgeSession/resolveLanding）',
     consoleBoot.includes('exchangeBridgeSession') && consoleBoot.includes('resolveLanding'))
   const loginSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'pages', 'login.js'), 'utf8')
-  check('登录回跳接线（?next= 与 401 暂存 heng_ops_next 消费 + 白名单 sanitizeNext）',
-    loginSrc.includes("params.get('next')") && loginSrc.includes('heng_ops_next') && loginSrc.includes('sanitizeNext'))
+  check('登录回跳接线（?next= 一次读取共享 + 401 暂存 heng_ops_next 消费 + 跨源白名单双 sanitize）',
+    loginSrc.includes('urlNextParam') && loginSrc.includes("sanitizeNext(urlNextParam")
+    && loginSrc.includes("sanitizeCrossOriginNext(urlNextParam")
+    && loginSrc.includes('heng_ops_next') && loginSrc.includes('sanitizeNext'))
   const panelApp = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'app.js'), 'utf8')
   check('面板侧切换接线（管理控制台 data-landing 偏好 + 401 引导带 ?next= 回面板）',
     panelApp.includes('data-landing') && panelApp.includes('next='))
