@@ -460,7 +460,7 @@ ${sceneSummary}` : "",
     if (!content) return { ok: false, reason: `\u6280\u80FD\u300C${skill.name}\u300D\u5F53\u524D\u7248\u672C\uFF08${skill.version}\uFF09\u65E0\u6307\u4EE4\u5185\u5BB9\uFF0C\u65E0\u6CD5\u76F4\u8C03` };
     let model = options.modelOverride?.trim() ?? "";
     if (!model) {
-      const online = this.soft("modelGateway")?.models().all().filter((item) => item.status === "online") ?? [];
+      const online = this.soft("modelGateway")?.models().all().filter((item) => item.status === "online" && item.endpoint.trim() !== "") ?? [];
       if (online.length === 0) return { ok: false, reason: "\u6A21\u578B\u76EE\u5F55\u6682\u65E0\u5728\u7EBF\u6A21\u578B\u2014\u2014\u8BF7\u7BA1\u7406\u5458\u5728\u300C\u6A21\u578B\u7BA1\u7406\u300D\u4E2D\u63A5\u5165\u540E\u518D\u76F4\u8C03\u6280\u80FD" };
       model = online[0].slug;
     }
@@ -492,7 +492,8 @@ ${sceneSummary}` : "",
             org: orgId,
             subject: options.userId ? `user:${options.userId}` : "panel:tool",
             principal: `org:${orgId}`,
-            resource: `skill:${skill.slug}`,
+            // J1 契约 v1 对表：计量资源键用 skill:<ID>（slug 可能含非 ASCII，过不了 usage resource 校验）
+            resource: `skill:${skill.id}`,
             meters: [{ key: "calls", value: 1, unit: "call" }],
             idempotency_key: `panel:skill:${skill.id}:${newId("inv")}`
           });

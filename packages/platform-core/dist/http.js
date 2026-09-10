@@ -45,6 +45,8 @@ class HttpServerService extends Service {
   /** 对外挂载前缀：'' 或形如 '/rq'（无尾斜杠）。见 HttpServerConfig.externalBase。 */
   externalBase;
   corsAllowOrigins;
+  /** 安全响应头默认开启（nosniff / SAMEORIGIN / Referrer-Policy）；SECURITY_HEADERS=off 或 config 显式 false 关闭。 */
+  securityHeaders;
   /**
    * 路由×权限矩阵（跨插件共享登记处）。register() 对 guarded 声明自动汇入（幂等去重），
    * selftest「RBAC 端点矩阵 100% 越权断言网」据此驱动（review-dsh-agent-panel-v2 Phase 0）。
@@ -61,6 +63,7 @@ class HttpServerService extends Service {
     this.host = config.host ?? "0.0.0.0";
     this.externalBase = (config.externalBase ?? "").replace(/\/+$/, "");
     this.corsAllowOrigins = config.corsAllowOrigins ?? ["*"];
+    this.securityHeaders = config.securityHeaders ?? process.env.SECURITY_HEADERS !== "off";
     ctx.effect(() => () => {
       void this.stop();
     });
@@ -155,6 +158,11 @@ class HttpServerService extends Service {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const pathSegments = url.pathname.split("/").filter(Boolean).map((s) => s);
     const method = (req.method ?? "GET").toUpperCase();
+    if (this.securityHeaders) {
+      res.setHeader("x-content-type-options", "nosniff");
+      res.setHeader("x-frame-options", "SAMEORIGIN");
+      res.setHeader("referrer-policy", "strict-origin-when-cross-origin");
+    }
     const blanketCorsExempt = url.pathname.startsWith("/api/portal/") || url.pathname.startsWith("/api/authn/oidc/") || this.corsAllowOrigins.includes("*") && url.pathname.startsWith("/api/auth/");
     const blanketCorsPath = url.pathname.startsWith("/api/") && !blanketCorsExempt;
     const allowOrigin = blanketCorsPath ? corsAllowOriginFor(this.corsAllowOrigins, req.headers.origin) : void 0;

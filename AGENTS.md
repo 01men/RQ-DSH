@@ -65,9 +65,9 @@
 **修改纪律（北极星护栏）**：每次推送备份前跑一次收敛检查——
 
 ```bash
-# 锚点=真上游 main 头（当前 e5e3a34＝F 域回流批 + L 节修复回浸，2026-09-11；上游前进后更新锚点哈希）。
+# 锚点=真上游 main 头（当前 6a19706＝M1-1 契约冻结 v1 齐套 + 安全/数据治理加固 + llms.txt 维护，2026-09-11；上游前进后更新锚点哈希）。
 # 不用 origin/main 追踪引用——它在 push/fetch 之间摇摆（见下文「已知无害怪象」），自比较会假绿。
-git diff 33f786a custom/dsh-rq -- \
+git diff 6a19706 custom/dsh-rq -- \
   packages/platform-core packages/plugin-console packages/plugin-portal \
   packages/plugin-authn packages/plugin-agent packages/plugin-audit packages/plugin-iam \
   packages/plugin-usage packages/plugin-skillhub packages/plugin-app \
