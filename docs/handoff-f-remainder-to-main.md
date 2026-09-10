@@ -151,6 +151,18 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
 |---|---|---|
 | `packages/platform-core/src/http.ts`（`file()`） | 补 `res.headersSent` 幂等守卫（与同文件 `ok`/`fail` 同款） | `file()` 方法体运行在异步 IIFE 中，双写路径下二次 `writeHead` 抛 `ERR_HTTP_HEADERS_SENT` 且无人接——以 uncaughtException 打死整个宿主进程（gate01-smoke 真机运行期崩溃实证，栈=dist/http.js:228）。`ok`/`fail` 已有守卫，`file` 是遗漏点 |
 
+## 闭环记录（2026-09-10，main 侧回执 `handoff-f-remainder-adoption-20260910.md` ＋ 定制侧吸收）
+
+- **main 实施提交**：`7f5f3ea`（本地，push 前夕）——A/B/D/F/G1/J/K 采纳落地，selftest 978 绿。
+- **定制侧吸收**：merge 7f5f3ea（冲突 3 文件：console app.js/dashboard.js 取 main；tests/selftest.mjs
+  保留定制布局并移植 G1 自助票分节 5 断言）。C 部分采纳中的 dashboard 场景卡片区不采纳——
+  **卡片包域表态：同意暂缓**（01门 装态 board 为演示面；全量形态场景卡片区随卡片包域专项另行回流）。
+- **定制侧整改**：H README 已还原（定制文档段拆除）；E main 布局 selftest 未落地（rename 检测并入
+  tests 冲突，tests/ 布局定版维持）；console PUBLIC_PATHS 格式损伤修复（main A 项点名）；base.css
+  场景卡片死代码拆除；approvals.js 定制审批 kind 映射保留（豁免登记，定制面板域配套）。
+- **收敛检查**：宿主面源码对 7f5f3ea 锚点零残余（仅存 I 豁免产品身份值 + approvals.js kind 映射 +
+  01门 装机面 dist/）。
+
 ## 决策回执（请 main 侧填写后回传）
 
 > main 侧已回填（2026-09-10，基线 main `5977067` 重算残余差异；实施与验证记录见 main 仓库

@@ -315,27 +315,6 @@ button { font-family: inherit; }
 .stat-foot { font-size: 11.5px; color: var(--text-4); margin-top: 10px; display: flex; align-items: center; gap: 4px; }
 .stat-foot .up { color: var(--ok); } .stat-foot .down { color: var(--danger); }
 
-/* ============ 场景卡片区（WP-04/A3 + WP-05：卡片包驱动，≤6 张） ============ */
-.dash-scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
-.dash-scene-card {
-  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2);
-  padding: 14px 16px; cursor: pointer; transition: all 0.18s; position: relative; overflow: hidden;
-}
-.dash-scene-card::before {
-  content: ''; position: absolute; inset: 0 auto 0 0; width: 3px;
-  background: var(--brand-gradient); opacity: 0; transition: opacity 0.18s;
-}
-.dash-scene-card:hover { border-color: var(--brand-300); box-shadow: var(--shadow-s); transform: translateY(-2px); background: var(--surface); }
-.dash-scene-card:hover::before, .dash-scene-card:focus-visible::before { opacity: 1; }
-.dash-scene-card:focus-visible { outline: 2px solid var(--brand-300); outline-offset: 1px; }
-.dash-scene-badge {
-  display: inline-flex; align-items: center; gap: 5px; height: 21px; padding: 0 8px;
-  border-radius: 10px; font-size: 11.5px; font-weight: 500;
-  color: var(--brand-600); background: var(--brand-50); margin-bottom: 10px;
-}
-.dash-scene-title { font-size: 13.5px; font-weight: 600; }
-.dash-scene-desc { font-size: 12px; color: var(--text-3); margin-top: 4px; line-height: 1.5; }
-
 /* ============ 徽章体系 ============ */
 .badge {
   display: inline-flex; align-items: center; gap: 5px;

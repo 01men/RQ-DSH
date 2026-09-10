@@ -43,7 +43,8 @@ interface CallerInfo {
 }
 
 // 公开路径白名单（免鉴权）：导出供 selftest「rbac endpoint matrix」比对——清单变动即红
-export const PUBLIC_PATHS = new Set([  '/api/auth/login',
+export const PUBLIC_PATHS = new Set([
+  '/api/auth/login',
   '/api/auth/sso',
   '/api/auth/sso/authorize',
   '/api/auth/sso/callback',
