@@ -1,5 +1,5 @@
 /**
- * @01men/plugin-panel-core —— 部门 Agent 工作台面板（review-dsh-agent-panel-v2 Phase 1/2）。
+ * @ybkk/plugin-panel-core —— 部门 Agent 工作台面板（review-dsh-agent-panel-v2 Phase 1/2）。
  *
  * 职责：
  *   - 静态托管面板 SPA（/panel，对外经 dsh-bridge 即 /gate01/panel/；宿主 web diff=0 铁律）

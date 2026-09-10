@@ -18,12 +18,12 @@
 
 ## 一、目标形态（定版）
 
-1. **一键安装**：cordis 插件形态装进 dsh，四通道可用——`dsh plugin add github:01men/RQ-DSH`、`dsh plugin add @01men/gate-01`（npm）、`link:`、`file:`。安装→启动→打开 `http://127.0.0.1:<端口>/gate01/panel/` **直接见到演示看板**（内置 scenegraphs 演示数据），向导常驻引导连接宿主。
+1. **一键安装**：cordis 插件形态装进 dsh，四通道可用——`dsh plugin add github:01men/RQ-DSH`、`dsh plugin add @ybkk/gate-01`（npm）、`link:`、`file:`。安装→启动→打开 `http://127.0.0.1:<端口>/gate01/panel/` **直接见到演示看板**（内置 scenegraphs 演示数据），向导常驻引导连接宿主。
 2. **连接宿主**：本机（localhost 预填 + 端口探测）/ 远端地址统一为「连接宿主」流程；连接后面板/看板/卡片数据全量指向宿主（经本机代理，浏览器零跨域），登录在宿主侧完成。
 3. **插拔**：`dsh plugin remove` 卸载干净；重装即恢复。
 4. **G3 自解（限 01门产物）**：预构建 `dist/*.js` 提交入库，安装形态不再依赖 node_modules 内 TS 装载。宿主面包的 G3 仍在交接清单挂起，与本产物无关。
 
-### 产物构成（根包 `@01men/gate-01`）
+### 产物构成（根包 `@ybkk/gate-01`）
 
 | entry | 来源包 | 角色 | 改造 |
 |---|---|---|---|
@@ -83,7 +83,7 @@
 |---|---|---|
 | 1 | 本机宿主语义 | **彻底移除本机初始化**（形态 B 设口令全链路删除）；本地/远端统一「连接宿主」，本机=localhost 连接目标（预填+探测） |
 | 2 | 无宿主首启体验 | **内置演示看板**：未连接时本地只读渲染 scenegraphs（qb01/gcjx）+ seed 演示内容，向导常驻；连接后切真实数据 |
-| 3 | 发行通道 | **双通道**：预构建 dist 提交进 RQ-DSH main（github: 直装）+ npm 发布。包名 @01men scope（根包 `@01men/gate-01`；若要裸名 `01men` 实施前一句话可调） |
+| 3 | 发行通道 | **双通道**：预构建 dist 提交进 RQ-DSH main（github: 直装）+ npm 发布。包名 @01men scope（根包 `@ybkk/gate-01`；若要裸名 `01men` 实施前一句话可调） |
 | 4 | 命名深度 | **技术标识一并改**：根包名、@dsh-ops→@01men scope、挂载 `/rq`→`/gate01`、localStorage 键、数据文件名（范围见「不改清单」） |
 
 ---
@@ -103,8 +103,8 @@
 ### Phase 1 地基：改名 + 预构建链（patch 暂不收缩，机械改造）
 
 1. **改名清扫**：
-   - 根包 `dsh-enterprise-ops` → `@01men/gate-01`（package.json name/repository）；
-   - 定制包 scope `@dsh-ops/*` → `@01men/*`（3 个 workspace 包名 + 根 dependencies + `src/boot-all.ts` 对应 3 行 import——与上游漂移，登记 F 清单）；
+   - 根包 `dsh-enterprise-ops` → `@ybkk/gate-01`（package.json name/repository）；
+   - 定制包 scope `@dsh-ops/*` → `@ybkk/*`（3 个 workspace 包名 + 根 dependencies + `src/boot-all.ts` 对应 3 行 import——与上游漂移，登记 F 清单）；
    - 挂载前缀 `/rq` → `/gate01`：cordis.yml/patch 的 `externalBase`、`mountPath`、`wire.ts` 常量（CONSOLE_BASE/PANEL_URL/LINK_ENDPOINT/FEEDBACK_ENDPOINT）、SPA BASE 推导；
    - localStorage 键**全部 `heng_ops_*`** → `gate01_*`（`api.js` token/refresh/user、`app.js:577` heng_ops_landing——审查补漏，heng_ops 共 17 处命中）；`panel_hub_history` 同步；
    - 数据文件 `rq-host-link.json` → `gate01-host-link.json`（`hostlink.ts`；不做旧文件迁移，重连一次即可）；
@@ -135,12 +135,12 @@
 
 ### Phase 3 产物收缩：patch 4×dist + files + 装机段重写（前置条件：Phase 2 完成——硬顺序约束）
 
-1. **cordis.patch.yml 收缩为 4 entry 全指向 dist**：ops-platform-core（provideToolRuntime:false/startHttp:false/externalBase:/gate01）、ops-panel-core（**demoAuth:true——仅本 patch 声明**，cordis.yml 与全量形态永不声明）、ops-dsh-bridge（mountPath:/gate01）、rq-card（包名 `@01men/plugin-rq-card`）。
+1. **cordis.patch.yml 收缩为 4 entry 全指向 dist**：ops-platform-core（provideToolRuntime:false/startHttp:false/externalBase:/gate01）、ops-panel-core（**demoAuth:true——仅本 patch 声明**，cordis.yml 与全量形态永不声明）、ops-dsh-bridge（mountPath:/gate01）、rq-card（包名 `@ybkk/plugin-rq-card`）。
 2. **rq-card `exports['.']` → `./dist/index.js`**；**两形态统一包名**（审查修正：删除原稿「cordis.yml 改显式 src 路径」方案——cordis.yml:80-84 已记录 spike §4.2：文件路径会被 client-modules 负判为「非 client 包」且永久缓存）；`build:dist` 纳入开发重建仪式（与浏览器半 build-id 同规格，selftest 新鲜度断言覆盖）；核对 `exports['./*']` 子路径映射在 dist 形态下的去向；client-modules 的 require.resolve 与 dsh.client 声明不动。
 3. **cordis.yml（源码开发形态）保持全量 22 entry**，仅同步改名/改路径。
 4. **files 收缩**（根 package.json）：`[cordis.patch.yml, packages/platform-core, packages/plugin-panel-core, packages/plugin-rq-card, README.md, LICENSE]`——scenegraphs（platform-core 内）、cardpacks/seed/SPA（panel-core 内）、lib/client.js 与 dist（rq-card 内）、各包 dist 随包目录自然覆盖；其余宿主包与根 src 不再进安装产物（独立宿主 `npm start` 全量形态仅源码检出支持）。
 5. **selftest fresh-install 段重写**（`tests/selftest.mjs:595-782`）：
-   - entry 前缀解析 `dsh-enterprise-ops/` → `@01men/gate-01/`；
+   - entry 前缀解析 `dsh-enterprise-ops/` → `@ybkk/gate-01/`；
    - 三链规则改为：**patch(4) id 集 ⊆ cordis.yml(22)** + **boot-all ↔ cordis.yml 服务面双射维持不变**（DSH_ONLY 豁免集保留）；
    - files 断言按新清单重写；去掉 ≥20/≥15 硬编码，改为精确集合断言；
    - 浏览器半 vm 执行段、RBAC 矩阵段不动。
@@ -161,7 +161,7 @@
 
 ### Phase 5 真机验收 + 双通道发布
 
-1. **冒烟矩阵**：全新 profile × {`github:01men/RQ-DSH`、npm `@01men/gate-01`、`link:`、`file:`}——安装→启动→演示看板→连接宿主→真实看板→`dsh plugin remove` 插拔→重装。
+1. **冒烟矩阵**：全新 profile × {`github:01men/RQ-DSH`、npm `@ybkk/gate-01`、`link:`、`file:`}——安装→启动→演示看板→连接宿主→真实看板→`dsh plugin remove` 插拔→重装。
 2. **npm 发布**：private:false、exports/files 核对、`npm publish --dry-run`；实际发布需 @01men org 的 npm 账号（用户执行或提供凭证）。
 3. 全量开发形态回归：`--patch cordis.yml` 源码形态全栈（22 entry）启动、面板 RBAC、dingtalk-bridge 事件链——确认瘦身未伤全量形态。
 

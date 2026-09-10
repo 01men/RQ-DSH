@@ -8,7 +8,7 @@
  *
  * 【失败静默】端点未上线/网络失败时控制器只 console 留痕，本组件不渲染任何
  * 错误（降级不打扰会话）。提交成功后短暂显示「已记录」确认。
- * @module @01men/plugin-rq-card/client/RqFeedback
+ * @module @ybkk/plugin-rq-card/client/RqFeedback
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'

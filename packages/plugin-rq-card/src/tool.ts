@@ -2,7 +2,7 @@
  * 本包内联的工具定义辅助（plan-gate01 Phase 2.5 执行记录，2026-09-10）。
  *
  * 【为什么内联】rq-card 是独立 npm 包（client-modules 以包名 require.resolve 解析，
- * spike §4.2），安装位置 node_modules/@01men/plugin-rq-card/ 下不存在 packages/* 兄弟
+ * spike §4.2），安装位置 node_modules/@ybkk/plugin-rq-card/ 下不存在 packages/* 兄弟
  * 目录——对 platform-core 的相对值导入（defineTool）在安装形态必然 ERR_MODULE_NOT_FOUND
  * （真机 gate01-smoke profile 实装实证）。defineTool 是叶子级纯函数（扁平参数说明 →
  * JSON Schema），从 platform-core/src/tools-lite.ts 复制内联，副本漂移登记

@@ -83,4 +83,4 @@
     # 启动前必须先构建浏览器半（激活期缺 bundle 会响亮抛错、宿主启动失败，spike §4.4）：
     #   node packages/plugin-rq-card/build.mjs   →  packages/plugin-rq-card/lib/client.js
     - id: rq-card
-      name: '@01men/plugin-rq-card'
+      name: '@ybkk/plugin-rq-card'

@@ -1,6 +1,6 @@
-/* rq-card-build-id: f832390ac9438940 */
+/* rq-card-build-id: 3152c616d1b6991e */
 (function () {
-  var PLUGIN_ID = "@01men/plugin-rq-card";
+  var PLUGIN_ID = "@ybkk/plugin-rq-card";
   var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };
   var note = function (stage, error) {
     var entry = { at: new Date().toISOString(), stage: stage };
@@ -507,7 +507,7 @@ var en = {
 };
 
 // src/client/styles.ts
-var PLUGIN_ID = "@01men/plugin-rq-card";
+var PLUGIN_ID = "@ybkk/plugin-rq-card";
 var SHEET = `
 .rq-ecard{border:1px solid var(--rq-ecard-edge,#e2e6ee);border-radius:10px;padding:8px 12px;
   margin:4px 0;font-size:13px;line-height:1.5;background:var(--rq-ecard-bg,#fff);max-width:640px}
@@ -594,7 +594,7 @@ function ensureStyles() {
 
 // src/client/index.ts
 var NS = "rq-card";
-var PLUGIN_ID2 = "@01men/plugin-rq-card";
+var PLUGIN_ID2 = "@ybkk/plugin-rq-card";
 var RQ_TOOL_NAMES = [
   // 资产调运（四态主战场）
   "mcp_invoke",

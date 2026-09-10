@@ -1,7 +1,7 @@
 {
-  "name": "@01men/gate-01",
+  "name": "@ybkk/gate-01",
   "version": "1.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "description": "01门 —— AI 代理与人类的协作前台（基于 DeepSeek Harness「一切皆插件」架构）",
   "license": "MIT",
@@ -9,10 +9,10 @@
     "packages/*"
   ],
   "dependencies": {
-    "@01men/plugin-rq-card": "file:packages/plugin-rq-card"
+    "@ybkk/plugin-rq-card": "file:packages/plugin-rq-card"
   },
   "bundledDependencies": [
-    "@01men/plugin-rq-card"
+    "@ybkk/plugin-rq-card"
   ],
   "repository": {
     "type": "git",

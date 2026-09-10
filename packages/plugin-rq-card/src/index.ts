@@ -1,5 +1,5 @@
 /**
- * @01men/plugin-rq-card —— dsh 会话侧注入插件，宿主半（WP-06 + M2 宿主连接）。
+ * @ybkk/plugin-rq-card —— dsh 会话侧注入插件，宿主半（WP-06 + M2 宿主连接）。
  *
  * 双面结构：
  *   - 浏览器半（src/client/** → lib/client.js）：四态执行卡 + 👍/👎 反馈条 +（M2/M3）
@@ -15,7 +15,7 @@
  *     node packages/plugin-rq-card/build.mjs     # 产出 lib/client.js（含 build-id 指纹）
  *
  * cordis.yml / cordis.patch.yml 的 loader 条目 name 必须是包名
- * '@01men/plugin-rq-card'（client-modules 用 require.resolve 解析包元数据，
+ * '@ybkk/plugin-rq-card'（client-modules 用 require.resolve 解析包元数据，
  * 源码文件路径会被负判为「非 client 包」且永久缓存，spike §4.2）。
  *
  * 【markdown 兜底契约（spike §5 降级预案第 5 条，宿主工具侧义务）】

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-const PLATFORM_PACKAGE = "@01men/gate-01";
+const PLATFORM_PACKAGE = "@ybkk/gate-01";
 let cached;
 function platformVersionInfo() {
   if (cached) return cached;

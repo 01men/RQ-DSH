@@ -1,4 +1,4 @@
-# 01门 npm 发布手册（@01men/gate-01 双通道之 npm 通道）
+# 01门 npm 发布手册（@ybkk/gate-01 双通道之 npm 通道）
 
 > 前置状态（2026-09-10 已就绪）：安装产物为预构建 dist（G3 自解）、零生命周期脚本、
 > rq-card 经 bundledDependencies 随包自包含（file: 依赖在 npm/tgz 通道不可移植，真机实证）。
@@ -27,9 +27,9 @@ npm run build:dist && npm run selftest && npm pack
 # 3. 发布（scope 包必须显式 --access public）
 npm publish --access public --registry=https://registry.npmjs.org/
 # 4. 发布验证
-npm view @01men/gate-01 version
+npm view @ybkk/gate-01 version
 # 5. 真机冒烟（四通道之 npm 通道闭环）
-dsh plugin add --profile <全新profile> @01men/gate-01
+dsh plugin add --profile <全新profile> @ybkk/gate-01
 # 6. 发布记录回填本手册 + 推送备份
 ```
 
@@ -37,7 +37,7 @@ dsh plugin add --profile <全新profile> @01men/gate-01
 
 - **file:/tgg 本地安装的刷新陷阱**：pnpm 对 `file:` 目录依赖取 inode 快照，源 `dist/` 重写后
   必须 `pnpm remove + add` 或改用 tgz 安装才会刷新；npm/github 内容寻址通道天然新鲜。
-- **profile bundles**：`pnpm remove` 会把 bundles 列表里的 `@01men/gate-01` 一并移除，
-  重装后需确认 profile `package.json` 的 `dsh.profile.bundles` 含 `@01men/gate-01`。
+- **profile bundles**：`pnpm remove` 会把 bundles 列表里的 `@ybkk/gate-01` 一并移除，
+  重装后需确认 profile `package.json` 的 `dsh.profile.bundles` 含 `@ybkk/gate-01`。
 - **版本节奏**：每次发布 = bump 版本号 → `npm run build:dist` + 浏览器半重建 → selftest 全绿 →
   pack → publish → 推送备份（安装产物 dist/** 提交入库，发布包与仓库一致）。

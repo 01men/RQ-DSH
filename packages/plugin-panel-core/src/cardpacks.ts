@@ -1,5 +1,5 @@
 /**
- * @01men/plugin-panel-core —— 卡片包（card pack）模型与加载（action-plan-dsh-frontend WP-05）。
+ * @ybkk/plugin-panel-core —— 卡片包（card pack）模型与加载（action-plan-dsh-frontend WP-05）。
  *
  * 目标 3（多平台差异化交互）的配置底座：新增/调整卡片零前端代码改动——
  * 卡片包是纯 JSON 配置（默认目录 packages/platform-core/cardpacks/*.json，可经 CARDPACK_DIR 覆盖），

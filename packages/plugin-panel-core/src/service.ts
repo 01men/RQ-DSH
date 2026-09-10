@@ -1,5 +1,5 @@
 /**
- * @01men/plugin-panel-core —— 部门面板域服务（review-dsh-agent-panel-v2 Phase 1/2）。
+ * @ybkk/plugin-panel-core —— 部门面板域服务（review-dsh-agent-panel-v2 Phase 1/2）。
  *
  * 数据面（opsStorage 集合，全平台此前没有 channel/message 模型，这里是最大缺口之一的落点）：
  *   panel:deptConfigs   部门↔主题/协作模式/Agent 阵容/KPI/widget 布局（数据驱动皮肤，一套骨架五种皮肤）

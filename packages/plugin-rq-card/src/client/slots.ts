@@ -9,7 +9,7 @@
  *     messageId（spike §2.4 证据 D2）。
  *
  * 全部 dsh 包引用都是 type-only（编译期擦除，不进 bundle、不触构建纯度门禁）。
- * @module @01men/plugin-rq-card/client/slots
+ * @module @ybkk/plugin-rq-card/client/slots
  */
 
 import type {

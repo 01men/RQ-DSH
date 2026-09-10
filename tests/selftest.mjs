@@ -609,12 +609,12 @@ try {
     for (const entry of patchEntries) {
       const name = String(entry?.name ?? '')
       let localPath = null
-      if (name.startsWith('@01men/gate-01/')) {
-        // 形如 @01men/gate-01/packages/<dir>/dist/index.js（相对本仓根；dist 预构建产物随包入库）
-        localPath = name.slice('@01men/gate-01/'.length)
-      } else if (name.startsWith('@01men/')) {
+      if (name.startsWith('@ybkk/gate-01/')) {
+        // 形如 @ybkk/gate-01/packages/<dir>/dist/index.js（相对本仓根；dist 预构建产物随包入库）
+        localPath = name.slice('@ybkk/gate-01/'.length)
+      } else if (name.startsWith('@ybkk/')) {
         // 安装形态以包名解析（client-modules 走 require.resolve）；本仓等价物 = packages/<包目录>
-        const dir = name.slice('@01men/'.length)
+        const dir = name.slice('@ybkk/'.length)
         try {
           const pkg = JSON.parse(readFileSync(join('packages', dir, 'package.json'), 'utf8'))
           const target = typeof pkg.exports?.['.'] === 'string' ? pkg.exports['.'] : pkg.exports?.['.']?.default
@@ -630,8 +630,8 @@ try {
     // -- 2. 三链一致（plan-gate01 Phase 3 收缩后规则）：patch(4) id 集 ⊆ cordis.yml(22)；
     //        boot-all ↔ cordis.yml 服务面双射维持不变（防「加了包漏登记」）--
     const entryDir = (name) => {
-      if (name.startsWith('@01men/gate-01/packages/')) return name.slice('@01men/gate-01/packages/'.length).split('/')[0]
-      if (name.startsWith('@01men/')) return name.slice('@01men/'.length)
+      if (name.startsWith('@ybkk/gate-01/packages/')) return name.slice('@ybkk/gate-01/packages/'.length).split('/')[0]
+      if (name.startsWith('@ybkk/')) return name.slice('@ybkk/'.length)
       const embedded = name.indexOf('/packages/') // cordis.yml 源码形态：<PROJECT_ROOT>/packages/<dir>/src/index.ts
       if (embedded >= 0) return name.slice(embedded + '/packages/'.length).split('/')[0]
       return null
@@ -639,7 +639,7 @@ try {
     const patchDirs = patchEntries.map((entry) => entryDir(String(entry?.name ?? ''))).filter(Boolean)
     const DSH_ONLY = new Set(['plugin-rq-card', 'plugin-dsh-bridge']) // dsh 宿主专属（客户端 bundle / webServer 挂载），独立形态不装配
     const bootSource = readFileSync('src/boot-all.ts', 'utf8')
-    const bootDirs = [...bootSource.matchAll(/from '((?:@dsh-ops|@01men)\/[\w-]+)'/g)].map((match) => match[1].split('/')[1])
+    const bootDirs = [...bootSource.matchAll(/from '((?:@dsh-ops|@01men|@ybkk)\/[\w-]+)'/g)].map((match) => match[1].split('/')[1])
     const cordisYaml = platformCore.parseYaml(readFileSync('cordis.yml', 'utf8'))
     const cordisEntries = Array.isArray(cordisYaml?.[0]?.insert) ? cordisYaml[0].insert : []
     const cordisDirs = cordisEntries.map((entry) => entryDir(String(entry?.name ?? ''))).filter(Boolean)
@@ -687,7 +687,7 @@ try {
     check('dsh.bundle.patch 契约指向 cordis.patch.yml 且存在',
       rootPkg.dsh?.bundle?.patch === './cordis.patch.yml' && pathExists('cordis.patch.yml'))
     check('rq-card 包名安装形态可解析（根包声明 file: 依赖 → profile node_modules 就位，真机 rq-smoke 实证）',
-      typeof rootPkg.dependencies?.['@01men/plugin-rq-card'] === 'string',
+      typeof rootPkg.dependencies?.['@ybkk/plugin-rq-card'] === 'string',
       `dependencies=${JSON.stringify(rootPkg.dependencies ?? {})}`)
     check('dsh.compatibility 声明在场（dsh 版本区间 + profiles）',
       typeof rootPkg.dsh?.compatibility?.dsh === 'string' && Array.isArray(rootPkg.dsh?.compatibility?.profiles))
@@ -4295,9 +4295,9 @@ try {
   check('/docs 未知文档 404', docMissing.status === 404)
   // 路径穿越探测：字面 .. 与编码 %2e%2e 均被 URL 解析归一化（WHATWG 规范视编码点段为点段）→ 回落 SPA 兜底页，不泄露文件
   const docTraverseLiteral = await rawReq('GET', '/docs/../package.json')
-  check('/docs 字面 .. 穿越 → SPA 兜底页（不泄露文件）', docTraverseLiteral.status === 200 && String(docTraverseLiteral.headers['content-type']).startsWith('text/html') && !docTraverseLiteral.body.includes('"name": "@01men/gate-01"'))
+  check('/docs 字面 .. 穿越 → SPA 兜底页（不泄露文件）', docTraverseLiteral.status === 200 && String(docTraverseLiteral.headers['content-type']).startsWith('text/html') && !docTraverseLiteral.body.includes('"name": "@ybkk/gate-01"'))
   const docTraverseEncoded = await rawReq('GET', '/docs/%2e%2e/package.json')
-  check('/docs 编码 %2e%2e 穿越 → SPA 兜底页（不泄露文件）', docTraverseEncoded.status === 200 && String(docTraverseEncoded.headers['content-type']).startsWith('text/html') && !docTraverseEncoded.body.includes('"name": "@01men/gate-01"'))
+  check('/docs 编码 %2e%2e 穿越 → SPA 兜底页（不泄露文件）', docTraverseEncoded.status === 200 && String(docTraverseEncoded.headers['content-type']).startsWith('text/html') && !docTraverseEncoded.body.includes('"name": "@ybkk/gate-01"'))
   const spaStillOk = await rawReq('GET', '/')
   check('SPA 静态兜底不受影响（/ 仍返回控制台首页）', spaStillOk.status === 200 && String(spaStillOk.headers['content-type']).startsWith('text/html') && spaStillOk.body.includes('榕器'))
 

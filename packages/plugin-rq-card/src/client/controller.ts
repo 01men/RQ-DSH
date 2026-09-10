@@ -8,7 +8,7 @@
  *     不向会话区渲染任何错误——反馈是锦上添花，绝不能变成新的打扰源。
  *   - HostObservable 契约（getSnapshot/subscribe）与 dsh 的 useSyncExternalStore
  *     绑定-kit 兼容，视图经 slots 注入面的 hooks.rqfb 下发。
- * @module @01men/plugin-rq-card/client/controller
+ * @module @ybkk/plugin-rq-card/client/controller
  */
 
 import type { FeedbackResult, FeedbackScore } from '../wire.ts'
