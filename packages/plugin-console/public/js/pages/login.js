@@ -134,14 +134,20 @@ export function renderLogin(app) {
   // 时按跨源处理——登录完成后签发一次性自助 entry_ticket，以 #entry_ticket= 片段回跳（远程 dsh 面板
   // 向导闭环）。钉钉整页授权会离开本页，跨源目的地暂存 sessionStorage（heng_ops_next_cross），
   // 由本页回装或 SSO 回调脚本消费。
+  // next 参数一次读取（G1-a 缺陷修复，2026-09-11 回流定制侧 L 节）：此前同源/跨源两个 IIFE 各自重读
+  // location.search，而同源分支读完即用 replaceState 清参——跨源分支永远读到空，
+  // G1 跨源回跳在任何场景都不生效（定制侧本机全量栈真机闭环实证）。现共享一次读取，
+  // URL 清参后置到两个消费者都读完之后。
+  const urlNextParam = new URLSearchParams(location.search).get('next')
+
   const nextDestination = (() => {
-    const params = new URLSearchParams(location.search)
-    let next = sanitizeNext(params.get('next') ?? '')
+    let next = sanitizeNext(urlNextParam ?? '')
     if (!next) {
       try { next = sanitizeNext(sessionStorage.getItem('heng_ops_next') ?? '') } catch { /* 忽略 */ }
     }
     try { sessionStorage.removeItem('heng_ops_next') } catch { /* 忽略 */ }
-    if (params.get('next')) {
+    if (urlNextParam) {
+      const params = new URLSearchParams(location.search)
       params.delete('next')
       const rest = params.toString()
       history.replaceState(null, '', location.pathname + (rest ? `?${rest}` : '') + location.hash)
@@ -150,8 +156,7 @@ export function renderLogin(app) {
   })()
 
   const crossNextDestination = (() => {
-    const params = new URLSearchParams(location.search)
-    let next = sanitizeCrossOriginNext(params.get('next') ?? '')
+    let next = sanitizeCrossOriginNext(urlNextParam ?? '')
     if (!next) {
       try { next = sanitizeCrossOriginNext(sessionStorage.getItem('heng_ops_next_cross') ?? '') } catch { /* 忽略 */ }
     }
