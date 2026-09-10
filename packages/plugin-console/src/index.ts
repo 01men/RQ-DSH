@@ -3442,6 +3442,16 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     return result
   })
 
+  // 保留策略手动巡检（缺省按 USAGE_RETENTION_DAYS 配置的窗口；body.days 允许管理员临时以更短窗口清理，
+  // 0=本次跳过）。日常清理由 usage 服务内建定时巡检承担，此端点是运维的手动对账口。
+  guarded('POST', '/api/usage/retention/purge', 'usage.admin', (exchange) => {
+    const input = body<{ days?: number }>(exchange)
+    const days = typeof input.days === 'number' && Number.isFinite(input.days) && input.days >= 0 ? Math.floor(input.days) : undefined
+    const result = ctx.usage.purgeExpired(days)
+    changeLog(exchange, 'usage.retention.purge', 'usage', 'retention', '', `days=${days ?? 'default'} 事件=${result.purgedEvents} 水位=${result.purgedWatermarks} 死信=${result.purgedDeadLetters}`)
+    return { ...result, retentionDays: ctx.usage.retentionDays }
+  })
+
   guarded('PUT', '/api/usage/capability-grants', 'usage.admin', (exchange) => {
     const input = body<{ principal: string; capabilities: string[]; source?: string }>(exchange)
     return ctx.usage.grantCapabilities(input.principal, input.capabilities, input.source ?? 'console')

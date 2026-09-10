@@ -404,9 +404,11 @@ export class PanelService extends Service {
   async sendMessage(input: {
     dept: string
     channelId: string
-    senderType: 'human' | 'system'
+    senderType: 'human' | 'agent' | 'system'
     senderId?: string
     senderName: string
+    /** agent 型消息的展示图标（如技能直调的 ⚡）。 */
+    senderIcon?: string
     text: string
     ddSync: boolean
     card?: MessageRecord['card']
@@ -414,6 +416,11 @@ export class PanelService extends Service {
     uniqueKey?: string
     /** 对话框模型切换：本次会话指定模型（缺省跟随各 Agent 资产的 model 属性）。 */
     modelOverride?: string
+    /** agent 型消息的归属名（技能直调落 ⚡ 技能名）与实际使用的模型 slug（消息列表展示）。 */
+    agentName?: string
+    replyModel?: string
+    /** true 时不做 @Agent 唤起（技能直调落痕文本含 @Agent 名时防双派发）。 */
+    skipAgentDispatch?: boolean
   }): Promise<MessageRecord> {
     const channel = this.channels().get(input.channelId)
     if (!channel || channel.dept !== input.dept) throw new Error(`频道不存在或不属于该部门：${input.channelId}`)
@@ -425,10 +432,13 @@ export class PanelService extends Service {
       senderType: input.senderType,
       ...(input.senderId ? { senderId: input.senderId } : {}),
       senderName: input.senderName,
+      ...(input.senderIcon ? { senderIcon: input.senderIcon } : {}),
       text: input.text,
       mentions,
       ...(input.card ? { card: { ...input.card, done: [] } } : {}),
       ddSync: input.senderType === 'system' ? 'none' : input.ddSync ? 'pending' : 'none',
+      ...(input.agentName ? { agentName: input.agentName } : {}),
+      ...(input.replyModel ? { model: input.replyModel } : {}),
       ...(input.sceneCode ? { sceneCode: input.sceneCode } : {}),
       ...(input.uniqueKey ? { uniqueKey: input.uniqueKey } : {}),
     })
@@ -438,7 +448,7 @@ export class PanelService extends Service {
       senderName: input.senderName, text: input.text, ddSync: record.ddSync,
       card: record.card, title: record.card?.title ?? '',
     })
-    if (input.senderType === 'human') void this.dispatchAgentMentions(record, input.modelOverride)
+    if (input.senderType === 'human' && !input.skipAgentDispatch) void this.dispatchAgentMentions(record, input.modelOverride)
     return record
   }
 
@@ -533,6 +543,158 @@ export class PanelService extends Service {
       return user?.orgId ?? ''
     } catch {
       return ''
+    }
+  }
+
+  /**
+   * 面板 Agent 点名问答（J1 契约 v1：panel_agent_invoke 工具与 dsh 对话协作的服务原语）。
+   * 与 invokeAgent 共享资产解析/模型取向/场景摘要组装，但同步返回应答文本、不落频道消息
+   * （调用方决定是否经 sendMessage 留痕）。失败诚实返回 ok:false + reason，不造假回复、不静默。
+   */
+  async askAgent(
+    deptId: string,
+    agentName: string,
+    question: string,
+    options: { userId?: string; modelOverride?: string; contextNote?: string } = {},
+  ): Promise<{ ok: true; reply: string; model: string } | { ok: false; reason: string }> {
+    const dept = this.dept(deptId)
+    const agentCard = dept.agents.find((card) => card.name === agentName)
+    if (!agentCard) {
+      const names = dept.agents.map((card) => card.name)
+      return { ok: false, reason: `部门 ${dept.id}（${dept.label}）名册无此 Agent。可用阵容：${names.join('、') || '（无）'}` }
+    }
+    const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
+    const asset = ref ? this.ctx.resourceCore.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
+    if (!asset) return { ok: false, reason: `Agent「${agentName}」未绑定 Agent 资产（agentRef），无法自主应答` }
+    const model = options.modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
+    if (!model) return { ok: false, reason: `Agent「${agentName}」未配置模型（model 属性为空），且本次未指定模型` }
+    const orgId = this.callerOrgId(options.userId)
+    const sceneSummary = this.sceneSummaryForDept(dept)
+    const systemPrompt = [
+      String((asset.attrs as Record<string, unknown> | undefined)?.systemPrompt ?? `你是企业部门协作面板中的数字同事「${agentCard.name}」（${agentCard.desc}）。`),
+      sceneSummary ? `本部门挂载的行业场景图谱要点：\n${sceneSummary}` : '',
+      options.contextNote ?? '',
+    ].filter(Boolean).join('\n\n')
+    try {
+      const result = await this.ctx.modelGateway.invoke({
+        model, orgId, subject: options.userId ? `user:${options.userId}` : 'panel:tool',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: question },
+        ],
+      })
+      return { ok: true, reply: result.content, model: result.model }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      return { ok: false, reason: `模型网关调用失败（${message}）` }
+    } finally {
+      // 与 invokeAgent 同风格的协作计量（org 主键缺省跳过；失败不阻塞应答）
+      if (orgId) {
+        try {
+          this.ctx.usage.record({
+            org: orgId,
+            subject: options.userId ? `user:${options.userId}` : 'panel:tool',
+            principal: `org:${orgId}`,
+            resource: this.meterResource(dept.id, orgId),
+            meters: [{ key: 'calls', value: 1, unit: 'call' }],
+            idempotency_key: `panel:ask:${dept.id}:${agentName}:${newId('ask')}`,
+          })
+        } catch { /* 计量失败不阻塞问答 */ }
+      }
+    }
+  }
+
+  // -- 技能直调（J1 契约 v1 消费面：面板对话框 /技能名 与 panel_skill_invoke 工具共享） --------
+
+  /**
+   * 面板可直调的已上架技能清单（skillhub published + 调用人组织可见）。
+   * 与 skillhub.search 同一套可见性口径（visibility=orgs 时按调用人组织过滤）；
+   * 仅 published 可直调（deprecated/offline 不给面板点名）。
+   */
+  listInvokeableSkills(viewerOrgId?: string): Array<{ id: string; name: string; slug: string; summary: string; category: string; version: string }> {
+    return this.ctx.skillHub.skills().all()
+      .filter((skill) => {
+        if (skill.status !== 'published') return false
+        if (skill.visibility === 'orgs') {
+          if (!viewerOrgId || !skill.targetOrgs.includes(viewerOrgId)) return false
+        }
+        return true
+      })
+      .sort((a, b) => b.stats.downloads - a.stats.downloads)
+      .map((skill) => ({
+        id: skill.id, name: skill.name, slug: skill.slug,
+        summary: skill.summary, category: skill.category, version: skill.currentVersion,
+      }))
+  }
+
+  /**
+   * 面板技能点名直调（J1 契约 v1：panel_skill_invoke 工具与面板对话框共享的服务原语）。
+   * 语义：skillhub 已上架（published）技能 → 取当前版本内容作为指令上下文 → 模型网关单轮应答。
+   * 失败诚实返回 ok:false + reason（不存在/未上架/不可见/无内容/网关失败），不造假回复、不静默。
+   * 与 askAgent 同风格：不落频道消息，调用方决定是否经 sendMessage 留痕。
+   * 计量资源键用 `skill:<id>`（v1.5 惯例：slug 可能含非 ASCII 过不了 resource 校验）。
+   */
+  async invokeSkill(
+    skillName: string,
+    message: string,
+    options: { userId?: string; modelOverride?: string; contextNote?: string } = {},
+  ): Promise<{ ok: true; reply: string; model: string; skill: { name: string; version: string } } | { ok: false; reason: string }> {
+    const name = skillName.trim()
+    if (!name) return { ok: false, reason: '技能名为空（用 /技能名 或 panel_skill_invoke 点名）' }
+    const orgId = this.callerOrgId(options.userId)
+    const invokeable = this.listInvokeableSkills(orgId || undefined)
+    // 按名全名匹配优先，slug 兜底（技能名常含中文与空格，通用 regex 兜不了）
+    const skill = invokeable.find((item) => item.name === name) ?? invokeable.find((item) => item.slug === name)
+    if (!skill) {
+      const hint = this.ctx.skillHub.skills().all().find((item) => item.status === 'published' && (item.name === name || item.slug === name))
+      if (hint) return { ok: false, reason: `技能「${name}」未对当前用户组织开放（visibility=${hint.visibility}），无法直调` }
+      const names = invokeable.slice(0, 8).map((item) => item.name)
+      return { ok: false, reason: `没有已上架且对您开放的技能「${name}」。可用技能：${names.join('、') || '（无）'}` }
+    }
+    const record = this.ctx.skillHub.skills().get(skill.id)
+    const version = record?.versions.find((item) => item.version === skill.version && item.status === 'published')
+    const content = version?.content?.trim() ?? ''
+    if (!content) return { ok: false, reason: `技能「${skill.name}」当前版本（${skill.version}）无指令内容，无法直调` }
+    // 模型取向：显式指定优先；未指定时不跟随 Agent 资产（技能无资产），自动取目录首个在线模型
+    // （班组长没选过模型也要能一把直调——目录为空才诚实拒绝）
+    let model = options.modelOverride?.trim() ?? ''
+    if (!model) {
+      // 只自动选「在线且已配 endpoint」的模型——无 endpoint 的模型调用必失败，不应被自动选中
+      const online = this.ctx.modelGateway.models().all().filter((item) => item.status === 'online' && item.endpoint.trim() !== '')
+      if (online.length === 0) return { ok: false, reason: '模型目录暂无在线模型——请管理员在「模型管理」中接入后再直调技能' }
+      model = online[0]!.slug
+    }
+    const systemPrompt = [
+      `你在执行企业技能平台上架的技能「${skill.name}」（${skill.summary}）。严格按以下技能指令完成任务：`,
+      content,
+      options.contextNote ?? '',
+    ].filter(Boolean).join('\n\n')
+    try {
+      const result = await this.ctx.modelGateway.invoke({
+        model, orgId, subject: options.userId ? `user:${options.userId}` : 'panel:tool',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: message || '（无附加输入，按技能指令执行）' },
+        ],
+      })
+      return { ok: true, reply: result.content, model: result.model, skill: { name: skill.name, version: skill.version } }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      return { ok: false, reason: `模型网关调用失败（${reason}）` }
+    } finally {
+      // 与 askAgent 同风格的协作计量（org 主键缺省跳过；失败不阻塞回包）
+      if (orgId) {
+        try {
+          this.ctx.usage.record({
+            org: orgId,
+            subject: options.userId ? `user:${options.userId}` : 'panel:tool',
+            principal: `org:${orgId}`,
+            resource: `skill:${skill.id}`,
+            meters: [{ key: 'calls', value: 1, unit: 'call' }],
+            idempotency_key: `panel:skill:${skill.id}:${newId('inv')}`,
+          })
+        } catch { /* 计量失败不阻塞直调 */ }
+      }
     }
   }
 

@@ -2,7 +2,8 @@
 
 基于 **DeepSeek Harness（dsh）「一切皆插件」** 架构实现的企业级 AI 资源管理平台。
 对应设计方案：《企业服务资源统一管理方案 V1.0》与《技术实现规划》；生态平台演进设计见
-[docs/ecosystem-design-v1.2.md](docs/ecosystem-design-v1.2.md)，后续路线见 [docs/roadmap-9-10.md](docs/roadmap-9-10.md)。
+[docs/ecosystem-design-v1.2.md](docs/ecosystem-design-v1.2.md)（商业化部分已随 M0 废止，见文内横幅），
+宿主轨迭代计划以《榕器开发计划-主分支》为最新基线（M1-1 契约冻结见下）。
 
 > 组织账号（IAM）· 统一认证（Authn + OIDC Provider）· MCP 部署服务 · Skill/插件市场 · Agent 本体 ·
 > AI 应用本体 · 用量透明计量（usage）· 模型接入网关（modelgw）· 审计与告警
@@ -14,6 +15,14 @@
 > [docs/contract-j4-usage-report.md](docs/contract-j4-usage-report.md)。
 > 原钱包/分账子系统（plugin-billing）已整体下线封存（存量流水 CSV 封存 90 天，登记见
 > [docs/billing-archive-register.md](docs/billing-archive-register.md)）。
+>
+> **M1-1 契约冻结 v1 齐套（2026-09-11）**：J1 面板技能/Agent 点名直调（诚实降级 200+ok:false，
+> [contract-j1-panel-invoke.md](docs/contract-j1-panel-invoke.md)）· J2 统一入口分诊
+> （[contract-j2-entry-triage.md](docs/contract-j2-entry-triage.md)）· J3 会话直通
+> （[contract-j3-session-passthrough.md](docs/contract-j3-session-passthrough.md)）· J4 用量报表。
+> 同批加固：安全响应头默认开启（`SECURITY_HEADERS=off` 可关）、usage 事件保留策略默认 730 天
+> （`USAGE_RETENTION_DAYS`，0=永久）——详见
+> [docs/release-notes-2026-09-11-optimization.md](docs/release-notes-2026-09-11-optimization.md)。
 
 ---
 
@@ -47,8 +56,8 @@ DEMO_SEED=1 npm start   # 首次启动注入演示数据（组织树/演示账�
 演示模式下钉钉免密登录可用（mock 连接器）：登录页「钉钉扫码」输入工号 `DD0002`（林小满）；生产基线不配置连接器，三方登录入口自动隐藏。
 
 ```bash
-npm run selftest      # 功能自测：隔离实例（DEMO_SEED）700 项端到端断言
-npm run lint:manifests  # 插件清单五面 YAML 校验（75 项）
+npm run selftest      # 功能自测：隔离实例（DEMO_SEED）端到端断言，全绿（数量以本次运行为准）
+npm run lint:manifests  # 插件清单五面 YAML 校验
 DSHCTL_USER=admin DSHCTL_PASS=*** node cli/dshctl.mjs help    # CLI 帮助（凭据经环境变量或 DSHCTL_TOKEN 提供）
 ```
 
@@ -565,4 +574,4 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 
 ---
 
-> 最近更新：2026-09-10 · F 域余量回流（[docs/handoff-f-remainder-adoption-20260910.md](docs/handoff-f-remainder-adoption-20260910.md)）——审批深化（高风险二次确认 + 公司级终审 + SLA 看板）、usage 最近调用、五平台主题、目录筛选与登记引导、远程登录回跳闭环（自助 entry_ticket）、http.ts file() 崩溃级缺陷修复；selftest 978 项断言全绿。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
+> 最近更新：2026-09-11 · M1-1 契约冻结 v1 齐套（J1 直调落地 + J2/J3 成文）+ 安全响应头与 usage 保留策略加固（[docs/release-notes-2026-09-11-optimization.md](docs/release-notes-2026-09-11-optimization.md)）；selftest 数量以本次运行为准。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。

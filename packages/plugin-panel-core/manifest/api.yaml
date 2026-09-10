@@ -7,6 +7,7 @@ endpoints:
   - GET/POST /api/panel/:dept/channels · GET/POST /api/panel/:dept/messages · POST /api/panel/messages/:id/card-action
   - GET/POST /api/panel/:dept/tasks · POST /api/panel/tasks/:id/transition（panel.task.write）
   - GET /api/panel/:dept/artifacts · GET /api/panel/:dept/poll（降级轮询）
+  - GET /api/panel/:dept/skills（panel.read）· POST /api/panel/:dept/skills/invoke（panel.write；J1 直调：降级=200+ok:false，鉴权/范围=403/400）
   - POST /api/panel/stream-ticket（panel.read + 部门范围校验；换取 ≤60s 一次性 SSE 票据，H4）
   - GET /api/panel/stream?dept=&ticket=|token=（SSE；EventSource 无法带 Bearer：首选一次性 ticket 消费即焚，?token= 旧通道自校验 fail-closed）
   - GET /api/panel/industries（三态）· POST /api/panel/industries/:code/activate-requests
@@ -18,6 +19,8 @@ tools:
   - panel_task_transition
   - panel_scene_diag
   - panel_widget_data
+  - panel_agent_invoke
+  - panel_skill_invoke
 services:
   - key: panel
     access: ctx.panel
