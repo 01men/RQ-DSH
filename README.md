@@ -8,11 +8,12 @@
 > AI 应用本体 · 用量透明计量（usage）· 模型接入网关（modelgw）· 审计与告警
 > ——多类资源，一套身份、一套权限、一套计量、一套审计。
 >
-> **M0 合规收敛（2026-09-09）**：商业模式为**私有化年费 + 治理包**——钱包/复式分账（plugin-billing）已整体
-> 下线封存（存量流水 CSV 封存 90 天，见 [docs/billing-archive-register.md](docs/billing-archive-register.md)）；
-> 价格簿转「零价快照 + 内部成本参考」，平台与产品面对外**不呈现任何金额结算语义**；
-> 用量透明月度报表（部门/Agent/Skill tokens 三维聚合 + CSV 自助导出）见 J4 契约
+> **M0 合规收敛（2026-09-09）**：商业模式为**私有化年费 + 治理包**。平台对外只呈现**用量与内部成本穿透**——
+> 价格簿为零价快照（charge 恒 0）+ 内部采购成本参考，不呈现任何金额结算语义；用量透明月度报表
+> （部门/Agent/Skill tokens 三维聚合 + CSV 自助导出）见 J4 契约
 > [docs/contract-j4-usage-report.md](docs/contract-j4-usage-report.md)。
+> 原钱包/分账子系统（plugin-billing）已整体下线封存（存量流水 CSV 封存 90 天，登记见
+> [docs/billing-archive-register.md](docs/billing-archive-register.md)）。
 
 ---
 
@@ -350,8 +351,8 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
   不再必然 403。存量部署一次性迁移（幂等标记 `agent-scopes-usage-write-v1`，只跑一次防覆盖后续人工
   收权；迁移动作逐条入 change 审计 `agent.credential.scopes-backfill`）。
 - **计量键与价格簿不符 → 硬拒绝**：`usage.record` 校验事件必含价格簿 `meter_key`，缺失 400 且错误信息
-  直接携带期望键（价格簿对调用方不可见，错误信息是唯一自纠线索）——消灭「静默按 0 计费入库」这一
-  比报错更危险的漏计费面。skillhub 内部管道同步对齐（meters 补价格簿计价键 `calls`，downloads/installs
+  直接携带期望键（价格簿对调用方不可见，错误信息是唯一自纠线索）——消灭「静默按 0 口径入库」这一
+  比报错更危险的漏计量面。skillhub 内部管道同步对齐（meters 补计量键 `calls`，downloads/installs
   观测维度保留，热力图口径不变）。
 - **机器凭证治理三端齐备**：`PATCH /api/authn/principals/:id`（scopes 调整，须全部命中权限目录或恰为
   `['*']`）+ `POST /api/authn/principals/:id/rotate-secret`（clientId 不变、旧 secret 立即失效、新值仅此
