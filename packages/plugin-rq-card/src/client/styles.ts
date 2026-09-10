@@ -9,7 +9,7 @@
  */
 
 /** 插件 id（style 标签的 data-plugin 值，loader 卸载凭它回收）。 */
-const PLUGIN_ID = '@dsh-ops/plugin-rq-card'
+const PLUGIN_ID = '@01men/plugin-rq-card'
 
 /** 样式表文本（全部类名以 rq- 前缀隔离，避免与宿主/其他插件冲突）。 */
 const SHEET = `

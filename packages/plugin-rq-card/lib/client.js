@@ -1,6 +1,6 @@
-/* rq-card-build-id: 201492e1778a307b */
+/* rq-card-build-id: 13463168c9efee80 */
 (function () {
-  var PLUGIN_ID = "@dsh-ops/plugin-rq-card";
+  var PLUGIN_ID = "@01men/plugin-rq-card";
   var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };
   var note = function (stage, error) {
     var entry = { at: new Date().toISOString(), stage: stage };
@@ -77,7 +77,7 @@ function deriveExecutionState(input) {
 }
 
 // src/wire.ts
-var CONSOLE_BASE = "/rq";
+var CONSOLE_BASE = "/gate01";
 var FEEDBACK_ENDPOINT = `${CONSOLE_BASE}/api/usage/feedback`;
 var SLOT_TOOLVIEW = "tool.call.toolview";
 var SLOT_ASSISTANT_ACTIONS = "conversation.chat.assistant-actions";
@@ -432,7 +432,7 @@ var zh = {
   "card.blocked.down": "\u670D\u52A1\u6682\u4E0D\u53EF\u7528\uFF0C\u6062\u590D\u540E\u5373\u53EF\u91CD\u8BD5",
   "card.blocked.binding-invalid": "\u8EAB\u4EFD\u7ED1\u5B9A\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u7ED1\u5B9A",
   "card.blocked.invoke-error": "\u6267\u884C\u51FA\u9519\uFF0C\u8BE6\u89C1\u7ED3\u679C\u4FE1\u606F",
-  // ── 执行卡：阻断行动按钮（跳 /rq 控制台对应页，同源带登录态）──
+  // ── 执行卡：阻断行动按钮（跳 /gate01 控制台对应页，同源带登录态）──
   "card.action.nas-authz-deny": "\u7533\u8BF7\u8BBF\u95EE",
   "card.action.quota-exhausted": "\u7533\u8BF7\u989D\u5EA6",
   "card.action.pdp-unreachable": "\u67E5\u770B\u5E73\u53F0\u72B6\u6001",
@@ -454,7 +454,7 @@ var zh = {
   "settings.refresh": "\u5237\u65B0\u72B6\u6001",
   "settings.open.wizard": "\u6253\u5F00\u8FDE\u63A5\u5411\u5BFC",
   "settings.open.panel": "\u6253\u5F00\u6995\u5668\u5DE5\u4F5C\u53F0",
-  "settings.hint": "\u8FDE\u63A5\u5BBF\u4E3B\uFF08\u9009\u62E9 IP\uFF09\u5E76\u5728\u9762\u677F\u5B8C\u6210\u9489\u9489/\u8D26\u53F7\u767B\u5F55\uFF1B\u9762\u677F\u5730\u5740 /rq/panel/\u3002",
+  "settings.hint": "\u8FDE\u63A5\u5BBF\u4E3B\uFF08\u9009\u62E9 IP\uFF09\u5E76\u5728\u9762\u677F\u5B8C\u6210\u9489\u9489/\u8D26\u53F7\u767B\u5F55\uFF1B\u9762\u677F\u5730\u5740 /gate01/panel/\u3002",
   // ── 会话视图 Tab「榕器工作台」（M3）──
   "view.workbench": "\u6995\u5668\u5DE5\u4F5C\u53F0",
   "view.open.external": "\u5728\u6D4F\u89C8\u5668\u6253\u5F00",
@@ -500,14 +500,14 @@ var en = {
   "settings.refresh": "Refresh",
   "settings.open.wizard": "Open connect wizard",
   "settings.open.panel": "Open RongQi workbench",
-  "settings.hint": "Link a host (pick an IP) and sign in with DingTalk/account on the panel; panel lives at /rq/panel/.",
+  "settings.hint": "Link a host (pick an IP) and sign in with DingTalk/account on the panel; panel lives at /gate01/panel/.",
   "view.workbench": "RongQi workbench",
   "view.open.external": "Open in browser",
   "overlay.unlinked": "RongQi: host not linked \u2014 click to open the wizard"
 };
 
 // src/client/styles.ts
-var PLUGIN_ID = "@dsh-ops/plugin-rq-card";
+var PLUGIN_ID = "@01men/plugin-rq-card";
 var SHEET = `
 .rq-ecard{border:1px solid var(--rq-ecard-edge,#e2e6ee);border-radius:10px;padding:8px 12px;
   margin:4px 0;font-size:13px;line-height:1.5;background:var(--rq-ecard-bg,#fff);max-width:640px}
@@ -594,7 +594,7 @@ function ensureStyles() {
 
 // src/client/index.ts
 var NS = "rq-card";
-var PLUGIN_ID2 = "@dsh-ops/plugin-rq-card";
+var PLUGIN_ID2 = "@01men/plugin-rq-card";
 var RQ_TOOL_NAMES = [
   // 资产调运（四态主战场）
   "mcp_invoke",

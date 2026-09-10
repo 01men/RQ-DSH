@@ -116,6 +116,26 @@ selftest 对照：`宿主连接向导` 分节（50 项，含向导 jsdom DOM 全
 归属建议：宿主侧文档「遗留 1」的整包同步时随包采纳；不采纳则定制侧把该节移入
 `docs/plan-dsh-plugin-first.md` 并还原 README（收敛检查红项清零）。
 
+## I. 「01门」改名装配漂移（plan-gate01 Phase 1，2026-09-10）——宿主面受控值改动
+
+本分支产品收缩为「01门」（AI 代理与人类的协作前台，定义见 docs/plan-gate01.md），根包改名
+`dsh-enterprise-ops` → `@01men/gate-01`、定制包 scope `@dsh-ops/*` → `@01men/*`（仅定制三包）、
+挂载前缀 `/rq` → `/gate01`。由此产生以下**宿主面文件受控漂移**（全部为值/装配改动，零逻辑改动），
+主分支侧按「采纳/不采纳」定性；不采纳时定制侧在收敛检查中拆除或豁免登记：
+
+| 文件 | 改动 | 定性说明 |
+|---|---|---|
+| `packages/platform-core/src/version.ts:12` | `PLATFORM_PACKAGE` 值 `'dsh-enterprise-ops'` → `'@01men/gate-01'`（+注释） | 运行期向上解析仓库根的判据，必须跟随根包名，否则版本定位/自更新根目录错乱。宿主面唯一源码值改动 |
+| `src/boot-all.ts:26-27` | panel-core / dingtalk-bridge 两行 import scope `@dsh-ops` → `@01men` | 跟随定制包改名，其余 18 行宿主面包 import 不动 |
+| `cordis.yml` | `externalBase`/`mountPath` `/rq` → `/gate01`；rq-card entry name → `@01men/plugin-rq-card` | 装配配置跟随产品挂载前缀与包名 |
+| `cordis.patch.yml` | 同上 + 全部 entry 前缀 `dsh-enterprise-ops/` → `@01men/gate-01/` | 同上（patch 收缩为 4×dist 见 plan-gate01 Phase 3，另行登记） |
+| 根 `package.json` | name → `@01men/gate-01`；dependencies 键 → `@01men/plugin-rq-card` | 定制分支产品定义，**不回流**（main 的根包名由 main 侧自定） |
+
+配套：rq-card 数据文件 `rq-host-link.json` → `gate01-host-link.json`（定制面，不回流）；
+panel SPA localStorage 键 `heng_ops_*` → `gate01_*`（panel 定制面；**console 的 `heng_ops_*` 未动**）；
+`probeHub` 探测序列 `['/gate01','/rq','']`（兼容宿主轨 `/rq` 与 01门 `/gate01` 两种挂载形态）。
+selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探针/dist 新鲜度断言）。
+
 ## 决策回执（请 main 侧填写后回传）
 
 | 域 | 采纳？ | 备注 |
@@ -128,6 +148,7 @@ selftest 对照：`宿主连接向导` 分节（50 项，含向导 jsdom DOM 全
 | F mcp/app riskLevel 水印 | | 依赖 A（plugin-audit 底座） |
 | G1 远程登录回跳闭环（next + 自助 entry_ticket） | | 采纳后定制侧向导自动升级闭环 |
 | G2 modelgw 流式化 | | 可选 |
-| G3 拷贝安装形态 TS 装载（dsh loader 预剥离 / 平台预构建分发） | | 「全新 dsh 拷贝安装完整体验」最后一公里；源码/链接形态已实证闭环 |
+| G3 拷贝安装形态 TS 装载（dsh loader 预剥离 / 平台预构建分发） | | 「全新 dsh 拷贝安装完整体验」最后一公里；源码/链接形态已实证闭环。**01门产物已自解**（预构建 dist 入库，plan-gate01 Phase 1）；宿主面包仍挂起 |
+| I 01门改名装配漂移 | | 定性 PLATFORM_PACKAGE/boot-all/cordis 装配是否随根包名演进 |
 
 未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）。

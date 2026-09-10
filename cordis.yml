@@ -13,7 +13,7 @@
 #   - provideToolRuntime=false：完整 dsh 自带 ToolRuntime（ctx.tools），
 #     平台插件注册的全部运维工具将直接对模型可见、可被调用
 #   - startHttp=false + plugin-dsh-bridge：榕器数据面（REST/控制台 SPA/docs/mcp）
-#     以 /rq 前缀挂进 dsh webServer——单进程单入口（dsh web 端口即唯一入口），
+#     以 /gate01 前缀挂进 dsh webServer——单进程单入口（dsh web 端口即唯一入口），
 #     独立进程形态（node src/main.ts）保留为开发形态，两种形态不再要求并跑
 - insert:
     - id: ops-platform-core
@@ -22,8 +22,8 @@
         provideToolRuntime: false
         startHttp: false
         http:
-          # 对外前缀：OIDC 授权页 302 等「根绝对路径」构造据此保持 /rq 自洽
-          externalBase: /rq
+          # 对外前缀：OIDC 授权页 302 等「根绝对路径」构造据此保持 /gate01 自洽
+          externalBase: /gate01
     # connect 必须先于业务插件加载：client 角色要在业务工具注册前完成代理包裹
     - id: ops-connect
       name: '<PROJECT_ROOT>/packages/plugin-connect/src/index.ts'
@@ -72,15 +72,15 @@
     # 钉钉桥接（群桥/出向投递/审批推送/告警通道）：订阅 panel.message.created / audit.alert.fired
     - id: ops-dingtalk-bridge
       name: '<PROJECT_ROOT>/packages/plugin-dingtalk-bridge/src/index.ts'
-    # 单进程单入口：把榕器数据面挂进 dsh webServer（/rq 前缀），必须在 console 之后装配
+    # 单进程单入口：把榕器数据面挂进 dsh webServer（/gate01 前缀），必须在 console 之后装配
     - id: ops-dsh-bridge
       name: '<PROJECT_ROOT>/packages/plugin-dsh-bridge/src/index.ts'
       config:
-        mountPath: /rq
+        mountPath: /gate01
     # 会话侧注入插件（WP-06）：四态执行卡 + 👍/👎 反馈条（dsh.client 双面插件）。
     # name 必须写包名而非源码路径：client-modules 用 require.resolve('<条目>/package.json')
     # 解析包元数据，文件路径会被负判为「非 client 包」且永久缓存（spike §4.2）。
     # 启动前必须先构建浏览器半（激活期缺 bundle 会响亮抛错、宿主启动失败，spike §4.4）：
     #   node packages/plugin-rq-card/build.mjs   →  packages/plugin-rq-card/lib/client.js
     - id: rq-card
-      name: '@dsh-ops/plugin-rq-card'
+      name: '@01men/plugin-rq-card'

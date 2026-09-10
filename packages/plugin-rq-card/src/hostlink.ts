@@ -20,7 +20,7 @@
  *      白名单外 403；SSE（/api/panel/stream）不透传（前端走既有 30s 轮询降级）。
  *   3. 代理只透传 Authorization 头（不带 Cookie）、redirect: 'manual'（令牌不随 302 外泄）。
  *
- * 【配置落盘】<dataDir>/rq-host-link.json（0600，参照 connect-client.json 惯例）。
+ * 【配置落盘】<dataDir>/gate01-host-link.json（0600，参照 connect-client.json 惯例）。
  */
 import { existsSync, readFileSync, writeFileSync, unlinkSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
@@ -34,7 +34,7 @@ export interface HostLinkConfig {
   mode: 'none' | 'local' | 'remote'
   /** remote 模式下的宿主基址（如 http://192.168.1.5:3080）。 */
   hubBase?: string
-  /** 宿主数据面挂载前缀：形态 B（dsh 挂载）为 '/rq'；形态 A（独立宿主）为 ''。探测时自动判定。 */
+  /** 宿主数据面挂载前缀：形态 B（dsh 挂载）为 '/gate01'（01门装态）或 '/rq'（上游宿主轨）；形态 A（独立宿主）为 ''。探测时自动判定。 */
   hubMountPrefix?: string
   /** 连接备注名（向导里可读的标识）。 */
   label?: string
@@ -48,7 +48,7 @@ export interface HubProbe {
   status: number
   /** 宿主平台版本（/api/health 返回时透出）。 */
   version?: string
-  /** 数据面挂载前缀（探测命中 '/rq' 或 ''）。 */
+  /** 数据面挂载前缀（探测命中 '/gate01'、'/rq' 或 ''）。 */
   mountPrefix?: string
 }
 
@@ -118,7 +118,7 @@ export class HostLinkService {
 
   constructor(ctx: Context, options: HostLinkOptions = {}) {
     this.ctx = ctx
-    this.configFile = join(options.dataDir ?? ctx.opsStorage.dataDirPath, 'rq-host-link.json')
+    this.configFile = join(options.dataDir ?? ctx.opsStorage.dataDirPath, 'gate01-host-link.json')
     this.config = this.load()
     this.scanPorts = options.scanPorts ?? DEFAULT_SCAN_PORTS
   }
@@ -170,15 +170,16 @@ export class HostLinkService {
   // ---------------------------------------------------------------- 探测与扫描
 
   /**
-   * 探测宿主：依次试 `${base}/rq/api/health`（dsh 挂载形态）与 `${base}/api/health`（独立宿主）。
+   * 探测宿主：依次试 `${base}/gate01/api/health`（01门装态）、`${base}/rq/api/health`
+   * （宿主轨全量形态，上游装配仍挂 /rq）与 `${base}/api/health`（独立宿主）。
    * 命中即返回，携带自动判定的挂载前缀。
    *
-   * 【严格判据（Bug1 修复）】独立宿主对 `/rq/api/health` 这类未匹配路径会以 SPA 兜底返回
-   * 200 HTML——只看 HTTP 200 会把挂载前缀误判成 '/rq'（钉钉登录跳错地址、代理打错路径）。
+   * 【严格判据（Bug1 修复）】独立宿主对 `/gate01/api/health` 这类未匹配路径会以 SPA 兜底返回
+   * 200 HTML——只看 HTTP 200 会把挂载前缀误判成挂载形态（登录跳错地址、代理打错路径）。
    * 必须解析出健康 JSON 信封（ok===true）才算命中，HTML/非 JSON 一律视为该前缀不可用。
    */
   async probeHub(hubBase: string): Promise<HubProbe> {
-    for (const mountPrefix of ['/rq', '']) {
+    for (const mountPrefix of ['/gate01', '/rq', '']) {
       const url = `${hubBase}${mountPrefix}/api/health`
       try {
         const response = await fetch(url, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS * 4), headers: { accept: 'application/json' } })

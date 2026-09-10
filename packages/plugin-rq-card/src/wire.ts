@@ -1,18 +1,18 @@
 /**
- * @dsh-ops/plugin-rq-card —— 通道常量与载荷类型（wire 层）。
+ * @01men/plugin-rq-card —— 通道常量与载荷类型（wire 层）。
  *
  * 【浏览器安全】本文件被宿主半与浏览器半共同消费：只允许常量与纯类型，
  * 零 Node 内建、零包依赖——可被任意一侧（含浏览器 bundle）内联而不泄漏
  * 运行时身份（对齐 dsh tsdown.client.ts 的 INLINE_SAFE 判据）。
  *
  * 【数据回流选型（spike §4.3 二选一）】走同源 REST：浏览器直接 fetch 到
- * plugin-dsh-bridge 已挂在 /rq 前缀的榕器数据面，复用榕器自身鉴权（rq_sid
+ * plugin-dsh-bridge 已挂在 /gate01 前缀的榕器数据面，复用榕器自身鉴权（rq_sid
  * Cookie）与审计；不新增宿主 RPC 通道（connection.rpc 的 loopback 判定在
  * 反代/远端访问场景有不确定性，spike 风险 R6）。
  */
 
 /** 榕器数据面对外前缀（plugin-dsh-bridge mountPath，单进程单入口）。 */
-export const CONSOLE_BASE = '/rq'
+export const CONSOLE_BASE = '/gate01'
 
 /** 👍/👎 反馈薄端点（同源 REST 相对路径）。端点本体由 WP-07 实现
  * （POST → usage.record 零价快照，主体经绑定身份归因）；端点未上线期间
@@ -22,7 +22,7 @@ export const FEEDBACK_ENDPOINT = `${CONSOLE_BASE}/api/usage/feedback`
 /** 反馈评分（WP-07 契约：score 只有两值）。 */
 export type FeedbackScore = 'up' | 'down'
 
-/** POST /rq/api/usage/feedback 请求体（note 可选；不传即纯评分）。 */
+/** POST /gate01/api/usage/feedback 请求体（note 可选；不传即纯评分）。 */
 export interface FeedbackPayload {
   messageId: string
   score: FeedbackScore
@@ -48,7 +48,7 @@ export const SLOT_SETTINGS = 'settings.section' as const
 /** M3：会话视图 Tab 环（ui-trajectory 同款挂载位）——「榕器工作台」整页内嵌面板。 */
 export const SLOT_VIEW = 'conversation.view' as const
 
-/** 宿主连接状态端点（同源根绝对：/rq 挂载之下的免登向导命名空间）。 */
+/** 宿主连接状态端点（同源根绝对：/gate01 挂载之下的免登向导命名空间）。 */
 export const LINK_ENDPOINT = `${CONSOLE_BASE}/rqcard/link` as const
 
 /** 榕器面板入口（同源；?embed=1 = 被 dsh 视图 Tab 内嵌形态，面板侧据此做嵌套防护）。 */

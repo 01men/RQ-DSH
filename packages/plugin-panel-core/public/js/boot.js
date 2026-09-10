@@ -2,23 +2,23 @@
  * 面板启动引导：BASE 推导修正 + 票据免登 + 宿主连接探测 + 动态装载应用。
  *
  * BASE 修正（review-dsh-agent-panel-v2 Phase 1 第 5 条）：console api.js 的
- * `new URL('.', baseURI)` 在 /rq/panel/ 下会推导成 /rq/panel（缺陷），这里改为
- * 「截取 /panel 前缀之前的部分」——独立形态 /panel/ → ''，挂载形态 /rq/panel/ → '/rq'。
+ * `new URL('.', baseURI)` 在 /gate01/panel/ 下会推导成 /gate01/panel（缺陷），这里改为
+ * 「截取 /panel 前缀之前的部分」——独立形态 /panel/ → ''，挂载形态 /gate01/panel/ → '/gate01'。
  *
  * M2 宿主连接探测（fresh-install 铁律）：装好插件的全新 dsh 上，面板启动时向本机
  * 插件的 /rqcard/link 问一次「连的哪个宿主」——
  *   - remote：令牌作用域切到该宿主 + 全部 API 走本机远端代理（api.js setRemoteProxy）；
  *   - none 且无会话：渲染连接向导（wizard.js）——选宿主/扫描 IP/本机初始化/登录；
  *   - local / 探测失败（独立形态未装 rq-card）：维持既有行为。
- * 向导端点在 /rq（非 /api）命名空间，须带 x-rqcard-call 头（服务端 CSRF 防线）。
+ * 向导端点在 /gate01（非 /api）命名空间，须带 x-rqcard-call 头（服务端 CSRF 防线）。
  */
 const path = location.pathname
 const panelIdx = path.indexOf('/panel')
 export const BASE = panelIdx > 0 ? path.slice(0, panelIdx) : ''
 
-const TOKEN_KEY = 'heng_ops_token'
-const REFRESH_KEY = 'heng_ops_refresh'
-const USER_KEY = 'heng_ops_user'
+const TOKEN_KEY = 'gate01_token'
+const REFRESH_KEY = 'gate01_refresh'
+const USER_KEY = 'gate01_user'
 
 async function exchangeEntryTicket(ticket) {
   const response = await fetch(`${BASE}/api/auth/entry-ticket-session`, {
@@ -34,7 +34,7 @@ async function exchangeEntryTicket(ticket) {
 /**
  * 远端形态票据兑换（G1 回跳闭环的消费侧）：宿主签发的回跳票据必须回宿主兑换
  * （本机 authn 兑不了别家的票）——经本机插件代理转发（白名单端点 + 向导头），
- * 兑得的宿主会话按连接作用域隔离保存（heng_ops_token@<hubBase>），与本机/其他连接互不串台。
+ * 兑得的宿主会话按连接作用域隔离保存（gate01_token@<hubBase>），与本机/其他连接互不串台。
  */
 async function exchangeEntryTicketRemote(ticket, apiModule) {
   const response = await fetch(`${BASE}/rqcard/proxy/api/auth/entry-ticket-session`, {
@@ -85,8 +85,8 @@ function saveSession(data) {
 /**
  * 宿主桥探测 + 宿主会话直通（登录打通）：dsh 宿主下 rq_sid Cookie 已绑定宿主身份时，
  * 经 POST /dsh-bridge/session（同源收紧）兑换平台会话——零二次登录。
- * 路径必须根绝对（不带 BASE）：/dsh-bridge/* 注册在 dsh webServer 根上，挂载形态并不落在 /rq 之内
- * （带 BASE 会请求 /rq/dsh-bridge/* → 剥前缀后无此路由 → 静默 miss）。
+ * 路径必须根绝对（不带 BASE）：/dsh-bridge/* 注册在 dsh webServer 根上，挂载形态并不落在 /gate01 之内
+ * （带 BASE 会请求 /gate01/dsh-bridge/* → 剥前缀后无此路由 → 静默 miss）。
  * 独立形态下 /dsh-bridge/* 不存在（回落 SPA HTML → json 为 null），静默跳过。
  * 返回 hostBridge 供面板侧栏决定是否展示「Agent 对话」入口（仅 dsh 宿主形态有对话面）。
  */

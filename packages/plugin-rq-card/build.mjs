@@ -3,7 +3,7 @@
  * build.mjs —— 产出浏览器半 bundle lib/client.js（WP-06 交付物 4）。
  *
  * 【为什么必须构建（spike §4.4 构建门禁）】client-modules 对声明的 client 包
- * 伺服 /plugins/@dsh-ops/plugin-rq-card/client.js；产物缺失时宿主激活期响亮抛错
+ * 伺服 /plugins/@01men/plugin-rq-card/client.js；产物缺失时宿主激活期响亮抛错
  * （MissingClientBundleError → ClientPackageCompositionError），`dsh web` 直接
  * 启动失败。因此启动前必须先跑本脚本。
  *
@@ -12,7 +12,7 @@
  * banner/footer 拼 closure-factory 形状——
  *
  *     var module = { exports: {} }; var exports = module.exports;
- *     window.__ModuleLoader__.load({ id: "@dsh-ops/plugin-rq-card", factory: (require) => {
+ *     window.__ModuleLoader__.load({ id: "@01men/plugin-rq-card", factory: (require) => {
  *       ...bundle...
  *       return module.exports; } });
  *
@@ -40,7 +40,7 @@ import { fileURLToPath } from 'node:url'
 import { BUILD_ID_HEADER, computeClientBuildId } from './build-id.mjs'
 
 const PKG_ROOT = fileURLToPath(new URL('.', import.meta.url))
-const PLUGIN_ID = '@dsh-ops/plugin-rq-card'
+const PLUGIN_ID = '@01men/plugin-rq-card'
 
 /** 平台模块表（镜像 dsh packages/client/web/src/platform.ts，升级 dsh 时同步）。 */
 const PLATFORM_MODULES = [
@@ -163,7 +163,7 @@ async function main() {
       js: [
         `/* ${BUILD_ID_HEADER}: ${computeClientBuildId(PKG_ROOT)} */`,
         '(function () {',
-        '  var PLUGIN_ID = "@dsh-ops/plugin-rq-card";',
+        '  var PLUGIN_ID = "@01men/plugin-rq-card";',
         '  var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };',
         '  var note = function (stage, error) {',
         '    var entry = { at: new Date().toISOString(), stage: stage };',
@@ -243,7 +243,7 @@ async function main() {
   }
   const size = statSync(outfile).size
   console.log(`[rq-card/build] OK → packages/plugin-rq-card/lib/client.js（${(size / 1024).toFixed(1)} KiB）`)
-  console.log('[rq-card/build] 提示：dsh web 启动会伺服 /plugins/@dsh-ops/plugin-rq-card/client.js；lib/ 建议纳入版本管理（激活期缺产物=宿主启动失败）。')
+  console.log('[rq-card/build] 提示：dsh web 启动会伺服 /plugins/@01men/plugin-rq-card/client.js；lib/ 建议纳入版本管理（激活期缺产物=宿主启动失败）。')
 }
 
 main().catch((error) => {

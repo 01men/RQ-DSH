@@ -9,7 +9,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 /** 平台包名（根 package.json 的 name，安装形态下同样成立）。 */
-export const PLATFORM_PACKAGE = 'dsh-enterprise-ops'
+// 【受控漂移 · F 清单登记】根包改名 dsh-enterprise-ops → @01men/gate-01（plan-gate01 Phase 1）：
+// 本常量是运行期向上解析仓库根的判据，必须跟随根包名，否则版本定位/自更新根目录全部错乱。
+// 宿主面唯一值改动，docs/handoff-f-remainder-to-main.md 登记，上游 merge 冲突时按 AGENTS.md 铁律 5 定性。
+export const PLATFORM_PACKAGE = '@01men/gate-01'
 
 export type InstallMode = 'source' | 'bundle'
 

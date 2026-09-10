@@ -30,7 +30,7 @@
  *   5.（兜底在宿主工具侧）工具结果文本始终携带 markdown 摘要 + /rq 链接，
  *      见 src/index.ts 的 summarizeForToolResult 契约；
  *   6. 降级标志在场时经 shell.overlay 挂「卡片插件未生效」角标（槽在才挂）。
- * @module @dsh-ops/plugin-rq-card/client
+ * @module @01men/plugin-rq-card/client
  */
 
 import type { ClientContext, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
@@ -62,7 +62,7 @@ export { deriveExecutionState } from './state.ts'
 const NS = 'rq-card'
 
 /** 插件 id（与 package.json name、boot 图行 id 一致）。 */
-const PLUGIN_ID = '@dsh-ops/plugin-rq-card'
+const PLUGIN_ID = '@01men/plugin-rq-card'
 
 /**
  * 榕器工具名名录（各插件包 tools.ts 的登记清单，截至 WP-06）。
@@ -387,7 +387,7 @@ export function apply(ctx: ClientContext): void {
   })
 
   // 【冒烟自证（spike 风险 R8 的首个联调里程碑）】boot 后可在控制台确认：
-  //   window.__DSH_BOOT__ 含 { id: '@dsh-ops/plugin-rq-card', ... } 图行，
+  //   window.__DSH_BOOT__ 含 { id: '@01men/plugin-rq-card', ... } 图行，
   //   且本日志出现——两件事齐了，说明「空插件上链」成立。
   console.info('[rq-card] client plugin applied:', PLUGIN_ID)
 }

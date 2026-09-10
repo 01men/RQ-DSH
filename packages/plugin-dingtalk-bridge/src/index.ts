@@ -1,5 +1,5 @@
 /**
- * @dsh-ops/plugin-dingtalk-bridge —— REST 面 + 事件装配（review-dsh-agent-panel-v2 Phase 3）。
+ * @01men/plugin-dingtalk-bridge —— REST 面 + 事件装配（review-dsh-agent-panel-v2 Phase 3）。
  *
  * 全部 REST 走 guarded（权限点：dingtalk.message.send / panel.read），自注册路由推入
  * httpServer.routeMatrix 共享登记处（RBAC 断言网覆盖义务与 panel-core 一致）。

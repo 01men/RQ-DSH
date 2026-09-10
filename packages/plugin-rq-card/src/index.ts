@@ -1,5 +1,5 @@
 /**
- * @dsh-ops/plugin-rq-card —— dsh 会话侧注入插件，宿主半（WP-06 + M2 宿主连接）。
+ * @01men/plugin-rq-card —— dsh 会话侧注入插件，宿主半（WP-06 + M2 宿主连接）。
  *
  * 双面结构：
  *   - 浏览器半（src/client/** → lib/client.js）：四态执行卡 + 👍/👎 反馈条 +（M2/M3）
@@ -15,11 +15,11 @@
  *     node packages/plugin-rq-card/build.mjs     # 产出 lib/client.js（含 build-id 指纹）
  *
  * cordis.yml / cordis.patch.yml 的 loader 条目 name 必须是包名
- * '@dsh-ops/plugin-rq-card'（client-modules 用 require.resolve 解析包元数据，
+ * '@01men/plugin-rq-card'（client-modules 用 require.resolve 解析包元数据，
  * 源码文件路径会被负判为「非 client 包」且永久缓存，spike §4.2）。
  *
  * 【markdown 兜底契约（spike §5 降级预案第 5 条，宿主工具侧义务）】
- * 榕器工具的 tool/result 文本内容必须始终携带纯 markdown 摘要 + /rq 控制台链接：
+ * 榕器工具的 tool/result 文本内容必须始终携带纯 markdown 摘要 + /gate01 控制台链接：
  * 客户端富卡片只是把同一信息「升级」呈现；上游升级导致注入面失效时，用户
  * 体验自动回落为该文本，无需发版。summarizeForToolResult() 是该契约的参考
  * 实现，供工具侧（platform-core / plugin-mcp 等）在组织工具结果时复用——
@@ -39,7 +39,7 @@ export interface ToolResultSummaryInput {
   toolName: string
   /** 一句话业务摘要（用户最关心的那件事）。 */
   summary: string
-  /** /rq 控制台对应资源页 hash 路由（如 #/mcp）；缺省不生成链接。 */
+  /** /gate01 控制台对应资源页 hash 路由（如 #/mcp）；缺省不生成链接。 */
   consoleHash?: string
   /** 关键明细（键值对，逐行渲染；保持精炼，摘要不是日志）。 */
   details?: Readonly<Record<string, string | number>>
@@ -55,7 +55,7 @@ export interface ToolResultSummaryInput {
  *   **mcp_invoke** ⚠ 执行受阻 —— 无访问权限
  *   - 服务：inventory（online）
  *   - 原因：nas-authz deny
- *   👉 [到榕器控制台处理](/rq#/nas-authz)
+ *   👉 [到榕器控制台处理](/gate01#/nas-authz)
  *
  * 返回值直接作为 tool/result 文本内容的一部分（不依赖任何客户端插件）。
  */

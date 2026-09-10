@@ -608,12 +608,12 @@ try {
     for (const entry of patchEntries) {
       const name = String(entry?.name ?? '')
       let localPath = null
-      if (name.startsWith('dsh-enterprise-ops/')) {
-        // 形如 dsh-enterprise-ops/packages/<dir>/src/index.ts（相对本仓根）
-        localPath = name.slice('dsh-enterprise-ops/'.length)
-      } else if (name.startsWith('@dsh-ops/')) {
+      if (name.startsWith('@01men/gate-01/')) {
+        // 形如 @01men/gate-01/packages/<dir>/src/index.ts（相对本仓根）
+        localPath = name.slice('@01men/gate-01/'.length)
+      } else if (name.startsWith('@01men/')) {
         // 安装形态以包名解析（client-modules 走 require.resolve）；本仓等价物 = packages/<包目录>
-        const dir = name.slice('@dsh-ops/'.length)
+        const dir = name.slice('@01men/'.length)
         try {
           const pkg = JSON.parse(readFileSync(join('packages', dir, 'package.json'), 'utf8'))
           const target = typeof pkg.exports?.['.'] === 'string' ? pkg.exports['.'] : pkg.exports?.['.']?.default
@@ -628,13 +628,13 @@ try {
 
     // -- 2. 三链一致：cordis.patch.yml ↔ cordis.yml ↔ boot-all.ts（防「加了包漏登记」）--
     const patchDirs = patchEntries.map((entry) => String(entry?.name ?? '')).flatMap((name) => {
-      if (name.startsWith('dsh-enterprise-ops/packages/')) return [name.slice('dsh-enterprise-ops/packages/'.length).split('/')[0]]
-      if (name.startsWith('@dsh-ops/')) return [name.slice('@dsh-ops/'.length)]
+      if (name.startsWith('@01men/gate-01/packages/')) return [name.slice('@01men/gate-01/packages/'.length).split('/')[0]]
+      if (name.startsWith('@01men/')) return [name.slice('@01men/'.length)]
       return []
     })
     const DSH_ONLY = new Set(['plugin-rq-card', 'plugin-dsh-bridge']) // dsh 宿主专属（客户端 bundle / webServer 挂载），独立形态不装配
     const bootSource = readFileSync('src/boot-all.ts', 'utf8')
-    const bootDirs = [...bootSource.matchAll(/from '(@dsh-ops\/[\w-]+)'/g)].map((match) => match[1].slice('@dsh-ops/'.length))
+    const bootDirs = [...bootSource.matchAll(/from '((?:@dsh-ops|@01men)\/[\w-]+)'/g)].map((match) => match[1].split('/')[1])
     const patchOnly = patchDirs.filter((dir) => !DSH_ONLY.has(dir) && !bootDirs.includes(dir))
     const bootOnly = bootDirs.filter((dir) => !patchDirs.includes(dir))
     check('三链一致：boot-all ↔ patch 服务面插件一一对应（dsh 专属条目豁免）',
@@ -653,6 +653,14 @@ try {
     check('rq-card 浏览器半 bundle 新鲜（build-id 指纹一致）',
       Boolean(builtId) && expectedId === builtId, `expected=${expectedId} built=${builtId}`)
 
+    // -- 3.5. 随附包 dist 预构建产物新鲜度（plan-gate01 G3 自解：改随附包 src 忘跑 build:dist = 过期装机包）--
+    const { DIST_PACKAGES, computeDistBuildId, readDistBuildId } = await import('../scripts/dist-build-id.mjs')
+    const expectedDistId = computeDistBuildId(process.cwd())
+    const stale = DIST_PACKAGES.map((pkg) => [pkg, readDistBuildId(process.cwd(), pkg)])
+      .filter(([, built]) => built !== expectedDistId)
+      .map(([pkg, built]) => `${pkg}(built=${built ?? 'missing'} expected=${expectedDistId})`)
+    check('随附包 dist 预构建产物新鲜（4 包 build-id 与 src 树指纹一致）', stale.length === 0, stale.join(' | '))
+
     // -- 4. 装机 files 覆盖：运行期资产必须落在根 package.json files 根之下 --
     const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
     const filesRoots = ['packages', 'src', 'cordis.patch.yml', 'cordis.yml', 'README.md', 'LICENSE']
@@ -660,7 +668,7 @@ try {
     check('dsh.bundle.patch 契约指向 cordis.patch.yml 且存在',
       rootPkg.dsh?.bundle?.patch === './cordis.patch.yml' && pathExists('cordis.patch.yml'))
     check('rq-card 包名安装形态可解析（根包声明 file: 依赖 → profile node_modules 就位，真机 rq-smoke 实证）',
-      typeof rootPkg.dependencies?.['@dsh-ops/plugin-rq-card'] === 'string',
+      typeof rootPkg.dependencies?.['@01men/plugin-rq-card'] === 'string',
       `dependencies=${JSON.stringify(rootPkg.dependencies ?? {})}`)
     check('dsh.compatibility 声明在场（dsh 版本区间 + profiles）',
       typeof rootPkg.dsh?.compatibility?.dsh === 'string' && Array.isArray(rootPkg.dsh?.compatibility?.profiles))
@@ -4265,9 +4273,9 @@ try {
   check('/docs 未知文档 404', docMissing.status === 404)
   // 路径穿越探测：字面 .. 与编码 %2e%2e 均被 URL 解析归一化（WHATWG 规范视编码点段为点段）→ 回落 SPA 兜底页，不泄露文件
   const docTraverseLiteral = await rawReq('GET', '/docs/../package.json')
-  check('/docs 字面 .. 穿越 → SPA 兜底页（不泄露文件）', docTraverseLiteral.status === 200 && String(docTraverseLiteral.headers['content-type']).startsWith('text/html') && !docTraverseLiteral.body.includes('"name": "dsh-enterprise-ops"'))
+  check('/docs 字面 .. 穿越 → SPA 兜底页（不泄露文件）', docTraverseLiteral.status === 200 && String(docTraverseLiteral.headers['content-type']).startsWith('text/html') && !docTraverseLiteral.body.includes('"name": "@01men/gate-01"'))
   const docTraverseEncoded = await rawReq('GET', '/docs/%2e%2e/package.json')
-  check('/docs 编码 %2e%2e 穿越 → SPA 兜底页（不泄露文件）', docTraverseEncoded.status === 200 && String(docTraverseEncoded.headers['content-type']).startsWith('text/html') && !docTraverseEncoded.body.includes('"name": "dsh-enterprise-ops"'))
+  check('/docs 编码 %2e%2e 穿越 → SPA 兜底页（不泄露文件）', docTraverseEncoded.status === 200 && String(docTraverseEncoded.headers['content-type']).startsWith('text/html') && !docTraverseEncoded.body.includes('"name": "@01men/gate-01"'))
   const spaStillOk = await rawReq('GET', '/')
   check('SPA 静态兜底不受影响（/ 仍返回控制台首页）', spaStillOk.status === 200 && String(spaStillOk.headers['content-type']).startsWith('text/html') && spaStillOk.body.includes('榕器'))
 
@@ -4975,7 +4983,7 @@ try {
     const bridgeDataDir = join(DATA_DIR, 'bridge-mount')
     await mkdir(bridgeDataDir, { recursive: true })
     const mountCtx = new Context()
-    await mountCtx.plugin(platformCore, { dataDir: bridgeDataDir, http: { port: 0, externalBase: '/rq' }, startHttp: false })
+    await mountCtx.plugin(platformCore, { dataDir: bridgeDataDir, http: { port: 0, externalBase: '/gate01' }, startHttp: false })
     // 完整业务树（等价 boot-all 依赖序；startHttp=false → 数据面经 bridge 挂载）：
     await mountCtx.plugin(resourceCore)
     await mountCtx.plugin(iam)
@@ -4998,7 +5006,7 @@ try {
     // 部门面板 + 钉钉桥接（review-dsh-agent-panel-v2）：与 boot-all 同序（console 之后）
     await mountCtx.plugin(panelCore)
     await mountCtx.plugin(dingtalkBridge)
-    await mountCtx.plugin(dshBridge, { mountPath: '/rq' })
+    await mountCtx.plugin(dshBridge, { mountPath: '/gate01' })
     mountCtx.httpServer.register('GET', '/api/__mount_probe', (exchange) => exchange.ok({ pong: exchange.path }), { access: 'authenticated' })
     // 将伪造 webServer 提供给 ctx 后正常装配（等价 dsh 形态：inject 完成后 apply）
     // 绑定服务显式构造（注册在真实 mountCtx 上，供 plugin-nas 出站归因读取）；
@@ -5011,14 +5019,14 @@ try {
     const bindingService = new dshBridge.IdentityBindingService(mountCtx, {})
     dshBridge.apply(
       { webServer: fakeWebServer, httpServer: mountCtx.httpServer, entryTickets: mountCtx.entryTickets, oidc: mountCtx.oidc, iam: mountCtx.iam, authn: mountCtx.authn, audit: mountCtx.audit, logger: (name) => mountCtx.logger(name), identityBinding: bindingService },
-      { mountPath: '/rq', oidcCredentialFile: join(bridgeDataDir, 'dsh-agent-credential.json') },
+      { mountPath: '/gate01', oidcCredentialFile: join(bridgeDataDir, 'dsh-agent-credential.json') },
     )
     check('bridge 向 webServer 注册挂载路由（/rq + /auth/entry + /dsh-bridge + /auth/oidc/*）',
-      captured.some((r) => r.kind === 'prefix' && r.path === '/rq') && captured.some((r) => r.kind === 'exact' && r.path === '/auth/entry')
+      captured.some((r) => r.kind === 'prefix' && r.path === '/gate01') && captured.some((r) => r.kind === 'exact' && r.path === '/auth/entry')
       && captured.some((r) => r.kind === 'prefix' && r.path === '/dsh-bridge') && captured.some((r) => r.kind === 'exact' && r.path === '/auth/oidc/start')
       && captured.some((r) => r.kind === 'exact' && r.path === '/auth/oidc/callback'),
       JSON.stringify(captured.map((r) => `${r.kind}:${r.path}`)))
-    check('externalBase 配置生效（/rq）', mountCtx.httpServer.externalBase === '/rq')
+    check('externalBase 配置生效（/gate01）', mountCtx.httpServer.externalBase === '/gate01')
 
     // -- M0-1 死信重放演练：消费 3 次失败入死信 → 修复后重投成功且不双计 ----------
     let drillFail = true
@@ -5075,38 +5083,38 @@ try {
       res.writeHead(404).end('sim-miss')
     })
     await new Promise((resolve) => sim.listen(0, '127.0.0.1', resolve))
-    // 完整树下数据面带 console 鉴权中间件：先经 /rq/api/auth/login 换 Bearer（基线初始口令文件）
+    // 完整树下数据面带 console 鉴权中间件：先经 /gate01/api/auth/login 换 Bearer（基线初始口令文件）
     const pwFile = join(bridgeDataDir, 'admin-initial-password.txt')
     const adminPassword = existsSync(pwFile)
       ? (readFileSync(pwFile, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('平台管理员'))[0] ?? '')
       : ''
-    const loginRes = await fetch(`http://127.0.0.1:${sim.address().port}/rq/api/auth/login`, {
+    const loginRes = await fetch(`http://127.0.0.1:${sim.address().port}/gate01/api/auth/login`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ username: 'admin', password: adminPassword || '自测兜底口令' }),
     })
     const adminToken = (await loginRes.json().catch(() => null))?.data?.token
-    check('/rq/api/auth/login 可用（单入口下登录链路通）', Boolean(adminToken), `status=${loginRes.status}`)
+    check('/gate01/api/auth/login 可用（单入口下登录链路通）', Boolean(adminToken), `status=${loginRes.status}`)
     const simGet = async (path, token) => fetch(`http://127.0.0.1:${sim.address().port}${path}`, {
       redirect: 'manual', headers: token ? { authorization: `Bearer ${token}` } : {},
     })
-    const probe = await simGet('/rq/api/__mount_probe', adminToken)
+    const probe = await simGet('/gate01/api/__mount_probe', adminToken)
     const probeBody = await probe.json().catch(() => null)
-    check('/rq/api/* 剥前缀后与独立形态路由等价（含 Bearer 鉴权链）', probe.status === 200 && probeBody?.data?.pong === '/api/__mount_probe', `status=${probe.status} body=${JSON.stringify(probeBody)}`)
-    const redir = await simGet('/rq')
-    check('/rq 302 归一到 /rq/（SPA 相对引用可解析）', redir.status === 302 && redir.headers.get('location') === '/rq/')
-    const spa = await simGet('/rq/')
-    check('/rq/ 伺服控制台 index.html（SPA fallback）', spa.status === 200 && (await spa.text()).includes('<!doctype html>'))
-    const asset = await simGet('/rq/js/app.js')
-    check('/rq/js/* 控制台静态资源按前缀命中', asset.status === 200 && String(asset.headers.get('content-type') ?? '').includes('javascript'), `status=${asset.status}`)
-    const panelSpa = await simGet('/rq/panel/')
-    check('/rq/panel/ 面板 SPA 经前缀挂载可达（宿主 web diff=0）', panelSpa.status === 200 && (await panelSpa.text()).includes('部门 Agent 工作台'), `status=${panelSpa.status}`)
-    const panelBareMounted = await simGet('/rq/panel')
-    check('/rq/panel 302 → /rq/panel/（externalBase 感知，与独立形态同语义）',
-      panelBareMounted.status === 302 && panelBareMounted.headers.get('location') === '/rq/panel/',
+    check('/gate01/api/* 剥前缀后与独立形态路由等价（含 Bearer 鉴权链）', probe.status === 200 && probeBody?.data?.pong === '/api/__mount_probe', `status=${probe.status} body=${JSON.stringify(probeBody)}`)
+    const redir = await simGet('/gate01')
+    check('/gate01 302 归一到 /gate01/（SPA 相对引用可解析）', redir.status === 302 && redir.headers.get('location') === '/gate01/')
+    const spa = await simGet('/gate01/')
+    check('/gate01/ 伺服控制台 index.html（SPA fallback）', spa.status === 200 && (await spa.text()).includes('<!doctype html>'))
+    const asset = await simGet('/gate01/js/app.js')
+    check('/gate01/js/* 控制台静态资源按前缀命中', asset.status === 200 && String(asset.headers.get('content-type') ?? '').includes('javascript'), `status=${asset.status}`)
+    const panelSpa = await simGet('/gate01/panel/')
+    check('/gate01/panel/ 面板 SPA 经前缀挂载可达（宿主 web diff=0）', panelSpa.status === 200 && (await panelSpa.text()).includes('部门 Agent 工作台'), `status=${panelSpa.status}`)
+    const panelBareMounted = await simGet('/gate01/panel')
+    check('/gate01/panel 302 → /gate01/panel/（externalBase 感知，与独立形态同语义）',
+      panelBareMounted.status === 302 && panelBareMounted.headers.get('location') === '/gate01/panel/',
       `status=${panelBareMounted.status} location=${panelBareMounted.headers.get('location')}`)
-    const spaMiss = await simGet('/rq/anything-else')
+    const spaMiss = await simGet('/gate01/anything-else')
     check('非 /api 未命中回落 SPA（与独立形态一致）', spaMiss.status === 200 && (await spaMiss.text()).includes('<!doctype html>'))
-    const apiMiss = await simGet('/rq/api/definitely-missing', adminToken)
+    const apiMiss = await simGet('/gate01/api/definitely-missing', adminToken)
     const apiMissBody = await apiMiss.json().catch(() => null)
     check('未匹配 API 404 JSON 不落静态（DEF-01）', apiMiss.status === 404 && apiMissBody?.error?.code === 'NOT_FOUND')
     const simMiss = await fetch(`http://127.0.0.1:${sim.address().port}/outside`)
@@ -5157,9 +5165,9 @@ try {
     check('宿主会话直通：Cookie 绑定身份兑换平台会话（token + user + permissions）',
       sessionRes.status === 200 && sessionBody?.ok === true && Boolean(sessionBody.data?.token) && Array.isArray(sessionBody.data?.user?.permissions) && sessionBody.data.user.permissions.length > 0,
       JSON.stringify(sessionBody?.error ?? sessionBody?.data?.user?.displayName))
-    const panelViaSession = await fetch(`${simOrigin}/rq/api/panel/depts`, { headers: { authorization: `Bearer ${sessionBody.data.token}` } })
+    const panelViaSession = await fetch(`${simOrigin}/gate01/api/panel/depts`, { headers: { authorization: `Bearer ${sessionBody.data.token}` } })
     const panelViaSessionBody = await panelViaSession.json().catch(() => null)
-    check('宿主会话直通：兑换令牌直通面板 RBAC 面（/rq/api/panel/depts 200）',
+    check('宿主会话直通：兑换令牌直通面板 RBAC 面（/gate01/api/panel/depts 200）',
       panelViaSession.status === 200 && panelViaSessionBody?.ok === true && Array.isArray(panelViaSessionBody.data?.depts) && panelViaSessionBody.data.depts.length === 5,
       `status=${panelViaSession.status}`)
     const sessionNoCookie = await fetch(`${simOrigin}/dsh-bridge/session`, { method: 'POST' })
@@ -5240,9 +5248,9 @@ try {
       }
 
       // -- 免登命名空间 + 向导头防线（console 鉴权中间件只拦 /api/*，/rqcard/* 可达）--
-      const noHeader = await fetch(`${simOrigin}/rq/rqcard/link`)
+      const noHeader = await fetch(`${simOrigin}/gate01/rqcard/link`)
       check('hostlink：缺 x-rqcard-call 头 403（跨站 drive-by 防线）', noHeader.status === 403, `status=${noHeader.status}`)
-      const linkNone = await wfetchSim('GET', '/rq/rqcard/link')
+      const linkNone = await wfetchSim('GET', '/gate01/rqcard/link')
       check('hostlink：未配置态（mode=none + 本机首启标记，免登可达）',
         linkNone.status === 200 && linkNone.body?.data?.mode === 'none' && linkNone.body.data.localFirstRun === true,
         JSON.stringify(linkNone.body))
@@ -5312,88 +5320,88 @@ try {
       const hubA = `http://127.0.0.1:${hubStubA.address().port}`
       const hubB = `http://127.0.0.1:${hubStubB.address().port}`
       try {
-        const scanRes = await wfetchSim('POST', '/rq/rqcard/link/scan', { body: { candidates: [hubA, hubB, 'http://127.0.0.1:1'] } })
+        const scanRes = await wfetchSim('POST', '/gate01/rqcard/link/scan', { body: { candidates: [hubA, hubB, 'http://127.0.0.1:1'] } })
         check('hostlink：扫描发现两类宿主（挂载前缀自动判定 /rq 与 空串）',
           scanRes.status === 200 && scanRes.body.data.hosts.length === 2
           && scanRes.body.data.hosts.some((host) => host.endpoint === hubA && host.mountPrefix === '/rq' && host.version === '9.9.9-hubA')
           && scanRes.body.data.hosts.some((host) => host.endpoint === hubB && host.mountPrefix === ''),
           JSON.stringify({ status: scanRes.status, body: scanRes.body }))
-        const linkRemote = await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: hubA, label: '自测宿主A' } })
+        const linkRemote = await wfetchSim('POST', '/gate01/rqcard/link/remote', { body: { hubBase: hubA, label: '自测宿主A' } })
         check('hostlink：连接远端宿主（探测可达才落盘，mountPrefix=/rq）',
           linkRemote.status === 200 && linkRemote.body.data.config.mode === 'remote' && linkRemote.body.data.config.hubMountPrefix === '/rq' && linkRemote.body.data.probe.reachable === true,
           JSON.stringify(linkRemote.body))
-        const linkRemoteBad = await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: 'http://127.0.0.1:1' } })
+        const linkRemoteBad = await wfetchSim('POST', '/gate01/rqcard/link/remote', { body: { hubBase: 'http://127.0.0.1:1' } })
         check('hostlink：不可达宿主被拒（400，不落盘）', linkRemoteBad.status === 400 && /不可达/.test(String(linkRemoteBad.body?.error?.message ?? '')), JSON.stringify({ status: linkRemoteBad.status, body: linkRemoteBad.body }))
 
         // -- 远端代理：白名单转发 + Authorization 透传 + 白名单外 403 --
-        const proxyLogin = await wfetchSim('POST', '/rq/rqcard/proxy/api/auth/login', {
+        const proxyLogin = await wfetchSim('POST', '/gate01/rqcard/proxy/api/auth/login', {
           body: { username: 'admin', password: 'whatever' },
           headers: { authorization: 'Bearer proxied-token-abc' },
         })
         check('hostlink：代理白名单内转发（宿主收到 Authorization 透传，响应原样回浏览器）',
           proxyLogin.status === 200 && hubSeen.logins === 1 && hubSeen.authz === 'Bearer proxied-token-abc' && proxyLogin.body?.data?.token === 'stub-hub-session',
           JSON.stringify({ status: proxyLogin.status, hubSeen, body: proxyLogin.body }))
-        const proxyPanel = await wfetchSim('GET', '/rq/rqcard/proxy/api/panel/depts')
+        const proxyPanel = await wfetchSim('GET', '/gate01/rqcard/proxy/api/panel/depts')
         check('hostlink：面板 REST 全族经代理可达（形态 C 完整体验的数据面）',
           proxyPanel.status === 200 && proxyPanel.body?.data?.stub === 'panel' && hubSeen.panelCalls === 1, JSON.stringify(proxyPanel.body))
-        const proxyDenied = await wfetchSim('GET', '/rq/rqcard/proxy/api/iam/users')
+        const proxyDenied = await wfetchSim('GET', '/gate01/rqcard/proxy/api/iam/users')
         check('hostlink：代理白名单外 403（PROXY_PATH_DENIED）', proxyDenied.status === 403 && proxyDenied.body?.error?.code === 'PROXY_PATH_DENIED')
-        const proxyStream = await wfetchSim('GET', '/rq/rqcard/proxy/api/panel/stream')
+        const proxyStream = await wfetchSim('GET', '/gate01/rqcard/proxy/api/panel/stream')
         check('hostlink：SSE 不透传（前端走既有 30s 轮询降级）', proxyStream.status === 403 && proxyStream.body?.error?.code === 'PROXY_PATH_DENIED')
 
         // -- Bug1 回归：SPA HTML 兜底不得误判为健康宿主（/rq 前缀被独立宿主的 HTML 200 骗走）--
-        const linkFormA = await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: hubB } })
+        const linkFormA = await wfetchSim('POST', '/gate01/rqcard/link/remote', { body: { hubBase: hubB } })
         check('hostlink：Bug1 回归——独立宿主 /rq/api/health 回 200 HTML 不误判（mountPrefix 判为空串）',
           linkFormA.status === 200 && linkFormA.body.data.config.hubMountPrefix === '' && linkFormA.body.data.probe.version === '8.8.8-hubB',
           JSON.stringify(linkFormA.body?.data ?? linkFormA.body))
         // -- 代理 HTML 防线：宿主回 HTML（地址/前缀错配的特征）显式 502，不透传整页 --
-        const proxyHtml = await wfetchSim('POST', '/rq/rqcard/proxy/api/auth/logout')
+        const proxyHtml = await wfetchSim('POST', '/gate01/rqcard/proxy/api/auth/logout')
         check('hostlink：宿主回 HTML 而非 JSON → 502 HUB_BAD_RESPONSE（不把整页 HTML 当数据透传）',
           proxyHtml.status === 502 && proxyHtml.body?.error?.code === 'HUB_BAD_RESPONSE')
         // 还原为宿主 A 连接供后续断言
-        await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: hubA } })
+        await wfetchSim('POST', '/gate01/rqcard/link/remote', { body: { hubBase: hubA } })
         // -- G1 兑换通道：票据兑换端点在代理白名单内（boot.js 回跳闭环的服务端前提）--
-        const proxyTicket = await wfetchSim('POST', '/rq/rqcard/proxy/api/auth/entry-ticket-session', { body: { ticket: 'g1-selftest-ticket' } })
+        const proxyTicket = await wfetchSim('POST', '/gate01/rqcard/proxy/api/auth/entry-ticket-session', { body: { ticket: 'g1-selftest-ticket' } })
         check('hostlink：票据兑换端点经代理白名单转发（G1 回跳兑换通道）',
           proxyTicket.status === 200 && proxyTicket.body?.data?.token === 'stub-g1-session' && hubSeen.tickets === 1,
           JSON.stringify({ status: proxyTicket.status, body: proxyTicket.body }))
 
         // -- 断开：回到未配置，代理即拒 --
-        const resetRes = await wfetchSim('POST', '/rq/rqcard/link/reset')
+        const resetRes = await wfetchSim('POST', '/gate01/rqcard/link/reset')
         check('hostlink：断开回到未配置', resetRes.status === 200 && resetRes.body?.data?.config?.mode === 'none', JSON.stringify({ status: resetRes.status, body: resetRes.body }))
-        const proxyAfterReset = await wfetchSim('GET', '/rq/rqcard/proxy/api/panel/depts')
+        const proxyAfterReset = await wfetchSim('GET', '/gate01/rqcard/proxy/api/panel/depts')
         check('hostlink：未连接时代理 409 NOT_REMOTE', proxyAfterReset.status === 409 && proxyAfterReset.body?.error?.code === 'NOT_REMOTE')
 
         // -- 本机初始化（形态 B 首启：admin 口令设置，初始口令不出服务端）--
-        const initInfo = await wfetchSim('GET', '/rq/rqcard/local-init')
+        const initInfo = await wfetchSim('GET', '/gate01/rqcard/local-init')
         check('hostlink：本机首启检测 + 网卡清单', initInfo.status === 200 && initInfo.body?.data?.firstRun === true && Array.isArray(initInfo.body?.data?.interfaces), JSON.stringify({ status: initInfo.status, body: initInfo.body }))
         mountCtx.iam.resetPassword(adminUser.id, 'InitKnown123')
         writeFileSync(join(bridgeDataDir, 'admin-initial-password.txt'),
           '平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\nInitKnown123\n')
-        const initWeak = await wfetchSim('POST', '/rq/rqcard/local-init/admin', { body: { newPassword: 'short' } })
+        const initWeak = await wfetchSim('POST', '/gate01/rqcard/local-init/admin', { body: { newPassword: 'short' } })
         check('hostlink：弱口令被拒（≥8 位）', initWeak.status === 400, JSON.stringify({ status: initWeak.status, body: initWeak.body }))
-        const initOk = await wfetchSim('POST', '/rq/rqcard/local-init/admin', { body: { newPassword: 'FreshPass123' } })
+        const initOk = await wfetchSim('POST', '/gate01/rqcard/local-init/admin', { body: { newPassword: 'FreshPass123' } })
         check('hostlink：首启 admin 口令初始化（返回与 console 登录同形会话：token + user.permissions）',
           initOk.status === 200 && Boolean(initOk.body.data?.token) && Array.isArray(initOk.body.data?.user?.permissions),
           JSON.stringify(initOk.body?.error))
         check('hostlink：初始口令文件一次性消费（防重放）', !existsSync(join(bridgeDataDir, 'admin-initial-password.txt')))
-        const initAgain = await wfetchSim('POST', '/rq/rqcard/local-init/admin', { body: { newPassword: 'AnotherPass123' } })
+        const initAgain = await wfetchSim('POST', '/gate01/rqcard/local-init/admin', { body: { newPassword: 'AnotherPass123' } })
         check('hostlink：二次初始化被拒（仅首次启动可用）', initAgain.status === 400 && /仅首次启动/.test(String(initAgain.body?.error?.message ?? '')))
-        const reLogin = await fetch(`${simOrigin}/rq/api/auth/login`, {
+        const reLogin = await fetch(`${simOrigin}/gate01/api/auth/login`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ username: 'admin', password: 'FreshPass123' }),
         })
         check('hostlink：新口令可正常登录（改密真实生效）', reLogin.status === 200, String(reLogin.status))
-        const listenPlan = await wfetchSim('POST', '/rq/rqcard/local-init/listen-plan', { body: { ip: '192.168.1.10' } })
+        const listenPlan = await wfetchSim('POST', '/gate01/rqcard/local-init/listen-plan', { body: { ip: '192.168.1.10' } })
         check('hostlink：监听指引生成（trusted-host 命令 + 说明，不热改宿主监听）',
           listenPlan.status === 200 && listenPlan.body?.data?.command.includes('--trusted-host 192.168.1.10:3080'), JSON.stringify({ status: listenPlan.status, body: listenPlan.body }))
 
         // -- 向导 DOM 全链模拟（jsdom 驱动真实面板前端 × 真实向导端点：问题1/问题2 实机回归）--
         // 用户在浏览器里的两段真实操作逐击复演：
         //   A. 连接远端宿主 → 点「钉钉扫码登录」——打开地址必须按探测判定的真实挂载前缀构造
-        //      （独立宿主不多拼 /rq；dsh 挂载宿主必须带 /rq）；
+        //      （独立宿主不多拼前缀；宿主轨挂载宿主按探测判定带 /gate01 或 /rq）；
         //   B. 同页先做过远端登录尝试（连接作用域被污染）再点「设置口令并登录」——
-        //      令牌必须落默认键（heng_ops_token），重载后按默认键读到才进得了工作台；
+        //      令牌必须落默认键（gate01_token），重载后按默认键读到才进得了工作台；
         //   C. 两条「去控制台登录」链接必须带尾斜杠（/rq 不带斜杠触发 302 → /rq/，
         //      重定向吃掉 ?next 与 #/login 片段，地址栏一串百分号编码即用户所见的「乱码」）。
         {
@@ -5402,7 +5410,7 @@ try {
           const domErrors = []
           vc.on('jsdomError', (e) => { if (!/Not implemented/.test(String(e?.message ?? ''))) domErrors.push(String(e?.message ?? e)) })
           const dom = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
-            url: `${simOrigin}/rq/panel/`, pretendToBeVisual: true, virtualConsole: vc,
+            url: `${simOrigin}/gate01/panel/`, pretendToBeVisual: true, virtualConsole: vc,
           })
           const openedUrls = []
           dom.window.open = (url) => { openedUrls.push(String(url)); return null }
@@ -5426,7 +5434,7 @@ try {
             const wizard = await import(pathToFileURL(join(PANEL_JS, 'wizard.js')).href)
             const panelApp = await import(pathToFileURL(join(PANEL_JS, 'app.js')).href)
             const connectHub = async (hub) => {
-              await wizard.start({ base: '/rq' })
+              await wizard.start({ base: '/gate01' })
               document.querySelector('#wzHubInput').value = hub
               document.querySelector('#wzHubConnect').click()
               await waitForDom(() => Boolean(document.querySelector('#wzLoginDd')))
@@ -5435,7 +5443,7 @@ try {
             // 场景 A（问题1 回归）：钉钉登录地址按真实挂载前缀构造，且携带 next=本机面板绝对地址
             // （G1 前向兼容：宿主采纳回跳增强后扫码即自动回本机 dsh；未采纳宿主按防 open redirect
             // 白名单忽略跨源 next，无害）
-            const g1Next = encodeURIComponent(`${simOrigin}/rq/panel/`)
+            const g1Next = encodeURIComponent(`${simOrigin}/gate01/panel/`)
             await connectHub(hubB)
             document.querySelector('#wzLoginDd').click()
             check('向导DOM：连独立宿主，钉钉登录地址不多拼 /rq 且携带 next 回跳（问题1 回归）',
@@ -5455,38 +5463,38 @@ try {
             panelApi.setConnectionScope(hubA) // 同页先做过远端登录尝试的残留态
             writeFileSync(join(mountCtx.opsStorage.dataDirPath, 'admin-initial-password.txt'),
               '平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\nFreshPass123\n')
-            await wizard.start({ base: '/rq' })
+            await wizard.start({ base: '/gate01' })
             await waitForDom(() => Boolean(document.querySelector('#wzAdminSet')))
             check('向导DOM：本机首启表单随口令文件在场渲染', Boolean(document.querySelector('#wzAdminSet')))
             document.querySelector('#wzAdminPass').value = 'DomPass12345'
             document.querySelector('#wzAdminSet').click()
-            await waitForDom(() => Boolean(dom.window.localStorage.getItem('heng_ops_token')))
-            const domToken = dom.window.localStorage.getItem('heng_ops_token')
+            await waitForDom(() => Boolean(dom.window.localStorage.getItem('gate01_token')))
+            const domToken = dom.window.localStorage.getItem('gate01_token')
             check('向导DOM：设口令即登录——令牌落默认键（重载即登录态，问题2 回归）', Boolean(domToken))
             check('向导DOM：令牌未落入远端作用域隔离键（作用域卫生）',
-              dom.window.localStorage.getItem(`heng_ops_token@${hubA}`) === null)
-            const domTokenUse = await fetch(`${simOrigin}/rq/api/panel/depts`, { headers: { authorization: `Bearer ${domToken}` } })
-            check('向导DOM：初始化令牌直通面板 RBAC 面（/rq/api/panel/depts 200）', domTokenUse.status === 200, `status=${domTokenUse.status}`)
+              dom.window.localStorage.getItem(`gate01_token@${hubA}`) === null)
+            const domTokenUse = await fetch(`${simOrigin}/gate01/api/panel/depts`, { headers: { authorization: `Bearer ${domToken}` } })
+            check('向导DOM：初始化令牌直通面板 RBAC 面（/gate01/api/panel/depts 200）', domTokenUse.status === 200, `status=${domTokenUse.status}`)
 
             // 场景 C（链接形态回归：尾斜杠在，302 不再吃掉 ?next 与 #/login）
-            await wizard.start({ base: '/rq' }) // 口令文件已消费 → 非首启分支
+            await wizard.start({ base: '/gate01' }) // 口令文件已消费 → 非首启分支
             await waitForDom(() => Boolean(document.querySelector('#wzLocalBody a[href]')))
             const wizardLoginHref = document.querySelector('#wzLocalBody a[href]').getAttribute('href') ?? ''
             check('向导DOM：向导「在本机控制台登录」链接带尾斜杠 + next 回跳 + #/login',
-              wizardLoginHref.startsWith('/rq/?next=') && wizardLoginHref.includes('#/login'), wizardLoginHref)
+              wizardLoginHref.startsWith('/gate01/?next=') && wizardLoginHref.includes('#/login'), wizardLoginHref)
             panelApi.session.clear()
-            panelApp.start({ base: '/rq' })
+            panelApp.start({ base: '/gate01' })
             const guideHref = document.querySelector('.login-guide a')?.getAttribute('href') ?? ''
             check('向导DOM：面板登录引导「去控制台登录」链接带尾斜杠 + next 回跳 + #/login',
-              guideHref.startsWith('/rq/?next=') && guideHref.includes('#/login'), guideHref)
+              guideHref.startsWith('/gate01/?next=') && guideHref.includes('#/login'), guideHref)
             check('向导DOM：jsdom 运行期零意外错误（reload 的 not-implemented 噪音已过滤）', domErrors.length === 0, domErrors.join(' | '))
 
             // 场景 D（问题1 G1 回跳闭环回归）：宿主签发 entry_ticket → boot 按连接形态经代理兑换 →
             // 会话落连接作用域键 → 面板数据面经代理携带宿主身份（Authorization + 向导头）。
             // 用全新 JSDOM（URL 带 ?entry_ticket=）驱动真实 boot.js 全链。
-            await wfetchSim('POST', '/rq/rqcard/link/remote', { body: { hubBase: hubA } })
+            await wfetchSim('POST', '/gate01/rqcard/link/remote', { body: { hubBase: hubA } })
             const dom2 = new JSDOM('<!doctype html><html><body><div id="app"></div></body></html>', {
-              url: `${simOrigin}/rq/panel/?entry_ticket=g1-selftest-ticket`, pretendToBeVisual: true, virtualConsole: vc,
+              url: `${simOrigin}/gate01/panel/?entry_ticket=g1-selftest-ticket`, pretendToBeVisual: true, virtualConsole: vc,
             })
             const saved2 = {
               fetch: globalThis.fetch, document: globalThis.document, window: globalThis.window,
@@ -5500,11 +5508,11 @@ try {
             try {
               const bootMod = await import(pathToFileURL(join(PANEL_JS, 'boot.js')).href + '?g1test=1')
               check('G1回跳：boot 模块装载（全新 JSDOM，URL 携带 ?entry_ticket=）', typeof bootMod === 'object')
-              await waitForDom(() => Boolean(dom2.window.localStorage.getItem(`heng_ops_token@${hubA}`)))
-              const g1Token = dom2.window.localStorage.getItem(`heng_ops_token@${hubA}`)
-              check('G1回跳：宿主票据经代理兑换，会话落连接作用域键（heng_ops_token@<hub>）',
+              await waitForDom(() => Boolean(dom2.window.localStorage.getItem(`gate01_token@${hubA}`)))
+              const g1Token = dom2.window.localStorage.getItem(`gate01_token@${hubA}`)
+              check('G1回跳：宿主票据经代理兑换，会话落连接作用域键（gate01_token@<hub>）',
                 g1Token === 'stub-g1-session', `token=${g1Token}`)
-              check('G1回跳：刷新令牌同样落作用域键', dom2.window.localStorage.getItem(`heng_ops_refresh@${hubA}`) === 'stub-g1-refresh')
+              check('G1回跳：刷新令牌同样落作用域键', dom2.window.localStorage.getItem(`gate01_refresh@${hubA}`) === 'stub-g1-refresh')
               check('G1回跳：地址栏票据即用即清（不常驻 URL）', dom2.window.location.search === '' && !dom2.window.location.hash.includes('entry_ticket'),
                 `${dom2.window.location.search}|${dom2.window.location.hash}`)
               check('G1回跳：票据兑换打到宿主（hubSeen.tickets=2：白名单直测 1 + boot 回跳兑换 1）', hubSeen.tickets === 2, JSON.stringify(hubSeen))
@@ -5518,8 +5526,8 @@ try {
               // 以代理轮询地址 + 向导头驱动，宿主应收到带身份的 /poll 请求
               const realtime = await import(pathToFileURL(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'realtime.js')).href)
               const streamHandle = realtime.createEventStream({
-                url: `${simOrigin}/rq/rqcard/proxy/api/panel/stream?dept=rd&token=${encodeURIComponent('stub-g1-session')}`,
-                pollPath: `${simOrigin}/rq/rqcard/proxy/api/panel/rd/poll`,
+                url: `${simOrigin}/gate01/rqcard/proxy/api/panel/stream?dept=rd&token=${encodeURIComponent('stub-g1-session')}`,
+                pollPath: `${simOrigin}/gate01/rqcard/proxy/api/panel/rd/poll`,
                 pollIntervalMs: 200,
                 headers: { authorization: 'Bearer stub-g1-session', 'x-rqcard-call': '1' },
               })
@@ -5547,7 +5555,7 @@ try {
             if (savedGlobals.localStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = savedGlobals.localStorage
           }
           // 收场：连接态还原 none（不干扰后续 rq_host_status 等断言）
-          await wfetchSim('POST', '/rq/rqcard/link/reset')
+          await wfetchSim('POST', '/gate01/rqcard/link/reset')
         }
       } finally {
         await new Promise((resolve) => hubStubA.close(resolve))

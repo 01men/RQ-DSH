@@ -43,10 +43,15 @@
    - rq-card 浏览器半（`src/client/**`、`src/wire.ts`、build.mjs、package.json）有任何改动，
      必须先 `node packages/plugin-rq-card/build.mjs` 重建 `lib/client.js`——selftest
      「fresh-install 装机模拟」段校验 build-id 指纹，忘重建即红；
+   - 4 随附包（platform-core、plugin-dsh-bridge、plugin-panel-core、plugin-rq-card）的
+     `src/**` 有任何改动，必须先 `npm run build:dist` 重建 `packages/*/dist/`（预构建产物
+     提交入库，安装形态零 TS 装载，plan-gate01 G3 自解）——selftest 装机段校验
+     `dist/.build-id` 指纹（scripts/dist-build-id.mjs），忘重建即红；
+     上游 merge 碰到随附包 src 同理（见「标准同步节奏」）；
    - 面板静态资源/业务数据（public/、cardpacks/、scenegraphs）必须落在根 package.json
      `files` 覆盖范围内（`packages` 根之下），否则装机包缺文件、全新 dsh 上静默缺功能；
    - selftest「fresh-install 装机模拟」段（patch entry 逐个解析导入、cordis.patch.yml ↔
-     cordis.yml ↔ boot-all 三链一致、bundle 新鲜度、files 覆盖）必须全绿。
+     cordis.yml ↔ boot-all 三链一致、bundle 新鲜度、dist 新鲜度、files 覆盖）必须全绿。
 
 ## 目录所有权（三区，双轨的边界线）
 
@@ -78,6 +83,9 @@ git diff 33f786a custom/dsh-rq -- \
 git fetch origin main                      # 拉上游（origin fetch 指向 ybkk-AIOS）
 git log --oneline custom/dsh-rq..origin/main   # 看上游新增了什么
 git merge origin/main                      # 合并进定制分支（冲突按铁律 5 解决）
+npm install                                # 依赖/包名若有变化先同步（workspace 包改名等）
+npm run build:dist                         # 上游 merge 碰随附包 src 即令 dist 过期——重建预构建产物
+node packages/plugin-rq-card/build.mjs     # 上游 merge 碰浏览器半 src/wire.ts 同理——重建 lib/client.js
 npm run selftest && npm run lint:manifests # 全量回归，必须全绿
 git push                                   # 备份（origin push 指向 RQ-DSH，自动推到其 main）
 ```

@@ -1,8 +1,8 @@
 /**
- * @dsh-ops/plugin-panel-core —— 部门 Agent 工作台面板（review-dsh-agent-panel-v2 Phase 1/2）。
+ * @01men/plugin-panel-core —— 部门 Agent 工作台面板（review-dsh-agent-panel-v2 Phase 1/2）。
  *
  * 职责：
- *   - 静态托管面板 SPA（/panel，对外经 dsh-bridge 即 /rq/panel/；宿主 web diff=0 铁律）
+ *   - 静态托管面板 SPA（/panel，对外经 dsh-bridge 即 /gate01/panel/；宿主 web diff=0 铁律）
  *   - /api/panel/* REST（guarded + 权限点；自注册路由推入 httpServer.routeMatrix 共享登记处，
  *     保住 selftest 的 RBAC 100% 越权断言网——Phase 0 补欠账）
  *   - SSE /api/panel/stream（EventSource 无法带 Bearer → 端点公开 + 内部 ?token= 自校验 fail-closed；
@@ -797,12 +797,12 @@ export function apply(ctx: Context) {
     offDelivered()
   })
 
-  // -- 静态托管（/panel → 对外 /rq/panel/） ----------------------------------------
+  // -- 静态托管（/panel → 对外 /gate01/panel/） ----------------------------------------
 
   const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public')
   if (existsSync(publicDir)) {
     // 目录形态归一：/panel（无尾斜杠）伺服 index.html 后相对资源 ./js/* 会解析到 /js/*（404→SPA 兜底→白屏），
-    // 与 dsh-bridge 的 /rq→/rq/ 302 同语义；Location 带 externalBase（挂载形态 = /rq/panel/）。
+    // 与 dsh-bridge 的 /gate01→/gate01/ 302 同语义；Location 带 externalBase（挂载形态 = /gate01/panel/）。
     // 注意路由按 split('/').filter(Boolean) 匹配，/panel 与 /panel/ 命中同一路由节点——
     // 带尾斜杠的请求必须原地伺服 index.html，不得 302（自指循环）。
     http.register('GET', '/panel', (exchange) => {

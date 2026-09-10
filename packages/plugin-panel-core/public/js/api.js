@@ -1,6 +1,6 @@
 /**
  * 面板 API 客户端：与 console api.js 同一套令牌存储键（同源复用控制台会话），
- * BASE 由 boot.js 传入（/rq/panel/ 挂载形态推导修正）。全部请求收口于此，
+ * BASE 由 boot.js 传入（/gate01/panel/ 挂载形态推导修正）。全部请求收口于此，
  * 页面代码零裸 fetch（RBAC 走查铁律同样适用于面板前端）。
  *
  * M2 远端连接（形态 C）：boot.js 探测到宿主连接为 remote 时调用 setRemoteProxy(true)——
@@ -36,20 +36,20 @@ const mapPath = (path) => (remoteProxy && path.startsWith('/api/')
   : `${BASE}${path}`)
 
 const session = {
-  get token() { return localStorage.getItem(scopedKey('heng_ops_token')) ?? '' },
-  get refreshToken() { return localStorage.getItem(scopedKey('heng_ops_refresh')) ?? '' },
-  saveRefresh(token) { localStorage.setItem(scopedKey('heng_ops_refresh'), token) },
+  get token() { return localStorage.getItem(scopedKey('gate01_token')) ?? '' },
+  get refreshToken() { return localStorage.getItem(scopedKey('gate01_refresh')) ?? '' },
+  saveRefresh(token) { localStorage.setItem(scopedKey('gate01_refresh'), token) },
   get user() {
-    try { return JSON.parse(localStorage.getItem(scopedKey('heng_ops_user')) ?? 'null') } catch { return null }
+    try { return JSON.parse(localStorage.getItem(scopedKey('gate01_user')) ?? 'null') } catch { return null }
   },
   save(token, user) {
-    localStorage.setItem(scopedKey('heng_ops_token'), token)
-    localStorage.setItem(scopedKey('heng_ops_user'), JSON.stringify(user))
+    localStorage.setItem(scopedKey('gate01_token'), token)
+    localStorage.setItem(scopedKey('gate01_user'), JSON.stringify(user))
   },
   clear() {
-    localStorage.removeItem(scopedKey('heng_ops_token'))
-    localStorage.removeItem(scopedKey('heng_ops_refresh'))
-    localStorage.removeItem(scopedKey('heng_ops_user'))
+    localStorage.removeItem(scopedKey('gate01_token'))
+    localStorage.removeItem(scopedKey('gate01_refresh'))
+    localStorage.removeItem(scopedKey('gate01_user'))
   },
   get permissions() { return this.user?.permissions ?? [] },
   can(point) { return this.permissions.includes('*') || this.permissions.includes(point) },
@@ -84,8 +84,8 @@ async function tryRefresh() {
         })
         const payload = await response.json().catch(() => null)
         if (!response.ok || payload?.ok === false) return false
-        localStorage.setItem(scopedKey('heng_ops_token'), payload.data.token)
-        localStorage.setItem(scopedKey('heng_ops_refresh'), payload.data.refreshToken)
+        localStorage.setItem(scopedKey('gate01_token'), payload.data.token)
+        localStorage.setItem(scopedKey('gate01_refresh'), payload.data.refreshToken)
         return true
       } catch {
         return false

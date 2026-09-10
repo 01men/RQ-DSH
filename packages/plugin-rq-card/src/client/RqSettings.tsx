@@ -2,8 +2,8 @@
  * 设置页「榕器宿主」分区（M2）：连接状态丸 + 打开向导/工作台入口。
  *
  * 形态对齐 ui-auth 的 AccountSection（settings.section list 条目）：
- * 状态读取走同源 /rq/rqcard/link（hostStatus.ts），动作是打开
- * /rq/panel/（未连接且未登录时面板首屏即连接向导——向导与面板同一入口，
+ * 状态读取走同源 /gate01/rqcard/link（hostStatus.ts），动作是打开
+ * /gate01/panel/（未连接且未登录时面板首屏即连接向导——向导与面板同一入口，
  * 避免在注入面重复实现一份表单）。
  */
 import { useCallback, useEffect, useState } from 'react'

@@ -31,7 +31,7 @@ export const zh = {
   'card.blocked.binding-invalid': '身份绑定已失效，请重新绑定',
   'card.blocked.invoke-error': '执行出错，详见结果信息',
 
-  // ── 执行卡：阻断行动按钮（跳 /rq 控制台对应页，同源带登录态）──
+  // ── 执行卡：阻断行动按钮（跳 /gate01 控制台对应页，同源带登录态）──
   'card.action.nas-authz-deny': '申请访问',
   'card.action.quota-exhausted': '申请额度',
   'card.action.pdp-unreachable': '查看平台状态',
@@ -55,7 +55,7 @@ export const zh = {
   'settings.refresh': '刷新状态',
   'settings.open.wizard': '打开连接向导',
   'settings.open.panel': '打开榕器工作台',
-  'settings.hint': '连接宿主（选择 IP）并在面板完成钉钉/账号登录；面板地址 /rq/panel/。',
+  'settings.hint': '连接宿主（选择 IP）并在面板完成钉钉/账号登录；面板地址 /gate01/panel/。',
 
   // ── 会话视图 Tab「榕器工作台」（M3）──
   'view.workbench': '榕器工作台',
@@ -122,7 +122,7 @@ export const en = {
   'settings.refresh': 'Refresh',
   'settings.open.wizard': 'Open connect wizard',
   'settings.open.panel': 'Open RongQi workbench',
-  'settings.hint': 'Link a host (pick an IP) and sign in with DingTalk/account on the panel; panel lives at /rq/panel/.',
+  'settings.hint': 'Link a host (pick an IP) and sign in with DingTalk/account on the panel; panel lives at /gate01/panel/.',
 
   'view.workbench': 'RongQi workbench',
   'view.open.external': 'Open in browser',

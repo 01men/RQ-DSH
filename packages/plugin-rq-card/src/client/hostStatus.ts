@@ -1,8 +1,8 @@
 /**
  * 宿主连接状态的浏览器侧读取（M2/M3 注入面共用）。
  *
- * 走同源 REST（spike §4.3 数据回流二选一的同款选择）：/rq/rqcard/link 注册在
- * 榕器数据面（dsh-bridge /rq 挂载之下），须带向导头（服务端 CSRF 防线）。
+ * 走同源 REST（spike §4.3 数据回流二选一的同款选择）：/gate01/rqcard/link 注册在
+ * 榕器数据面（dsh-bridge /gate01 挂载之下），须带向导头（服务端 CSRF 防线）。
  * 端点不存在（独立形态/宿主半未装）返回 null——注入面按「未知」降级。
  */
 import { LINK_ENDPOINT, RQCARD_CALL_HEADER } from '../wire.ts'

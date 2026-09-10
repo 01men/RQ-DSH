@@ -180,7 +180,7 @@ function renderLoginGuide() {
     return
   }
   // 回跳语义：登录成功后带 ?next= 回到面板（登录页消费一次），不再让业务员落在控制台后自己找路
-  // 尾斜杠不能省：/rq 不带斜杠会触发 302 → /rq/，重定向把 #/login fragment 与 next 参数一并吃掉
+  // 尾斜杠不能省：/gate01 不带斜杠会触发 302 → /gate01/，重定向把 #/login fragment 与 next 参数一并吃掉
   const here = encodeURIComponent(location.pathname + location.search + location.hash)
   document.getElementById('app').innerHTML = `
     <div class="login-guide">
@@ -574,7 +574,7 @@ function renderRail() {
   // 显式跨工作台切换：记住去向（控制台启动分诊尊重该偏好，不再把人拽回面板）
   rail.querySelectorAll('[data-landing]').forEach((el) => {
     el.addEventListener('click', () => {
-      try { localStorage.setItem('heng_ops_landing', el.dataset.landing) } catch { /* 忽略 */ }
+      try { localStorage.setItem('gate01_landing', el.dataset.landing) } catch { /* 忽略 */ }
     })
   })
 }

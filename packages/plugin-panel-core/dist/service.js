@@ -1,0 +1,655 @@
+import { Service } from "@deepseek-ai/cordis";
+import { PlatformEvents } from "../../platform-core/dist/bus.js";
+import { ACTIVITY_LABELS } from "../../platform-core/dist/scenegraph.js";
+import { newId } from "../../platform-core/dist/ids.js";
+const INDUSTRY_REGISTRY = [
+  { code: "QB01", name: "\u5BB6\u7535\u884C\u4E1A", icon: "\u{1F4FA}", sub: "\u6574\u673A/\u7ED3\u6784\u4EF6/\u4EA4\u4E92\u611F\u77E5/\u7535\u63A7/\u6838\u5FC3\u96F6\u90E8\u4EF6 \xB7 \u4E00\u56FE\u56DB\u6E05\u5355" },
+  { code: "GCJX", name: "\u5DE5\u7A0B\u673A\u68B0", icon: "\u{1F69C}", sub: "\u6574\u673A/\u6DB2\u538B/\u7535\u52A8\u5316/\u57FA\u7840\u96F6\u90E8\u4EF6/\u552E\u540E\u8FD0\u7EF4 \xB7 \u4E00\u56FE\u56DB\u6E05\u5355" },
+  { code: "JQR", name: "\u673A\u5668\u4EBA", icon: "\u{1F9BE}", sub: "\u96F6\u90E8\u4EF6/\u672C\u4F53/\u96C6\u6210 \xB7 \u573A\u666F\u56FE\u8C31 2025 \u7248" },
+  { code: "NEV", name: "\u65B0\u80FD\u6E90\u6C7D\u8F66", icon: "\u{1F697}", sub: "\u6574\u8F66/\u4E09\u7535/\u667A\u80FD\u7F51\u8054 \xB7 \u573A\u666F\u56FE\u8C31 2025 \u7248" },
+  { code: "PCB", name: "\u5370\u5236\u677FPCB", icon: "\u{1F50C}", sub: "\u8BBE\u8BA1/\u5236\u9020/\u68C0\u6D4B \xB7 \u573A\u666F\u56FE\u8C31 2025 \u7248" }
+];
+const TASK_LANES = ["todo", "doing", "review", "done"];
+const LANE_LABELS = { todo: "\u5F85\u529E", doing: "\u8FDB\u884C\u4E2D", review: "\u5F85\u5BA1", done: "\u5B8C\u6210" };
+class PanelService extends Service {
+  static provide = "panel";
+  streamSubscribers = /* @__PURE__ */ new Map();
+  constructor(ctx, config = {}) {
+    super(ctx, "panel");
+    void config;
+  }
+  // -- 集合 -----------------------------------------------------------------
+  deptConfigs() {
+    return this.ctx.opsStorage.collection("panel:deptConfigs");
+  }
+  channels() {
+    return this.ctx.opsStorage.collection("panel:channels");
+  }
+  messages() {
+    const collection = this.ctx.opsStorage.collection("panel:messages");
+    collection.uniqueOn("bridge-dedup", (m) => m.uniqueKey ? `${m.channelId}:${m.uniqueKey}` : `id:${m.id}`);
+    return collection;
+  }
+  tasks() {
+    return this.ctx.opsStorage.collection("panel:tasks");
+  }
+  artifacts() {
+    return this.ctx.opsStorage.collection("panel:artifacts");
+  }
+  readCursors() {
+    const collection = this.ctx.opsStorage.collection("panel:readCursors");
+    collection.uniqueOn("user-channel", (r) => `${r.userId}:${r.channelId}`);
+    return collection;
+  }
+  activations() {
+    return this.ctx.opsStorage.collection("panel:activations");
+  }
+  // -- 部门与行业 ------------------------------------------------------------
+  dept(dept) {
+    const config = this.deptConfigs().get(dept);
+    if (!config) throw new Error(`\u90E8\u95E8\u4E0D\u5B58\u5728\uFF1A${dept}`);
+    return config;
+  }
+  /** 计量/激活用的组织主键：登录人所属组织（org 树根归一由调用方保证存在）。 */
+  activeIndustry(orgId) {
+    const activation = this.activations().findOne((item) => item.orgId === orgId && item.status === "active");
+    if (!activation) return void 0;
+    const registry = INDUSTRY_REGISTRY.find((item) => item.code === activation.code);
+    return { code: activation.code.toLowerCase(), name: registry?.name ?? activation.code };
+  }
+  // -- 账号组织打通：部门 ↔ 平台组织 -----------------------------------------
+  /** 组织子树包含判定（orgId 沿 parentId 上溯到 rootId）。 */
+  orgSubtreeContains(rootId, orgId) {
+    let current = this.ctx.iam.orgs().get(orgId);
+    let guard = 0;
+    while (current && guard++ < 32) {
+      if (current.id === rootId) return true;
+      current = current.parentId ? this.ctx.iam.orgs().get(current.parentId) : void 0;
+    }
+    return false;
+  }
+  /** 绑定组织信息（名称实时解析，组织改名不落陈旧数据）。 */
+  deptOrg(dept) {
+    if (!dept.orgId) return void 0;
+    const org = this.ctx.iam.orgs().get(dept.orgId);
+    return org ? { id: org.id, name: org.name } : void 0;
+  }
+  /**
+   * 部门范围权限（权限控制 × 组织归属双通道）：'*' 管理员与机器凭证（经 scope 授权的集成面）
+   * 直通；绑定组织后，人必须属于该组织子树；未绑定部门对所有 panel.read 持有者开放。
+   * org_admin 角色跨部门治理豁免（与 iam.* 的治理语义一致）。
+   */
+  deptScopeAllowed(exchangeCaller, dept) {
+    if (exchangeCaller.permissions.includes("*")) return true;
+    if (exchangeCaller.kind === "machine") return true;
+    if (!dept.orgId) return true;
+    if (exchangeCaller.userId) {
+      const user = this.ctx.iam.users().get(exchangeCaller.userId);
+      if (user) {
+        const isOrgAdmin = user.roleIds.some((roleId) => this.ctx.iam.roles().get(roleId)?.code === "org_admin");
+        if (isOrgAdmin) return true;
+        return this.orgSubtreeContains(dept.orgId, user.orgId);
+      }
+    }
+    return false;
+  }
+  /** 部门名册：绑定组织（或全组织兜底）子树内的成员（最小 PII：姓名/职务/组织名）。 */
+  deptMembers(dept, limit = 50) {
+    const orgRoot = dept.orgId ?? this.ctx.iam.orgs().find((org) => org.parentId === null).at(0)?.id;
+    if (!orgRoot) return [];
+    const inScope = (orgId) => this.orgSubtreeContains(orgRoot, orgId);
+    const orgName = (orgId) => this.ctx.iam.orgs().get(orgId)?.name ?? "";
+    return this.ctx.iam.users().all().filter((user) => user.status === "active" && inScope(user.orgId)).slice(0, limit).map((user) => ({ id: user.id, name: user.displayName, ...user.title ? { title: user.title } : {}, orgName: orgName(user.orgId) }));
+  }
+  /** 计量键（D1 裁决）：panel:<dept>.<行业code 小写>；无激活行业回落 panel:<dept>.core。 */
+  meterResource(dept, orgId) {
+    const industry = this.activeIndustry(orgId);
+    return `panel:${dept}.${industry?.code ?? "core"}`;
+  }
+  /** 行业三态（选择器）：active 激活 / pending 审批在办 / locked 待授权。 */
+  industryStates(orgId, pendingCodes) {
+    return INDUSTRY_REGISTRY.map((entry) => {
+      const active = this.activations().findOne((item) => item.orgId === orgId && item.code === entry.code && item.status === "active");
+      const graphLoaded = this.ctx.scenegraphs.get(entry.code) !== void 0;
+      const pending = !active && pendingCodes.includes(entry.code);
+      return { ...entry, state: active ? "active" : pending ? "pending" : "locked", graphLoaded };
+    });
+  }
+  /**
+   * 行业激活执行器（audit approvals executor）：审批通过 → 置 active + grantCapabilities + 事件。
+   * review D6 裁决：复用审批链 + 能力授权，license 签发链路（Ed25519 平台私钥）留待 Phase 4。
+   */
+  buildActivationExecutor() {
+    return async (payload, approverId) => {
+      const code = String(payload.code ?? "");
+      const orgId = String(payload.orgId ?? "");
+      if (!code || !orgId) throw new Error("\u884C\u4E1A\u6FC0\u6D3B\u5BA1\u6279\u5355\u7F3A\u5C11 code/orgId");
+      if (!INDUSTRY_REGISTRY.some((item) => item.code === code)) throw new Error(`\u672A\u767B\u8BB0\u884C\u4E1A\uFF1A${code}`);
+      const existing = this.activations().findOne((item) => item.orgId === orgId && item.code === code);
+      if (existing) {
+        this.activations().update(existing.id, { status: "active", activatedAt: (/* @__PURE__ */ new Date()).toISOString(), activatedBy: approverId });
+      } else {
+        this.activations().insert({ id: newId("act"), code, orgId, status: "active", activatedAt: (/* @__PURE__ */ new Date()).toISOString(), approvalId: String(payload.approvalId ?? ""), activatedBy: approverId });
+      }
+      try {
+        this.ctx.usage.grantCapabilities(`org:${orgId}`, [`panel:${code.toLowerCase()}`], "industry-activation");
+      } catch {
+      }
+      this.ctx.platformBus.emit(PlatformEvents.PanelIndustryActivated, { code, orgId, activatedBy: approverId });
+      return { code, orgId, status: "active" };
+    };
+  }
+  /** Agent 阵容 × Agent 资产联动：绑定资产的存在性与生命周期状态实时解析（宿主数字员工在线面）。 */
+  agentWithAsset(agentCard) {
+    const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
+    if (!ref) return { ...agentCard };
+    const asset = this.ctx.resourceCore.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref);
+    if (!asset) return { ...agentCard };
+    const attrs = asset.attrs;
+    return {
+      ...agentCard,
+      asset: {
+        id: asset.id,
+        ...asset.slug ? { slug: asset.slug } : {},
+        name: asset.name,
+        status: String(asset.status ?? "draft"),
+        ...attrs?.model ? { model: String(attrs.model) } : {}
+      }
+    };
+  }
+  // -- widget 求值（照抄 portal.board() 的逐源独立降级范式） -------------------
+  resolveWidgetSource(widget) {
+    const labels = { manual: "\u624B\u5DE5\u767B\u8BB0", mock: "\u6A21\u62DF\u6570\u636E", connector: "\u8FDE\u63A5\u5668", mcp: "MCP" };
+    if (widget.source === "manual" || widget.source === "mock") {
+      return { rows: widget.rows, degraded: false, sourceLabel: labels[widget.source] };
+    }
+    return {
+      rows: [],
+      degraded: true,
+      sourceLabel: `${labels[widget.source]}\uFF08${widget.ref ?? "\u672A\u914D\u7F6E"}\uFF09\u6682\u4E0D\u53EF\u7528\u2014\u2014\u7B49\u5F85\u4E1A\u52A1\u8FDE\u63A5\u5668\u63A5\u5165`
+    };
+  }
+  /** 部门看板聚合：全部 widget 独立求值降级（单块故障不拖垮整板）。 */
+  board(dept) {
+    return dept.widgets.map((widget) => {
+      try {
+        const resolved = this.resolveWidgetSource(widget);
+        return { id: widget.id, type: widget.type, title: widget.title, ...widget.live ? { live: true } : {}, source: resolved.sourceLabel, degraded: resolved.degraded, rows: resolved.rows };
+      } catch {
+        return { id: widget.id, type: widget.type, title: widget.title, source: "\u6C42\u503C\u5931\u8D25", degraded: true, rows: [] };
+      }
+    });
+  }
+  // -- 消息与频道 --------------------------------------------------------------
+  /** 未读数：频道内 lastReadAt 之后的非本人消息数。 */
+  unreadCount(userId, channelId) {
+    const cursor = this.readCursors().findOne((item) => item.userId === userId && item.channelId === channelId);
+    const since = cursor?.at ?? "";
+    return this.messages().find((m) => m.channelId === channelId && m.createdAt > since && m.senderId !== userId).length;
+  }
+  markRead(userId, channelId) {
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    const cursor = this.readCursors().findOne((item) => item.userId === userId && item.channelId === channelId);
+    if (cursor) this.readCursors().update(cursor.id, { at });
+    else this.readCursors().insert({ id: newId("cur"), userId, channelId, at });
+  }
+  /**
+   * 发消息：落库 → 游标推进 → 事件（钉钉桥接订阅投递）→ @Agent 唤起。
+   * 返回落库消息；Agent 回包异步追加（调用方随后拉取即可）。
+   */
+  async sendMessage(input) {
+    const channel = this.channels().get(input.channelId);
+    if (!channel || channel.dept !== input.dept) throw new Error(`\u9891\u9053\u4E0D\u5B58\u5728\u6216\u4E0D\u5C5E\u4E8E\u8BE5\u90E8\u95E8\uFF1A${input.channelId}`);
+    const mentions = extractMentions(input.text);
+    const record = this.messages().insert({
+      id: newId("pmsg"),
+      channelId: input.channelId,
+      dept: input.dept,
+      senderType: input.senderType,
+      ...input.senderId ? { senderId: input.senderId } : {},
+      senderName: input.senderName,
+      text: input.text,
+      mentions,
+      ...input.senderType === "agent" && input.senderIcon ? { senderIcon: input.senderIcon } : {},
+      ...input.senderType === "agent" && input.agentName ? { agentName: input.agentName } : {},
+      ...input.senderType === "agent" && input.replyModel ? { model: input.replyModel } : {},
+      ...input.card ? { card: { ...input.card, done: [] } } : {},
+      ddSync: input.senderType === "system" ? "none" : input.ddSync ? "pending" : "none",
+      ...input.sceneCode ? { sceneCode: input.sceneCode } : {},
+      ...input.uniqueKey ? { uniqueKey: input.uniqueKey } : {}
+    });
+    if (input.senderId) this.markRead(input.senderId, input.channelId);
+    this.ctx.platformBus.emit(PlatformEvents.PanelMessageCreated, {
+      messageId: record.id,
+      dept: input.dept,
+      channelId: input.channelId,
+      senderName: input.senderName,
+      text: input.text,
+      ddSync: record.ddSync,
+      card: record.card,
+      title: record.card?.title ?? ""
+    });
+    if (input.senderType === "human" && input.skipAgentDispatch !== true) void this.dispatchAgentMentions(record, input.modelOverride);
+    return record;
+  }
+  /**
+   * panelAgentRuntime MVP（单轮）：@Agent 唤起 → Agent 资产 → modelgw 单轮 → 回包落库。
+   * 模型取向：对话框显式指定的 modelOverride 优先，否则跟随 Agent 资产的 model 属性。
+   * 未绑定资产/无模型可用 → 诚实降级消息 + 转人工待办，不造假回复。
+   */
+  async dispatchAgentMentions(message, modelOverride) {
+    const dept = this.dept(message.dept);
+    for (const agentCard of dept.agents) {
+      if (!message.text.includes(`@${agentCard.name}`)) continue;
+      await this.invokeAgent(dept, agentCard, message, modelOverride);
+    }
+  }
+  async invokeAgent(dept, agentCard, trigger, modelOverride) {
+    const channel = this.channels().get(trigger.channelId);
+    const orgId = this.callerOrgId(trigger.senderId);
+    const reply = async (text, card, usedModel) => {
+      const record = this.messages().insert({
+        id: newId("pmsg"),
+        channelId: trigger.channelId,
+        dept: dept.id,
+        senderType: "agent",
+        senderName: agentCard.name,
+        senderIcon: agentCard.icon,
+        text,
+        mentions: [],
+        ...card ? { card: { ...card, done: [] } } : {},
+        ddSync: "none",
+        agentName: agentCard.name,
+        ...usedModel ? { model: usedModel } : {},
+        ...trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}
+      });
+      this.ctx.platformBus.emit(PlatformEvents.PanelMessageCreated, {
+        messageId: record.id,
+        dept: dept.id,
+        channelId: trigger.channelId,
+        senderName: agentCard.name,
+        text,
+        ddSync: "none",
+        card: record.card,
+        title: record.card?.title ?? ""
+      });
+      return record;
+    };
+    const fallbackToHuman = async (reason) => {
+      await reply(`\u300C${agentCard.name}\u300D\u6682\u4E0D\u80FD\u81EA\u4E3B\u5E94\u7B54\uFF1A${reason}\u5DF2\u8F6C\u4EBA\u5DE5\u5F85\u529E\uFF0C\u8BF7\u76F8\u5173\u540C\u4E8B\u8DDF\u8FDB\u3002`);
+      this.tasks().insert({
+        id: newId("ptask"),
+        dept: dept.id,
+        title: `\u8DDF\u8FDB\uFF1A${trigger.text.slice(0, 40)}`,
+        detail: `Agent\u300C${agentCard.name}\u300D\u4E0D\u53EF\u7528\uFF08${reason}\uFF09\uFF0C\u7531\u6D88\u606F ${trigger.id} \u8F6C\u4EBA\u5DE5`,
+        lane: "todo",
+        assigneeType: "human",
+        createdBy: `agent:${agentCard.name}`,
+        messageId: trigger.id
+      });
+    };
+    const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
+    const asset = ref ? this.ctx.resourceCore.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
+    if (!asset) return void fallbackToHuman("\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08\u8BF7\u5728\u63A7\u5236\u53F0\u300CAgent \u672C\u4F53\u300D\u767B\u8BB0\u5E76\u5728\u6B64\u914D\u7F6E agentRef\uFF09");
+    const model = modelOverride ?? String(asset.attrs?.model ?? "");
+    if (!model) return void fallbackToHuman("Agent \u8D44\u4EA7\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u4F1A\u8BDD\u672A\u6307\u5B9A\u6A21\u578B");
+    const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8);
+    const contextText = recent.map((m) => `${m.senderName}: ${m.text}`).join("\n");
+    const sceneSummary = this.sceneSummaryForDept(dept);
+    const systemPrompt = [
+      String(asset.attrs?.systemPrompt ?? `\u4F60\u662F\u4F01\u4E1A\u90E8\u95E8\u534F\u4F5C\u9762\u677F\u4E2D\u7684\u6570\u5B57\u540C\u4E8B\u300C${agentCard.name}\u300D\uFF08${agentCard.desc}\uFF09\u3002`),
+      sceneSummary ? `\u672C\u90E8\u95E8\u6302\u8F7D\u7684\u884C\u4E1A\u573A\u666F\u56FE\u8C31\u8981\u70B9\uFF1A
+${sceneSummary}` : "",
+      `\u4EE5\u4E0B\u662F\u9891\u9053\u300C${channel?.name ?? ""}\u300D\u6700\u8FD1\u5BF9\u8BDD\uFF1A
+${contextText}`
+    ].filter(Boolean).join("\n\n");
+    try {
+      const result = await this.ctx.modelGateway.invoke({
+        model,
+        orgId,
+        subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: trigger.text }
+        ]
+      });
+      await reply(result.content, void 0, result.model);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await fallbackToHuman(`\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${message}\uFF09\u3002`);
+    } finally {
+      if (orgId) {
+        try {
+          this.ctx.usage.record({
+            org: orgId,
+            subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime",
+            principal: `org:${orgId}`,
+            resource: this.meterResource(dept.id, orgId),
+            meters: [{ key: "calls", value: 1, unit: "call" }],
+            idempotency_key: `panel:agent:${trigger.id}:${agentCard.name}`
+          });
+        } catch {
+        }
+      }
+    }
+  }
+  callerOrgId(userId) {
+    if (!userId) return "";
+    try {
+      const user = this.ctx.iam.users().get(userId);
+      return user?.orgId ?? "";
+    } catch {
+      return "";
+    }
+  }
+  /**
+   * 面板 Agent 点名问答（M3：panel_agent_invoke 工具的服务原语——dsh 标准对话协作主通道）。
+   * 与 invokeAgent 共享资产解析/模型取向/场景摘要组装，但同步返回应答文本、不落频道消息
+   * （调用方决定是否经 panel_msg_send 留痕）。失败诚实返回 ok:false + reason，不造假回复。
+   */
+  async askAgent(deptId, agentName, question, options = {}) {
+    const dept = this.dept(deptId);
+    const agentCard = dept.agents.find((card) => card.name === agentName);
+    if (!agentCard) {
+      const names = dept.agents.map((card) => card.name);
+      return { ok: false, reason: `\u90E8\u95E8 ${dept.id}\uFF08${dept.label}\uFF09\u540D\u518C\u65E0\u6B64 Agent\u3002\u53EF\u7528\u9635\u5BB9\uFF1A${names.join("\u3001") || "\uFF08\u65E0\uFF09"}` };
+    }
+    const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
+    const asset = ref ? this.ctx.resourceCore.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
+    if (!asset) return { ok: false, reason: `Agent\u300C${agentName}\u300D\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08agentRef\uFF09\uFF0C\u65E0\u6CD5\u81EA\u4E3B\u5E94\u7B54` };
+    const model = options.modelOverride ?? String(asset.attrs?.model ?? "");
+    if (!model) return { ok: false, reason: `Agent\u300C${agentName}\u300D\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u672A\u6307\u5B9A\u6A21\u578B` };
+    const orgId = this.callerOrgId(options.userId);
+    const sceneSummary = this.sceneSummaryForDept(dept);
+    const systemPrompt = [
+      String(asset.attrs?.systemPrompt ?? `\u4F60\u662F\u4F01\u4E1A\u90E8\u95E8\u534F\u4F5C\u9762\u677F\u4E2D\u7684\u6570\u5B57\u540C\u4E8B\u300C${agentCard.name}\u300D\uFF08${agentCard.desc}\uFF09\u3002`),
+      sceneSummary ? `\u672C\u90E8\u95E8\u6302\u8F7D\u7684\u884C\u4E1A\u573A\u666F\u56FE\u8C31\u8981\u70B9\uFF1A
+${sceneSummary}` : "",
+      options.contextNote ?? ""
+    ].filter(Boolean).join("\n\n");
+    try {
+      const result = await this.ctx.modelGateway.invoke({
+        model,
+        orgId,
+        subject: options.userId ? `user:${options.userId}` : "panel:tool",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: question }
+        ]
+      });
+      return { ok: true, reply: result.content, model: result.model };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason: `\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${message}\uFF09` };
+    } finally {
+      if (orgId) {
+        try {
+          this.ctx.usage.record({
+            org: orgId,
+            subject: options.userId ? `user:${options.userId}` : "panel:tool",
+            principal: `org:${orgId}`,
+            resource: this.meterResource(dept.id, orgId),
+            meters: [{ key: "calls", value: 1, unit: "call" }],
+            idempotency_key: `panel:ask:${dept.id}:${agentName}:${newId("ask")}`
+          });
+        } catch {
+        }
+      }
+    }
+  }
+  // -- 技能直调（C1-2 / J1 消费面：对话框 @技能名/斜杠命令主通道） ----------------------------
+  /**
+   * 面板可直调的已上架技能清单（skillhub published + 调用人组织可见）。
+   * 与 skillhub.search 同一套可见性口径（visibility=orgs 时按调用人组织过滤）；
+   * 仅 published 可直调（deprecated/offline 不给面板点名）。
+   */
+  listInvokeableSkills(viewerOrgId) {
+    return this.ctx.skillHub.skills().all().filter((skill) => {
+      if (skill.status !== "published") return false;
+      if (skill.visibility === "orgs") {
+        if (!viewerOrgId || !skill.targetOrgs.includes(viewerOrgId)) return false;
+      }
+      return true;
+    }).sort((a, b) => b.stats.downloads - a.stats.downloads).map((skill) => ({
+      id: skill.id,
+      name: skill.name,
+      slug: skill.slug,
+      summary: skill.summary,
+      category: skill.category,
+      version: skill.currentVersion
+    }));
+  }
+  /**
+   * 面板技能点名直调（C1-2：panel_skill_invoke 工具与面板对话框共享的服务原语）。
+   * 语义：skillhub 已上架（published）技能 → 取当前版本内容作为指令上下文 → 模型网关单轮应答。
+   * 失败诚实返回 ok:false + reason（不存在/未上架/不可见/无内容/网关失败），不造假回复、不静默。
+   * 与 askAgent 同风格：不落频道消息，调用方决定是否经 sendMessage 留痕。
+   */
+  async invokeSkill(skillName, message, options = {}) {
+    const name = skillName.trim();
+    if (!name) return { ok: false, reason: "\u6280\u80FD\u540D\u4E3A\u7A7A\uFF08\u7528 /\u6280\u80FD\u540D \u6216 panel_skill_invoke \u70B9\u540D\uFF09" };
+    const orgId = this.callerOrgId(options.userId);
+    const invokeable = this.listInvokeableSkills(orgId || void 0);
+    const skill = invokeable.find((item) => item.name === name) ?? invokeable.find((item) => item.slug === name);
+    if (!skill) {
+      const hint = this.ctx.skillHub.skills().all().find((item) => item.status === "published" && (item.name === name || item.slug === name));
+      if (hint) return { ok: false, reason: `\u6280\u80FD\u300C${name}\u300D\u672A\u5BF9\u5F53\u524D\u7528\u6237\u7EC4\u7EC7\u5F00\u653E\uFF08visibility=${hint.visibility}\uFF09\uFF0C\u65E0\u6CD5\u76F4\u8C03` };
+      const names = invokeable.slice(0, 8).map((item) => item.name);
+      return { ok: false, reason: `\u6CA1\u6709\u5DF2\u4E0A\u67B6\u4E14\u5BF9\u60A8\u5F00\u653E\u7684\u6280\u80FD\u300C${name}\u300D\u3002\u53EF\u7528\u6280\u80FD\uFF1A${names.join("\u3001") || "\uFF08\u65E0\uFF09"}` };
+    }
+    const record = this.ctx.skillHub.skills().get(skill.id);
+    const version = record?.versions.find((item) => item.version === skill.version && item.status === "published");
+    const content = version?.content?.trim() ?? "";
+    if (!content) return { ok: false, reason: `\u6280\u80FD\u300C${skill.name}\u300D\u5F53\u524D\u7248\u672C\uFF08${skill.version}\uFF09\u65E0\u6307\u4EE4\u5185\u5BB9\uFF0C\u65E0\u6CD5\u76F4\u8C03` };
+    let model = options.modelOverride?.trim() ?? "";
+    if (!model) {
+      const online = this.ctx.modelGateway.models().all().filter((item) => item.status === "online");
+      if (online.length === 0) return { ok: false, reason: "\u6A21\u578B\u76EE\u5F55\u6682\u65E0\u5728\u7EBF\u6A21\u578B\u2014\u2014\u8BF7\u7BA1\u7406\u5458\u5728\u300C\u6A21\u578B\u7BA1\u7406\u300D\u4E2D\u63A5\u5165\u540E\u518D\u76F4\u8C03\u6280\u80FD" };
+      model = online[0].slug;
+    }
+    const systemPrompt = [
+      `\u4F60\u5728\u6267\u884C\u4F01\u4E1A\u6280\u80FD\u5E73\u53F0\u4E0A\u67B6\u7684\u6280\u80FD\u300C${skill.name}\u300D\uFF08${skill.summary}\uFF09\u3002\u4E25\u683C\u6309\u4EE5\u4E0B\u6280\u80FD\u6307\u4EE4\u5B8C\u6210\u4EFB\u52A1\uFF1A`,
+      content,
+      options.contextNote ?? ""
+    ].filter(Boolean).join("\n\n");
+    try {
+      const result = await this.ctx.modelGateway.invoke({
+        model,
+        orgId,
+        subject: options.userId ? `user:${options.userId}` : "panel:tool",
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: message || "\uFF08\u65E0\u9644\u52A0\u8F93\u5165\uFF0C\u6309\u6280\u80FD\u6307\u4EE4\u6267\u884C\uFF09" }
+        ]
+      });
+      return { ok: true, reply: result.content, model: result.model, skill: { name: skill.name, version: skill.version } };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { ok: false, reason: `\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${reason}\uFF09` };
+    } finally {
+      if (orgId) {
+        try {
+          this.ctx.usage.record({
+            org: orgId,
+            subject: options.userId ? `user:${options.userId}` : "panel:tool",
+            principal: `org:${orgId}`,
+            resource: `skill:${skill.slug}`,
+            meters: [{ key: "calls", value: 1, unit: "call" }],
+            idempotency_key: `panel:skill:${skill.id}:${newId("inv")}`
+          });
+        } catch {
+        }
+      }
+    }
+  }
+  /** 部门挂载活动的场景图谱摘要（注入 Agent 系统提示；图谱未装载则空串）。 */
+  sceneSummaryForDept(dept) {
+    try {
+      const orgId = this.ctx.iam.orgs().all()[0]?.id ?? "";
+      const active = this.activeIndustry(orgId);
+      if (!active) return "";
+      const pack = this.ctx.scenegraphs.get(active.code.toUpperCase());
+      if (!pack) return "";
+      return dept.acts.flatMap((act) => (pack.activities[act] ?? []).map((scene) => `${scene.code} ${scene.name}\uFF08\u73B0\u72B6 ${"\u2605".repeat(scene.s)}${"\u2606".repeat(4 - scene.s)}\uFF0C\u75DB\u70B9\uFF1A${scene.pain}\uFF09`)).join("\n");
+    } catch {
+      return "";
+    }
+  }
+  // -- 卡片动作（走纯平台链：任务落点 / 审批链 / 钉钉推送） -----------------------
+  async cardAction(input) {
+    const message = this.messages().get(input.messageId);
+    if (!message?.card) throw new Error(`\u6D88\u606F\u4E0D\u5B58\u5728\u6216\u65E0\u64CD\u4F5C\u5361\u7247\uFF1A${input.messageId}`);
+    const op = message.card.ops.find((item) => item.id === input.opId);
+    if (!op) throw new Error(`\u64CD\u4F5C\u9879\u4E0D\u5B58\u5728\uFF1A${input.opId}`);
+    if (message.card.done.includes(input.opId)) throw new Error("\u8BE5\u64CD\u4F5C\u5DF2\u6267\u884C\u8FC7\uFF08\u5E42\u7B49\u4FDD\u62A4\uFF09");
+    let result = "\u5DF2\u8BB0\u5F55";
+    const action = op.action ?? "ack";
+    if (action === "task.create") {
+      this.tasks().insert({
+        id: newId("ptask"),
+        dept: message.dept,
+        title: message.card.title,
+        detail: `\u6765\u81EA\u6D88\u606F\u5361\u7247\uFF08${input.actorName} \u786E\u8BA4\uFF09`,
+        lane: "todo",
+        assigneeType: "human",
+        sceneCode: message.sceneCode,
+        createdBy: input.actorId,
+        messageId: message.id
+      });
+      result = `\u5DF2\u751F\u6210\u4EFB\u52A1\uFF1A${message.card.title}`;
+    } else if (action === "task.transition") {
+      const task = this.tasks().find((item) => item.messageId === message.id).at(-1) ?? this.tasks().find((item) => item.dept === message.dept && item.lane !== "done").at(-1);
+      if (!task) throw new Error("\u6CA1\u6709\u53EF\u6D41\u8F6C\u7684\u5173\u8054\u4EFB\u52A1");
+      this.transitionTask(task.id, op.lane ?? "doing", input.actorId);
+      result = `\u4EFB\u52A1 ${task.title} \u2192 ${LANE_LABELS[op.lane ?? "doing"]}`;
+    } else if (action === "approval.request") {
+      const approval = this.ctx.audit.createApproval({
+        kind: "panel.card-action",
+        title: `${message.card.title} \xB7 ${op.label}`,
+        payload: { messageId: message.id, dept: message.dept, opId: op.id, opLabel: op.label, reason: input.reason ?? "" },
+        requesterId: input.actorId,
+        requesterName: input.actorName,
+        ...op.risk ? { riskLevel: op.risk } : {}
+      });
+      result = `\u5DF2\u63D0\u4EA4\u5BA1\u6279\uFF08${approval.id}\uFF09\uFF0C\u5728\u5BA1\u6279\u4E2D\u5FC3\u8DDF\u8FDB`;
+    } else if (action === "dd.push") {
+      result = "\u5DF2\u8BF7\u6C42\u63A8\u9001\u9489\u9489";
+    }
+    const done = [...message.card.done, input.opId];
+    this.messages().update(message.id, { card: { ...message.card, done } });
+    const updated = this.messages().get(message.id);
+    this.ctx.platformBus.emit(PlatformEvents.PanelCardAction, {
+      messageId: message.id,
+      dept: message.dept,
+      opId: op.id,
+      opLabel: op.label,
+      action,
+      title: message.card.title,
+      text: message.text,
+      actorId: input.actorId,
+      actorName: input.actorName,
+      ddPush: action === "dd.push",
+      channelName: this.channels().get(message.channelId)?.name ?? ""
+    });
+    return { message: updated, result };
+  }
+  // -- 任务 -------------------------------------------------------------------
+  createTask(input) {
+    this.dept(input.dept);
+    return this.tasks().insert({
+      id: newId("ptask"),
+      dept: input.dept,
+      title: input.title,
+      ...input.detail ? { detail: input.detail } : {},
+      lane: input.lane ?? "todo",
+      assigneeType: input.assigneeType ?? "human",
+      ...input.assigneeName ? { assigneeName: input.assigneeName } : {},
+      ...input.sceneCode ? { sceneCode: input.sceneCode } : {},
+      createdBy: input.createdBy
+    });
+  }
+  transitionTask(taskId, lane, actorId) {
+    const task = this.tasks().get(taskId);
+    if (!task) throw new Error(`\u4EFB\u52A1\u4E0D\u5B58\u5728\uFF1A${taskId}`);
+    if (!TASK_LANES.includes(lane)) throw new Error(`\u975E\u6CD5\u6CF3\u9053\uFF1A${lane}`);
+    const updated = this.tasks().update(taskId, { lane });
+    this.ctx.platformBus.emit(PlatformEvents.PanelTaskUpdated, { taskId, dept: task.dept, lane, actorId, title: task.title });
+    return updated;
+  }
+  // -- 场景诊断（会话 × 图谱联动） -------------------------------------------------
+  /** 场景编号规范引用（如 QB01-A-2-5）——会话产出沉淀回转型路线图的联动点。 */
+  sceneContext(code) {
+    const hit = this.ctx.scenegraphs.findScene(code);
+    if (!hit) throw new Error(`\u573A\u666F\u7F16\u53F7\u5728\u5DF2\u88C5\u8F7D\u56FE\u8C31\u4E2D\u4E0D\u5B58\u5728\uFF1A${code}`);
+    return { pack: hit.pack, activityLabel: ACTIVITY_LABELS[hit.activity], sceneLabel: `${hit.scene.name}\uFF08\u73B0\u72B6 ${"\u2605".repeat(hit.scene.s)}${"\u2606".repeat(4 - hit.scene.s)}\uFF09` };
+  }
+  async diagnose(input) {
+    const dept = this.dept(input.dept);
+    const { pack, sceneLabel } = this.sceneContext(input.sceneCode);
+    const channel = this.channels().find((item) => item.dept === input.dept).at(0);
+    if (!channel) throw new Error(`\u90E8\u95E8 ${dept.label} \u6682\u65E0\u534F\u4F5C\u9891\u9053\uFF0C\u8BF7\u5148\u5EFA\u9891\u9053`);
+    const agentCard = dept.agents[0];
+    const text = `@${agentCard.name} \u8BF7\u5BF9\u300C${pack.name}\u300D\u573A\u666F\u300C${sceneLabel}\u300D\uFF08${input.sceneCode}\uFF09\u505A\u6570\u5B57\u5316\u8BCA\u65AD\uFF0C\u6309\u4E00\u56FE\u56DB\u6E05\u5355\u6846\u67B6\u8BC4\u4F30\u5DEE\u8DDD/\u9009\u578B/\u4F18\u5148\u7EA7\u3002`;
+    const message = await this.sendMessage({
+      dept: input.dept,
+      channelId: channel.id,
+      senderType: "human",
+      senderId: input.actorId,
+      senderName: input.actorName,
+      text,
+      ddSync: false,
+      sceneCode: input.sceneCode
+    });
+    const task = this.createTask({
+      dept: input.dept,
+      title: `\u573A\u666F\u8BCA\u65AD\uFF1A${input.sceneCode} ${sceneLabel}`,
+      detail: `\u6D3E ${agentCard.name} \u6309\u4E00\u56FE\u56DB\u6E05\u5355\u6846\u67B6\u8BCA\u65AD\uFF08\u6765\u81EA\u573A\u666F\u56FE\u8C31 ${pack.code}\uFF09`,
+      lane: "todo",
+      assigneeType: "agent",
+      assigneeName: agentCard.name,
+      sceneCode: input.sceneCode,
+      createdBy: input.actorId
+    });
+    return { message, task };
+  }
+  // -- SSE 订阅注册表 -----------------------------------------------------------
+  subscribeStream(dept, listener) {
+    const set = this.streamSubscribers.get(dept) ?? /* @__PURE__ */ new Set();
+    set.add(listener);
+    this.streamSubscribers.set(dept, set);
+    return () => set.delete(listener);
+  }
+  /** 平台事件 → SSE 订阅者扇出（panel.* 与 dingtalk-bridge.delivered）。 */
+  wireEventBus() {
+    const forward = (name) => (payload) => {
+      const dept = payload?.dept;
+      const targets = dept ? [dept] : [...this.streamSubscribers.keys()];
+      for (const target of targets) {
+        for (const listener of this.streamSubscribers.get(target) ?? []) {
+          try {
+            listener({ name, payload });
+          } catch {
+          }
+        }
+      }
+    };
+    this.ctx.platformBus.on(PlatformEvents.PanelMessageCreated, forward(PlatformEvents.PanelMessageCreated));
+    this.ctx.platformBus.on(PlatformEvents.PanelTaskUpdated, forward(PlatformEvents.PanelTaskUpdated));
+    this.ctx.platformBus.on(PlatformEvents.PanelCardAction, forward(PlatformEvents.PanelCardAction));
+    this.ctx.platformBus.on(PlatformEvents.PanelIndustryActivated, forward(PlatformEvents.PanelIndustryActivated));
+    this.ctx.platformBus.on(PlatformEvents.DingtalkDelivered, forward(PlatformEvents.DingtalkDelivered));
+    this.ctx.platformBus.on(PlatformEvents.ScenegraphUpdated, forward(PlatformEvents.ScenegraphUpdated));
+  }
+}
+function extractMentions(text) {
+  const mentions = /* @__PURE__ */ new Set();
+  for (const match of text.matchAll(/@([\p{L}\p{N}·]{2,20})/gu)) mentions.add(match[1]);
+  return [...mentions];
+}
+export {
+  INDUSTRY_REGISTRY,
+  LANE_LABELS,
+  PanelService,
+  TASK_LANES,
+  extractMentions
+};
