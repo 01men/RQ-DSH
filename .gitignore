@@ -18,3 +18,6 @@ tests/.probe-*
 # 部署 overlay（机器个性，勿版本化——见 docs/deploy-enterprise.md / deploy-mac-form-b.md）
 overlay.yml
 overlay-rq.yml
+
+# npm 打包产物（发布时生成，不入库）
+*.tgz
