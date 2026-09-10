@@ -1,0 +1,43 @@
+# 01门 npm 发布手册（@01men/gate-01 双通道之 npm 通道）
+
+> 前置状态（2026-09-10 已就绪）：安装产物为预构建 dist（G3 自解）、零生命周期脚本、
+> rq-card 经 bundledDependencies 随包自包含（file: 依赖在 npm/tgz 通道不可移植，真机实证）。
+> github 通道（`dsh plugin add github:01men/RQ-DSH`）不依赖 npm，已随仓库推送天然可用。
+
+## 用户侧配合（仅 2 步，涉及凭据必须本人操作）
+
+1. **npm 组织**：在 npmjs.com 确认/创建 org **`01men`**（名称必须与包 scope 完全一致，免费 plan 即可），
+   并将发布用账号设为 org 成员（owner）。若不想用 `@01men` scope，先告知开发侧改包名再发布。
+2. **登录官方源**（本机 npm 默认指向 npmmirror 淘宝镜像，publish 必须走官方源）：
+
+   ```bash
+   npm login --registry=https://registry.npmjs.org/
+   ```
+
+   浏览器交互完成（可能触发 2FA/OTP）。
+   备选：npmjs.com → Access Tokens → 生成 Granular Token（仅勾选 `@01men` 包 read-write、
+   有效期设短），交付开发侧用于发布，**发布完成后立即撤销**。
+
+## 开发侧执行（收到「登录完成」后）
+
+```bash
+# 1. 允许发布（根 package.json private:true → false），提交推送
+# 2. 最终校验
+npm run build:dist && npm run selftest && npm pack
+# 3. 发布（scope 包必须显式 --access public）
+npm publish --access public --registry=https://registry.npmjs.org/
+# 4. 发布验证
+npm view @01men/gate-01 version
+# 5. 真机冒烟（四通道之 npm 通道闭环）
+dsh plugin add --profile <全新profile> @01men/gate-01
+# 6. 发布记录回填本手册 + 推送备份
+```
+
+## 注意事项
+
+- **file:/tgg 本地安装的刷新陷阱**：pnpm 对 `file:` 目录依赖取 inode 快照，源 `dist/` 重写后
+  必须 `pnpm remove + add` 或改用 tgz 安装才会刷新；npm/github 内容寻址通道天然新鲜。
+- **profile bundles**：`pnpm remove` 会把 bundles 列表里的 `@01men/gate-01` 一并移除，
+  重装后需确认 profile `package.json` 的 `dsh.profile.bundles` 含 `@01men/gate-01`。
+- **版本节奏**：每次发布 = bump 版本号 → `npm run build:dist` + 浏览器半重建 → selftest 全绿 →
+  pack → publish → 推送备份（安装产物 dist/** 提交入库，发布包与仓库一致）。
