@@ -153,19 +153,25 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
 
 ## 决策回执（请 main 侧填写后回传）
 
+> main 侧已回填（2026-09-10，基线 main `5977067` 重算残余差异；实施与验证记录见 main 仓库
+> `docs/handoff-f-remainder-adoption-20260910.md`）。注意：本清单对 `ff1a8de` 实测，main 此后已
+> 自行推进——realtime.js / realtime.test.mjs（钉钉 H5 降级）与 plugin-usage 等两侧同幅差异系
+> 已同步内容，不在本批回流范围。
+
 | 域 | 采纳？ | 备注 |
 |---|---|---|
-| A 审批深化 | | |
-| B usage/recent | | |
-| C 五平台主题/钉钉H5/dashboard | | |
-| D 目录筛选/登记引导 | | |
-| E 测试资产 | | 随对应域 |
-| F mcp/app riskLevel 水印 | | 依赖 A（plugin-audit 底座） |
-| G1 远程登录回跳闭环（next + 自助 entry_ticket） | | 采纳后定制侧向导自动升级闭环 |
-| G2 modelgw 流式化 | | 可选 |
-| G3 拷贝安装形态 TS 装载（dsh loader 预剥离 / 平台预构建分发） | | 「全新 dsh 拷贝安装完整体验」最后一公里；源码/链接形态已实证闭环。**01门产物已自解**（预构建 dist 入库，plan-gate01 Phase 1）；宿主面包仍挂起 |
-| I 01门改名装配漂移 | | 定性 PLATFORM_PACKAGE/boot-all/cordis 装配是否随根包名演进 |
-| J 01门 Phase 3 追加漂移（dsh-bridge inject 收缩 / rq-card 内联 / files 闭包） | | 定性 dsh-bridge 声明面收缩与 rq-card 值导入内联是否回浸 main |
-| K http.ts file() headersSent 守卫（宿主崩溃级缺陷） | | **建议尽快采纳**——异步双写即 whole-process 崩溃 |
+| A 审批深化 | ✅ 采纳 | plugin-audit 底座 + agent 标注 + console 三端点整体回流；已剔除定制侧 `PUBLIC_PATHS` 首行误合并格式损伤（回流时修复）。main 既有 selftest 的 agent/app 上下线审批调用点已随 fail-closed 语义补 `confirmed: true` |
+| B usage/recent | ✅ 采纳 | `GET /api/usage/recent`（console.login，自见 ≤5） |
+| C 五平台主题/钉钉H5/dashboard | ◑ 部分采纳 | 主题（platform.js / base.css 五平台块 / 启动回放 / 钉钉入口探测）与审批终审展示采纳；**dashboard 场景卡片区不采纳**（依赖 `/api/panel/board` 定制面板数据面，按依赖警示待卡片包域表态；main 侧 dashboard 已按「仅采纳其余部分」改造，对话入口卡按挂载形态显隐）；H5 降级 main 已自备（realtime.js + realtime.test.mjs），walkthrough / dingtalk-h5-smoke 不搬（行为等价）；base.css 场景卡片 CSS 未搬（无消费方） |
+| D 目录筛选/登记引导 | ✅ 采纳 | asset-filters + assets 瘦身 + register 引导页 + NAV「资产登记」；已剔除定制侧 NAV 重复的「Skill 市场」行（rebase 残留）与 approvals 页 industry.activation / panel.* 定制 kind |
+| E 测试资产 | ✅ 随域 | 「审批 SLA 与公司级终审」「usage 最近调用」「五平台主题 CSS 断言」「资产目录筛选（纯函数+性能）」四分节移植进 scripts/selftest.mjs；跨源 next 白名单用例入 landing.test.mjs（main 的 landing.js 纯函数随包单测通道）；dom-smoke 等布局迁移不强制，未搬 |
+| F mcp/app riskLevel 水印 | ✅ 采纳 | app 2 处 high + mcp finalReview / 调用水印，随 A 底座一并落地 |
+| G1 远程登录回跳闭环（next + 自助 entry_ticket） | ✅ 采纳 | `POST /api/auth/entry-tickets/self`（EntryTicket 增 `self` 票种，TTL 硬上限 120s 覆盖 env 调高）；跨源 next 白名单 = landing.js `sanitizeCrossOriginNext()` 纯函数（仅回环/私网 http(s)；公网/伪协议/带凭据拒绝），比整页白名单更收窄 open redirect 面；登录页 finishLogin 与 SSO 回调脚本双消费点（`heng_ops_next_cross` 暂存过钉钉整页授权）。审计沿用 main 既有 `${refType}.entry.ticket.*` 约定（self.entry.ticket.issue / .session），未另设 authn.entryticket.redeemed 双轨。**定制侧零后续改动成立：G1 采纳即闭环** |
+| G2 modelgw 流式化 | ❌ 暂缓 | 非必须；现状单轮非流式诚实工作，待面板协作会话有流式诉求再议 |
+| G3 拷贝安装形态 TS 装载（dsh loader 预剥离 / 平台预构建分发） | ❌ 维持挂起 | 01门产物已自解（dist 入库）；宿主面包属平台预构建分发架构议题，登记维持，非本批 |
+| I 01门改名装配漂移 | ❌ 不采纳（豁免登记） | 产品身份值必须跟随**各自**根包名——main 保持 `dsh-enterprise-ops` / `@dsh-ops` / `/rq`，定制侧保留 `@01men/gate-01` / `/gate01`；此域属「产品身份固有分叉」，请定制侧在收敛检查按豁免登记（不可拆除，拆除即版本定位/自更新根目录错乱） |
+| J 01门 Phase 3 追加漂移（dsh-bridge inject 收缩 / rq-card 内联 / files 闭包） | ◑ 部分采纳 | **dsh-bridge inject 8→3 + softRead 防御式软读：采纳**（main 全量装配行为不变；抗缺提供者装配属宿主面健壮性，真机已实证）。rq-card tool.ts 内联 / exports / 根 files 闭包：不回流（rq-card 包内装机面，main 不涉） |
+| K http.ts file() headersSent 守卫（宿主崩溃级缺陷） | ✅ 采纳（本批最先落地） | 幂等守卫两处（writeHead 前 + catch 分支）原样回流 |
 
-未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）。
+未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）；**I 域例外：按豁免登记处理**
+（产品身份值，拆除即错乱）。

@@ -6,7 +6,8 @@ import { openCmdk } from './cmdk.js'
 import { replayPlatformTheme, PLATFORM_KEY } from './platform.js'
 import { resolveLanding, isBareLanding, LANDING_PREF_KEY } from './landing.js'
 
-// 平台主题（WP-05/B3）：启动即回放记忆的平台（免闪默认色）；登录后由工作台按卡片包下发的 platform 校准。
+// 平台主题（WP-05/B3）：启动即回放记忆的平台（免闪默认色）。写入方为平台身份下发方
+// （applyPlatformTheme——卡片包域回流后的工作台校准、或部署方预置 heng_ops_platform 键）。
 replayPlatformTheme()
 
 // 钉钉微应用入口探测（WP-11）：钉钉 webview UA 且无记忆平台时，标记钉钉入口态。
@@ -47,7 +48,6 @@ const NAV = [
   ] },
   { section: 'AI 资源', items: [
     { path: '#/register', label: '资产登记', icon: 'zap', perm: 'console.login' },
-    { path: '#/skills', label: 'Skill 市场', icon: 'sparkles', perm: 'skill.read' },
     { path: '#/skills', label: 'Skill 市场', icon: 'sparkles', perm: 'skill.read', badge: 'skills' },
     { path: '#/agents', label: 'Agent 本体', icon: 'bot', perm: 'agent.read' },
     { path: '#/apps', label: 'AI 应用', icon: 'app', perm: 'app.read' },

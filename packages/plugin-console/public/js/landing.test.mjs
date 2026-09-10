@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { resolveLanding, isBareLanding, sanitizeNext, canPanel, isBusinessOnly } from './landing.js'
+import { resolveLanding, isBareLanding, sanitizeNext, sanitizeCrossOriginNext, canPanel, isBusinessOnly } from './landing.js'
 
 /** 与 iam BuiltinRoles / BUILTIN_ROLE_MIGRATION 对齐的权限面（经 userPermissions 通配展开后的形态）。 */
 const PERMS = {
@@ -69,4 +69,21 @@ test('登录回跳白名单：仅同源绝对路径放行（open redirect 防护
   assert.equal(sanitizeNext(''), '')
   assert.equal(sanitizeNext(null), '')
   assert.equal(sanitizeNext(undefined), '')
+})
+
+test('跨源回跳白名单（G1）：仅回环/私网 http(s) 绝对地址放行（公网/伪协议/带凭据/同源路径均拒）', () => {
+  assert.equal(sanitizeCrossOriginNext('http://127.0.0.1:7300/rq/panel/'), 'http://127.0.0.1:7300/rq/panel/')
+  assert.equal(sanitizeCrossOriginNext('http://localhost:3080/'), 'http://localhost:3080/')
+  assert.equal(sanitizeCrossOriginNext('http://192.168.0.7:7300/'), 'http://192.168.0.7:7300/')
+  assert.equal(sanitizeCrossOriginNext('http://10.0.0.3:8080/panel/'), 'http://10.0.0.3:8080/panel/')
+  assert.equal(sanitizeCrossOriginNext('https://172.16.1.9/'), 'https://172.16.1.9/')
+  assert.equal(sanitizeCrossOriginNext('https://172.32.1.9/'), '')
+  assert.equal(sanitizeCrossOriginNext('http://8.8.8.8/'), '')
+  assert.equal(sanitizeCrossOriginNext('https://evil.example.com/'), '')
+  assert.equal(sanitizeCrossOriginNext('http://user:pass@192.168.0.7/'), '')
+  assert.equal(sanitizeCrossOriginNext('javascript:alert(1)'), '')
+  assert.equal(sanitizeCrossOriginNext('ftp://192.168.0.1/'), '')
+  assert.equal(sanitizeCrossOriginNext('/dashboard'), '')
+  assert.equal(sanitizeCrossOriginNext(''), '')
+  assert.equal(sanitizeCrossOriginNext(null), '')
 })

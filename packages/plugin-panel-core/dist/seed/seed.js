@@ -22,7 +22,10 @@ function mapOps(labels) {
 const DEMO_ORG_ID = "demo-org";
 function seedPanel(ctx, autoDemo = false) {
   const logger = ctx.logger("panel-seed");
-  if (ctx.panel.deptConfigs().count() > 0) return;
+  if (ctx.panel.deptConfigs().count() > 0) {
+    if (autoDemo) seedDemoContent(ctx, logger);
+    return;
+  }
   const iam = ctx.reflect.get("iam", false);
   for (const meta of DEPT_META) {
     const matchedOrg = iam?.orgs().findOne((org) => org.name === meta.label);
@@ -31,6 +34,7 @@ function seedPanel(ctx, autoDemo = false) {
   const rootOrg = iam?.orgs().find((org) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : void 0);
   if (rootOrg) {
     for (const code of ["QB01", "GCJX"]) {
+      if (ctx.panel.activations().findOne((item) => item.orgId === rootOrg.id && item.code === code)) continue;
       ctx.panel.activations().insert({
         id: newId("act"),
         code,
@@ -43,28 +47,35 @@ function seedPanel(ctx, autoDemo = false) {
   }
   logger.info("\u9762\u677F\u57FA\u7EBF\uFF1A\u4E94\u90E8\u95E8\u9AA8\u67B6 + \u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/GCJX\uFF09\u5B8C\u6210");
   if (process.env.DEMO_SEED !== "1" && !autoDemo) return;
+  seedDemoContent(ctx, logger);
+}
+function seedDemoContent(ctx, logger) {
   const demoPath = join(dirname(fileURLToPath(import.meta.url)), "demo-content.json");
   const demo = JSON.parse(readFileSync(demoPath, "utf8"));
   for (const [deptId, content] of Object.entries(demo.depts)) {
     const config = ctx.panel.deptConfigs().get(deptId);
     if (!config) continue;
-    const agents = content.agents.map((agent) => ({
-      name: agent.n,
-      desc: agent.d,
-      icon: agent.icon,
-      ...agent.busy ? { busy: true } : {}
-    }));
-    const kpis = content.kpis.map(([label, value]) => ({ label, value, source: "mock" }));
-    const widgets = content.widgets.map((widget, index) => ({
-      id: `w${index + 1}`,
-      type: widget.t,
-      title: widget.title,
-      ...widget.live ? { live: true } : {},
-      // 治理硬性 DoD：演示看板全部带「模拟数据」来源徽标，绝不冒充真实业务面
-      source: "mock",
-      rows: widget.rows
-    }));
-    ctx.panel.deptConfigs().update(config.id, { agents, kpis, widgets });
+    const alreadySeeded = ctx.panel.channels().find((item) => item.dept === deptId).length > 0;
+    if (config.agents.length === 0 && config.kpis.length === 0) {
+      const agents = content.agents.map((agent) => ({
+        name: agent.n,
+        desc: agent.d,
+        icon: agent.icon,
+        ...agent.busy ? { busy: true } : {}
+      }));
+      const kpis = content.kpis.map(([label, value]) => ({ label, value, source: "mock" }));
+      const widgets = content.widgets.map((widget, index) => ({
+        id: `w${index + 1}`,
+        type: widget.t,
+        title: widget.title,
+        ...widget.live ? { live: true } : {},
+        // 治理硬性 DoD：演示看板全部带「模拟数据」来源徽标，绝不冒充真实业务面
+        source: "mock",
+        rows: widget.rows
+      }));
+      ctx.panel.deptConfigs().update(config.id, { agents, kpis, widgets });
+    }
+    if (alreadySeeded) continue;
     for (const [name] of content.chans) {
       ctx.panel.channels().insert({ id: newId("pchan"), dept: deptId, name, createdBy: "seed" });
     }

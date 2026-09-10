@@ -8,11 +8,12 @@
 > AI 应用本体 · 用量透明计量（usage）· 模型接入网关（modelgw）· 审计与告警
 > ——多类资源，一套身份、一套权限、一套计量、一套审计。
 >
-> **M0 合规收敛（2026-09-09）**：商业模式为**私有化年费 + 治理包**——钱包/复式分账（plugin-billing）已整体
-> 下线封存（存量流水 CSV 封存 90 天，见 [docs/billing-archive-register.md](docs/billing-archive-register.md)）；
-> 价格簿转「零价快照 + 内部成本参考」，平台与产品面对外**不呈现任何金额结算语义**；
-> 用量透明月度报表（部门/Agent/Skill tokens 三维聚合 + CSV 自助导出）见 J4 契约
+> **M0 合规收敛（2026-09-09）**：商业模式为**私有化年费 + 治理包**。平台对外只呈现**用量与内部成本穿透**——
+> 价格簿为零价快照（charge 恒 0）+ 内部采购成本参考，不呈现任何金额结算语义；用量透明月度报表
+> （部门/Agent/Skill tokens 三维聚合 + CSV 自助导出）见 J4 契约
 > [docs/contract-j4-usage-report.md](docs/contract-j4-usage-report.md)。
+> 原钱包/分账子系统（plugin-billing）已整体下线封存（存量流水 CSV 封存 90 天，登记见
+> [docs/billing-archive-register.md](docs/billing-archive-register.md)）。
 
 ---
 
@@ -186,39 +187,6 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
 
 详细流程与验收清单见 [docs/deploy-enterprise.md](docs/deploy-enterprise.md) 第四节。
 
-### 装好插件即可用（fresh-install 体验 · 2026-09 定版）
-
-在**任何一台全新安装的 dsh** 上 `dsh plugin add` 装好本平台后，打开 `http://127.0.0.1:<端口>/rq/panel/`
-即进入**连接与登录向导**（定版设计见 [docs/plan-dsh-plugin-first.md](docs/plan-dsh-plugin-first.md)）：
-
-- **本机宿主（形态 B）**：首启可直接在向导里为 admin 设置登录口令（一次性初始口令全程不出服务端），
-  可选对外 IP 生成本机局域网监听指引，随后本机控制台登录（钉钉扫码 + 账号）；
-- **连接远端宿主（形态 C）**：向导**扫描局域网**（/24 × 7300/3080 端口探活，自动判定 dsh 挂载/独立
-  两种宿主形态）或手输 `http://宿主IP:端口` → 测试连接 → **账号密码登录经本机插件代理全闭环**
-  （令牌按连接隔离，浏览器零跨域）；钉钉扫码引导至宿主登录页（宿主侧 `next` 回跳增强见交接清单 G1）。
-  连接后面板/看板/卡片数据全量指向远端宿主——运维工具则由 plugin-connect 转发宿主执行。
-
-向导端点位于免登命名空间 `/rqcard/*`（console 鉴权中间件只拦 `/api/*`，选宿主/设口令必须发生在
-登录之前），自带三道防线：`x-rqcard-call` 向导头（挡跨站 drive-by CSRF）、代理白名单 + 只透传
-Authorization + `redirect: manual`（令牌不外泄）、SSE 不透传（前端走既有 30s 轮询降级）。
-
-**对话与看板双向打通**：dsh 会话内新增「榕器工作台」视图 Tab（同源内嵌 `/rq/panel/`）；面板
-「Agent 对话」默认内嵌 dsh 标准模式对话（作为默认 Agent 交互面；被内嵌/无 dsh 时自动回落内置
-协作会话，防 iframe 递归）；dsh 设置页新增「榕器宿主」分区、未连接宿主时全局角标主动提醒。
-其他 Agent 的协作调用：会话内 `panel_agent_invoke`（点名调用面板 Agent 阵容，同步取回应答）、
-`panel_board_digest`（战略看板聚合摘要）+ 既有 `panel_msg_send`/`panel_task_*` 写通道与 `POST /mcp`。
-
-**装机铁律（已写入 AGENTS.md 铁律 7）**：每次功能/面板更新必须保持本节体验成立——selftest 的
-「fresh-install 装机模拟」段自动断言装机链完整性（patch entry 逐个解析导入、cordis 三链一致、
-rq-card 浏览器半 build-id 新鲜度、files 覆盖、rq-card 包名 file: 依赖就位）；改了 `src/client/**` 必须
-先 `node packages/plugin-rq-card/build.mjs` 重建，忘重建推送前即红。
-
-**装机形态边界（2026-09-08 真机实测，见 docs/plan-dsh-plugin-first.md §六）**：源码/链接形态
-（`--patch overlay` 或 `dsh plugin --profile X add link:<本仓路径>`，符号链接真实路径在 node_modules
-之外）完整体验 **8/8 验证通过**；**拷贝安装形态**（`add github:`/`add file:`，包实体落入
-node_modules）当前受 Node ≥22.6 限制——拒绝类型剥离 node_modules 内 TS，`src/index.ts` 形式的
-loader entry 不可执行（全仓架构级限制，解法走交接清单 **G3**：dsh loader 预剥离或平台预构建分发）。
-
 ### 已融合 OS-skill 模块设计（v1.1）
 
 选择性吸收了 [01men/OS-skill](https://github.com/01men/OS-skill) 两个模块中具有长远价值的设计（决策全记录见 [docs/roadmap.md](docs/roadmap.md)）：
@@ -383,8 +351,8 @@ NAS 成为第六类受管资产（FS 文件存储类），Skill 上架产物可�
   不再必然 403。存量部署一次性迁移（幂等标记 `agent-scopes-usage-write-v1`，只跑一次防覆盖后续人工
   收权；迁移动作逐条入 change 审计 `agent.credential.scopes-backfill`）。
 - **计量键与价格簿不符 → 硬拒绝**：`usage.record` 校验事件必含价格簿 `meter_key`，缺失 400 且错误信息
-  直接携带期望键（价格簿对调用方不可见，错误信息是唯一自纠线索）——消灭「静默按 0 计费入库」这一
-  比报错更危险的漏计费面。skillhub 内部管道同步对齐（meters 补价格簿计价键 `calls`，downloads/installs
+  直接携带期望键（价格簿对调用方不可见，错误信息是唯一自纠线索）——消灭「静默按 0 口径入库」这一
+  比报错更危险的漏计量面。skillhub 内部管道同步对齐（meters 补计量键 `calls`，downloads/installs
   观测维度保留，热力图口径不变）。
 - **机器凭证治理三端齐备**：`PATCH /api/authn/principals/:id`（scopes 调整，须全部命中权限目录或恰为
   `['*']`）+ `POST /api/authn/principals/:id/rotate-secret`（clientId 不变、旧 secret 立即失效、新值仅此
@@ -477,7 +445,7 @@ packages/
   plugin-rq-card/           会话侧注入卡片（四态执行卡 + 反馈条；浏览器半需 node packages/plugin-rq-card/build.mjs 预构建）
 cli/dshctl.mjs              CLI（--output json|table / --dry-run / --yes；含 connect 接入管理）
 skills/dsh-ops-*/SKILL.md   9 个运维 Skill（含 dsh-ops-admin 总控索引）
-scripts/selftest.mjs        功能自测（931 项断言，含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点、宿主挂载/面板/桥接等功能分节；隔离实例 + DEMO_SEED）
+scripts/selftest.mjs        功能自测（端到端断言全绿，数量以本次运行为准；含安全攻击演练、App SSO 全链与 openid-client 冒烟、NAS 文件网关 stub 与 /mcp 端点、宿主挂载/面板/桥接等功能分节；隔离实例 + DEMO_SEED）
 scripts/verify-live-host.mjs  已上线宿主真实性验证（运维持凭据执行）
 tests/full-chain-drill.mjs  四类资产「登记→审批→上架→授权→调用→计量回传」全链路演练
 tests/morning-peak-entry.mjs  早高峰入口并发演练（50 并发领票/兑换）
@@ -554,7 +522,7 @@ curl http://localhost:7300/docs/app-sso-integration.md
 
 ## 七、自测
 
-`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，覆盖 **445 项端到端断言**：
+`npm run selftest` 在独立端口 + 独立数据目录启动隔离实例，端到端断言全绿（数量以本次运行为准，历史计数作废——[M0 发布说明](docs/release-notes-2026-09-09-m0.md)口径）：
 v1.0 全量（登录/RBAC 越权、冻结→令牌联动吊销、机器凭证与 scope 越权、MCP 灰度/回滚/网关鉴权（含只读约束拦截）、
 Skill 恶意提交驳回与两级审批、Agent 属性校验与 L4 单人审批（发起人可自审）、on-behalf-of 链、
 审计四类日志与筛选、告警、成本穿透、工具桥执行、安全演练）+ v1.2 新增
@@ -594,3 +562,7 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 - 钱包/资金面已下线封存（M0-2，见 [docs/billing-archive-register.md](docs/billing-archive-register.md)）；OIDC 私钥存 data 目录，生产建议迁 KMS
 - NAS 文件操作全部经 MCP 文件网关（不直连 DSM 私有 API）；`fs_upload/fs_download` 在网关进程侧读写本地路径——平台与网关需同机部署，或把资产 `stagingDir` 配置为共享挂载点；`/mcp` 端点为无会话纯 JSON 形态（不提供 GET SSE 长流，主流客户端兼容）
 - Node ≥ 22.6（原生 TypeScript 运行，无需构建步骤；node:sqlite 在 Node 24 下为 Experimental，无害）
+
+---
+
+> 最近更新：2026-09-10 · F 域余量回流（[docs/handoff-f-remainder-adoption-20260910.md](docs/handoff-f-remainder-adoption-20260910.md)）——审批深化（高风险二次确认 + 公司级终审 + SLA 看板）、usage 最近调用、五平台主题、目录筛选与登记引导、远程登录回跳闭环（自助 entry_ticket）、http.ts file() 崩溃级缺陷修复；selftest 978 项断言全绿。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。

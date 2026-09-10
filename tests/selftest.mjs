@@ -2479,6 +2479,35 @@ try {
   })
   check('直达票据：伪造票据被拒', redeemForged.status === 400)
 
+  // ================================================================ G1-a 自助入场票据与跨源回跳（main 7f5f3ea 采纳回流）
+  // 本机控制台登录人可自助签发 etk_ 票据（TTL 硬上限 120s），供跨源 next 回跳本机面板的
+  // 免登闭环（定制向导 wzLoginDd 钉钉扫码链的宿主侧配套）；复用既有公开兑换端点零新增公开面。
+  {
+    const selfAnon = await api('POST', '/api/auth/entry-tickets/self', { body: {} })
+    check('自助票：未认证被拒（401，机器主体不可自助签发）', selfAnon.status === 401)
+    const selfIssued = await api('POST', '/api/auth/entry-tickets/self', { token: admin, body: {} })
+    check('自助票：登录人类可自助签发（etk_ 票据，TTL 硬上限 120s 覆盖 env 调高）',
+      selfIssued.ok && selfIssued.data.ticket.startsWith('etk_') && selfIssued.data.ttlSeconds <= 120, JSON.stringify(selfIssued.error ?? selfIssued.data))
+    const selfRedeem = await rawReq('POST', '/api/auth/entry-ticket-session', {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticket: selfIssued.data.ticket }),
+    })
+    const selfSession = jsonBody(selfRedeem)
+    check('自助票：兑换建立平台会话（跨源回跳后复用既有公开兑换端点，零新增公开面）',
+      selfRedeem.status === 200 && typeof selfSession.data?.token === 'string',
+      `${selfRedeem.status} ${JSON.stringify(selfSession).slice(0, 160)}`)
+    const selfReplay = await rawReq('POST', '/api/auth/entry-ticket-session', {
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticket: selfIssued.data.ticket }),
+    })
+    check('自助票：重放被拒（一次性/防重放语义与 agent 票一致）', selfReplay.status === 400, String(selfReplay.status))
+    const selfAudit = await api('GET', '/api/audit/logs?q=' + encodeURIComponent('self.entry.ticket'), { token: admin })
+    check('自助票：签发与兑换均入审计（self.entry.ticket.* 可检索）',
+      selfAudit.ok && (selfAudit.data.items ?? []).some((log) => log.action === 'self.entry.ticket.issue')
+      && (selfAudit.data.items ?? []).some((log) => log.action === 'self.entry.ticket.session'),
+      JSON.stringify(selfAudit.error ?? selfAudit.data?.items?.map((item) => item.action)))
+  }
+
   // L4 上线：单人审批制——发起人（admin）自审通过
   const onlineRequest = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: admin, body: { action: 'online', note: '自测上线' } })
   check('上线生成 L4 审批单', onlineRequest.ok && onlineRequest.data.approval.status === 'pending')
@@ -2951,7 +2980,8 @@ try {
   check('更新工具已注册（update_status 等）', toolList.data.tools.some((t) => t.name === 'update_status' && t.permission === 'platform.update.read'))
 
   const updStatus0 = await api('GET', '/api/update/status', { token: admin })
-  check('更新状态可读（版本取自根 package.json=1.1.0）', updStatus0.ok && updStatus0.data.currentVersion === '1.1.0')
+  const rootPkgVersion = JSON.parse(readFileSync('package.json', 'utf8')).version
+  check(`更新状态可读（版本取自根 package.json=${rootPkgVersion}）`, updStatus0.ok && updStatus0.data.currentVersion === rootPkgVersion)
   check('安装形态识别为 source（git 检出）', updStatus0.data.installMode === 'source')
   check('环境变量关闭自动检查生效（DSH_UPDATE_AUTO_CHECK=off）', updStatus0.data.autoCheck === false)
   check('未检查时无最新版本快照', updStatus0.data.latest === null)
@@ -2961,7 +2991,7 @@ try {
 
   const updCheck1 = await api('POST', '/api/update/check', { token: admin })
   check('手动检查成功（stub 上游）', updCheck1.ok && updCheck1.data.latest?.version === '9.9.9')
-  check('发现新版本（1.1.0 → 9.9.9）', updCheck1.data.hasUpdate === true && updCheck1.data.updateKind === 'version')
+  check(`发现新版本（${rootPkgVersion} → 9.9.9）`, updCheck1.data.hasUpdate === true && updCheck1.data.updateKind === 'version')
   check('提交对比生效（落后 2 个提交）', updCheck1.data.behindBy === 2 && updCheck1.data.recentCommits.length === 2 && updCheck1.data.recentCommits[0].sha === 'a222222')
 
   const updCheck2 = await api('POST', '/api/update/check', { token: admin })
@@ -2992,7 +3022,7 @@ try {
   check('开启自动检查（每 24h）', updAutoOn.ok && updAutoOn.data.autoCheck === true && updAutoOn.data.intervalHours === 24)
 
   const updTool = await api('POST', '/api/tools/execute', { token: admin, body: { name: 'update_status', args: {} } })
-  check('Agent 工具 update_status 可用', updTool.ok && updTool.data.isError === false && updTool.data.value.currentVersion === '1.1.0')
+  check('Agent 工具 update_status 可用', updTool.ok && updTool.data.isError === false && updTool.data.value.currentVersion === rootPkgVersion)
   const updToolApply = await api('POST', '/api/tools/execute', { token: hrToken2, body: { name: 'update_apply', args: { reason: '越权尝试' } } })
   check('工具级权限拦截 update_apply（403）', updToolApply.status === 403)
 

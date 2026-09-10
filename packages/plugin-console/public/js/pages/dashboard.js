@@ -1,17 +1,9 @@
-/** 工作台：全员四区首页（问候 / 场景卡片 / 最近调用 / 对话入口）+ 管理简报（按权限显现）。 */
-import { api, session, bridgeStatus } from '../api.js'
+/** 工作台：全员首页（问候 / 最近调用 / 对话入口[挂载形态]）+ 管理简报（按权限显现）。
+ *  场景卡片区（卡片包驱动）随卡片包域另行回流（交接清单 C 依赖警示），此处不渲染。 */
+import { api, session, bridgeStatus, BASE } from '../api.js'
 import { icon } from '../icons.js'
 import { h, $, $$, esc, fmtNum, fmtCost, fmtPct, timeAgo, statusBadge, sparkline } from '../ui.js'
-import { applyPlatformTheme, currentPlatform } from '../platform.js'
 import { errorBarHtml } from '../errors.js'
-
-/** 行为埋点（WP-07/D2）：卡片曝光/点击上报 behavior 管道；失败静默（不打扰工作）。 */
-function track(type, payload) {
-  api.post('/api/behavior/events', { type, platform: document.documentElement.dataset.platform || undefined, payload }).catch(() => {})
-}
-
-const BADGE_ICON = { skill: 'sparkles', app: 'app', mcp: 'plug', nas: 'server', kb: 'layers', data: 'trending', model: 'cpu', agent: 'bot' }
-const BADGE_LABEL = { skill: '技能', app: '应用', mcp: '服务', nas: '数据', kb: '知识', data: '数据', model: '模型', agent: '数字员工' }
 
 export async function renderDashboard(content) {
   content.innerHTML = `<div style="padding:60px;text-align:center;color:var(--text-4)">加载中…</div>`
@@ -43,16 +35,7 @@ export async function renderDashboard(content) {
 
     <div id="dash-binding-banner"></div>
 
-    <div class="card mb-20" id="dash-scene">
-      <div class="card-head">
-        <span class="card-title">${icon('zap', 15)} 场景入口</span>
-        <span class="card-sub" id="dash-scene-label"></span>
-        <div class="card-head-actions"><button class="btn btn-default btn-sm" id="dash-open-chat">${icon('bot', 13)}打开对话</button></div>
-      </div>
-      <div class="card-body"><div class="dash-scene-grid" id="dash-scene-cards"></div></div>
-    </div>
-
-    <div class="grid-2 mb-20">
+    <div class="${BASE ? 'grid-2' : ''} mb-20">
       <div class="card">
         <div class="card-head">
           <span class="card-title">${icon('clock', 15)} 最近调用</span>
@@ -60,6 +43,7 @@ export async function renderDashboard(content) {
         </div>
         <div class="card-body" id="dash-recent"></div>
       </div>
+      ${BASE ? `
       <div class="card" id="dash-chat-card">
         <div class="card-head"><span class="card-title">${icon('bot', 15)} 对话入口</span></div>
         <div class="card-body" style="display:flex;flex-direction:column;gap:12px">
@@ -67,7 +51,7 @@ export async function renderDashboard(content) {
           <a class="btn btn-primary btn-lg btn-block" id="dash-open-chat-main" href="/" target="_top" rel="noopener">进入 AI 对话工作区</a>
           <div class="fs-11 text-4">单入口免登：从门户/钉钉进入即已登录，无需二次认证。</div>
         </div>
-      </div>
+      </div>` : ''}
     </div>
 
     ${isManager ? `
@@ -121,13 +105,11 @@ export async function renderDashboard(content) {
   $('#dash-goto-agents')?.addEventListener('click', () => { location.hash = '#/agents' })
   $('#dash-goto-approve')?.addEventListener('click', () => { location.hash = '#/approvals' })
   $('#dash-goto-conflicts')?.addEventListener('click', () => { location.hash = '#/iam?tab=conflicts' })
-  $('#dash-open-chat')?.addEventListener('click', () => { window.open('/', '_top') })
   $$('.stat-card[data-href]').forEach((card) => {
     card.onclick = () => { location.hash = card.dataset.href }
   })
 
   void mountBindingBanner()
-  void mountSceneCards()
   void mountRecentCalls()
   if (isManager) { void mountManagerCards(d) }
 }
@@ -141,33 +123,6 @@ async function mountBindingBanner() {
   host.innerHTML = errorBarHtml('binding-invalid', status.reason)
 }
 
-/** B4/A3 场景卡片区：卡片包按角色×平台下发（≤6 张），曝光/点击埋点，点击直达目标页。 */
-async function mountSceneCards() {
-  const host = $('#dash-scene-cards')
-  if (!host) return
-  try {
-    const pack = await api.get(`/api/panel/board${currentPlatform() ? `?platform=${currentPlatform()}` : ''}`)
-    if (pack.platform) applyPlatformTheme(pack.platform)
-    $('#dash-scene-label').textContent = pack.label || `${pack.cards.length} 个场景直达`
-    host.innerHTML = pack.cards.map((card) => `
-      <div class="dash-scene-card" data-card-id="${esc(card.id)}" data-href="${esc(card.href)}" tabindex="0" role="link">
-        <div class="dash-scene-badge">${icon(BADGE_ICON[card.badge] ?? 'zap', 15)}<span>${BADGE_LABEL[card.badge] ?? card.badge}</span></div>
-        <div class="dash-scene-title">${esc(card.title)}</div>
-        <div class="dash-scene-desc">${esc(card.description)}</div>
-      </div>`).join('')
-    host.querySelectorAll('.dash-scene-card').forEach((el) => {
-      el.onclick = () => {
-        track('card.clicked', { cardId: el.dataset.cardId, href: el.dataset.href })
-        const href = el.dataset.href ?? ''
-        if (href.startsWith('#/')) location.hash = href
-        else if (href) window.open(href, '_top')
-      }
-      el.onkeydown = (event) => { if (event.key === 'Enter') el.onclick() }
-    })
-    track('card.exposed', { cardIds: pack.cards.map((card) => card.id) })
-  } catch { /* 卡片包不可用（低版本平台）：工作台其余区域不受影响 */ }
-}
-
 /** A3 最近调用（≤5，自见）：来自 /api/usage/recent（当前登录人自身计量）。 */
 async function mountRecentCalls() {
   const host = $('#dash-recent')
@@ -179,7 +134,7 @@ async function mountRecentCalls() {
         <div style="text-align:center;padding:26px 10px">
           <div style="color:var(--ok);margin-bottom:8px">${icon('zap', 26)}</div>
           <div class="fs-13" style="font-weight:500">还没有调用记录</div>
-          <div class="fs-12 text-4">从上方场景入口开始你的第一次 AI 调用</div>
+          <div class="fs-12 text-4">完成一次 AI 调用后，最近记录将显示在这里</div>
         </div>`
       return
     }

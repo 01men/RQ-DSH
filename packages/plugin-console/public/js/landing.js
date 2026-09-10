@@ -51,3 +51,22 @@ export function sanitizeNext(raw) {
   if (!value.startsWith('/') || value.startsWith('//')) return ''
   return value
 }
+
+/**
+ * 跨源回跳地址白名单（交接清单 G1）：仅 http(s) 且主机为回环/私网 IP 或 localhost 的绝对 URL。
+ * 用途：远程 dsh 面板向导以 ?next=<本机面板地址> 发起宿主登录，登录完成后回跳本机并携带
+ * 一次性自助 entry_ticket——白名单挡住「公网地址 + 票据」的 open redirect / 票据外泄面。
+ * 公网主机一律拒绝（返回 ''），登录页按无 next 处理（诚实降级，不阻断登录）。
+ */
+export function sanitizeCrossOriginNext(raw) {
+  let parsed
+  try { parsed = new URL(String(raw ?? '')) } catch { return '' }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
+  if (parsed.username || parsed.password) return ''
+  const host = parsed.hostname.toLowerCase()
+  const isLoopback = host === 'localhost' || host === '::1' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  const isPrivate = /^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+    || /^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)
+    || /^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(host)
+  return isLoopback || isPrivate ? parsed.href : ''
+}

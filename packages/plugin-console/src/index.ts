@@ -423,7 +423,17 @@ export function apply(ctx: Context) {
         `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))});
 var resume=null;try{resume=JSON.parse(localStorage.getItem('heng_ops_sso_oidc_req')||'null')}catch(e){resume=null}
 localStorage.removeItem('heng_ops_sso_oidc_req');
-if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.req)&&Date.now()-(resume.ts||0)<300000){location.replace('${webBase}/#/oauth/authorize?req='+resume.req)}else{location.replace('${webBase}/#/dashboard')}</script>`)
+// 跨源自举回跳（交接清单 G1）：登录页在整页跳转钉钉授权前暂存的 next（仅回环/私网 http(s)，
+// 白名单见 landing.js sanitizeCrossOriginNext，此处正则兜底）——扫码完成后签自助票回跳本机面板
+var nx=null;try{nx=sessionStorage.getItem('heng_ops_next_cross')}catch(e){nx=null}
+sessionStorage.removeItem('heng_ops_next_cross');
+if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.req)&&Date.now()-(resume.ts||0)<300000){location.replace('${webBase}/#/oauth/authorize?req='+resume.req)}
+else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)/.test(nx)){
+  fetch('${webBase}/api/auth/entry-tickets/self',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+localStorage.getItem('heng_ops_token')}})
+    .then(function(r){return r.ok?r.json():null})
+    .then(function(p){var t=p&&p.data&&p.data.ticket;location.replace(t?nx+'#entry_ticket='+encodeURIComponent(t):'${webBase}/#/dashboard')})
+    .catch(function(){location.replace('${webBase}/#/dashboard')})
+}else{location.replace('${webBase}/#/dashboard')}</script>`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error('[sso-callback] 三方授权失败：', message)
@@ -2847,6 +2857,23 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
       exchange.fail(400, 'ENTRY_TICKET_INVALID', error instanceof Error ? error.message : String(error))
     }
   }, { access: 'public', selfValidated: true })
+
+  /**
+   * 自助入场票据（交接清单 G1）：已登录人类为自己签发一次性短时票据，供跨源自举回跳——
+   * 远程 dsh 面板向导以 ?next=<本机面板地址> 打开宿主登录页，登录（含钉钉扫码）完成后回跳
+   * next 并以 #entry_ticket= 片段携带票据，dsh 侧经既有公开兑换端点建立会话（零手工回导）。
+   * TTL 硬上限 120s（覆盖 env 调高），一次性/防重放复用 EntryTicket 既有语义。
+   */
+  guarded('POST', '/api/auth/entry-tickets/self', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    if (!info.userId) throw new Error('仅平台登录人类可自助签发入场票据')
+    const issued = ctx.entryTickets.issue(
+      { refType: 'self', refId: info.userId, userId: info.userId, userName: info.name },
+      { maxTtlSeconds: 120 },
+    )
+    changeLog(exchange, 'self.entry.ticket.issue', 'user', info.userId, info.name, `自助入场票据（跨源自举回跳，${issued.ttlSeconds}s，一次性）`)
+    return issued
+  })
 
   // -- 应用访客埋点 beacon（公开端点：浏览器 PV/UV 上报，免机器鉴权） ----------------
   // 指标口径补全：应用页面在加载/路由切换时上报一次即可。GET 返回 1x1 GIF（<img>/fetch(no-cors) 均可跨域），

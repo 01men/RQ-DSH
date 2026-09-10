@@ -40,7 +40,12 @@ export const DEMO_ORG_ID = 'demo-org'
 
 export function seedPanel(ctx: Context, autoDemo = false): void {
   const logger = ctx.logger('panel-seed')
-  if (ctx.panel.deptConfigs().count() > 0) return
+  // 幂等双入口：首启（集合空）播基线+演示；demoAuth 装态下 loader 热重载会以空 config
+  // 重放 apply——先播了基线骨架、后到的 autoDemo 需要能补齐演示内容（真机 gate01-npm 实证）
+  if (ctx.panel.deptConfigs().count() > 0) {
+    if (autoDemo) seedDemoContent(ctx, logger)
+    return
+  }
 
   // -- 基线：五部门骨架 + 内置行业激活 + 组织名自动绑定（账号组织打通） ------------
   // 组织目录缺席（01门演示态）→ 部门不绑组织（范围权限全开放）+ 跳过内置激活登记，
@@ -57,6 +62,8 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
   const rootOrg = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : undefined)
   if (rootOrg) {
     for (const code of ['QB01', 'GCJX']) {
+      // 幂等：同 org×code 已登记则跳过（loader 热重载会重放 apply）
+      if (ctx.panel.activations().findOne((item) => item.orgId === rootOrg.id && item.code === code)) continue
       ctx.panel.activations().insert({
         id: newId('act'), code, orgId: rootOrg.id, status: 'active',
         activatedAt: new Date().toISOString(), activatedBy: 'seed（内置资产包默认授权）',
@@ -67,8 +74,15 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
 
   // 演示内容门控：DEMO_SEED=1（全量形态显式演示）或 autoDemo（01门 demoAuth 装态自动演示）
   if (process.env.DEMO_SEED !== '1' && !autoDemo) return
+  seedDemoContent(ctx, logger)
+}
 
-  // -- 演示内容（原型 APPLIANCE 五部门样例，一图四清单标杆行业 QB01） ---------------
+/**
+ * 演示内容幂等补齐（plan-gate01 决策 2）：对「仍是空骨架」的部门补播 KPI/Agent 阵容/widget/
+ * 频道/会话/任务/知识。以「部门是否已有频道」为该部门演示内容已播标记（频道不空即跳过该
+ * 部门全量演示），agents/kpis/widgets 单独按空判——重复 apply / 热重载 / 部分失败重放全部安全。
+ */
+function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(msg: string): void }): void {
   type DemoMsg = { t: string; n?: string; icon?: string; x: string; dd?: boolean | string; card?: { t: string; ops: string[] } }
   type DemoDept = {
     kpis: Array<[string, string]>
@@ -83,22 +97,27 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
   for (const [deptId, content] of Object.entries(demo.depts)) {
     const config = ctx.panel.deptConfigs().get(deptId)
     if (!config) continue
+    // 幂等标记：该部门已有频道 = 演示内容（频道/会话/任务/知识）已播过，只补配置面
+    const alreadySeeded = ctx.panel.channels().find((item) => item.dept === deptId).length > 0
 
-    const agents: DeptAgent[] = content.agents.map((agent) => ({
-      name: agent.n, desc: agent.d, icon: agent.icon, ...(agent.busy ? { busy: true } : {}),
-    }))
-    const kpis: DeptKpi[] = content.kpis.map(([label, value]) => ({ label, value, source: 'mock' }))
-    const widgets: DeptWidget[] = content.widgets.map((widget, index) => ({
-      id: `w${index + 1}`,
-      type: widget.t as DeptWidget['type'],
-      title: widget.title,
-      ...(widget.live ? { live: true } : {}),
-      // 治理硬性 DoD：演示看板全部带「模拟数据」来源徽标，绝不冒充真实业务面
-      source: 'mock',
-      rows: widget.rows,
-    }))
-    ctx.panel.deptConfigs().update(config.id, { agents, kpis, widgets })
+    if (config.agents.length === 0 && config.kpis.length === 0) {
+      const agents: DeptAgent[] = content.agents.map((agent) => ({
+        name: agent.n, desc: agent.d, icon: agent.icon, ...(agent.busy ? { busy: true } : {}),
+      }))
+      const kpis: DeptKpi[] = content.kpis.map(([label, value]) => ({ label, value, source: 'mock' }))
+      const widgets: DeptWidget[] = content.widgets.map((widget, index) => ({
+        id: `w${index + 1}`,
+        type: widget.t as DeptWidget['type'],
+        title: widget.title,
+        ...(widget.live ? { live: true } : {}),
+        // 治理硬性 DoD：演示看板全部带「模拟数据」来源徽标，绝不冒充真实业务面
+        source: 'mock',
+        rows: widget.rows,
+      }))
+      ctx.panel.deptConfigs().update(config.id, { agents, kpis, widgets })
+    }
 
+    if (alreadySeeded) continue
     for (const [name] of content.chans) {
       ctx.panel.channels().insert({ id: newId('pchan'), dept: deptId, name, createdBy: 'seed' })
     }

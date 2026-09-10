@@ -20,8 +20,9 @@ import { Service } from '@deepseek-ai/cordis'
 import { type Collection, type RecordBase } from '../../platform-core/src/index.ts'
 
 export interface EntryTicketRecord extends RecordBase {
-  /** 票据本体即主键（etk_ + 256bit 随机值）；兑换后立即置 consumedAt。 */
-  refType: 'agent' | 'app'
+  /** 票据本体即主键（etk_ + 256bit 随机值）；兑换后立即置 consumedAt。
+   *  refType 'self'：登录人类自助签发（交接清单 G1 跨源自举回跳），refId 即签发人 userId。 */
+  refType: 'agent' | 'app' | 'self'
   refId: string
   userId: string
   issuedBy: string
@@ -64,12 +65,13 @@ export class EntryTicketService extends Service {
     return this.ctx.opsStorage.collection<EntryTicketRecord>('authn:entryTickets')
   }
 
-  /** 签发：调用方（console 端点）已完成资源存在性、human 身份与使用授权校验并落审计；此处校验用户状态。 */
-  issue(input: { refType: 'agent' | 'app'; refId: string; userId: string; userName: string }): { ticket: string; expiresAt: string; ttlSeconds: number } {
+  /** 签发：调用方（console 端点）已完成资源存在性、human 身份与使用授权校验并落审计；此处校验用户状态。
+   *  maxTtlSeconds：票种 TTL 硬上限（self 自助票 ≤120s，交接清单 G1——覆盖 env 调高）。 */
+  issue(input: { refType: 'agent' | 'app' | 'self'; refId: string; userId: string; userName: string }, options: { maxTtlSeconds?: number } = {}): { ticket: string; expiresAt: string; ttlSeconds: number } {
     const user = this.ctx.iam.users().get(input.userId)
     if (!user) throw new Error('用户不存在')
     if (user.status !== 'active') throw new Error('账号状态异常，无法签发入场票据')
-    const ttlSeconds = EntryTicketService.ttlSeconds()
+    const ttlSeconds = Math.min(EntryTicketService.ttlSeconds(), options.maxTtlSeconds ?? EntryTicketService.ttlSeconds())
     const ticket = 'etk_' + randomBytes(32).toString('base64url')
     const expiresAt = new Date(Date.now() + ttlSeconds * 1000).toISOString()
     this.tickets().insert({
@@ -87,7 +89,7 @@ export class EntryTicketService extends Service {
    * 兑换：一次性消费 → 实时校验用户状态 → 返回资源指向与标准化身份（审计由路由层写入）。
    * 票据熵 256bit 且一次性，不做 IP 限流（错误尝试无爆破收益，锁定只会伤及共享出口的正常用户）。
    */
-  redeem(ticket: string, clientIp: string): { refType: 'agent' | 'app'; refId: string; expiresAt: string; identity: EntryTicketIdentity } {
+  redeem(ticket: string, clientIp: string): { refType: EntryTicketRecord['refType']; refId: string; expiresAt: string; identity: EntryTicketIdentity } {
     const record = this.tickets().get(String(ticket ?? ''))
     if (!record) throw new Error('入场票据无效')
     if (record.consumedAt) throw new Error('入场票据已被使用（一次性，防重放）')
