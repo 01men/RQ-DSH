@@ -24,7 +24,7 @@ import { newId } from '../../platform-core/src/ids.ts'
 import { PanelService, TASK_LANES, type TaskLane, type DeptWidget, type DeptKpi, type DeptAgent } from './service.ts'
 import { CardpackService, CARD_PLATFORMS, filterCards, type CardPlatform } from './cardpacks.ts'
 export { CardpackService, CARD_PLATFORMS, filterCards } from './cardpacks.ts'
-import { seedPanel } from './seed/seed.ts'
+import { seedPanel, DEMO_ORG_ID } from './seed/seed.ts'
 
 export const name = 'panel-core'
 // plan-gate01 Phase 2 瘦身：硬依赖只保留数据面基座 5 键（platform-core / dsh 原生提供）。
@@ -173,7 +173,8 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     const iam = soft(ctx, 'iam')
     return (info.userId ? iam?.users().get(info.userId)?.orgId : undefined)
       ?? iam?.orgs().find((org) => org.parentId === null).at(0)?.id
-      ?? ''
+      // 组织目录缺席（01门 装态）→ 演示组织主键（与 seed.ts 的内置激活登记同值，行业面可用）
+      ?? DEMO_ORG_ID
   }
 
   // -- 部门与总览 -------------------------------------------------------------
@@ -893,7 +894,8 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
 
   // -- 种子（基线骨架 + DEMO_SEED=1 演示内容） ---------------------------------------
 
-  void seedPanel(ctx)
+  // 演示内容播种：demoAuth 装态自动演示（决策 2），全量形态维持 DEMO_SEED=1 显式门控
+  void seedPanel(ctx, demoAuth)
 
   // -- panel_* 工具族（共享 tools 键，dsh 下即原生 ToolRuntime） ------------------------
 

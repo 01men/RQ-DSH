@@ -19,7 +19,8 @@ function mapOps(labels) {
     return { id: `op${index + 1}`, label, style, action, ...action === "approval.request" ? { risk: "high" } : {} };
   });
 }
-function seedPanel(ctx) {
+const DEMO_ORG_ID = "demo-org";
+function seedPanel(ctx, autoDemo = false) {
   const logger = ctx.logger("panel-seed");
   if (ctx.panel.deptConfigs().count() > 0) return;
   const iam = ctx.reflect.get("iam", false);
@@ -27,7 +28,7 @@ function seedPanel(ctx) {
     const matchedOrg = iam?.orgs().findOne((org) => org.name === meta.label);
     ctx.panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...matchedOrg ? { orgId: matchedOrg.id } : {} });
   }
-  const rootOrg = iam?.orgs().find((org) => org.parentId === null).at(0);
+  const rootOrg = iam?.orgs().find((org) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : void 0);
   if (rootOrg) {
     for (const code of ["QB01", "GCJX"]) {
       ctx.panel.activations().insert({
@@ -41,7 +42,7 @@ function seedPanel(ctx) {
     }
   }
   logger.info("\u9762\u677F\u57FA\u7EBF\uFF1A\u4E94\u90E8\u95E8\u9AA8\u67B6 + \u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/GCJX\uFF09\u5B8C\u6210");
-  if (process.env.DEMO_SEED !== "1") return;
+  if (process.env.DEMO_SEED !== "1" && !autoDemo) return;
   const demoPath = join(dirname(fileURLToPath(import.meta.url)), "demo-content.json");
   const demo = JSON.parse(readFileSync(demoPath, "utf8"));
   for (const [deptId, content] of Object.entries(demo.depts)) {
@@ -138,5 +139,6 @@ function seedPanel(ctx) {
   logger.info("\u9762\u677F\u6F14\u793A\u6570\u636E\u521D\u59CB\u5316\u5B8C\u6210\uFF08\u4E94\u90E8\u95E8\u9891\u9053/\u4F1A\u8BDD/\u4EFB\u52A1/\u77E5\u8BC6/\u770B\u677F\uFF09");
 }
 export {
+  DEMO_ORG_ID,
   seedPanel
 };

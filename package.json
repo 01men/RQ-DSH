@@ -11,6 +11,9 @@
   "dependencies": {
     "@01men/plugin-rq-card": "file:packages/plugin-rq-card"
   },
+  "bundledDependencies": [
+    "@01men/plugin-rq-card"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/01men/RQ-DSH.git"

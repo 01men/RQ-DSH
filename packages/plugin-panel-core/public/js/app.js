@@ -136,25 +136,13 @@ export function start({ base, hostBridge = false, remoteHub = null, demoMode = f
   state.hostBridge = hostBridge
   state.remoteHub = remoteHub
   state.demoMode = demoMode
-  if (!session.token) {
+  if (!session.token && !demoMode) {
     renderLoginGuide()
     return
   }
   // 先落外壳骨架（数据慢/失败时页面不再是白屏），数据加载失败显式提示
   renderShell()
   renderTopRight()
-  // 演示态横幅（plan-gate01 决策 2）：未连接宿主时数据为内置演示内容，向导常驻引导连接
-  if (state.demoMode) {
-    document.getElementById('app').insertAdjacentHTML('afterbegin', `
-      <div id="demoBanner" style="position:sticky;top:0;z-index:900;display:flex;align-items:center;gap:10px;justify-content:center;padding:7px 14px;background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;font-size:12.5px">
-        <span>🧪 当前展示的是<b>内置演示数据</b>——连接宿主后自动切换为真实看板</span>
-        <button class="btn primary" id="demoOpenWizard" style="padding:3px 12px;font-size:12px">连接宿主</button>
-      </div>`)
-    document.getElementById('demoOpenWizard').onclick = async () => {
-      const wizard = await import('./wizard.js')
-      wizard.start({ base })
-    }
-  }
   window.addEventListener('hashchange', () => {
     state.view = location.hash === '#/board' ? 'board' : 'workbench'
     applyView()
@@ -391,6 +379,11 @@ async function handleRealtime(data) {
 function renderShell() {
   const activeIndustry = state.industry
   document.getElementById('app').innerHTML = `
+    ${state.demoMode ? `
+    <div id="demoBanner" style="position:sticky;top:0;z-index:900;display:flex;align-items:center;gap:10px;justify-content:center;padding:7px 14px;background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;font-size:12.5px">
+      <span>🧪 当前展示的是<b>内置演示数据</b>——连接宿主后自动切换为真实看板</span>
+      <button class="btn primary" id="demoOpenWizard" style="padding:3px 12px;font-size:12px">连接宿主</button>
+    </div>` : ''}
     <div class="topbar">
       <div class="logo">🌳 01门 <span class="badge">部门工作台</span></div>
       <div class="more-sel">
@@ -434,6 +427,11 @@ function renderShell() {
     }
   })
   document.getElementById('cmdkTrigger').onclick = () => openCmdk()
+  // 演示横幅按钮（renderShell 模板内，重建后重绑）：唤起连接向导
+  document.getElementById('demoOpenWizard')?.addEventListener('click', async () => {
+    const wizard = await import('./wizard.js')
+    wizard.start({ base: basePath() })
+  })
   applyView()
   renderTopRight()
 }
@@ -514,13 +512,20 @@ function renderTopRight() {
         ? `<span class="pill dd-on" id="ddPill">⇄ 钉钉：${esc(bound.displayName)} 已绑定</span>`
         : `<span class="pill dd-off" id="ddPill">⇄ 钉钉桥接：未绑定（点击绑定）</span>`)
     : `<span class="pill" id="ddPill">⇄ 钉钉桥接不可用</span>`
-  const user = session.user
+  const user = session.user ?? (state.demoMode ? { displayName: '演示访客' } : null)
+  const avatarTitle = state.demoMode ? '演示访客（只读）——点击连接宿主'
+    : `${esc(user?.displayName ?? '')}（点击退出登录）`
   host.innerHTML = `${pill}
     <span class="pill" data-live id="livePill"><span class="dot"></span>LIVE</span>
-    <div class="avatar" id="userAvatar" title="${esc(user?.displayName ?? '')}（点击退出登录）">${esc((user?.displayName ?? '?').slice(0, 1))}</div>`
+    <div class="avatar" id="userAvatar" title="${avatarTitle}">${esc((user?.displayName ?? '?').slice(0, 1))}</div>`
   document.getElementById('ddPill').onclick = () => showBind()
   // 退出登录入口（QA P2-3）：车间共用电脑下一班不能沿用上一班身份
   document.getElementById('userAvatar').onclick = async () => {
+    if (state.demoMode) {
+      const wizard = await import('./wizard.js')
+      wizard.start({ base: basePath() })
+      return
+    }
     if (!window.confirm(`退出当前账号（${user?.displayName ?? ''}）？`)) return
     session.clear()
     renderLoginGuide()

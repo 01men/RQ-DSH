@@ -35,7 +35,10 @@ function mapOps(labels: string[]): MessageCardOp[] {
   })
 }
 
-export function seedPanel(ctx: Context): void {
+/** 演示组织主键（01门 装态无组织目录时的激活/计量归属，与 index.ts orgIdOf 兜底同值）。 */
+export const DEMO_ORG_ID = 'demo-org'
+
+export function seedPanel(ctx: Context, autoDemo = false): void {
   const logger = ctx.logger('panel-seed')
   if (ctx.panel.deptConfigs().count() > 0) return
 
@@ -51,7 +54,7 @@ export function seedPanel(ctx: Context): void {
   }
   // 内置图谱资产（packages/platform-core/scenegraphs/ 随平台分发）默认授权根组织；
   // 其余组织/行业走「申请 → 审批（industry.activation，high）→ 激活」链路
-  const rootOrg = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0)
+  const rootOrg = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : undefined)
   if (rootOrg) {
     for (const code of ['QB01', 'GCJX']) {
       ctx.panel.activations().insert({
@@ -62,7 +65,8 @@ export function seedPanel(ctx: Context): void {
   }
   logger.info('面板基线：五部门骨架 + 内置行业激活（QB01/GCJX）完成')
 
-  if (process.env.DEMO_SEED !== '1') return
+  // 演示内容门控：DEMO_SEED=1（全量形态显式演示）或 autoDemo（01门 demoAuth 装态自动演示）
+  if (process.env.DEMO_SEED !== '1' && !autoDemo) return
 
   // -- 演示内容（原型 APPLIANCE 五部门样例，一图四清单标杆行业 QB01） ---------------
   type DemoMsg = { t: string; n?: string; icon?: string; x: string; dd?: boolean | string; card?: { t: string; ops: string[] } }

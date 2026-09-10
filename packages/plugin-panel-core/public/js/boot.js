@@ -145,16 +145,28 @@ async function bootstrap() {
   // 宿主连接探测结果落地：remote 时令牌作用域与代理已在上方就位；none 且无会话 → 连接向导
   // （fresh-install 首启体验）
   let remoteHub = null
+  let app = null
   if (remoteMode) remoteHub = { hubBase: hostLink.hubBase, hubMountPrefix: hostLink.hubMountPrefix ?? '' }
   if (hostLink?.mode === 'none' && !apiModule.session.token) {
-    const wizard = await import('./wizard.js')
+    // 演示态探测（plan-gate01 决策 2）：只读面板 API 匿名可达 = demoAuth 装态——
+    // 直接进入演示看板（横幅引导连接），不把用户挡在向导里；严格态（401）才渲染向导。
+    let demoOk = false
+    try {
+      const probe = await fetch(`${BASE}/api/panel/depts`, { headers: { accept: 'application/json' } })
+      demoOk = probe.ok
+    } catch { /* 探测失败按严格态处理 */ }
     document.getElementById('app').dataset.booted = '1'
+    if (demoOk) {
+      app = await import('./app.js')
+      app.start({ base: BASE, hostBridge, remoteHub: null, demoMode: true })
+      return
+    }
+    const wizard = await import('./wizard.js')
     wizard.start({ base: BASE, hostBridge })
     return
   }
 
-  const app = await import('./app.js')
-  document.getElementById('app').dataset.booted = '1'
+  app = await import('./app.js')
   app.start({ base: BASE, hostBridge, remoteHub, demoMode: hostLink?.mode === 'none' })
 }
 

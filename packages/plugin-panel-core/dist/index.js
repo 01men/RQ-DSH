@@ -7,7 +7,7 @@ import { newId } from "../../platform-core/dist/ids.js";
 import { PanelService, TASK_LANES } from "./service.js";
 import { CardpackService, CARD_PLATFORMS, filterCards } from "./cardpacks.js";
 import { CardpackService as CardpackService2, CARD_PLATFORMS as CARD_PLATFORMS2, filterCards as filterCards2 } from "./cardpacks.js";
-import { seedPanel } from "./seed/seed.js";
+import { seedPanel, DEMO_ORG_ID } from "./seed/seed.js";
 const name = "panel-core";
 const inject = [
   "httpServer",
@@ -104,7 +104,7 @@ function apply(ctx, config = {}) {
   const orgIdOf = (exchange) => {
     const info = caller(exchange);
     const iam = soft(ctx, "iam");
-    return (info.userId ? iam?.users().get(info.userId)?.orgId : void 0) ?? iam?.orgs().find((org) => org.parentId === null).at(0)?.id ?? "";
+    return (info.userId ? iam?.users().get(info.userId)?.orgId : void 0) ?? iam?.orgs().find((org) => org.parentId === null).at(0)?.id ?? DEMO_ORG_ID;
   };
   guarded("GET", "/api/panel/depts", "panel.read", (exchange) => {
     const info = caller(exchange);
@@ -759,7 +759,7 @@ function apply(ctx, config = {}) {
     });
     http.serveStatic("/panel", publicDir, "/index.html");
   }
-  void seedPanel(ctx);
+  void seedPanel(ctx, demoAuth);
   const renderJson = (args, value) => [{ type: "text", text: JSON.stringify(value, null, 2) }];
   ctx.tools.register({
     name: "panel_agents_list",
