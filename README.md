@@ -565,4 +565,4 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 
 ---
 
-> 最近更新：2026-09-10 · 仓库对外呈现维护——新增 [llms.txt](llms.txt)（AI 引擎收录摘要）；selftest 断言计数口径对齐 M0（数量以本次运行为准，历史计数作废）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
+> 最近更新：2026-09-10 · F 域余量回流（[docs/handoff-f-remainder-adoption-20260910.md](docs/handoff-f-remainder-adoption-20260910.md)）——审批深化（高风险二次确认 + 公司级终审 + SLA 看板）、usage 最近调用、五平台主题、目录筛选与登记引导、远程登录回跳闭环（自助 entry_ticket）、http.ts file() 崩溃级缺陷修复；selftest 978 项断言全绿。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。

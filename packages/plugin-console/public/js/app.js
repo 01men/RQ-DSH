@@ -3,7 +3,21 @@ import { icon } from './icons.js'
 import { session, api, exchangeBridgeSession, BASE, IS_LOCAL_HOST, CONNECTION_NAME } from './api.js'
 import { $, $$, h, toast, esc } from './ui.js'
 import { openCmdk } from './cmdk.js'
+import { replayPlatformTheme, PLATFORM_KEY } from './platform.js'
 import { resolveLanding, isBareLanding, LANDING_PREF_KEY } from './landing.js'
+
+// 平台主题（WP-05/B3）：启动即回放记忆的平台（免闪默认色）。写入方为平台身份下发方
+// （applyPlatformTheme——卡片包域回流后的工作台校准、或部署方预置 heng_ops_platform 键）。
+replayPlatformTheme()
+
+// 钉钉微应用入口探测（WP-11）：钉钉 webview UA 且无记忆平台时，标记钉钉入口态。
+// 只写独立键 heng_ops_dingtalk，不写 heng_ops_platform——钉钉是入口不是第六平台，不改五平台 data-platform 语义。
+try {
+  if (/DingTalk/i.test(navigator.userAgent) && !localStorage.getItem(PLATFORM_KEY)) {
+    localStorage.setItem('heng_ops_dingtalk', '1')
+    document.documentElement.dataset.platformEntry = 'dingtalk'
+  }
+} catch { /* 忽略 */ }
 
 import { renderLogin } from './pages/login.js'
 import { renderDashboard } from './pages/dashboard.js'
@@ -19,6 +33,7 @@ import { renderApps } from './pages/apps.js'
 import { renderAudit } from './pages/audit.js'
 import { renderApprovals } from './pages/approvals.js'
 import { renderAssets } from './pages/assets.js'
+import { renderRegister } from './pages/register.js'
 import { renderPlatform } from './pages/platform.js'
 import { renderConnect } from './pages/connect.js'
 import { renderConnections } from './pages/connections.js'
@@ -32,6 +47,7 @@ const NAV = [
     { ext: () => `${BASE}/panel/`, label: '部门面板', icon: 'users', perm: 'console.login', landing: 'panel' },
   ] },
   { section: 'AI 资源', items: [
+    { path: '#/register', label: '资产登记', icon: 'zap', perm: 'console.login' },
     { path: '#/skills', label: 'Skill 市场', icon: 'sparkles', perm: 'skill.read', badge: 'skills' },
     { path: '#/agents', label: 'Agent 本体', icon: 'bot', perm: 'agent.read' },
     { path: '#/apps', label: 'AI 应用', icon: 'app', perm: 'app.read' },
@@ -92,6 +108,7 @@ function navigate() {
 
   const builders = {
     dashboard: renderDashboard,
+    register: renderRegister,
     iam: renderIam,
     authn: renderAuthn,
     mcp: renderMcp,

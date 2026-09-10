@@ -1,6 +1,6 @@
 /** 登录页：账号密码 / 三方扫码（按平台连接器配置显隐）/ 票据免登（?ticket= 一次性参数）。 */
 import { api, session, entryTicketSession, BASE, CONNECTION_NAME, IS_LOCAL_HOST } from '../api.js'
-import { sanitizeNext, resolveLanding, LANDING_PREF_KEY } from '../landing.js'
+import { sanitizeNext, sanitizeCrossOriginNext, resolveLanding, LANDING_PREF_KEY } from '../landing.js'
 import { icon } from '../icons.js'
 import { h, $, esc, toast } from '../ui.js'
 
@@ -130,6 +130,10 @@ export function renderLogin(app) {
   // 登录回跳（docs/entry-switching.md）：?next= 显式目的地 > sessionStorage 暂存（api.js 401 打断处，
   // 键 heng_ops_next 与 api.js 字面量同步）。读取即消费：参数与暂存只生效一次；
   // 白名单仅同源绝对路径（sanitizeNext），防 open redirect。
+  // 跨源自举回跳（交接清单 G1）：?next= 为回环/私网 http(s) 绝对地址（sanitizeCrossOriginNext 白名单）
+  // 时按跨源处理——登录完成后签发一次性自助 entry_ticket，以 #entry_ticket= 片段回跳（远程 dsh 面板
+  // 向导闭环）。钉钉整页授权会离开本页，跨源目的地暂存 sessionStorage（heng_ops_next_cross），
+  // 由本页回装或 SSO 回调脚本消费。
   const nextDestination = (() => {
     const params = new URLSearchParams(location.search)
     let next = sanitizeNext(params.get('next') ?? '')
@@ -145,10 +149,31 @@ export function renderLogin(app) {
     return next
   })()
 
+  const crossNextDestination = (() => {
+    const params = new URLSearchParams(location.search)
+    let next = sanitizeCrossOriginNext(params.get('next') ?? '')
+    if (!next) {
+      try { next = sanitizeCrossOriginNext(sessionStorage.getItem('heng_ops_next_cross') ?? '') } catch { /* 忽略 */ }
+    }
+    try { sessionStorage.removeItem('heng_ops_next_cross') } catch { /* 忽略 */ }
+    return next
+  })()
+
   // 登录成功的统一出口：有回跳目的地整页跳转；无目的地时按落地分诊（与 app.js boot 同规则，
   // docs/entry-switching.md）——纯业务身份直达部门面板，其余进控制台工作台
-  const finishLogin = (welcomeName) => {
+  const finishLogin = async (welcomeName) => {
     toast(`欢迎回来，${welcomeName}`)
+    if (crossNextDestination) {
+      // 跨源自举回跳：签一次性自助票（TTL ≤120s）随 fragment 回跳；签票失败仍回跳，
+      // dsh 侧走「我已完成扫码」回导校验诚实降级
+      try {
+        const issued = await api.post('/api/auth/entry-tickets/self', {})
+        location.assign(`${crossNextDestination}#entry_ticket=${encodeURIComponent(issued.ticket)}`)
+      } catch {
+        location.assign(crossNextDestination)
+      }
+      return
+    }
     if (nextDestination) { location.assign(nextDestination); return }
     if (resolveLanding(session.user) === 'panel') {
       try { localStorage.setItem(LANDING_PREF_KEY, 'panel') } catch { /* 忽略 */ }
@@ -184,6 +209,10 @@ export function renderLogin(app) {
       const auth = await api.post('/api/auth/sso/authorize', { provider: 'dingtalk', scene: 'web_qr', ...(configId ? { configId } : {}) })
       if (!auth.authorizeUrl) throw new Error('身份源未返回授权地址（可能为 mock 模式），请改用手动输入授权码')
       try { localStorage.setItem(LAST_SSO_CONFIG_KEY, configId ?? '') } catch { /* 忽略 */ }
+      // 跨源自举回跳（G1）：整页跳转会离开本页，跨源目的地暂存给 SSO 回调脚本消费
+      if (crossNextDestination) {
+        try { sessionStorage.setItem('heng_ops_next_cross', crossNextDestination) } catch { /* 忽略 */ }
+      }
       // 必须整页跳转：弹窗/iframe 会被第三方 Cookie 策略拦截导致授权失败
       window.location.href = auth.authorizeUrl
     } catch (error) {

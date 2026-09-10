@@ -13,11 +13,11 @@ import {
   PlatformEvents, newId,
   type Collection, type RecordBase, type ResourceTypeSpec,
 } from '../../platform-core/src/index.ts'
+import { AppRegistryService, type AppRegistryServiceSsoCaller } from '../../plugin-app/src/index.ts'
+import { OidcService } from '../../plugin-authn/src/oidc.ts'
 import * as agentTools from './tools.ts'
 import { AGENT_TYPE_SPEC } from './schema.ts'
 import { buildAgentOnboardingPrompt, type AgentOnboardingCredential } from './onboarding.ts'
-import { AppRegistryService, type AppRegistryServiceSsoCaller } from '../../plugin-app/src/index.ts'
-import { OidcService } from '../../plugin-authn/src/oidc.ts'
 
 // ---------------------------------------------------------------------------
 // 数据模型（Agent 专属扩展记录）
@@ -343,6 +343,8 @@ export class AgentRegistryService extends Service {
     const ssoClientId = this.assertOnlineGate(agent)
     return this.ctx.audit.createApproval({
       kind: 'agent.online',
+      // WP-10/L1：L4 高危操作统一高风险——通过需二次确认，通过即落公司级终审标记
+      riskLevel: 'high',
       title: `Agent 上线：${agent.name}`,
       payload: { agentId, requesterId: requester.id, ...(ssoClientId ? { ssoClientId } : {}) },
       requesterId: requester.id,
@@ -357,6 +359,8 @@ export class AgentRegistryService extends Service {
     const impact = this.ctx.resourceCore.impact('agent', agentId)
     return this.ctx.audit.createApproval({
       kind: 'agent.offline',
+      // WP-10/L1：L4 高危操作统一高风险——通过需二次确认，通过即落公司级终审标记
+      riskLevel: 'high',
       title: `Agent 下线：${agent.name}`,
       payload: { agentId, reason, impact: impact.map((item) => `${item.name}（${item.type}）`) },
       requesterId: requester.id,

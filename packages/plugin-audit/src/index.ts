@@ -79,6 +79,10 @@ export interface ApprovalRecord extends RecordBase {
   createdAt: string
   decidedAt?: string
   execution?: { result: string; error?: string; at: string }
+  /** 风险级（WP-10/L1）：high 级审批通过需二次确认（服务端强制），且默认落公司级终审标记。 */
+  riskLevel?: 'high' | 'medium' | 'low'
+  /** 公司级终审标记（WP-10/L1，additive）：终审人与时间在审计可追溯（action=approval.final_review）。 */
+  finalReview?: { approverId: string; approverName: string; at: string }
 }
 
 export type ApprovalExecutor = (payload: Record<string, unknown>, approverId: string) => Promise<unknown>
@@ -439,6 +443,7 @@ export class AuditService extends Service {
     payload: Record<string, unknown>
     requesterId: string
     requesterName: string
+    riskLevel?: 'high' | 'medium' | 'low'
   }): ApprovalRecord {
     const record = this.approvals().insert({
       id: newId('apr'),
@@ -453,10 +458,26 @@ export class AuditService extends Service {
     return record
   }
 
-  async decideApproval(id: string, decision: 'approve' | 'reject', approverId: string, approverName: string, opinion?: string): Promise<ApprovalRecord> {
+  /**
+   * 审批决策（WP-10 增强）：高风险通过必须显式二次确认（服务端强制，confirmed=true）；
+   * 高风险（或显式 finalReview）通过后落「公司级终审标记」并写入审计（action=approval.final_review，
+   * L1 终审标记审计可追溯）。
+   */
+  async decideApproval(
+    id: string,
+    decision: 'approve' | 'reject',
+    approverId: string,
+    approverName: string,
+    opinion?: string,
+    options: { confirmed?: boolean; finalReview?: boolean } = {},
+  ): Promise<ApprovalRecord> {
     const approval = this.approvals().get(id)
     if (!approval) throw new Error(`审批单不存在：${id}`)
     if (approval.status !== 'pending') throw new Error(`审批单已处理（${approval.status}）`)
+    const isHighRisk = approval.riskLevel === 'high'
+    if (decision === 'approve' && isHighRisk && options.confirmed !== true) {
+      throw new Error('高风险审批通过需二次确认（confirmed=true），请在前端确认弹窗中复核后提交')
+    }
     if (decision === 'reject') {
       const updated = this.approvals().update(id, {
         status: 'rejected', approverId, approverName,
@@ -482,16 +503,71 @@ export class AuditService extends Service {
       execution = { result: '（无注册执行器，仅记录审批结果）', at: new Date().toISOString() }
     }
     const status: ApprovalRecord['status'] = execution.error ? 'failed' : 'executed'
+    const needsFinalReview = isHighRisk || options.finalReview === true
     const updated = this.approvals().update(id, {
       status, approverId, approverName,
       ...(opinion !== undefined ? { opinion } : {}),
       decidedAt: new Date().toISOString(),
       execution,
+      ...(needsFinalReview ? { finalReview: { approverId, approverName, at: new Date().toISOString() } } : {}),
     })
+    if (needsFinalReview) {
+      // L1 公司级终审标记 → 审计留痕（可按 action=approval.final_review 检索追溯）
+      this.record({
+        type: 'change', actorType: 'human', actorId: approverId, actorName: approverName,
+        action: 'approval.final_review', resourceType: 'approval', resourceId: id, resourceName: approval.title,
+        result: 'ok', detail: `公司级终审标记（风险级 ${approval.riskLevel ?? 'medium'}），审批单 ${id} 终审通过`,
+      })
+    }
     this.ctx.platformBus.emit(PlatformEvents.ApprovalDecided, {
       approvalId: id, title: approval.title, approved: true, approverId, approverName,
     })
     return updated
+  }
+
+  /**
+   * 审批 SLA 报表（WP-10）：窗口内已决审批的「≤2 个工作日」达成率与分项。
+   * 工作日口径：跳过周六/周日后按自然日差累计（法定节假日不做日历——v1 口径在响应中声明）。
+   */
+  slaReport(windowDays = 30): {
+    windowDays: number
+    total: number
+    decided: number
+    withinSla: number
+    achievementRate: number
+    breached: Array<{ id: string; kind: string; title: string; businessDays: number; decidedAt: string }>
+    calendarNote: string
+  } {
+    const since = new Date(Date.now() - windowDays * 24 * 3600_000).toISOString()
+    const decidedRecords = this.approvals().all()
+      .filter((item) => item.decidedAt && item.decidedAt >= since)
+    const businessDaysBetween = (fromIso: string, toIso: string): number => {
+      let days = 0
+      const cursor = new Date(fromIso)
+      const end = new Date(toIso)
+      while (cursor < end) {
+        const day = cursor.getUTCDay()
+        if (day !== 0 && day !== 6) days++
+        cursor.setUTCDate(cursor.getUTCDate() + 1)
+      }
+      return days
+    }
+    const breached: Array<{ id: string; kind: string; title: string; businessDays: number; decidedAt: string }> = []
+    let withinSla = 0
+    for (const item of decidedRecords) {
+      const days = businessDaysBetween(item.createdAt, item.decidedAt!)
+      if (days <= 2) withinSla++
+      else breached.push({ id: item.id, kind: item.kind, title: item.title, businessDays: days, decidedAt: item.decidedAt! })
+    }
+    return {
+      windowDays,
+      total: this.approvals().all().filter((item) => item.createdAt >= since).length,
+      decided: decidedRecords.length,
+      withinSla,
+      achievementRate: decidedRecords.length === 0 ? 1 : Math.round((withinSla / decidedRecords.length) * 1000) / 1000,
+      breached: breached.sort((a, b) => b.businessDays - a.businessDays),
+      calendarNote: '工作日=跳过周六/周日（未扣法定节假日，v1 口径）',
+    }
   }
 }
 

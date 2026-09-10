@@ -44,6 +44,8 @@ export interface McpServiceRecord extends RecordBase {
   /** 桥接来源标记（如 open-connector）：M0 数据面桥接的治理降级标识——仅服务级粒度，
    *  无 action 级授权/连接级绑定/令牌镜像（dev-plan-connector §2.11）。控制台打徽章。 */
   bridgeFrom?: string
+  /** 公司级终审标记（WP-10/L1）：终审通过的服务，其调用记录附带水印（审计可追溯）。 */
+  finalReview?: { approverId: string; approverName: string; at: string; approvalId?: string }
   status: 'draft' | 'verifying' | 'online' | 'gray' | 'unhealthy' | 'offline'
   grayPercent: number
   currentVersion: string
@@ -95,6 +97,8 @@ export interface McpCallRecord {
   error?: string
   /** 该调用走真实传输还是演示模拟（SLO/计费报表只统计 real）。 */
   exec: 'real' | 'demo'
+  /** 调用水印（WP-10/L1）：服务经公司级终审后，其全部调用附带水印，审计可追溯。 */
+  watermark?: { finalReview: true; at: string }
 }
 
 export interface InvokeCaller {
@@ -848,6 +852,7 @@ export class McpService extends Service {
       version: outcome.version,
       ok: outcome.ok,
       status: outcome.status,
+      ...(service.finalReview ? { watermark: { finalReview: true as const, at: service.finalReview.at } } : {}),
       latencyMs: outcome.latencyMs,
       tokens: outcome.tokens ?? 0,
       exec: service.exec,

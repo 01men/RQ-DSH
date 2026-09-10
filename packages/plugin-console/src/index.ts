@@ -424,7 +424,17 @@ export function apply(ctx: Context) {
         `<script>localStorage.setItem('heng_ops_token', ${JSON.stringify(result.session.token)}); localStorage.setItem('heng_ops_refresh', ${JSON.stringify(result.session.refreshToken)}); localStorage.setItem('heng_ops_user', ${JSON.stringify(JSON.stringify(sessionUser))});
 var resume=null;try{resume=JSON.parse(localStorage.getItem('heng_ops_sso_oidc_req')||'null')}catch(e){resume=null}
 localStorage.removeItem('heng_ops_sso_oidc_req');
-if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.req)&&Date.now()-(resume.ts||0)<300000){location.replace('${webBase}/#/oauth/authorize?req='+resume.req)}else{location.replace('${webBase}/#/dashboard')}</script>`)
+// 跨源自举回跳（交接清单 G1）：登录页在整页跳转钉钉授权前暂存的 next（仅回环/私网 http(s)，
+// 白名单见 landing.js sanitizeCrossOriginNext，此处正则兜底）——扫码完成后签自助票回跳本机面板
+var nx=null;try{nx=sessionStorage.getItem('heng_ops_next_cross')}catch(e){nx=null}
+sessionStorage.removeItem('heng_ops_next_cross');
+if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.req)&&Date.now()-(resume.ts||0)<300000){location.replace('${webBase}/#/oauth/authorize?req='+resume.req)}
+else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[0-9]|3[01])\\.)/.test(nx)){
+  fetch('${webBase}/api/auth/entry-tickets/self',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+localStorage.getItem('heng_ops_token')}})
+    .then(function(r){return r.ok?r.json():null})
+    .then(function(p){var t=p&&p.data&&p.data.ticket;location.replace(t?nx+'#entry_ticket='+encodeURIComponent(t):'${webBase}/#/dashboard')})
+    .catch(function(){location.replace('${webBase}/#/dashboard')})
+}else{location.replace('${webBase}/#/dashboard')}</script>`)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error('[sso-callback] 三方授权失败：', message)
@@ -1434,6 +1444,21 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     const service = await ctx.mcpRegistry.verifyService(exchange.params['id']!)
     changeLog(exchange, 'mcp.service.verify', 'mcp_service', service.id, service.name)
     return service
+  })
+
+  /**
+   * MCP 服务公司级终审标记（WP-10/L1）：终审通过后，该服务全部调用记录附带水印
+   * （watermark.finalReview），标记与水印在审计/调用台账双侧可追溯。
+   */
+  guarded('POST', '/api/mcp/services/:id/final-review', 'mcp.service.deploy', (exchange) => {
+    const id = exchange.params['id']!
+    const service = ctx.mcpRegistry.services().get(id)
+    if (!service) throw new Error(`MCP 服务不存在：${id}`)
+    const info = caller(exchange)
+    const mark = { approverId: info.userId ?? info.principalId, approverName: info.name, at: new Date().toISOString() }
+    const updated = ctx.mcpRegistry.services().update(id, { finalReview: mark })
+    changeLog(exchange, 'mcp.final_review', 'mcp_service', id, service.name, '公司级终审标记：后续调用将附带水印')
+    return { id, finalReview: updated.finalReview }
   })
 
   guarded('POST', '/api/mcp/services/:id/deploy', 'mcp.service.deploy', async (exchange) => {
@@ -2834,6 +2859,23 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     }
   }, { access: 'public', selfValidated: true })
 
+  /**
+   * 自助入场票据（交接清单 G1）：已登录人类为自己签发一次性短时票据，供跨源自举回跳——
+   * 远程 dsh 面板向导以 ?next=<本机面板地址> 打开宿主登录页，登录（含钉钉扫码）完成后回跳
+   * next 并以 #entry_ticket= 片段携带票据，dsh 侧经既有公开兑换端点建立会话（零手工回导）。
+   * TTL 硬上限 120s（覆盖 env 调高），一次性/防重放复用 EntryTicket 既有语义。
+   */
+  guarded('POST', '/api/auth/entry-tickets/self', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    if (!info.userId) throw new Error('仅平台登录人类可自助签发入场票据')
+    const issued = ctx.entryTickets.issue(
+      { refType: 'self', refId: info.userId, userId: info.userId, userName: info.name },
+      { maxTtlSeconds: 120 },
+    )
+    changeLog(exchange, 'self.entry.ticket.issue', 'user', info.userId, info.name, `自助入场票据（跨源自举回跳，${issued.ttlSeconds}s，一次性）`)
+    return issued
+  })
+
   // -- 应用访客埋点 beacon（公开端点：浏览器 PV/UV 上报，免机器鉴权） ----------------
   // 指标口径补全：应用页面在加载/路由切换时上报一次即可。GET 返回 1x1 GIF（<img>/fetch(no-cors) 均可跨域），
   // POST JSON 供 navigator.sendBeacon；匿名访客以 vid 去重（8-64 位 base64url，建议 localStorage 持久随机 ID），
@@ -3295,6 +3337,46 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
     return event
   })
 
+  // -- 全员工作台 / 效果回传（WP-04/A3 + WP-07/D1） ---------------------------------
+
+  /** 资产引用 → 展示名（agent/app/nas 走资源注册表，mcp/skill 走各自注册表；id 或 slug 命中均可）。 */
+  const usageAssetName = (resource: string): string => {
+    const colon = resource.indexOf(':')
+    const type = resource.slice(0, colon)
+    const id = resource.slice(colon + 1)
+    const matches = (item: { id?: string; slug?: string; name?: string }): boolean => item.id === id || item.slug === id
+    try {
+      if (type === 'agent' || type === 'app' || type === 'nas') return ctx.resourceCore.list(type).find(matches)?.name ?? id
+      if (type === 'mcp') return ctx.mcpRegistry.services().all().find(matches)?.name ?? id
+      if (type === 'skill') return ctx.skillHub.skills().all().find(matches)?.name ?? id
+    } catch { /* 注册表缺失时回落裸标识 */ }
+    return id
+  }
+
+  /**
+   * 最近调用（WP-04/A3 全员工作台）：当前登录人自身的计量事件 ≤5，只读自见（不做跨人透视）。
+   * 管理口径仍走 /api/usage/events（usage.read）。
+   */
+  guarded('GET', '/api/usage/recent', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    if (!info.userId) return { items: [] }
+    const limit = Math.min(Number(exchange.query.get('limit') ?? 5) || 5, 20)
+    const subject = `user:${info.userId}`
+    const items = ctx.usage.query({ limit: 200 }).items
+      .filter((event) => event.subject === subject)
+      .slice(0, limit)
+      .map((event) => ({
+        event_id: event.event_id,
+        occurred_at: event.occurred_at,
+        resource: event.resource,
+        name: usageAssetName(event.resource),
+        meters: event.meters,
+        charge_cents: event.pricing.charge_cents,
+        nonbillable: event.pricing.rate?.nonbillable === true,
+      }))
+    return { items }
+  })
+
   /**
    * 反馈回传（WP-07/D1）：👍/👎 薄端点 —— 落零价快照 usage 事件（D2：charge=0 + nonbillable，
    * 不污染计量口径）。主体经 X-On-Behalf-User 归因（Agent 代用户回传），缺省取登录人；
@@ -3599,10 +3681,16 @@ if(resume&&typeof resume.req==='string'&&/^[A-Za-z0-9_-]{1,128}$/.test(resume.re
   }))
 
   guarded('POST', '/api/approvals/:id/decide', 'approval.decide', async (exchange) => {
-    const { decision, opinion } = body<{ decision: 'approve' | 'reject'; opinion?: string }>(exchange)
+    const { decision, opinion, confirmed, finalReview } = body<{ decision: 'approve' | 'reject'; opinion?: string; confirmed?: boolean; finalReview?: boolean }>(exchange)
     const info = caller(exchange)
-    const record = await ctx.audit.decideApproval(exchange.params['id']!, decision, info.userId ?? info.principalId, info.name, opinion)
+    const record = await ctx.audit.decideApproval(exchange.params['id']!, decision, info.userId ?? info.principalId, info.name, opinion, { confirmed, finalReview })
     return record
+  })
+
+  /** 审批 SLA 看板（WP-10）：≤2 工作日达成率可查（L2 审批周期指标口径）。 */
+  guarded('GET', '/api/approvals/sla', 'approval.read', (exchange) => {
+    const windowDays = Number(exchange.query.get('windowDays') ?? 30) || 30
+    return ctx.audit.slaReport(Math.min(Math.max(windowDays, 1), 365))
   })
 
   // -- 平台信息与工具桥 -----------------------------------------------------

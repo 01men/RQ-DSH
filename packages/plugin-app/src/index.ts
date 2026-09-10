@@ -172,6 +172,8 @@ export class AppRegistryService extends Service {
     const ssoClientId = this.checkSsoGate(app)
     return this.ctx.audit.createApproval({
       kind: 'app.online',
+      // WP-10/L1：L4 高危操作统一高风险——通过需二次确认，通过即落公司级终审标记
+      riskLevel: 'high',
       title: `AI 应用上线：${app.name}`,
       payload: { appId, requesterId: requester.id, ...(ssoClientId !== undefined ? { ssoClientId } : {}) },
       requesterId: requester.id,
@@ -198,6 +200,8 @@ export class AppRegistryService extends Service {
     if (!reason?.trim()) throw new Error('下架必须填写原因（护栏要求）')
     return this.ctx.audit.createApproval({
       kind: 'app.offline',
+      // WP-10/L1：L4 高危操作统一高风险——通过需二次确认，通过即落公司级终审标记
+      riskLevel: 'high',
       title: `AI 应用下架：${app.name}`,
       payload: { appId, reason },
       requesterId: requester.id,
