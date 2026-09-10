@@ -543,7 +543,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     return result
   })
 
-  // -- 技能直调（C1-2 / J1 消费面：对话框 @技能名/斜杠命令） ---------------------------------
+  // -- 技能直调（J1 契约 v1 消费面：对话框 @技能名/斜杠命令） ---------------------------------
 
   guarded('GET', '/api/panel/:dept/skills', 'panel.read', (exchange) => {
     deptOf(exchange)
@@ -551,7 +551,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
   })
 
   /**
-   * 技能点名直调（/技能名 问题 的服务端）。诚实降级语义（J1）：可预判的失败
+   * 技能点名直调（/技能名 问题 的服务端）。诚实降级语义（J1 契约 v1）：可预判的失败
    * （技能不存在/未上架/不可见/网关失败）以 HTTP 200 + ok:false + reason 回包——
    * 降级是数据不是传输错误；鉴权/部门范围失败仍走 403/400。
    * 留痕：斜杠原文先落频道（skipAgentDispatch：同一条文本不重复触发 @Agent）；
@@ -1024,7 +1024,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     },
   })
 
-  // -- M3 对话打通：dsh 标准对话点名调用面板 Agent 阵容（其他 Agent 协作的主通道） --
+  // -- J1 契约 v1：dsh 标准对话点名调用面板 Agent 阵容与已上架 Skill（其他 Agent 协作的主通道） --
   ctx.tools.register({
     name: 'panel_agent_invoke',
     description: '点名调用部门面板的某个 Agent 提问并同步取回应答（dsh 标准对话协作主通道）：按部门名册全名匹配，'
@@ -1051,7 +1051,6 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     },
   })
 
-  // -- C1-2 技能直调：dsh 标准对话点名调用已上架 Skill（J1 契约的工具面） --
   ctx.tools.register({
     name: 'panel_skill_invoke',
     description: '点名调用技能平台上架的某个 Skill 并同步取回执行结果（面板对话框 /技能名 直调的同一服务原语）：'

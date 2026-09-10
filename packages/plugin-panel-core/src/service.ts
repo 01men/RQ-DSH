@@ -423,6 +423,8 @@ export class PanelService extends Service {
     senderType: 'human' | 'agent' | 'system'
     senderId?: string
     senderName: string
+    /** agent 型消息的展示图标（如技能直调的 ⚡）。 */
+    senderIcon?: string
     text: string
     ddSync: boolean
     card?: MessageRecord['card']
@@ -675,7 +677,8 @@ export class PanelService extends Service {
     // （班组长没选过模型也要能一把直调——目录为空才诚实拒绝）
     let model = options.modelOverride?.trim() ?? ''
     if (!model) {
-      const online = this.soft('modelGateway')?.models().all().filter((item) => item.status === 'online') ?? []
+      // 只自动选「在线且已配 endpoint」的模型——无 endpoint 的模型调用必失败，不应被自动选中（J1 行为加固）
+      const online = this.soft('modelGateway')?.models().all().filter((item) => item.status === 'online' && item.endpoint.trim() !== '') ?? []
       if (online.length === 0) return { ok: false, reason: '模型目录暂无在线模型——请管理员在「模型管理」中接入后再直调技能' }
       model = online[0]!.slug
     }
@@ -706,7 +709,8 @@ export class PanelService extends Service {
             org: orgId,
             subject: options.userId ? `user:${options.userId}` : 'panel:tool',
             principal: `org:${orgId}`,
-            resource: `skill:${skill.slug}`,
+            // J1 契约 v1 对表：计量资源键用 skill:<ID>（slug 可能含非 ASCII，过不了 usage resource 校验）
+            resource: `skill:${skill.id}`,
             meters: [{ key: 'calls', value: 1, unit: 'call' }],
             idempotency_key: `panel:skill:${skill.id}:${newId('inv')}`,
           })

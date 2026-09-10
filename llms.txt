@@ -11,9 +11,9 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - MCP 部署服务：草稿→验证→灰度→全量、版本不可变、一键回滚、令牌网关（权限组/Tool 粒度/只读约束）、熔断、P95 监控
 - Skill 市场：提交→静态扫描（恶意代码/密钥泄露自动驳回）→两级审批→版本化上架，Ed25519 契约验签，安装包可直传 NAS
 - Agent 本体与 AI 应用本体：注册颁发机器凭证、on-behalf-of 令牌链、编排拓扑一图穿透、PV/UV/DAU 指标（主动上报 + 公开访客埋点 beacon）
-- 用量计量：schema v1 幂等管道（死信重放/消费幂等）、零价快照价格簿、三方对账、能力漂移检测、成本穿透报表（单位 DAU 成本）
+- 用量计量：schema v1 幂等管道（死信重放/消费幂等）、零价快照价格簿、三方对账、能力漂移检测、成本穿透报表（单位 DAU 成本）；事件保留策略默认 730 天（`USAGE_RETENTION_DAYS`，0=永久，附清除运维口）
 - 模型接入网关：OpenAI 兼容真实转发（模型未配置 endpoint 时拒绝调用，不生成假 completion），实测 input/output tokens 计量
-- 审计与治理：四类审计日志、告警规则引擎、越权计数告警、L4 强制审批（上线/下线/下架/吊销，单人通过即执行、结果回写）
+- 审计与治理：四类审计日志、告警规则引擎、越权计数告警、L4 强制审批（上线/下线/下架/吊销，单人通过即执行、结果回写）；审批深化（高风险二次确认 fail-closed、公司级终审、SLA 看板）；HTTP 全响应安全头默认开启（nosniff/SAMEORIGIN/Referrer-Policy）
 - 连接器纳管：open-connector sidecar 作 SaaS 数据面（1,000+ Provider 目录、OAuth 代理、凭证保险库），平台侧双层授权镜像与计量对账
 - NAS 资产纳管与数据权限：经 Synology 文件 MCP 网关操作（不直连 DSM 私有 API）、mcpServers JSON 一键纳管、组织位置 + 角色层级 RBAC 判定引擎（默认 deny、全程留痕）
 - 平台即 MCP Server：`POST /mcp`（Streamable HTTP JSON 形态），40+ 运维工具对 ZCode/Claude/Cursor 等任意 MCP 客户端开放，复用 Bearer 令牌与工具级权限点
@@ -36,6 +36,7 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - [连接器集成](https://github.com/01men/ybkk-AIOS/blob/main/docs/connector-integration.md)：open-connector sidecar 部署拓扑与故障排查
 - [NAS 数据权限](https://github.com/01men/ybkk-AIOS/blob/main/docs/nas-authz.md)：组织位置 + 角色层级 RBAC 设计与灰度
 - [M0 发布说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-09-m0.md)：当前商业模式口径与契约变更清单
+- [M1-1 契约冻结 v1 发布说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-11-optimization.md)：J1 面板技能/Agent 点名直调、J2 统一入口分诊、J3 会话直通契约与安全/数据治理加固
 
 ## 边界与口径
 
@@ -43,4 +44,4 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - 生产部署默认基线初始化（零演示数据）；演示数据仅 `DEMO_SEED=1` 显式注入，请勿在生产启用
 - 全部文件操作经 MCP 文件网关并按真实用户身份（X-On-Behalf-User）留痕；测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock
 
-（更新日期：2026-09-10）
+（更新日期：2026-09-11）

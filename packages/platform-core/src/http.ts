@@ -71,6 +71,13 @@ export interface HttpServerConfig {
    * 根上、不经本分发），放开不改变同源语义；传 [] 关闭；传具体来源列表则精确回显（配合 Vary: Origin）。
    */
   corsAllowOrigins?: string[]
+  /**
+   * 安全响应头（默认开）：全部响应追加 `x-content-type-options: nosniff`、`x-frame-options: SAMEORIGIN`
+   * （挂载形态 /rq 与 dsh web 同源，SAMEORIGIN 不影响宿主面同源内嵌；钉钉 H5 微应用为顶层 webview）、
+   * `referrer-policy: strict-origin-when-cross-origin`。`SECURITY_HEADERS=off`（或 config false）一键关闭，
+   * 对齐 PORTAL_SYNC / IAM_CONNECTOR_AUTO_SYNC 惯例。
+   */
+  securityHeaders?: boolean
 }
 
 /**
@@ -116,6 +123,8 @@ export class HttpServerService extends Service {
   /** 对外挂载前缀：'' 或形如 '/rq'（无尾斜杠）。见 HttpServerConfig.externalBase。 */
   readonly externalBase: string
   private readonly corsAllowOrigins: string[]
+  /** 安全响应头默认开启（nosniff / SAMEORIGIN / Referrer-Policy）；SECURITY_HEADERS=off 或 config 显式 false 关闭。 */
+  private readonly securityHeaders: boolean
   /**
    * 路由×权限矩阵（跨插件共享登记处）。register() 对 guarded 声明自动汇入（幂等去重），
    * selftest「RBAC 端点矩阵 100% 越权断言网」据此驱动（review-dsh-agent-panel-v2 Phase 0）。
@@ -133,6 +142,7 @@ export class HttpServerService extends Service {
     this.host = config.host ?? '0.0.0.0'
     this.externalBase = (config.externalBase ?? '').replace(/\/+$/, '')
     this.corsAllowOrigins = config.corsAllowOrigins ?? ['*']
+    this.securityHeaders = config.securityHeaders ?? process.env.SECURITY_HEADERS !== 'off'
     ctx.effect(() => () => {
       void this.stop()
     })
@@ -238,6 +248,14 @@ export class HttpServerService extends Service {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
     const pathSegments = url.pathname.split('/').filter(Boolean).map((s) => s)
     const method = (req.method ?? 'GET').toUpperCase()
+
+    // 安全响应头（默认开，SECURITY_HEADERS=off 关闭）：经 setHeader 预挂，与后续
+    // ok/fail/file 的 writeHead 自然合并（与下方 CORS 放行头同一合并机制）。
+    if (this.securityHeaders) {
+      res.setHeader('x-content-type-options', 'nosniff')
+      res.setHeader('x-frame-options', 'SAMEORIGIN')
+      res.setHeader('referrer-policy', 'strict-origin-when-cross-origin')
+    }
 
     // 跨域放行（宿主连接切换，docs/frontend-host-switching.md）：只覆盖平台 REST 数据面 /api/*，
     // 且豁免自管 CORS 的子面——门户通道 /api/portal/* 与 OIDC 协议的 /api/authn/oidc/* 自行按

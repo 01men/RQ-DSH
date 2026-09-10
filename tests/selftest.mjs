@@ -4895,6 +4895,124 @@ try {
       panelBoardAnon.status === 401 || panelBoardAnon.status === 403, String(panelBoardAnon.status))
   }
 
+  // ================================================================ J1 契约 v1 + 安全响应头 + usage 保留策略（2026-09-11 版本优化）
+  section('J1 契约 v1：面板技能/Agent 点名直调（GET skills · POST skills/invoke · panel_*_invoke 工具）')
+  {
+    const j1Admin = admin
+    // 专用 stub 模型（本段自备生命周期，不依赖面板段的 try/finally）
+    const j1Stub = createServer((req, res) => {
+      if ((req.url ?? '').endsWith('/chat/completions')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ choices: [{ message: { content: 'J1 直调自测应答：按技能指令完成。' } }], usage: { prompt_tokens: 80, completion_tokens: 60 } }))
+        return
+      }
+      res.writeHead(404).end('{}')
+    })
+    await new Promise((resolve) => j1Stub.listen(0, '127.0.0.1', resolve))
+    try {
+      const j1Model = await api('POST', '/api/modelgw/models', { token: j1Admin, body: { slug: 'j1-stub-model', displayName: 'J1 直调自测', provider: 'deepseek', endpoint: `http://127.0.0.1:${j1Stub.address().port}/v1`, apiKey: 'stub-key', costCentsPerKTokens: 0 } })
+      check('J1：stub 模型就绪', j1Model.ok, JSON.stringify(j1Model.error))
+      // deepseek-chat 重指本段 stub：面板段 stub 已在 finally 关闭，而 mfg 名册「面板质检员」的资产 model 仍指向它
+      await api('POST', '/api/modelgw/models', { token: j1Admin, body: { slug: 'deepseek-chat', displayName: 'DeepSeek Chat（面板自测 stub·J1 段接管）', provider: 'deepseek', endpoint: `http://127.0.0.1:${j1Stub.address().port}/v1`, apiKey: 'stub-key', listCentsPerKTokens: 1, costCentsPerKTokens: 0 } })
+      const j1Channel = (await api('GET', '/api/panel/mfg/channels', { token: j1Admin })).data.channels[0]
+
+      // 种一个已上架技能（提交 → 领域审批 → 上架）
+      const j1Submit = await api('POST', '/api/skills', { token: j1Admin, body: { name: 'J1 直调自测技能', summary: 'J1 契约直调验证', content: '# J1 直调自测技能\n\n## 何时使用\n面板技能直调契约自测。\n\n## 步骤\n1. 点名直调\n2. 断言应答', category: '通用', version: '1.0.0' } })
+      await api('POST', `/api/skills/${j1Submit.data.id}/approve`, { token: j1Admin, body: { decision: 'approve', level: 'domain', opinion: '契约自测' } })
+      const j1Publish = await api('POST', `/api/skills/${j1Submit.data.id}/publish`, { token: j1Admin, body: {} })
+      check('J1：直调技能上架就绪', j1Publish.ok && j1Publish.data.status === 'published', JSON.stringify(j1Publish.error))
+
+      const j1Skills = await api('GET', '/api/panel/mfg/skills', { token: j1Admin })
+      check('J1：可直调技能清单（published + 组织可见，行含 id/name/slug/version）',
+        j1Skills.ok && j1Skills.data.skills.some((item) => item.name === 'J1 直调自测技能')
+        && j1Skills.data.skills.every((item) => item.id && item.slug && item.version),
+        JSON.stringify(j1Skills.error ?? j1Skills.data?.skills?.length))
+
+      const j1Invoke = await api('POST', '/api/panel/mfg/skills/invoke', { token: j1Admin, body: { skill: 'J1 直调自测技能', message: '请按技能指令执行', channelId: j1Channel.id, model: 'j1-stub-model' } })
+      check('J1：技能直调成功路径（200 + ok:true + reply + skill 元数据 + model 回显）',
+        j1Invoke.status === 200 && j1Invoke.data.ok === true && /J1 直调自测应答/.test(j1Invoke.data.reply ?? '')
+        && j1Invoke.data.skill?.name === 'J1 直调自测技能' && j1Invoke.data.model === 'j1-stub-model',
+        JSON.stringify(j1Invoke.error ?? j1Invoke.data).slice(0, 180))
+      const j1Msgs = (await api('GET', `/api/panel/mfg/messages?channelId=${j1Channel.id}&limit=30`, { token: j1Admin })).data.messages
+      const j1Trace = j1Msgs.find((m) => m.senderType === 'human' && m.text.startsWith('/J1 直调自测技能'))
+      const j1ReplyMsg = j1Msgs.find((m) => m.senderType === 'agent' && m.senderName === '⚡ J1 直调自测技能')
+      check('J1：直调留痕——斜杠原文落频道（skipAgentDispatch）+ 应答落 ⚡ agent 消息（含 model）',
+        Boolean(j1Trace) && Boolean(j1ReplyMsg) && j1ReplyMsg.model === 'j1-stub-model')
+
+      const j1Auto = await api('POST', '/api/panel/mfg/skills/invoke', { token: j1Admin, body: { skill: 'J1 直调自测技能', message: '自动选模直调', channelId: j1Channel.id } })
+      check('J1：未指定模型自动选「在线且已配 endpoint」模型（ghost-model 这类必败模型不被选中）',
+        j1Auto.status === 200 && j1Auto.data.ok === true && j1Auto.data.model !== 'ghost-model',
+        JSON.stringify(j1Auto.error ?? { model: j1Auto.data?.model, reason: j1Auto.data?.reason }))
+
+      const j1Missing = await api('POST', '/api/panel/mfg/skills/invoke', { token: j1Admin, body: { skill: '不存在的技能XYZ', message: 'x', channelId: j1Channel.id } })
+      check('J1：诚实降级——不存在技能 200 + ok:false + reason（降级是数据不是传输错误）',
+        j1Missing.status === 200 && j1Missing.data.ok === false && /没有已上架/.test(j1Missing.data.reason ?? ''))
+      const j1FailRow = (await api('GET', `/api/panel/mfg/messages?channelId=${j1Channel.id}&limit=30`, { token: j1Admin })).data.messages.find((m) => m.senderType === 'system' && /技能「不存在的技能XYZ」调用失败/.test(m.text))
+      check('J1：失败原因落系统行全频道可见（不静默）', Boolean(j1FailRow))
+
+      const j1Tool = await api('POST', '/api/tools/execute', { token: j1Admin, body: { name: 'panel_skill_invoke', args: { skill: 'J1 直调自测技能', message: '工具面同步直调' } } })
+      check('J1：panel_skill_invoke 工具面（与 REST 同一服务原语）',
+        j1Tool.ok && j1Tool.data.value?.ok === true && j1Tool.data.value.skill?.name === 'J1 直调自测技能',
+        JSON.stringify(j1Tool.error ?? j1Tool.data?.value).slice(0, 160))
+      const j1AgentTool = await api('POST', '/api/tools/execute', { token: j1Admin, body: { name: 'panel_agent_invoke', args: { dept: 'mfg', agent: '面板质检员', message: '工具面点名 Agent' } } })
+      check('J1：panel_agent_invoke 工具面（askAgent 同步应答，不落频道消息）',
+        j1AgentTool.ok && j1AgentTool.data.value?.ok === true && /J1 直调自测应答/.test(j1AgentTool.data.value.reply ?? ''),
+        JSON.stringify(j1AgentTool.error ?? j1AgentTool.data?.value).slice(0, 160))
+      const j1AgentMissing = await api('POST', '/api/tools/execute', { token: j1Admin, body: { name: 'panel_agent_invoke', args: { dept: 'mfg', agent: '不存在AgentXYZ', message: 'x' } } })
+      check('J1：Agent 点名诚实降级（名册无此 Agent → ok:false + 可用阵容提示）',
+        j1AgentMissing.ok && j1AgentMissing.data.value?.ok === false && /名册无此 Agent/.test(j1AgentMissing.data.value.reason ?? ''))
+
+      // 可见性：orgs 限定技能不进清单、直调给 visibility 提示（对表定制侧 C1-2 语义）
+      const j1OtherOrg = await api('POST', '/api/iam/orgs', { token: j1Admin, body: { name: 'J1 可见性对照组织' } })
+      const j1Scope = await api('PATCH', `/api/skills/${j1Submit.data.id}`, { token: j1Admin, body: { visibility: 'orgs', targetOrgs: [j1OtherOrg.data.id] } })
+      const j1ScopeList = await api('GET', '/api/panel/mfg/skills', { token: j1Admin })
+      const j1ScopeInvoke = await api('POST', '/api/panel/mfg/skills/invoke', { token: j1Admin, body: { skill: 'J1 直调自测技能', message: 'x', channelId: j1Channel.id } })
+      check('J1：orgs 限定技能按调用人组织过滤（清单不含 + 直调 visibility 提示 ok:false）',
+        j1Scope.ok && !j1ScopeList.data.skills.some((item) => item.name === 'J1 直调自测技能')
+        && j1ScopeInvoke.status === 200 && j1ScopeInvoke.data.ok === false && /未对当前用户组织开放/.test(j1ScopeInvoke.data.reason ?? ''),
+        JSON.stringify({ scope: j1Scope.error, invoke: j1ScopeInvoke.data?.reason }))
+      await api('PATCH', `/api/skills/${j1Submit.data.id}`, { token: j1Admin, body: { visibility: 'all' } })
+    } finally {
+      j1Stub.close()
+    }
+  }
+
+  section('安全响应头（platform-core http.ts：nosniff / SAMEORIGIN / Referrer-Policy；SECURITY_HEADERS=off 关闭）')
+  {
+    const secRoot = await rawReq('GET', '/')
+    check('安全响应头：静态页携带 nosniff / SAMEORIGIN / Referrer-Policy',
+      secRoot.headers['x-content-type-options'] === 'nosniff'
+      && secRoot.headers['x-frame-options'] === 'SAMEORIGIN'
+      && secRoot.headers['referrer-policy'] === 'strict-origin-when-cross-origin',
+      JSON.stringify({ nosniff: secRoot.headers['x-content-type-options'], frame: secRoot.headers['x-frame-options'], referrer: secRoot.headers['referrer-policy'] }))
+    const secApi = await rawReq('GET', '/api/overview')
+    check('安全响应头：401 API 响应同样携带（鉴权面不豁免）',
+      secApi.status === 401 && secApi.headers['x-content-type-options'] === 'nosniff' && secApi.headers['x-frame-options'] === 'SAMEORIGIN',
+      JSON.stringify(secApi.headers['x-content-type-options']))
+  }
+
+  section('usage 保留策略（USAGE_RETENTION_DAYS 默认 730d；POST /api/usage/retention/purge 手动巡检）')
+  {
+    const retOrg = (await api('GET', '/api/iam/orgs', { token: admin })).data.find((org) => org.parentId === null).id
+    const oldEvent = await api('POST', '/api/usage/record', { token: admin, body: { org: retOrg, subject: 'user:admin', principal: `org:${retOrg}`, resource: 'panel:mfg.qb01', meters: [{ key: 'calls', value: 1, unit: '次' }], idempotency_key: 'retention-selftest-old-1', occurred_at: new Date(Date.now() - 1100 * 86_400_000).toISOString() } })
+    check('保留策略：出窗历史事件回填成功（occurred_at 显式指定，约 3 年前）', oldEvent.ok, JSON.stringify(oldEvent.error))
+    const purgeDefault = await api('POST', '/api/usage/retention/purge', { token: admin, body: {} })
+    check('保留策略：默认窗口巡检清理出窗事件并回显 retentionDays',
+      purgeDefault.ok && purgeDefault.data.retentionDays === 730 && purgeDefault.data.purgedEvents >= 1,
+      JSON.stringify(purgeDefault.data ?? purgeDefault.error))
+    const afterPurge = await api('GET', '/api/usage/events?resource=' + encodeURIComponent('panel:mfg.qb01') + '&limit=500', { token: admin })
+    check('保留策略：出窗事件已不在流水，窗口内事件不受影响',
+      afterPurge.ok && !afterPurge.data.items.some((item) => item.idempotency_key === 'retention-selftest-old-1'))
+    const purgeZero = await api('POST', '/api/usage/retention/purge', { token: admin, body: { days: 0 } })
+    check('保留策略：days=0 显式跳过（cutoff 为空，零清理）',
+      purgeZero.ok && purgeZero.data.cutoff === '' && purgeZero.data.purgedEvents === 0, JSON.stringify(purgeZero.data))
+    const memberRoleRet = (await api('GET', '/api/iam/roles', { token: admin })).data.roles.find((role) => role.code === 'member')
+    const retMember = await api('POST', '/api/iam/users', { token: admin, body: { username: 'retention_member', displayName: '保留策略成员', orgId: retOrg, roleIds: [memberRoleRet.id] } })
+    const retMemberToken = (await api('POST', '/api/auth/login', { body: { username: 'retention_member', password: retMember.data.initialPassword } })).data.token
+    const purgeDenied = await api('POST', '/api/usage/retention/purge', { token: retMemberToken, body: {} })
+    check('保留策略：无 usage.admin 被拒 403', purgeDenied.status === 403, String(purgeDenied.status))
+  }
+
   // ================================================================ 钉钉桥接（review-dsh-agent-panel-v2 Phase 3）
   section('钉钉桥接（plugin-dingtalk-bridge：群桥 / 出向投递 / 审批推送 / 告警通道 / 回决 fail-closed）')
   {

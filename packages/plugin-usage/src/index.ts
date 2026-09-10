@@ -145,6 +145,9 @@ export class UsageService extends Service {
 
   private consumers = new Map<string, { handler: UsageConsumer; attempts: Map<string, number> }>()
   private seq = 0
+  /** 事件保留天数（USAGE_RETENTION_DAYS，默认 730=2 年；0=永久保留不清理）。 */
+  readonly retentionDays: number
+  private retentionTimer: ReturnType<typeof setInterval> | undefined
 
   constructor(ctx: Context) {
     super(ctx, 'usage')
@@ -169,7 +172,56 @@ export class UsageService extends Service {
       event_id: 'TEXT NOT NULL',
       at: 'TEXT NOT NULL',
     }, { primaryKey: ['consumer', 'event_id'] })
+    const retention = Number(process.env.USAGE_RETENTION_DAYS ?? 730)
+    this.retentionDays = Number.isFinite(retention) && retention > 0 ? Math.floor(retention) : 0
+    if (this.retentionDays > 0) {
+      ctx.logger('usage').info(`usage 事件保留策略：${this.retentionDays} 天（USAGE_RETENTION_DAYS，0=永久）`)
+      // 启动 20s 后首跑 + 每 6h 巡检（对齐 iam 连接器自动同步的构造期定时器惯例）
+      const first = setTimeout(() => void this.sweepRetention(), 20_000)
+      ctx.effect(() => () => clearTimeout(first))
+      this.retentionTimer = setInterval(() => void this.sweepRetention(), 6 * 3_600_000)
+      ctx.effect(() => {
+        if (this.retentionTimer) clearInterval(this.retentionTimer)
+      })
+    }
     this.ensureDefaultPriceBook()
+  }
+
+  /**
+   * 保留策略巡检：清理超出保留窗口的 usage_events，连带消费水位与对应死信。
+   * 语义（发布说明 2026-09-11 登记）：事件被清理后，同幂等键重报将按新事件重新入账——
+   * 保留窗口即删除契约；J4 月度报表窗口（近 13 个月）在默认 730 天窗口内不受影响。
+   */
+  purgeExpired(daysOverride?: number): { cutoff: string; purgedEvents: number; purgedWatermarks: number; purgedDeadLetters: number } {
+    const days = daysOverride ?? this.retentionDays
+    if (!(days > 0)) return { cutoff: '', purgedEvents: 0, purgedWatermarks: 0, purgedDeadLetters: 0 }
+    const cutoff = new Date(Date.now() - days * 86_400_000).toISOString()
+    // 死信先对表：事件已出窗的死信一并移除（保留它们只会让重投在事件缺失时才被动清理）
+    let purgedDeadLetters = 0
+    for (const letter of this.deadLetters().all()) {
+      const row = this.ctx.txnStore.one<UsageRow>('usage_events', { id: letter.event_id })
+      if (row && row.occurred_at < cutoff) {
+        this.deadLetters().remove(letter.id)
+        purgedDeadLetters++
+      }
+    }
+    const purgedWatermarks = this.ctx.txnStore.run(
+      'DELETE FROM usage_consumptions WHERE event_id IN (SELECT id FROM usage_events WHERE occurred_at < ?)',
+      [cutoff],
+    )
+    const purgedEvents = this.ctx.txnStore.run('DELETE FROM usage_events WHERE occurred_at < ?', [cutoff])
+    if (purgedEvents > 0) {
+      this.ctx.logger('usage').info(`usage 保留清理：${purgedEvents} 事件 / ${purgedWatermarks} 消费水位 / ${purgedDeadLetters} 死信（cutoff=${cutoff}）`)
+    }
+    return { cutoff, purgedEvents, purgedWatermarks, purgedDeadLetters }
+  }
+
+  private async sweepRetention(): Promise<void> {
+    try {
+      this.purgeExpired()
+    } catch (error) {
+      this.ctx.logger('usage').warn('usage 保留巡检失败', error)
+    }
   }
 
   // -- 登记与分发 -----------------------------------------------------------
