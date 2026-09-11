@@ -232,6 +232,8 @@ const OC_TOKEN = 'oc-selftest-admin-token'
 const ocCalls = []          // POST /v1/actions/:id 调用记录 {actionId,bearerOk,alias,idempotencyKey,input}
 const ocPuts = []           // PUT /api/runtime-tokens/:id 记录（四数组断言用）
 const ocDeletes = []        // DELETE /api/runtime-tokens/:id
+let ocMirrorFailOnce = false   // OPT-P1-05：下一次 PUT runtime-token 返回 500（镜像失败注入）
+let ocDriftOnMint = null       // OPT-P1-05：下一次 POST runtime-token 先并发收紧权限组再延迟应答（快照漂移注入）
 const ocMintedValues = []   // 每次铸造返回的 oct_ 一次性值（T-24 全文扫描名单）
 const ocLedgerTokens = new Map()  // id → {policy,name}
 const ocTokenByValue = new Map()
@@ -373,6 +375,13 @@ const ocStub = createServer(async (req, res) => {
 
   // -- 运行时令牌 -------------------------------------------------------------
   if (req.method === 'POST' && path === '/api/runtime-tokens') {
+    if (ocDriftOnMint) {
+      const hook = ocDriftOnMint
+      ocDriftOnMint = null
+      // 并发收紧权限组（确定性快照漂移注入）+ 延迟应答，保证外层镜像最后落账（ledger 滞后于当前策略）
+      await api('PATCH', `/api/connector/perm-groups/${hook.permGroupId}`, { token: hook.token, body: hook.body })
+      await new Promise((resolve) => setTimeout(resolve, hook.delayMs ?? 150))
+    }
     const requiredArrays = ['allowedActions', 'blockedActions', 'allowedProxies', 'allowedConnections']
     for (const key of requiredArrays) {
       if (!Array.isArray(body[key])) return ocEnvelope(res, 400, { success: false, errorCode: 'invalid_policy_arrays', message: `${key} 必须是数组（四数组全发契约）` })
@@ -390,6 +399,10 @@ const ocStub = createServer(async (req, res) => {
   const tokenMatch = path.match(/^\/api\/runtime-tokens\/([^/]+)$/)
   if (req.method === 'PUT' && tokenMatch) {
     const id = decodeURIComponent(tokenMatch[1])
+    if (ocMirrorFailOnce) {
+      ocMirrorFailOnce = false
+      return ocEnvelope(res, 500, { success: false, errorCode: 'injected_mirror_failure', message: 'OPT-P1-05 注入：镜像 PUT 失败一次' })
+    }
     if (!ocLedgerTokens.has(id)) return ocEnvelope(res, 404, { success: false, errorCode: 'unknown_token' })
     for (const key of ['allowedActions', 'blockedActions', 'allowedProxies', 'allowedConnections']) {
       if (!Array.isArray(body[key])) return ocEnvelope(res, 400, { success: false, errorCode: 'invalid_policy_arrays', message: `${key} 缺失或非数组（PUT 四数组全发契约）` })
@@ -3838,6 +3851,46 @@ try {
   check('meta.auditPersisted=false 透传给调用方', ghostRun.ok && ghostRun.data?.status === 'ok' && ghostRun.data.meta.auditPersisted === false, JSON.stringify(ghostRun.data?.meta))
   const recoveredLog = await api('GET', `/api/audit/logs?q=${encodeURIComponent('recovered-audit')}&type=invoke&limit=50`, { token: admin })
   check('T-28 平台补记审计', recoveredLog.ok && recoveredLog.data.items.length >= 1, JSON.stringify(recoveredLog.data?.items?.slice(0, 1)))
+
+  // -- OPT-P1-05 TOCTOU 收紧（镜像失败 fail-closed + 执行侧快照漂移拒绝） -------------
+  // 隔离主体（isoGroup 仅本组覆盖 fetch_item），保证候选组唯一、断言不受其他健康组干扰
+  const pgP105 = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'P1-05 TOCTOU 观测组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: ['hackernews.fetch_item'], riskCap: 'write' } },
+    subjects: [{ type: 'user_group', id: isoGroup.id }],
+    rateLimitPerMin: 60,
+  } })).data
+  const p105Invoke = () => api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  const p105Baseline = await p105Invoke()
+  check('P1-05 基线调用成功（健康组可用）', p105Baseline.data?.status === 'ok', JSON.stringify(p105Baseline.data ?? {}).slice(0, 200))
+  // 场景一：镜像注入失败 → 旧 oct_ 令牌立即吊销 + 组级 fail-closed
+  // （快照哈希只含 allowedActions/connections 面——扩动作列表才会触发镜像 PUT）
+  const deletesBeforeFail = ocDeletes.length
+  ocMirrorFailOnce = true
+  await api('PATCH', `/api/connector/perm-groups/${pgP105.id}`, { token: admin, body: { policies: { hackernews: { allowedActions: ['hackernews.fetch_item', 'hackernews.get_top_stories'], riskCap: 'write' } } } })
+  await waitFor(() => ocDeletes.length > deletesBeforeFail, 4000)
+  check('P1-05 镜像失败 → 旧 oct_ 令牌立即吊销（DELETE 命中 stub，不静默放大窗口）', ocDeletes.length > deletesBeforeFail)
+  const p105FailClosed = await p105Invoke()
+  check('P1-05 镜像失败期间组级 fail-closed → invoke 拒绝', p105FailClosed.data?.status === 'denied' && String(p105FailClosed.data.error).includes('fail-closed'), JSON.stringify(p105FailClosed.data ?? {}).slice(0, 220))
+  // 场景二：恢复铸币期间并发收紧（确定性注入：钩子 PATCH 收紧至 H3 并延迟应答，外层镜像最后落账 H2）
+  const mintedBeforeDrift = ocMintedValues.length
+  // PATCH#2 回收组面（H2：单动作）触发恢复铸币；钩子在铸币期间并发改到 H3（双动作）并延迟应答，
+  // 外层镜像最后按 H2 落账 → ledger(H2) 滞后于当前策略(H3)，确定性制造快照漂移
+  ocDriftOnMint = { permGroupId: pgP105.id, token: admin, delayMs: 150, body: { policies: { hackernews: { allowedActions: ['hackernews.fetch_item', 'hackernews.get_top_stories', 'hackernews.submit_post'], riskCap: 'write' } } } }
+  await api('PATCH', `/api/connector/perm-groups/${pgP105.id}`, { token: admin, body: { policies: { hackernews: { allowedActions: ['hackernews.get_top_stories'], riskCap: 'write' } } } })
+  await waitFor(() => ocMintedValues.length > mintedBeforeDrift + 1, 5000)
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  const p105Drift = await p105Invoke()
+  check('P1-05 授权后策略漂移（ledger 滞后当前策略）→ 执行侧拒绝按旧快照执行',
+    p105Drift.data?.status === 'denied' && String(p105Drift.data.error).includes('快照漂移'), JSON.stringify(p105Drift.data ?? {}).slice(0, 240))
+  // 收敛：镜像一次 PUT（账本哈希对齐当前）→ 调用恢复
+  await api('PATCH', `/api/connector/perm-groups/${pgP105.id}`, { token: admin, body: { policies: { hackernews: { allowedActions: ['hackernews.fetch_item', 'hackernews.get_top_stories'], riskCap: 'write' } } } })
+  await waitFor(() => ocPuts.length > mintedBeforeDrift, 4000).catch(() => {})
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  const p105Recovered = await p105Invoke()
+  check('P1-05 镜像收敛后调用恢复（对齐账本哈希后正常执行）', p105Recovered.data?.status === 'ok', JSON.stringify(p105Recovered.data ?? {}).slice(0, 200))
+  // 观测组退场：删除组（连带吊销令牌），恢复 isoGroup 单点清单组口径，不污染后续用例
+  await api('DELETE', `/api/connector/perm-groups/${pgP105.id}`, { token: admin })
 
   // -- T-16a 限流（用单点清单组保证候选组唯一，绕开多组并集下的候选顺序不确定性） --------
   await api('PATCH', `/api/connector/perm-groups/${pgIso.id}`, { token: admin, body: { rateLimitPerMin: 1 } })

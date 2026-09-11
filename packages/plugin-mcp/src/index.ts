@@ -240,6 +240,7 @@ export class McpService extends Service {
     this.probeTimer = setInterval(() => {
       void this.probeAll()
     }, 30_000)
+    this.probeTimer.unref?.() // OPT-P3-02
   }
 
   services(): Collection<McpServiceRecord> {

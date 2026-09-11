@@ -159,6 +159,8 @@ const PLUGINS = [
       ['connector.connected / connector.disconnected', 'emit', '连接生命周期'],
       ['connector.invoked', 'emit', '连接器调用（审计透传 actChain+runId；成本归集 connector:*）'],
       ['connector.permgroup.changed', 'emit', '权限组变更（oct_ 令牌镜像联动）'],
+      ['connector.policy_mirror_failed', 'emit', 'OPT-P1-05：令牌策略镜像失败（吊销旧令牌 + 组级 fail-closed 直至恢复）'],
+      ['connector.policy_snapshot_drifted', 'emit', 'OPT-P1-05：授权后策略快照漂移（执行侧拒绝按旧快照执行）'],
     ],
     api: [
       'GET/PUT /api/connector/gateway · POST /api/connector/gateway/health · POST /api/connector/gateway/offline · POST /api/connector/gateway/online · POST /api/connector/patrol（org 巡检）',

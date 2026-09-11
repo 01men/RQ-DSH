@@ -114,7 +114,7 @@ export class NasAuthzService extends Service {
       })
     })
     // 每日组织↔目录对账 job（R1）+ 留痕滚动清理；unref 不阻断进程退出
-    const daily = setInterval(() => {
+    const daily: ReturnType<typeof setInterval> = setInterval(() => {
       void this.dailyReconcile().catch((error) => this.ctx.logger('nasAuthz').warn('对账 job 失败', error))
     }, 24 * 60 * 60_000)
     daily.unref?.()

@@ -623,6 +623,7 @@ export class IamService extends Service {
     // 通讯录变动（新入职/离职/调岗）需人工点同步才进平台。启动后首跑补同步超期配置，
     // 此后每分钟巡检到期；IAM_CONNECTOR_AUTO_SYNC=off 一键停用（对齐 PORTAL_SYNC 惯例）。
     this.autoSyncTimer = setInterval(() => void this.runDueAutoSyncs(), AUTO_SYNC_TICK_MS)
+    this.autoSyncTimer.unref?.() // OPT-P3-02
     setTimeout(() => void this.runDueAutoSyncs(), AUTO_SYNC_BOOT_DELAY_MS)
     ctx.effect(() => {
       if (this.autoSyncTimer) clearInterval(this.autoSyncTimer)

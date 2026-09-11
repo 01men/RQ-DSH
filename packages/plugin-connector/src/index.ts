@@ -192,6 +192,8 @@ export class ConnectorHubService extends Service {
   private reconcileTimer: ReturnType<typeof setInterval> | undefined
   /** unhealthy 事件节流状态：gatewayId → { 已发阈值, 已发原因 }（测试 DEF-02：防审计刷屏）。 */
   private unhealthyEmitState = new Map<string, { threshold: number; reason?: string }>()
+  /** 镜像失败 fail-closed 组集合（OPT-P1-05）：镜像成功即移除；期间该组 invoke 全拒。 */
+  private mirrorFailureGroups = new Set<string>()
 
   constructor(ctx: Context) {
     super(ctx, 'connectorHub')
@@ -200,9 +202,13 @@ export class ConnectorHubService extends Service {
         if (timer) clearInterval(timer)
       }
     })
+    // OPT-P3-02：全部构造期定时器 unref——保活语义不再隐式持有事件循环（dispose 仍显式清理）
     this.healthTimer = setInterval(() => void this.probeGateway(), HEALTH_INTERVAL_MS)
+    this.healthTimer.unref?.()
     this.patrolTimer = setInterval(() => void this.runPatrols(), PATROL_INTERVAL_MS)
+    this.patrolTimer.unref?.()
     this.reconcileTimer = setInterval(() => void this.reconcileRuns().catch(() => undefined), RECONCILE_INTERVAL_MS)
+    this.reconcileTimer.unref?.()
   }
 
   // -- 工具层身份与组织收敛（REST 与工具路径共用同一套标准，架构审查 P0-1/P0-2） ---------
@@ -598,7 +604,7 @@ export class ConnectorHubService extends Service {
         kind: 'catalog', providers: normalized.length, actions: mapped.length, added, removed, actor, prunedGroups,
       })
       for (const group of this.permGroups().all()) {
-        await this.mirrorTokenPolicy(group).catch(() => undefined)
+        await this.mirrorTokenPolicySafe(group)
       }
     }
     return { providers: normalized.length, actions: mapped.length, added, removed, skippedServices: skipped }
@@ -822,13 +828,13 @@ export class ConnectorHubService extends Service {
         { ...policy, connections: (policy.connections ?? []).filter((alias) => alias !== ref.alias) },
       ]))
       const updatedGroup = this.permGroups().update(group.id, { policies: nextPolicies })
-      await this.mirrorTokenPolicy(updatedGroup).catch(() => undefined)
+      await this.mirrorTokenPolicySafe(updatedGroup)
     }
     if (referencingGroups.length === 0) {
       const affected = this.tokens().find((item) => item.permGroupId && this.permGroups().get(item.permGroupId)?.orgId === ref.ownerOrgId)
       for (const ledger of affected) {
         const group = this.permGroups().get(ledger.permGroupId)
-        if (group) await this.mirrorTokenPolicy(group).catch(() => undefined)
+        if (group) await this.mirrorTokenPolicySafe(group)
       }
     }
     this.ctx.platformBus.emit(PlatformEvents.ConnectorDisconnected, { connectionId: id, alias: ref.alias, provider: ref.provider, orgId: ref.ownerOrgId, actor: options.actor })
@@ -951,7 +957,8 @@ export class ConnectorHubService extends Service {
 
   private afterPermGroupChange(group: ConnectorPermGroupRecord): void {
     this.ctx.platformBus.emit(PlatformEvents.ConnectorPermGroupChanged, { groupId: group.id, name: group.name, change: 'upserted' })
-    void this.mirrorTokenPolicy(group).catch(() => undefined)
+    // OPT-P1-05：显式调度（错误经 handleMirrorFailure 全程可观测，不再静默吞）
+    void this.mirrorTokenPolicySafe(group)
   }
 
   // -- 第二层：oct_ 令牌策略镜像（#7） -----------------------------------------
@@ -990,6 +997,34 @@ export class ConnectorHubService extends Service {
   }
 
   /** 台账收敛：新建铸令 / 快照哈希变化才 PUT（四个数组全发）/ 删除场景走 DELETE。 */
+  /**
+   * 镜像安全封装（OPT-P1-05）：镜像成功即解除该组 fail-closed；
+   * 失败显式处理（吊销旧令牌 + 告警事件 + 组级 fail-closed），杜绝 catch(() => undefined) 静默。
+   */
+  private async mirrorTokenPolicySafe(group: ConnectorPermGroupRecord): Promise<void> {
+    try {
+      await this.mirrorTokenPolicy(group)
+      this.mirrorFailureGroups.delete(group.id)
+    } catch (error) {
+      await this.handleMirrorFailure(group, error)
+    }
+  }
+
+  /**
+   * 镜像失败处置（OPT-P1-05，审计核验 #10 升级项）：收紧权限后旧 oct_ 令牌短期仍有效会
+   * 放大 TOCTOU 窗口——失败即吊销该组旧运行时令牌 + 发 connector.policy_mirror_failed 告警
+   * + 该组 invoke fail-closed 直至镜像成功（巡检/下次变更自动尝试恢复）。
+   */
+  private async handleMirrorFailure(group: ConnectorPermGroupRecord, error: unknown): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error)
+    this.mirrorFailureGroups.add(group.id)
+    this.tokenValueCache.delete(group.id)
+    await this.deleteTokenForGroup(group.id).catch(() => undefined)
+    this.ctx.platformBus.emit(PlatformEvents.ConnectorPolicyMirrorFailed, {
+      groupId: group.id, groupName: group.name, orgId: group.orgId, error: message, at: nowIso(),
+    })
+  }
+
   async mirrorTokenPolicy(group: ConnectorPermGroupRecord): Promise<{ tokenId: string; hash: string; changed: boolean }> {
     const client = this.clientForMirror()
     const snapshot = this.policySnapshot(group)
@@ -1003,10 +1038,16 @@ export class ConnectorHubService extends Service {
         allowedConnections: snapshot.allowedConnections,
       })
       if (!minted.id) throw new OcError('runtime_token_invalid', 'open-connector 未返回运行时令牌 id', undefined, 502)
-      this.tokens().insert({
-        id: newId('ctk'), permGroupId: group.id, ocTokenId: minted.id,
-        policySnapshotHash: snapshot.snapshotHash, createdAt: nowIso(), lastSyncedAt: nowIso(),
-      })
+      // OPT-P1-05：并发镜像去重——铸币 await 期间他方镜像可能已建账本，按组 upsert 而非盲目 insert
+      const concurrentLedger = this.tokens().findOne((item) => item.permGroupId === group.id)
+      if (concurrentLedger) {
+        this.tokens().update(concurrentLedger.id, { ocTokenId: minted.id, policySnapshotHash: snapshot.snapshotHash, lastSyncedAt: nowIso() })
+      } else {
+        this.tokens().insert({
+          id: newId('ctk'), permGroupId: group.id, ocTokenId: minted.id,
+          policySnapshotHash: snapshot.snapshotHash, createdAt: nowIso(), lastSyncedAt: nowIso(),
+        })
+      }
       if (minted.token) this.tokenValueCache.set(group.id, minted.token)
       return { tokenId: minted.id, hash: snapshot.snapshotHash, changed: true }
     }
@@ -1054,10 +1095,16 @@ export class ConnectorHubService extends Service {
       await client.deleteRuntimeToken(ledger.ocTokenId).catch(() => undefined)
       this.tokens().update(ledger.id, { ocTokenId: minted.id, policySnapshotHash: snapshot.snapshotHash, lastSyncedAt: nowIso() })
     } else {
-      this.tokens().insert({
-        id: newId('ctk'), permGroupId: group.id, ocTokenId: minted.id,
-        policySnapshotHash: snapshot.snapshotHash, createdAt: nowIso(), lastSyncedAt: nowIso(),
-      })
+      // OPT-P1-05：铸币 await 期间他方镜像可能已建账本，按组 upsert 而非盲目 insert
+      const racedLedger = this.tokens().findOne((item) => item.permGroupId === group.id)
+      if (racedLedger) {
+        this.tokens().update(racedLedger.id, { ocTokenId: minted.id, policySnapshotHash: snapshot.snapshotHash, lastSyncedAt: nowIso() })
+      } else {
+        this.tokens().insert({
+          id: newId('ctk'), permGroupId: group.id, ocTokenId: minted.id,
+          policySnapshotHash: snapshot.snapshotHash, createdAt: nowIso(), lastSyncedAt: nowIso(),
+        })
+      }
     }
     if (!minted.token) throw new OcError('runtime_token_invalid', '运行时令牌未返回一次性 token 值', undefined, 502)
     this.tokenValueCache.set(group.id, minted.token)
@@ -1176,6 +1223,13 @@ export class ConnectorHubService extends Service {
       return { ok: false, status: 'denied', error: verdict.reason, latencyMs: Date.now() - started }
     }
     const { group, policy, action } = verdict
+    const authorizedHash = this.policySnapshot(group).snapshotHash // OPT-P1-05：授权时刻快照基线
+    // 组级 fail-closed（OPT-P1-05）：镜像失败期间旧授权面不可用，直至镜像成功
+    if (this.mirrorFailureGroups.has(group.id)) {
+      const reason = '该权限组 oct_ 令牌策略镜像失败，fail-closed 直至镜像成功（connector.policy_mirror_failed 已告警）'
+      this.emitDeniedEvent(caller, params.actionId, reason, started)
+      return { ok: false, status: 'denied', error: reason, latencyMs: Date.now() - started }
+    }
 
     // dry-run：通过授权即可给出影响面预览（CLI 冒烟与 UI 预演共用）
     if (params.dryRun) {
@@ -1249,6 +1303,19 @@ export class ConnectorHubService extends Service {
     // ⑦ 取/铸 oct_ 令牌 + 数据面执行（含 401/connection_not_allowed 自动恢复，P1 修正⑥）
     try {
       const octToken = await this.obtainOctToken(group)
+      // 执行侧快照哈希校验（OPT-P1-05 轻量两阶段）：授权与执行间隔内权限组被收紧/策略漂移
+      // → 拒绝按旧快照执行并发 connector.policy_snapshot_drifted；调用方重试即按新快照重走授权。
+      const freshGroup = this.permGroups().get(group.id)
+      const currentHash = freshGroup ? this.policySnapshot(freshGroup).snapshotHash : undefined
+      const ledgerHash = this.tokens().findOne((item) => item.permGroupId === group.id)?.policySnapshotHash
+      if (!freshGroup || currentHash !== authorizedHash || (ledgerHash !== undefined && ledgerHash !== currentHash)) {
+        this.ctx.platformBus.emit(PlatformEvents.ConnectorPolicySnapshotDrifted, {
+          groupId: group.id, groupName: group.name, actionId: action.id,
+          authorizedHash, currentHash, ledgerHash, callerId: caller.id, at: nowIso(),
+        })
+        this.emitDeniedEvent(caller, params.actionId, `权限组策略在授权后变更（快照漂移 ${authorizedHash.slice(0, 8)}→${currentHash ? currentHash.slice(0, 8) : 'deleted'}），拒绝按旧快照执行`, started)
+        return { ok: false, status: 'denied', error: '权限组策略在授权后发生变更（快照漂移），已拒绝执行：请重试以按最新策略重新授权', latencyMs: Date.now() - started }
+      }
       const idempotencyKey = action.riskLevel === 'read' ? undefined : crypto.randomUUID()
       const chosenAlias = effectiveAlias
       const outcome = await this.executeWithRecovery(group, action, {
@@ -1354,7 +1421,8 @@ export class ConnectorHubService extends Service {
       const recoverable = error instanceof OcError && (error.code === 'connection_not_allowed' || error.code === 'unauthorized' || error.status === 401)
       if (!recoverable) throw error
       // 自动恢复：镜像最新快照（新连接合入 allowedConnections 等）后取最新令牌重试一次
-      await this.mirrorTokenPolicy(group).catch(() => undefined)
+      await this.mirrorTokenPolicySafe(group)
+      if (this.mirrorFailureGroups.has(group.id)) throw error // 镜像仍失败：fail-closed，不携带旧授权面重试（OPT-P1-05）
       this.tokenValueCache.delete(group.id)
       const freshToken = await this.obtainOctToken(group)
       try {

@@ -180,6 +180,7 @@ export class UsageService extends Service {
       const first = setTimeout(() => void this.sweepRetention(), 20_000)
       ctx.effect(() => () => clearTimeout(first))
       this.retentionTimer = setInterval(() => void this.sweepRetention(), 6 * 3_600_000)
+      this.retentionTimer.unref?.() // OPT-P3-02
       ctx.effect(() => {
         if (this.retentionTimer) clearInterval(this.retentionTimer)
       })

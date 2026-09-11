@@ -146,6 +146,7 @@ export class OidcService extends Service {
     this.registerRoutes()
     this.cleanupExpired()
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 24 * 3600_000)
+    this.cleanupTimer.unref?.() // OPT-P3-02
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     })

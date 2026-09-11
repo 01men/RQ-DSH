@@ -658,7 +658,7 @@ export function apply(ctx: Context) {
         res.write(`data: ${JSON.stringify({ name: event.name, payload: event.payload })}\n\n`)
       } catch { /* 连接已断，cleanup 兜底 */ }
     })
-    const heartbeat = setInterval(() => {
+    const heartbeat: ReturnType<typeof setInterval> = setInterval(() => {
       try { res.write(': ping\n\n') } catch { /* ignore */ }
     }, 25_000)
     exchange.raw.on('close', () => {

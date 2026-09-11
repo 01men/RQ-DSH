@@ -216,6 +216,7 @@ export class UpdateService extends Service {
       intervalHours: clampIntervalHours(this.config0.intervalHours ?? 24),
     })
     this.tickTimer = setInterval(() => void this.maybeAutoCheck(), AUTO_CHECK_TICK_MS)
+    this.tickTimer.unref?.() // OPT-P3-02
     this.ctx.effect?.(() => () => {
       if (this.tickTimer) clearInterval(this.tickTimer)
     })

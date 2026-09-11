@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { parseYaml } from '../packages/platform-core/src/yaml.ts'
 import { validateScenegraph } from '../packages/platform-core/src/scenegraph.ts'
 import { runContractLint } from './contract-lint.mjs'
+import { scanTimerHygiene } from './lint-timers.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const packagesDir = join(root, 'packages')
@@ -87,4 +88,9 @@ for (const diff of contract.diffs) {
 }
 if (!contract.ok) console.error('契约比对存在红项：实现与清单漂移，拒绝放行')
 
-process.exit(failed + sgFailed > 0 || !contract.ok ? 1 : 0)
+// -- 定时器卫生（OPT-P3-02）：setInterval 必须就近配 unref（保活语义需注释豁免）或文件内存在 clearInterval 生命周期管理 --
+const timerReport = await scanTimerHygiene(packagesDir)
+console.log(`定时器卫生：${timerReport.total} 处 setInterval，${timerReport.violations} 处违规`)
+for (const message of timerReport.messages) console.error(`  ⚠ [timer_hygiene] ${message}`)
+
+process.exit(failed + sgFailed > 0 || !contract.ok || timerReport.violations > 0 ? 1 : 0)

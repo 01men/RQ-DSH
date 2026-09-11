@@ -169,6 +169,7 @@ export class AuthnService extends Service {
     // 启动即清 + 每小时巡检
     this.cleanupExpiredTokens()
     this.cleanupTimer = setInterval(() => this.cleanupExpiredTokens(), 3600_000)
+    this.cleanupTimer.unref?.() // OPT-P3-02：嵌入/测试形态允许进程自然退出
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     })
