@@ -81,8 +81,9 @@ const state = {
   artifacts: [],
   scenegraph: null,
   ddSync: localStorage.getItem('panel_ddsync') === '1',
-  /** 模型目录（与 dsh 服务共用 modelgw 事实源）；chatModel='' 表示跟随各 Agent 资产配置。 */
+  /** 模型目录（modelgw 事实源 / dsh 配置桥只读）；chatModel='' 表示跟随各 Agent 资产配置。 */
   models: [],
+  modelSource: '',
   chatModel: localStorage.getItem('panel_chat_model') ?? '',
   /** 可直调技能清单（C1-2：skillhub published 且对当前账号组织开放；空=不展示技能入口）。 */
   skills: [],
@@ -244,13 +245,19 @@ async function init() {
 }
 
 async function refreshDingtalk() {
+  // 双源探测：宿主面钉钉桥（/api/dingtalk/*）优先；01门装态桥缺席 → 回退面板自持 dws CLI 面。
   try {
     const [status, bridges] = await Promise.all([api.get('/api/dingtalk/status'), api.get('/api/dingtalk/bridges')])
     state.ddStatus = status
     state.bridges = bridges.bridges
   } catch {
-    state.ddStatus = null
-    state.bridges = []
+    try {
+      state.ddStatus = await api.get('/api/panel/ddws/status')
+      state.bridges = []
+    } catch {
+      state.ddStatus = null
+      state.bridges = []
+    }
   }
   renderTopRight()
 }
@@ -258,9 +265,12 @@ async function refreshDingtalk() {
 /** 模型目录（GET /api/panel/models，panel.read）：失败时置空（composer 退化为「未接入模型」提示）。 */
 async function refreshModels() {
   try {
-    state.models = (await api.get('/api/panel/models')).models ?? []
+    const payload = await api.get('/api/panel/models')
+    state.models = payload.models ?? []
+    state.modelSource = payload.source ?? ''
   } catch {
     state.models = []
+    state.modelSource = ''
   }
 }
 
@@ -511,11 +521,16 @@ function renderTopRight() {
   const host = document.getElementById('topRight')
   if (!host) return
   const bound = state.ddStatus?.bound
+  const viaDws = state.ddStatus?.via === 'dws-cli'
   const pill = state.ddStatus
     ? (bound
-        ? `<span class="pill dd-on" id="ddPill">⇄ 钉钉：${esc(bound.displayName)} 已绑定</span>`
-        : `<span class="pill dd-off" id="ddPill">⇄ 钉钉桥接：未绑定（点击绑定）</span>`)
-    : `<span class="pill" id="ddPill">⇄ 钉钉桥接不可用</span>`
+        ? `<span class="pill dd-on" id="ddPill">⇄ ${viaDws ? '钉钉(dws)' : '钉钉'}：${esc(bound.displayName)} 已绑定</span>`
+        : viaDws
+          ? (state.ddStatus.installed
+            ? '<span class="pill dd-off" id="ddPill">⇄ 钉钉(dws)：CLI 已装，点击绑群</span>'
+            : '<span class="pill dd-off" id="ddPill">⇄ 钉钉(dws)：CLI 未安装，点击安装</span>')
+          : '<span class="pill dd-off" id="ddPill">⇄ 钉钉桥接：未绑定（点击绑定）</span>')
+    : '<span class="pill" id="ddPill">⇄ 钉钉桥接不可用</span>'
   const user = session.user ?? (state.demoMode ? { displayName: '演示访客' } : null)
   const avatarTitle = state.demoMode ? '演示访客（只读）——点击连接宿主'
     : `${esc(user?.displayName ?? '')}（点击退出登录）`
@@ -1354,8 +1369,95 @@ function sceneCardHtml(scene) {
 // 绑定向导（D2 裁决：iam 扫码绑定为事实源，无一次性绑定码）
 // ---------------------------------------------------------------------------
 
+/** dws CLI 桥模式绑定面（2026-09-11）：装态无钉钉桥时，安装 dws CLI → 绑定目标群 → 测试投递。 */
+function showBindDws(status) {
+  const steps = [
+    `<div class="step ${status.installed ? 'done' : ''}"><div class="no">${status.installed ? '✓' : '1'}</div><div>
+      <div class="st-t">dws CLI（钉钉官方命令行）</div>
+      <div class="st-d">${status.installed
+        ? `已安装（${esc(status.version ?? '')}）。授权态由 dws 自身管理（终端 dws login）。`
+        : esc(status.installHint ?? '未检测到 dws CLI')}</div>
+      ${status.installed ? '' : '<div style="margin-top:8px"><button class="btn dd" id="dwsInstall">⬇ 一键安装 dws CLI</button></div>'}</div></div>`,
+    `<div class="step ${status.bound ? 'done' : ''}"><div class="no">${status.bound ? '✓' : '2'}</div><div>
+      <div class="st-t">绑定目标钉钉群（群名或 openConversationId）</div>
+      <div class="st-d">${status.bound
+        ? `已绑定：${esc(status.group ?? status.bound?.displayName ?? '')}——开启「钉钉同步」的面板消息将投递到该群。`
+        : '填写群名后绑定。此后面板消息开启「钉钉同步」即经 dws 投递到该群。'}</div>
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <input id="dwsGroup" placeholder="如：异常快速响应群" value="${esc(status.group ?? '')}" style="flex:1;border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:13px">
+        <button class="btn primary" id="dwsBindSave">${status.bound ? '换绑' : '绑定'}</button>
+        ${status.bound ? '<button class="btn" id="dwsUnbind">解绑</button>' : ''}
+      </div></div></div>`,
+    `<div class="step"><div class="no">3</div><div>
+      <div class="st-t">测试投递</div>
+      <div class="st-d">向绑定群真实发送一条测试消息（走 dws chat，失败原因如实回显）。</div>
+      <div style="margin-top:8px"><button class="btn" id="dwsTest" ${status.installed && status.bound ? '' : 'disabled title="先完成安装与绑群"'}>📤 发送测试消息</button></div></div></div>`,
+  ]
+  showModal('⇄ 钉钉连接（dws CLI 模式）', `${steps.join('')}
+    <p class="note">安全边界：钉钉授权态归 dws CLI 自身（本面板零凭证）；安装/绑群/投递全程审计留痕；投递失败会落到消息同步状态与告警，绝不静默丢消息。</p>`)
+  const installBtn = document.getElementById('dwsInstall')
+  if (installBtn) {
+    installBtn.onclick = async (event) => {
+      event.target.disabled = true
+      event.target.textContent = '⏳ 安装中（最长 4 分钟）…'
+      try {
+        const result = await api.post('/api/panel/ddws/install', {}, { timeoutMs: 260_000 })
+        void toast(result.message, result.ok ? undefined : 'error')
+      } catch (error) {
+        void toast(error.message, 'error')
+      }
+      await refreshDingtalk()
+      showBindDws(state.ddStatus ?? status)
+    }
+  }
+  const saveBtn = document.getElementById('dwsBindSave')
+  if (saveBtn) {
+    saveBtn.onclick = async (event) => {
+      const group = document.getElementById('dwsGroup').value.trim()
+      if (!group) { void toast('群名/会话 ID 必填', 'error'); return }
+      event.target.disabled = true
+      try {
+        await api.put('/api/panel/ddws/bind', { group })
+        void toast(`已绑定钉钉群：${group}`)
+        await refreshDingtalk()
+        showBindDws(state.ddStatus ?? status)
+      } catch (error) {
+        event.target.disabled = false
+        void toast(error.message, 'error')
+      }
+    }
+  }
+  const unbindBtn = document.getElementById('dwsUnbind')
+  if (unbindBtn) {
+    unbindBtn.onclick = async () => {
+      try {
+        await api.delete('/api/panel/ddws/bind')
+        void toast('已解绑钉钉群')
+        await refreshDingtalk()
+        showBindDws(state.ddStatus ?? status)
+      } catch (error) {
+        void toast(error.message, 'error')
+      }
+    }
+  }
+  const testBtn = document.getElementById('dwsTest')
+  if (testBtn) {
+    testBtn.onclick = async (event) => {
+      event.target.disabled = true
+      try {
+        const result = await api.post('/api/panel/ddws/test', {}, { timeoutMs: 40_000 })
+        void toast(result.ok ? `✓ 已投递到「${result.group}」` : `✗ ${result.error}`, result.ok ? undefined : 'error')
+      } catch (error) {
+        void toast(error.message, 'error')
+      }
+      event.target.disabled = false
+    }
+  }
+}
+
 async function showBind() {
   const status = state.ddStatus
+  if (status?.via === 'dws-cli') return showBindDws(status)
   const connectorOk = status?.connector?.configured
   const bound = status?.bound
   showModal('⇄ 钉钉身份绑定与消息桥接', `
@@ -1471,7 +1573,8 @@ async function showModels() {
     return
   }
   state.models = models
-  const canEdit = session.can('panel.config.write')
+  const dshManaged = state.modelSource === 'dsh'
+  const canEdit = session.can('panel.config.write') && !dshManaged
   const rows = models.map((model) => `
     <div class="lic-row">
       <span class="lr-ic">🧠</span>
@@ -1489,7 +1592,9 @@ async function showModels() {
     </div>`).join('')
     || '<div class="sys-line"><span>模型目录为空：登记后即可在协作会话切换模型、供 Agent 真实调用。</span></div>'
   showModal('🧠 模型配置（与 dsh 服务共用模型目录）', `
-    <p class="note" style="margin-top:0">模型目录（modelgw）是平台服务唯一的模型事实源：此处登记的模型 = 协作会话对话框可切换的模型 = 面板 Agent 实际调用的模型，与 dsh 本身服务保持一致。调用走真实上游（OpenAI 兼容 chat/completions），未配置 endpoint 的模型拒绝调用、绝不造假回复。</p>
+    <p class="note" style="margin-top:0">${dshManaged
+      ? '当前为 <b>dsh 配置托管模式</b>：下列模型来自 dsh 默认配置（agent-default-model 与已配置的 llm 适配器路由），面板只读；增删改请在 dsh 侧完成，本面板的 Agent 调用与连通测试直接走 dsh 模型通道。'
+      : '模型目录（modelgw）是平台服务唯一的模型事实源：此处登记的模型 = 协作会话对话框可切换的模型 = 面板 Agent 实际调用的模型，与 dsh 本身服务保持一致。调用走真实上游（OpenAI 兼容 chat/completions），未配置 endpoint 的模型拒绝调用、绝不造假回复。'}</p>
     <div style="margin:12px 0">${rows}</div>
     ${canEdit ? `<div style="display:flex;gap:10px">
       <button class="btn primary" id="modelAdd">＋ 登记模型</button>
@@ -1541,7 +1646,7 @@ function showModelForm(existing) {
         <input id="mfSlug" value="${esc(existing?.slug ?? '')}" ${existing ? 'disabled title="slug 是登记主键，如需变更请新建登记"' : ''} placeholder="如 deepseek-chat"></label>
       <label>显示名<input id="mfName" value="${esc(existing?.displayName ?? '')}" placeholder="缺省同 slug"></label>
       <label>厂商<input id="mfProvider" value="${esc(existing?.provider ?? '')}" placeholder="如 deepseek / aliyun / openai"></label>
-      <label>Endpoint（OpenAI 兼容基址）*<input id="mfEndpoint" value="${esc(existing?.endpoint ?? '')}" placeholder="如 https://api.deepseek.com/v1"></label>
+      <label>Endpoint（OpenAI 兼容基址，必须含 /v1 路径）*<input id="mfEndpoint" value="${esc(existing?.endpoint ?? '')}" placeholder="如 https://api.deepseek.com/v1（漏 /v1 会 404）"></label>
       <label>API Key${existing ? '（留空保持不变）' : ''}<input id="mfKey" type="password" autocomplete="new-password" placeholder="${existing ? '留空保持既有密钥' : '直填或环境变量引用（如 env:DEEPSEEK_API_KEY）'}"></label>
       <div class="mform-grid">
         <label>挂牌价（分/千 tokens）*<input id="mfList" type="number" min="0" step="0.1" value="${existing?.listCentsPerKTokens ?? 0}"></label>

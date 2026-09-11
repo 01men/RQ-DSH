@@ -601,8 +601,8 @@ try {
     const { existsSync: pathExists } = await import('node:fs')
     const patchYaml = platformCore.parseYaml(readFileSync('cordis.patch.yml', 'utf8'))
     const patchEntries = Array.isArray(patchYaml?.[0]?.insert) ? patchYaml[0].insert : []
-    check('cordis.patch.yml 收缩为 4 entry（01门 产物：3×dist 前缀 + 1×rq-card 包名）',
-      patchEntries.length === 4, `entries=${patchEntries.length}`)
+    check('cordis.patch.yml 装配 6 entry（01门 产物：5×dist 前缀 + 1×rq-card 包名；2026-09-11 补 iam/authn）',
+      patchEntries.length === 6, `entries=${patchEntries.length}`)
 
     // -- 1. 逐 entry 解析到本地模块并导入（抓缺文件/坏导出——装机包里最致命的静默事故）--
     const broken = []
@@ -627,7 +627,7 @@ try {
     }
     check('patch 全部 entry 解析到本地模块并成功导入', broken.length === 0, broken.join(' | '))
 
-    // -- 2. 三链一致（plan-gate01 Phase 3 收缩后规则）：patch(4) id 集 ⊆ cordis.yml(22)；
+    // -- 2. 三链一致（plan-gate01 Phase 3 收缩后规则）：patch(6) id 集 ⊆ cordis.yml(22)；
     //        boot-all ↔ cordis.yml 服务面双射维持不变（防「加了包漏登记」）--
     const entryDir = (name) => {
       if (name.startsWith('@ybkk/gate-01/packages/')) return name.slice('@ybkk/gate-01/packages/'.length).split('/')[0]
@@ -645,7 +645,7 @@ try {
     const cordisDirs = cordisEntries.map((entry) => entryDir(String(entry?.name ?? ''))).filter(Boolean)
     const patchOnly = patchDirs.filter((dir) => !DSH_ONLY.has(dir) && !bootDirs.includes(dir))
     const patchNotInCordis = patchDirs.filter((dir) => !cordisDirs.includes(dir))
-    check('三链一致：patch(4) 服务面 ⊆ boot-all（dsh 专属条目豁免）且 ⊆ cordis.yml(22)',
+    check('三链一致：patch(6) 服务面 ⊆ boot-all（dsh 专属条目豁免）且 ⊆ cordis.yml(22)',
       patchOnly.length === 0 && patchNotInCordis.length === 0,
       `patchOnly=${patchOnly} patchNotInCordis=${patchNotInCordis}`)
     const cordisOnly = cordisDirs.filter((dir) => !DSH_ONLY.has(dir) && !bootDirs.includes(dir))
@@ -656,8 +656,8 @@ try {
     const cordisIds = new Set(cordisEntries.map((entry) => entry?.id))
     const patchIds = new Set(patchEntries.map((entry) => entry?.id))
     const idMissing = [...patchIds].filter((id) => !cordisIds.has(id))
-    check('三链一致：patch(4) 插件 id 集 ⊆ cordis.yml(22)',
-      cordisEntries.length === 22 && idMissing.length === 0 && patchIds.size === 4,
+    check('三链一致：patch(6) 插件 id 集 ⊆ cordis.yml(22)',
+      cordisEntries.length === 22 && idMissing.length === 0 && patchIds.size === 6,
       `cordis=${cordisEntries.length} missing=${idMissing}`)
 
     // -- 3. rq-card 浏览器半 bundle 新鲜度（改 src/client 忘重建 = 过期装机包）--
@@ -674,12 +674,12 @@ try {
     const stale = DIST_PACKAGES.map((pkg) => [pkg, readDistBuildId(process.cwd(), pkg)])
       .filter(([, built]) => built !== expectedDistId)
       .map(([pkg, built]) => `${pkg}(built=${built ?? 'missing'} expected=${expectedDistId})`)
-    check('随附包 dist 预构建产物新鲜（4 包 build-id 与 src 树指纹一致）', stale.length === 0, stale.join(' | '))
+    check('随附包 dist 预构建产物新鲜（6 包 build-id 与 src 树指纹一致）', stale.length === 0, stale.join(' | '))
 
     // -- 4. 装机 files 覆盖：运行期资产必须落在根 package.json files 根之下 --
     const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
     // plan-gate01 Phase 3 精确清单：安装产物=01门 4 entry 所需的最小闭包（源码开发形态根 src/cordis.yml 不随包）
-    const expectedFiles = ['cordis.patch.yml', 'packages/platform-core', 'packages/plugin-dsh-bridge', 'packages/plugin-panel-core', 'packages/plugin-rq-card', 'README.md', 'LICENSE'].sort()
+    const expectedFiles = ['cordis.patch.yml', 'packages/platform-core', 'packages/plugin-iam', 'packages/plugin-authn', 'packages/plugin-dsh-bridge', 'packages/plugin-panel-core', 'packages/plugin-rq-card', 'README.md', 'LICENSE'].sort()
     const actualFiles = [...(rootPkg.files ?? [])].sort()
     check('根 package.json files 精确覆盖 01门 装机闭包（多列/少列都红）',
       JSON.stringify(expectedFiles) === JSON.stringify(actualFiles),
@@ -803,10 +803,10 @@ try {
       }
     }
     const declared = patchDirs.filter((dir) => pathExists(join('packages', dir, 'plugin.yaml')))
-    // plan-gate01 Phase 3 精确断言：4 entry 中仅 plugin-panel-core 持声明位
+    // plan-gate01 Phase 3 精确断言（2026-09-11 扩容）：6 entry 中声明位=iam/authn/panel-core 三包
     // （platform-core/dsh-bridge 为纯代码包；rq-card 走 dsh.client 声明，无 plugin.yaml）
-    check('声明位插件 plugin.yaml 与 manifest/api.yaml 成对在场（patch(4) 中声明位=plugin-panel-core，精确）',
-      JSON.stringify([...declared].sort()) === JSON.stringify(['plugin-panel-core'])
+    check('声明位插件 plugin.yaml 与 manifest/api.yaml 成对在场（patch(6) 中声明位=iam/authn/panel-core，精确）',
+      JSON.stringify([...declared].sort()) === JSON.stringify(['plugin-authn', 'plugin-iam', 'plugin-panel-core'])
       && declared.every((dir) => pathExists(join('packages', dir, 'manifest', 'api.yaml'))),
       declared.join(','))
   }

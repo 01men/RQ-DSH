@@ -14,7 +14,7 @@
  *   - 种子：基线=五部门骨架配置+内置行业激活；DEMO_SEED=1 追加演示会话/任务/知识/看板
  */
 import { join, dirname } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, writeFileSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
@@ -25,6 +25,8 @@ import { PanelService, TASK_LANES, type TaskLane, type DeptWidget, type DeptKpi,
 import { CardpackService, CARD_PLATFORMS, filterCards, type CardPlatform } from './cardpacks.ts'
 export { CardpackService, CARD_PLATFORMS, filterCards } from './cardpacks.ts'
 import { seedPanel, DEMO_ORG_ID } from './seed/seed.ts'
+import { resolvePanelModelGateway } from './llm-bridge.ts'
+import { DwsCli } from './dws.ts'
 
 export const name = 'panel-core'
 // plan-gate01 Phase 2 瘦身：硬依赖只保留数据面基座 5 键（platform-core / dsh 原生提供）。
@@ -82,18 +84,46 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
   const caller = (exchange: HttpExchange): CallerInfo => exchange.principal as CallerInfo
 
   // 与 console 同款 requirePermission：缺权限 403 + audit.authz.denied 留痕（RBAC 探针的判定面）。
-  // 两道前置守卫（plan-gate01 Phase 2.2）：
-  //   1. 严格态 principal 兜底——console 鉴权中间件缺位/装配序异常时 exchange.principal 未写入，
-  //      此前会 TypeError→500；现干净 401（fail-closed），绝不放行；
-  //   2. demoAuth（缺省 false）演示放行——仅只读动词、仅演示身份（DEMO_PRINCIPAL 最小只读权限点），
-  //      写动词 403；该开关只由 01门 patch 装配声明，全量形态永不声明。
+  // 三道前置（plan-gate01 Phase 2.2 + 2026-09-11 写通道打通）：
+  //   1. Bearer 自校验——鉴权中间件住在 plugin-console（01门 4+2 entry 装态无 console），
+  //      面板对自带 Bearer 的请求经 authn.verify 自行建立 principal（与 SSE ?token= 通道同规）；
+  //      出示了令牌但校验失败 → 干净 401，绝不降级为演示访客（fail-closed）；
+  //   2. 严格态 principal 兜底——无凭证且非演示态 → 401；
+  //   3. demoAuth（缺省 false）演示放行——仅「无有效 principal」时介入：只读动词以演示身份
+  //      渲染内置演示数据，写动词 403；已登录（有 principal）用户不受只读限制。该开关只由
+  //      01门 patch 装配声明，全量形态永不声明。
   const requirePermission = (exchange: HttpExchange, point: string): boolean => {
-    if (demoAuth) {
+    if (!exchange.principal) {
+      const header = String(exchange.headers['authorization'] ?? '')
+      if (header.startsWith('Bearer ')) {
+        const authn = soft(ctx, 'authn')
+        if (!authn) {
+          exchange.fail(401, 'UNAUTHENTICATED', '认证中心未接入，无法校验所出示的令牌')
+          return false
+        }
+        try {
+          const verified = authn.verify(header.slice(7))
+          exchange.principal = {
+            kind: verified.principal.type,
+            principalId: verified.principal.id,
+            ...(verified.principal.type === 'human' && verified.principal.refId ? { userId: verified.principal.refId } : {}),
+            ...(verified.principal.type === 'machine' ? { refType: verified.principal.refType, refId: verified.principal.refId } : {}),
+            name: verified.principal.name,
+            permissions: verified.scopes,
+            actChain: verified.actChain,
+          }
+        } catch (error) {
+          exchange.fail(401, 'TOKEN_INVALID', `令牌无效：${error instanceof Error ? error.message : String(error)}`)
+          return false
+        }
+      }
+    }
+    if (demoAuth && !exchange.principal) {
       if (!['GET', 'HEAD', 'OPTIONS'].includes(exchange.method.toUpperCase())) {
         exchange.fail(403, 'DEMO_READONLY', '演示数据只读：连接宿主并登录后解锁写操作')
         return false
       }
-      if (!exchange.principal) exchange.principal = DEMO_PRINCIPAL
+      exchange.principal = DEMO_PRINCIPAL
     } else if (!exchange.principal) {
       exchange.fail(401, 'UNAUTHENTICATED', '未认证：请先登录（鉴权中间件未覆盖该请求）')
       return false
@@ -123,9 +153,10 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
       try {
         const result = await handler(exchange)
         if (!exchange.res.writableEnded) {
-          // 演示态标记（plan-gate01 Phase 4）：demoAuth 放行的只读响应一律带 demo:true——
-          // 前端与消费方可据此区分「内置演示数据」与「宿主真实数据」
-          const demoMarked = demoAuth && result !== null && typeof result === 'object' && !Array.isArray(result)
+          // 演示态标记（plan-gate01 Phase 4）：仅「确以演示访客身份放行」的只读响应带 demo:true——
+          // 已登录用户读到的是真实数据，不再误标（2026-09-11 写通道打通配套语义收紧）
+          const isDemoPrincipal = caller(exchange)?.principalId === DEMO_PRINCIPAL.principalId
+          const demoMarked = demoAuth && isDemoPrincipal && result !== null && typeof result === 'object' && !Array.isArray(result)
             ? { ...result, demo: true }
             : result
           exchange.ok(demoMarked)
@@ -288,7 +319,10 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     return { agents }
   })
 
-  // -- 模型目录（与 dsh 服务共用 modelgw 唯一事实源；对话框切换与 Agent 调用同源） ------
+  // -- 模型目录（modelgw 事实源优先；01门 dsh 装态落 dsh 模型桥——目录随 dsh 配置只读同源） ------
+
+  /** 模型网关解析：modelgw 在场优先，缺席时 dsh llm 在场即落桥（llm-bridge.ts），两者皆无 → undefined。 */
+  const modelGateway = () => resolvePanelModelGateway(ctx)
 
   /** 目录读取（面板视角）：apiKey 脱敏回显（env: 引用原样展示，直填密钥打码），与 console 同口径。 */
   const maskedModel = (model: { apiKey: string } & Record<string, unknown>) => ({
@@ -296,15 +330,25 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     apiKey: model.apiKey.startsWith('env:') ? model.apiKey : '***',
   })
 
-  guarded('GET', '/api/panel/models', 'panel.read', (exchange) => {
-    const gateway = soft(ctx, 'modelGateway')
-    if (!gateway) return degraded(exchange, '模型网关')
-    return { models: gateway.models().all().map(maskedModel) }
+  guarded('GET', '/api/panel/models', 'panel.read', async (exchange) => {
+    const resolved = modelGateway()
+    if (!resolved) return degraded(exchange, '模型网关')
+    if (resolved.kind === 'dsh') {
+      // dsh 桥目录：惰性发现（provider 路由枚举是异步的），default 跟随 dsh 默认模型置顶
+      const models = await resolved.gateway.ensureCatalog()
+      return { models: models.map(maskedModel), source: 'dsh' }
+    }
+    return { models: resolved.gateway.models().all().map(maskedModel), source: 'modelgw' }
   })
 
   guarded('POST', '/api/panel/models', 'panel.config.write', (exchange) => {
-    const gateway = soft(ctx, 'modelGateway')
-    if (!gateway) return degraded(exchange, '模型网关')
+    const resolved = modelGateway()
+    if (!resolved) return degraded(exchange, '模型网关')
+    if (resolved.kind === 'dsh') {
+      exchange.fail(400, 'MODEL_READONLY', '模型目录由 dsh 配置托管（settings.yaml agent-default-model / llm 适配器）——01门面板只读，请在 dsh 侧增删改模型')
+      return
+    }
+    const gateway = resolved.gateway
     const input = body<{ slug?: string; displayName?: string; provider?: string; endpoint?: string; apiKey?: string; listCentsPerKTokens?: number; costCentsPerKTokens?: number; status?: string }>(exchange)
     const slug = input.slug?.trim() ?? ''
     if (!slug) throw new Error('模型 slug 必填（如 deepseek-chat）')
@@ -330,8 +374,13 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
 
   /** 删除登记：从模型目录移除；计量与审计数据保留。 */
   guarded('DELETE', '/api/panel/models/:id', 'panel.config.write', (exchange) => {
-    const gateway = soft(ctx, 'modelGateway')
-    if (!gateway) return degraded(exchange, '模型网关')
+    const resolved = modelGateway()
+    if (!resolved) return degraded(exchange, '模型网关')
+    if (resolved.kind === 'dsh') {
+      exchange.fail(400, 'MODEL_READONLY', '模型目录由 dsh 配置托管——01门面板只读，请在 dsh 侧增删改模型')
+      return
+    }
+    const gateway = resolved.gateway
     const id = exchange.params['id']!
     const model = gateway.models().get(id)
     if (!model) throw new Error(`模型不存在：${id}`)
@@ -340,25 +389,30 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     return { deleted: true }
   })
 
-  /** 连通性测试：真实走 modelgw.invoke 全链（预检/转发/计量），失败如实回传，不造假成功。 */
+  /** 连通性测试：真实走网关 invoke 全链（modelgw 计量 / dsh 桥真实出站），失败如实回传，不造假成功。 */
   guarded('POST', '/api/panel/models/:slug/test', 'panel.config.write', async (exchange) => {
-    const gateway = soft(ctx, 'modelGateway')
-    if (!gateway) return degraded(exchange, '模型网关')
+    const resolved = modelGateway()
+    if (!resolved) return degraded(exchange, '模型网关')
     const slug = String(exchange.params.slug ?? '')
     const info = caller(exchange)
     const orgId = orgIdOf(exchange)
-    if (!orgId) throw new Error('无法确定计费组织（orgId），无法执行真实调用测试')
+    if (resolved.kind === 'modelgw' && !orgId) throw new Error('无法确定计费组织（orgId），无法执行真实调用测试')
     try {
-      const result = await gateway.invoke({
+      const result = await resolved.gateway.invoke({
         model: slug,
         messages: [{ role: 'user', content: '模型连通性测试，请直接回复：OK' }],
-        orgId,
+        ...(resolved.kind === 'modelgw' ? { orgId } : {}),
         subject: info.userId ? `user:${info.userId}` : `panel:${info.principalId}`,
         maxTokens: 16,
       })
       return { ok: true, model: result.model, content: result.content.slice(0, 80), outputTokens: result.outputTokens }
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      const message = error instanceof Error ? error.message : String(error)
+      // 高频误配提示：OpenAI 兼容基址漏了 /v1 路径时上游 404（如「404 page not found」）——可行动文案而非裸状态码
+      const hint = /HTTP 404/.test(message)
+        ? '（提示：HTTP 404 常因 endpoint 漏了 /v1 路径——OpenAI 兼容基址应形如 https://<host>/v1）'
+        : ''
+      return { ok: false, error: `${message}${hint}` }
     }
   })
 
@@ -511,7 +565,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     if (!channelId) throw new Error('部门暂无频道，请先创建')
     // 对话框模型切换：显式指定 model 时必须是模型目录已登记的 slug（未指定则跟随 Agent 资产配置）
     const requestedModel = input.model?.trim() ?? ''
-    if (requestedModel && !soft(ctx, 'modelGateway')?.models().findOne((item) => item.slug === requestedModel)) {
+    if (requestedModel && !modelGateway()?.gateway.models().findOne((item) => item.slug === requestedModel)) {
       throw new Error(`模型未在目录登记：${requestedModel}（可在「🧠 模型」中登记）`)
     }
     const info = caller(exchange)
@@ -568,7 +622,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id
     if (!channelId) throw new Error('部门暂无频道，请先创建')
     const requestedModel = input.model?.trim() ?? ''
-    if (requestedModel && !soft(ctx, 'modelGateway')?.models().findOne((item) => item.slug === requestedModel)) {
+    if (requestedModel && !modelGateway()?.gateway.models().findOne((item) => item.slug === requestedModel)) {
       throw new Error(`模型未在目录登记：${requestedModel}（可在「🧠 模型」中登记）`)
     }
     const info = caller(exchange)
@@ -873,6 +927,173 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
     offExecutor()
     offDelivered()
   })
+
+  // -- 01门装态补环（2026-09-11 写通道/模型/钉钉三件套） -----------------------------------
+  // dsh Loader 并发装载 patch entry（app-boot §mountRootInclude）——「apply 期软读兄弟服务」
+  // 是竞态写法，本节全部改为顺序无关：
+  //   a. 登录面无条件注册在 panel 自有命名空间（/api/panel/auth/*，不与 console 的 /api/auth/*
+  //      冲突），authn 缺席时请求期诚实 503——console/authn 在场与否都行为正确；
+  //   b. dws CLI 桥挂 /api/panel/ddws/*（同理不碰 /api/dingtalk/*）；ddSync 投递钩子在事件时
+  //      再查 dingtalkBridge，桥在场即让位，杜绝双投；
+  //   c. 基线管理员种子延迟重试（iam 发布即播种，orgs 非空幂等跳过；与 console seed 双跑安全）。
+
+  /** 面板命名空间登录面：authn 在场即转发（响应形状与 console 逐字段一致，前端零特判）。 */
+  const loginViaAuthn = () => {
+    const authn = soft(ctx, 'authn')
+    const iam = soft(ctx, 'iam')
+    if (!authn || !iam) return undefined
+    return {
+      login: (username: string, password: string) => {
+        const result = authn.login(username, password)
+        const user = iam.users().get(result.userId)!
+        return {
+          token: result.token,
+          refreshToken: result.refreshToken,
+          expiresAt: result.record.expiresAt,
+          user: {
+            id: user.id, username: user.username, displayName: user.displayName,
+            orgId: user.orgId, roleIds: user.roleIds,
+            roles: user.roleIds.map((roleId: string) => iam.roles().get(roleId)?.name).filter(Boolean),
+            permissions: iam.userPermissions(user.id),
+          },
+        }
+      },
+      refresh: (refreshToken: string) => authn.refreshSession(refreshToken),
+    }
+  }
+  http.register('POST', '/api/panel/auth/login', (exchange) => {
+    const backend = loginViaAuthn()
+    if (!backend) {
+      exchange.fail(503, 'AUTHN_UNAVAILABLE', '认证面未就绪（本机形态未装配认证中心）——请从宿主/控制台登录')
+      return
+    }
+    const { username, password } = body<{ username?: string; password?: string }>(exchange)
+    if (!username || !password) {
+      exchange.fail(400, 'BAD_REQUEST', '用户名与密码必填')
+      return
+    }
+    try {
+      exchange.ok(backend.login(username, password))
+    } catch (error) {
+      exchange.fail(401, 'LOGIN_FAILED', error instanceof Error ? error.message : String(error))
+    }
+  }, { access: 'public' })
+  http.register('POST', '/api/panel/auth/refresh', (exchange) => {
+    const backend = loginViaAuthn()
+    if (!backend) {
+      exchange.fail(503, 'AUTHN_UNAVAILABLE', '认证面未就绪（本机形态未装配认证中心）')
+      return
+    }
+    const { refreshToken } = body<{ refreshToken?: string }>(exchange)
+    if (!refreshToken) {
+      exchange.fail(400, 'BAD_REQUEST', 'refreshToken 必填')
+      return
+    }
+    try {
+      const result = backend.refresh(refreshToken)
+      exchange.ok({ token: result.token, refreshToken: result.refreshToken })
+    } catch (error) {
+      exchange.fail(401, 'REFRESH_FAILED', error instanceof Error ? error.message : String(error))
+    }
+  }, { access: 'public' })
+
+  const dingtalkBridgePresent = Boolean(soft(ctx, 'dingtalkBridge'))
+  if (!dingtalkBridgePresent) {
+    const dws = new DwsCli(ctx)
+    // 命名空间铁律：dws 面全部挂在 /api/panel/ddws/*（panel 自有命名空间）——绝不动 /api/dingtalk/*，
+    // 那是 plugin-dingtalk-bridge 的路由面；本插件装配序先于桥，抢注同名路径会整面遮蔽桥的路由。
+    guarded('GET', '/api/panel/ddws/status', 'panel.read', async () => {
+      const status = await dws.status()
+      return {
+        ...status,
+        via: 'dws-cli',
+        // 形状兼容（app.js renderTopRight 消费）：bound=false | {displayName,...}
+        bound: status.bound && status.group ? { displayName: status.group, via: 'dws-cli' } : false,
+        connector: { configured: status.installed, name: `dws CLI${status.version ? ` ${status.version}` : ''}`, mode: status.installed ? 'real' : 'mock' },
+      }
+    })
+    guarded('POST', '/api/panel/ddws/install', 'panel.config.write', async () => dws.install())
+    guarded('PUT', '/api/panel/ddws/bind', 'panel.config.write', (exchange) => {
+      const group = body<{ group?: string }>(exchange).group?.trim() ?? ''
+      const record = dws.bind(group, caller(exchange).userId ?? caller(exchange).principalId)
+      return { bound: true, group: record.group }
+    })
+    guarded('DELETE', '/api/panel/ddws/bind', 'panel.config.write', () => {
+      dws.unbind()
+      return { bound: false }
+    })
+    guarded('POST', '/api/panel/ddws/test', 'panel.write', async (exchange) => {
+      const text = body<{ text?: string }>(exchange).text?.trim() || '01门面板 dws 连通性测试'
+      try {
+        const sent = await dws.sendToGroup(text)
+        return { ok: true, group: sent.group }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+    })
+    // 消息 ddSync 出向钩子：钉钉桥缺席时，开启「钉钉同步」的消息经 dws CLI 投递；
+    // 投递结果以 DingtalkDelivered 事件回流（上方监听器统一推进 ddSync 状态与告警留痕）。
+    // 事件时守卫：本插件装配序先于 dingtalk-bridge，apply 期探测不到桥不代表桥不在——
+    // 真正投递前再查一次，桥在场（全量形态）即整体让位，杜绝双投。
+    ctx.platformBus.on(PlatformEvents.PanelMessageCreated, (payload) => {
+      const data = (payload ?? {}) as { messageId?: string; ddSync?: string; text?: string }
+      if (!data.messageId || data.ddSync !== 'pending') return
+      if (soft(ctx, 'dingtalkBridge')) return
+      void dws.sendToGroup(String(data.text ?? '')).then(
+        (sent) => ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, { messageId: data.messageId, ok: true, via: 'dws-cli', group: sent.group }),
+        (error) => ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, {
+          messageId: data.messageId, ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+    })
+    ctx.logger('panel-core').info('01门装态钉钉面已挂载：dws CLI 桥（/api/panel/ddws/* + ddSync 投递）')
+  }
+
+  // 基线管理员种子（延迟重试）：iam 在场且组织目录为空（01门+authn 首启）→ 与 console seed
+  // 同口径初始化。Loader 并发装载下 iam 可能晚于本插件发布，这里轮询等待直至可用（上限 30s）。
+  // console 在场（全量形态）时由 console seed 负责；本种子幂等（orgs().count()>0 即跳过）。
+  {
+    let seedTries = 0
+    const seedTimer = setInterval(() => {
+      seedTries += 1
+      const iamNow = soft(ctx, 'iam')
+      if (!iamNow) {
+        if (seedTries >= 60) {
+          clearInterval(seedTimer)
+          ctx.logger('panel-core').info('iam 未就绪，跳过 01门基线管理员种子（纯演示态）')
+        }
+        return
+      }
+      clearInterval(seedTimer)
+      if (iamNow.orgs().count() > 0) return
+      try {
+        iamNow.ensureBuiltinRoles()
+        const root = iamNow.createOrg({ name: process.env.ORG_NAME ?? '元冰可集团' })
+        const roleSuper = iamNow.roles().findOne((role: { code: string }) => role.code === 'super_admin')!
+        const { user, initialPassword } = iamNow.createUser({
+          username: 'admin',
+          displayName: '平台管理员',
+          orgId: root.id,
+          title: '平台管理员',
+          roleIds: [roleSuper.id],
+          password: process.env.ADMIN_PASSWORD,
+        })
+        iamNow.users().update(user.id, { status: 'active' })
+        void user
+        if (initialPassword) {
+          const file = join(ctx.opsStorage.dataDirPath, 'admin-initial-password.txt')
+          if (!existsSync(file)) {
+            writeFileSync(file, `平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\n${initialPassword}\n`, 'utf8')
+          }
+        }
+        ctx.logger('panel-core').info('01门装态基线种子完成：内置角色 + 根组织 + 平台管理员 admin（初始口令见 data/admin-initial-password.txt）')
+      } catch (error) {
+        ctx.logger('panel-core').warn(`01门装态基线种子失败（不阻断装配）：${error instanceof Error ? error.message : String(error)}`)
+      }
+    }, 500)
+    ctx.effect(() => () => clearInterval(seedTimer))
+  }
 
   // -- 静态托管（/panel → 对外 /gate01/panel/） ----------------------------------------
 

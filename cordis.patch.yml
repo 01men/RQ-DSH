@@ -2,6 +2,10 @@
 #
 # plan-gate01 Phase 3（2026-09-10）产物收缩：本补丁从 22×src（TS 直载）收缩为 4×dist
 # （预构建纯 JS，提交入库，安装形态零 TS 装载、零生命周期脚本、零构建依赖——G3 自解）。
+# 2026-09-11 可用性补环（用户实测「面板无法发消息/模型用不上 dsh 配置」）：4×dist → 6×dist——
+# 补 iam + authn 两个宿主面 dist entry，让安装形态拥有登录通道（面板 Bearer 自校验 + 面板自持
+# /api/auth/login|refresh）与身份半（dsh-bridge rq_sid 直通/OIDC）；模型面经 dsh llm 桥直接复用
+# dsh 默认配置（llm-bridge.ts），钉钉面经 dws CLI 桥（dws.ts）——4 entry 形态的其余收缩原则不变。
 # 源码开发形态（22 entry 全量栈）见 cordis.yml，两文件服务面等价（selftest 三链断言监管）。
 #
 # name 形态（包名 + 子路径模块说明符）：
@@ -18,7 +22,8 @@
 #   - startHttp=false + ops-dsh-bridge：数据面（REST/面板 SPA/docs/mcp）以 /gate01 前缀
 #     挂进 dsh webServer——单进程单入口，无需另起独立进程
 #   - ops-panel-core.demoAuth=true：演示鉴权开关（缺省 false=严格）——本补丁专属声明，
-#     仅放行只读动词渲染内置演示看板；cordis.yml 与全量形态永不声明（fail-closed 边界见
+#     仅放行只读动词渲染内置演示看板；已登录（Bearer 有效）用户不受只读限制；写动词
+#     无有效 principal 时一律 403；cordis.yml 与全量形态永不声明（fail-closed 边界见
 #     docs/gate01-degradation-ledger.md）
 - insert:
     - id: ops-platform-core
@@ -29,6 +34,12 @@
         http:
           # 对外前缀：OIDC 授权页 302 等「根绝对路径」构造据此保持 /gate01 自洽
           externalBase: /gate01
+    # 身份面（2026-09-11 补环）：组织/账号/角色 + 认证会话——面板登录、写通道与 dsh-bridge
+    # 身份半（entryTickets/rq_sid 直通）的最小依赖闭包（audit/usage 仍缺席，面板侧诚实降级）
+    - id: ops-iam
+      name: '@ybkk/gate-01/packages/plugin-iam/dist/index.js'
+    - id: ops-authn
+      name: '@ybkk/gate-01/packages/plugin-authn/dist/index.js'
     # 部门面板（01门 主交付面）：/gate01/panel/ 静态 + /api/panel/* REST + 演示看板（只读）。
     # demoAuth 仅在此声明：安装形态未连宿主时可只读预览演示数据，写动词一律 403
     - id: ops-panel-core

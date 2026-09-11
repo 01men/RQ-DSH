@@ -62,12 +62,21 @@
 
 ## panel-core 鉴权（Phase 2.2，配置标志 fail-closed）
 
-- `PanelConfig.demoAuth`（缺省 **false=严格**）：仅 cordis.patch.yml 的 01门 4-entry 装配声明；
+- `PanelConfig.demoAuth`（缺省 **false=严格**）：仅 cordis.patch.yml 的 01门 6-entry 装配声明；
 - `requirePermission` 前置守卫：
   1. `demoAuth` 态：写动词（非 GET/HEAD/OPTIONS）→ 403 `DEMO_READONLY`；只读动词挂 `DEMO_PRINCIPAL`
      （`panel.read` + `scenegraph.read` 最小只读权限点）；
   2. 严格态 principal 缺失（console 中间件缺位/装配序异常）→ 干净 401 `UNAUTHENTICATED`
      （原 TypeError→500 修复；**绝不 fail-open**——运行时不探测 authn 在场，形态性缺席只能由装配声明表达）。
+
+**2026-09-11 增补（写通道补环，6-entry 扩容配套）**：装配补入 iam/authn 两个宿主面 dist entry 后，
+面板对**自带 Bearer 的请求**经 `authn.verify` 自校验建立 principal（与 SSE `?token=` 通道同规；
+出示了令牌但校验失败 → 干净 401，**绝不降级为演示访客**）。`demoAuth` 语义随之收紧为
+「**仅无有效 principal 时介入**」：匿名只读动词仍以演示访客渲染（响应带 `demo:true`，已登录用户的
+响应不再误标），写动词匿名仍 403，**已登录用户写操作按其真实权限点放行**（admin `*` / 成员
+`panel.write` 预设）。配套面板自持公开登录面 `POST /api/panel/auth/login|refresh`（panel 自有
+命名空间，不依赖 console；authn 缺席时请求期诚实 503）——dsh Loader 并发装载 entry，
+禁止任何「apply 期软读兄弟服务决定路由存在性」的竞态写法。
 
 ## plugin-rq-card（Phase 2.3）
 

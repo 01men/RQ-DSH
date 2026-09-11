@@ -2,6 +2,7 @@ import { Service } from "@deepseek-ai/cordis";
 import { PlatformEvents } from "../../platform-core/dist/bus.js";
 import { ACTIVITY_LABELS } from "../../platform-core/dist/scenegraph.js";
 import { newId } from "../../platform-core/dist/ids.js";
+import { resolvePanelModelGateway } from "./llm-bridge.js";
 const INDUSTRY_REGISTRY = [
   { code: "QB01", name: "\u5BB6\u7535\u884C\u4E1A", icon: "\u{1F4FA}", sub: "\u6574\u673A/\u7ED3\u6784\u4EF6/\u4EA4\u4E92\u611F\u77E5/\u7535\u63A7/\u6838\u5FC3\u96F6\u90E8\u4EF6 \xB7 \u4E00\u56FE\u56DB\u6E05\u5355" },
   { code: "GCJX", name: "\u5DE5\u7A0B\u673A\u68B0", icon: "\u{1F69C}", sub: "\u6574\u673A/\u6DB2\u538B/\u7535\u52A8\u5316/\u57FA\u7840\u96F6\u90E8\u4EF6/\u552E\u540E\u8FD0\u7EF4 \xB7 \u4E00\u56FE\u56DB\u6E05\u5355" },
@@ -319,7 +320,7 @@ ${sceneSummary}` : "",
 ${contextText}`
     ].filter(Boolean).join("\n\n");
     try {
-      const gateway = this.soft("modelGateway");
+      const gateway = resolvePanelModelGateway(this.ctx)?.gateway;
       if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
       const result = await gateway.invoke({
         model,
@@ -381,7 +382,7 @@ ${sceneSummary}` : "",
       options.contextNote ?? ""
     ].filter(Boolean).join("\n\n");
     try {
-      const gateway = this.soft("modelGateway");
+      const gateway = resolvePanelModelGateway(this.ctx)?.gateway;
       if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
       const result = await gateway.invoke({
         model,
@@ -460,7 +461,7 @@ ${sceneSummary}` : "",
     if (!content) return { ok: false, reason: `\u6280\u80FD\u300C${skill.name}\u300D\u5F53\u524D\u7248\u672C\uFF08${skill.version}\uFF09\u65E0\u6307\u4EE4\u5185\u5BB9\uFF0C\u65E0\u6CD5\u76F4\u8C03` };
     let model = options.modelOverride?.trim() ?? "";
     if (!model) {
-      const online = this.soft("modelGateway")?.models().all().filter((item) => item.status === "online" && item.endpoint.trim() !== "") ?? [];
+      const online = resolvePanelModelGateway(this.ctx)?.gateway.models().all().filter((item) => item.status === "online" && item.endpoint.trim() !== "") ?? [];
       if (online.length === 0) return { ok: false, reason: "\u6A21\u578B\u76EE\u5F55\u6682\u65E0\u5728\u7EBF\u6A21\u578B\u2014\u2014\u8BF7\u7BA1\u7406\u5458\u5728\u300C\u6A21\u578B\u7BA1\u7406\u300D\u4E2D\u63A5\u5165\u540E\u518D\u76F4\u8C03\u6280\u80FD" };
       model = online[0].slug;
     }
@@ -470,7 +471,7 @@ ${sceneSummary}` : "",
       options.contextNote ?? ""
     ].filter(Boolean).join("\n\n");
     try {
-      const gateway = this.soft("modelGateway");
+      const gateway = resolvePanelModelGateway(this.ctx)?.gateway;
       if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
       const result = await gateway.invoke({
         model,

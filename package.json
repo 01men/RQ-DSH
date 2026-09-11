@@ -1,6 +1,6 @@
 {
   "name": "@ybkk/gate-01",
-  "version": "1.1.2",
+  "version": "1.1.3",
   "private": false,
   "type": "module",
   "description": "01门 —— AI 代理与人类的协作前台（基于 DeepSeek Harness「一切皆插件」架构）",
@@ -21,6 +21,8 @@
   "files": [
     "cordis.patch.yml",
     "packages/platform-core",
+    "packages/plugin-iam",
+    "packages/plugin-authn",
     "packages/plugin-dsh-bridge",
     "packages/plugin-panel-core",
     "packages/plugin-rq-card",

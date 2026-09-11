@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dist-build-id —— 4 随附包预构建产物（dist/）的新鲜度指纹（plan-gate01 Phase 1.2）。
+ * dist-build-id —— 6 随附包预构建产物（dist/）的新鲜度指纹（plan-gate01 Phase 1.2；2026-09-11 扩容）。
  *
  * 机制仿 packages/plugin-rq-card/build-id.mjs（浏览器半 build-id）：对「随附包 src 树 +
  * 构建脚本自身」做 sha256 指纹，写入各包 dist/.build-id；tests/selftest.mjs 装机段重算比对，
@@ -18,9 +18,11 @@ import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
-/** 4 随附包（plan-gate01 §一 产物构成）：宿主面基座 2 + 定制面 2。 */
+/** 6 随附包（plan-gate01 §一 产物构成 + 2026-09-11 可用性补环）：宿主面基座 4 + 定制面 2。 */
 export const DIST_PACKAGES = [
   'platform-core',
+  'plugin-iam',
+  'plugin-authn',
   'plugin-dsh-bridge',
   'plugin-panel-core',
   'plugin-rq-card',

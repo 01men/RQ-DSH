@@ -1,5 +1,5 @@
 import { join, dirname } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { PlatformEvents } from "../../platform-core/dist/bus.js";
@@ -8,6 +8,8 @@ import { PanelService, TASK_LANES } from "./service.js";
 import { CardpackService, CARD_PLATFORMS, filterCards } from "./cardpacks.js";
 import { CardpackService as CardpackService2, CARD_PLATFORMS as CARD_PLATFORMS2, filterCards as filterCards2 } from "./cardpacks.js";
 import { seedPanel, DEMO_ORG_ID } from "./seed/seed.js";
+import { resolvePanelModelGateway } from "./llm-bridge.js";
+import { DwsCli } from "./dws.js";
 const name = "panel-core";
 const inject = [
   "httpServer",
@@ -34,12 +36,37 @@ function apply(ctx, config = {}) {
   const panel = new PanelService(ctx);
   const caller = (exchange) => exchange.principal;
   const requirePermission = (exchange, point) => {
-    if (demoAuth) {
+    if (!exchange.principal) {
+      const header = String(exchange.headers["authorization"] ?? "");
+      if (header.startsWith("Bearer ")) {
+        const authn = soft(ctx, "authn");
+        if (!authn) {
+          exchange.fail(401, "UNAUTHENTICATED", "\u8BA4\u8BC1\u4E2D\u5FC3\u672A\u63A5\u5165\uFF0C\u65E0\u6CD5\u6821\u9A8C\u6240\u51FA\u793A\u7684\u4EE4\u724C");
+          return false;
+        }
+        try {
+          const verified = authn.verify(header.slice(7));
+          exchange.principal = {
+            kind: verified.principal.type,
+            principalId: verified.principal.id,
+            ...verified.principal.type === "human" && verified.principal.refId ? { userId: verified.principal.refId } : {},
+            ...verified.principal.type === "machine" ? { refType: verified.principal.refType, refId: verified.principal.refId } : {},
+            name: verified.principal.name,
+            permissions: verified.scopes,
+            actChain: verified.actChain
+          };
+        } catch (error) {
+          exchange.fail(401, "TOKEN_INVALID", `\u4EE4\u724C\u65E0\u6548\uFF1A${error instanceof Error ? error.message : String(error)}`);
+          return false;
+        }
+      }
+    }
+    if (demoAuth && !exchange.principal) {
       if (!["GET", "HEAD", "OPTIONS"].includes(exchange.method.toUpperCase())) {
         exchange.fail(403, "DEMO_READONLY", "\u6F14\u793A\u6570\u636E\u53EA\u8BFB\uFF1A\u8FDE\u63A5\u5BBF\u4E3B\u5E76\u767B\u5F55\u540E\u89E3\u9501\u5199\u64CD\u4F5C");
         return false;
       }
-      if (!exchange.principal) exchange.principal = DEMO_PRINCIPAL;
+      exchange.principal = DEMO_PRINCIPAL;
     } else if (!exchange.principal) {
       exchange.fail(401, "UNAUTHENTICATED", "\u672A\u8BA4\u8BC1\uFF1A\u8BF7\u5148\u767B\u5F55\uFF08\u9274\u6743\u4E2D\u95F4\u4EF6\u672A\u8986\u76D6\u8BE5\u8BF7\u6C42\uFF09");
       return false;
@@ -65,7 +92,8 @@ function apply(ctx, config = {}) {
       try {
         const result = await handler(exchange);
         if (!exchange.res.writableEnded) {
-          const demoMarked = demoAuth && result !== null && typeof result === "object" && !Array.isArray(result) ? { ...result, demo: true } : result;
+          const isDemoPrincipal = caller(exchange)?.principalId === DEMO_PRINCIPAL.principalId;
+          const demoMarked = demoAuth && isDemoPrincipal && result !== null && typeof result === "object" && !Array.isArray(result) ? { ...result, demo: true } : result;
           exchange.ok(demoMarked);
         }
       } catch (error) {
@@ -199,18 +227,28 @@ function apply(ctx, config = {}) {
     changeLog(exchange, "panel.agent.roster", "panel_dept", dept.id, dept.label, `${agents.length} \u4E2A Agent \u9635\u5BB9\u4F4D`);
     return { agents };
   });
+  const modelGateway = () => resolvePanelModelGateway(ctx);
   const maskedModel = (model) => ({
     ...model,
     apiKey: model.apiKey.startsWith("env:") ? model.apiKey : "***"
   });
-  guarded("GET", "/api/panel/models", "panel.read", (exchange) => {
-    const gateway = soft(ctx, "modelGateway");
-    if (!gateway) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
-    return { models: gateway.models().all().map(maskedModel) };
+  guarded("GET", "/api/panel/models", "panel.read", async (exchange) => {
+    const resolved = modelGateway();
+    if (!resolved) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
+    if (resolved.kind === "dsh") {
+      const models = await resolved.gateway.ensureCatalog();
+      return { models: models.map(maskedModel), source: "dsh" };
+    }
+    return { models: resolved.gateway.models().all().map(maskedModel), source: "modelgw" };
   });
   guarded("POST", "/api/panel/models", "panel.config.write", (exchange) => {
-    const gateway = soft(ctx, "modelGateway");
-    if (!gateway) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
+    const resolved = modelGateway();
+    if (!resolved) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
+    if (resolved.kind === "dsh") {
+      exchange.fail(400, "MODEL_READONLY", "\u6A21\u578B\u76EE\u5F55\u7531 dsh \u914D\u7F6E\u6258\u7BA1\uFF08settings.yaml agent-default-model / llm \u9002\u914D\u5668\uFF09\u2014\u201401\u95E8\u9762\u677F\u53EA\u8BFB\uFF0C\u8BF7\u5728 dsh \u4FA7\u589E\u5220\u6539\u6A21\u578B");
+      return;
+    }
+    const gateway = resolved.gateway;
     const input = body(exchange);
     const slug = input.slug?.trim() ?? "";
     if (!slug) throw new Error("\u6A21\u578B slug \u5FC5\u586B\uFF08\u5982 deepseek-chat\uFF09");
@@ -233,8 +271,13 @@ function apply(ctx, config = {}) {
     return maskedModel(model);
   });
   guarded("DELETE", "/api/panel/models/:id", "panel.config.write", (exchange) => {
-    const gateway = soft(ctx, "modelGateway");
-    if (!gateway) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
+    const resolved = modelGateway();
+    if (!resolved) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
+    if (resolved.kind === "dsh") {
+      exchange.fail(400, "MODEL_READONLY", "\u6A21\u578B\u76EE\u5F55\u7531 dsh \u914D\u7F6E\u6258\u7BA1\u2014\u201401\u95E8\u9762\u677F\u53EA\u8BFB\uFF0C\u8BF7\u5728 dsh \u4FA7\u589E\u5220\u6539\u6A21\u578B");
+      return;
+    }
+    const gateway = resolved.gateway;
     const id = exchange.params["id"];
     const model = gateway.models().get(id);
     if (!model) throw new Error(`\u6A21\u578B\u4E0D\u5B58\u5728\uFF1A${id}`);
@@ -243,23 +286,25 @@ function apply(ctx, config = {}) {
     return { deleted: true };
   });
   guarded("POST", "/api/panel/models/:slug/test", "panel.config.write", async (exchange) => {
-    const gateway = soft(ctx, "modelGateway");
-    if (!gateway) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
+    const resolved = modelGateway();
+    if (!resolved) return degraded(exchange, "\u6A21\u578B\u7F51\u5173");
     const slug = String(exchange.params.slug ?? "");
     const info = caller(exchange);
     const orgId = orgIdOf(exchange);
-    if (!orgId) throw new Error("\u65E0\u6CD5\u786E\u5B9A\u8BA1\u8D39\u7EC4\u7EC7\uFF08orgId\uFF09\uFF0C\u65E0\u6CD5\u6267\u884C\u771F\u5B9E\u8C03\u7528\u6D4B\u8BD5");
+    if (resolved.kind === "modelgw" && !orgId) throw new Error("\u65E0\u6CD5\u786E\u5B9A\u8BA1\u8D39\u7EC4\u7EC7\uFF08orgId\uFF09\uFF0C\u65E0\u6CD5\u6267\u884C\u771F\u5B9E\u8C03\u7528\u6D4B\u8BD5");
     try {
-      const result = await gateway.invoke({
+      const result = await resolved.gateway.invoke({
         model: slug,
         messages: [{ role: "user", content: "\u6A21\u578B\u8FDE\u901A\u6027\u6D4B\u8BD5\uFF0C\u8BF7\u76F4\u63A5\u56DE\u590D\uFF1AOK" }],
-        orgId,
+        ...resolved.kind === "modelgw" ? { orgId } : {},
         subject: info.userId ? `user:${info.userId}` : `panel:${info.principalId}`,
         maxTokens: 16
       });
       return { ok: true, model: result.model, content: result.content.slice(0, 80), outputTokens: result.outputTokens };
     } catch (error) {
-      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      const message = error instanceof Error ? error.message : String(error);
+      const hint = /HTTP 404/.test(message) ? "\uFF08\u63D0\u793A\uFF1AHTTP 404 \u5E38\u56E0 endpoint \u6F0F\u4E86 /v1 \u8DEF\u5F84\u2014\u2014OpenAI \u517C\u5BB9\u57FA\u5740\u5E94\u5F62\u5982 https://<host>/v1\uFF09" : "";
+      return { ok: false, error: `${message}${hint}` };
     }
   });
   const refAlive = (ref) => {
@@ -402,7 +447,7 @@ function apply(ctx, config = {}) {
     const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id;
     if (!channelId) throw new Error("\u90E8\u95E8\u6682\u65E0\u9891\u9053\uFF0C\u8BF7\u5148\u521B\u5EFA");
     const requestedModel = input.model?.trim() ?? "";
-    if (requestedModel && !soft(ctx, "modelGateway")?.models().findOne((item) => item.slug === requestedModel)) {
+    if (requestedModel && !modelGateway()?.gateway.models().findOne((item) => item.slug === requestedModel)) {
       throw new Error(`\u6A21\u578B\u672A\u5728\u76EE\u5F55\u767B\u8BB0\uFF1A${requestedModel}\uFF08\u53EF\u5728\u300C\u{1F9E0} \u6A21\u578B\u300D\u4E2D\u767B\u8BB0\uFF09`);
     }
     const info = caller(exchange);
@@ -454,7 +499,7 @@ function apply(ctx, config = {}) {
     const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id;
     if (!channelId) throw new Error("\u90E8\u95E8\u6682\u65E0\u9891\u9053\uFF0C\u8BF7\u5148\u521B\u5EFA");
     const requestedModel = input.model?.trim() ?? "";
-    if (requestedModel && !soft(ctx, "modelGateway")?.models().findOne((item) => item.slug === requestedModel)) {
+    if (requestedModel && !modelGateway()?.gateway.models().findOne((item) => item.slug === requestedModel)) {
       throw new Error(`\u6A21\u578B\u672A\u5728\u76EE\u5F55\u767B\u8BB0\uFF1A${requestedModel}\uFF08\u53EF\u5728\u300C\u{1F9E0} \u6A21\u578B\u300D\u4E2D\u767B\u8BB0\uFF09`);
     }
     const info = caller(exchange);
@@ -748,6 +793,157 @@ function apply(ctx, config = {}) {
     offExecutor();
     offDelivered();
   });
+  const loginViaAuthn = () => {
+    const authn = soft(ctx, "authn");
+    const iam = soft(ctx, "iam");
+    if (!authn || !iam) return void 0;
+    return {
+      login: (username, password) => {
+        const result = authn.login(username, password);
+        const user = iam.users().get(result.userId);
+        return {
+          token: result.token,
+          refreshToken: result.refreshToken,
+          expiresAt: result.record.expiresAt,
+          user: {
+            id: user.id,
+            username: user.username,
+            displayName: user.displayName,
+            orgId: user.orgId,
+            roleIds: user.roleIds,
+            roles: user.roleIds.map((roleId) => iam.roles().get(roleId)?.name).filter(Boolean),
+            permissions: iam.userPermissions(user.id)
+          }
+        };
+      },
+      refresh: (refreshToken) => authn.refreshSession(refreshToken)
+    };
+  };
+  http.register("POST", "/api/panel/auth/login", (exchange) => {
+    const backend = loginViaAuthn();
+    if (!backend) {
+      exchange.fail(503, "AUTHN_UNAVAILABLE", "\u8BA4\u8BC1\u9762\u672A\u5C31\u7EEA\uFF08\u672C\u673A\u5F62\u6001\u672A\u88C5\u914D\u8BA4\u8BC1\u4E2D\u5FC3\uFF09\u2014\u2014\u8BF7\u4ECE\u5BBF\u4E3B/\u63A7\u5236\u53F0\u767B\u5F55");
+      return;
+    }
+    const { username, password } = body(exchange);
+    if (!username || !password) {
+      exchange.fail(400, "BAD_REQUEST", "\u7528\u6237\u540D\u4E0E\u5BC6\u7801\u5FC5\u586B");
+      return;
+    }
+    try {
+      exchange.ok(backend.login(username, password));
+    } catch (error) {
+      exchange.fail(401, "LOGIN_FAILED", error instanceof Error ? error.message : String(error));
+    }
+  }, { access: "public" });
+  http.register("POST", "/api/panel/auth/refresh", (exchange) => {
+    const backend = loginViaAuthn();
+    if (!backend) {
+      exchange.fail(503, "AUTHN_UNAVAILABLE", "\u8BA4\u8BC1\u9762\u672A\u5C31\u7EEA\uFF08\u672C\u673A\u5F62\u6001\u672A\u88C5\u914D\u8BA4\u8BC1\u4E2D\u5FC3\uFF09");
+      return;
+    }
+    const { refreshToken } = body(exchange);
+    if (!refreshToken) {
+      exchange.fail(400, "BAD_REQUEST", "refreshToken \u5FC5\u586B");
+      return;
+    }
+    try {
+      const result = backend.refresh(refreshToken);
+      exchange.ok({ token: result.token, refreshToken: result.refreshToken });
+    } catch (error) {
+      exchange.fail(401, "REFRESH_FAILED", error instanceof Error ? error.message : String(error));
+    }
+  }, { access: "public" });
+  const dingtalkBridgePresent = Boolean(soft(ctx, "dingtalkBridge"));
+  if (!dingtalkBridgePresent) {
+    const dws = new DwsCli(ctx);
+    guarded("GET", "/api/panel/ddws/status", "panel.read", async () => {
+      const status = await dws.status();
+      return {
+        ...status,
+        via: "dws-cli",
+        // 形状兼容（app.js renderTopRight 消费）：bound=false | {displayName,...}
+        bound: status.bound && status.group ? { displayName: status.group, via: "dws-cli" } : false,
+        connector: { configured: status.installed, name: `dws CLI${status.version ? ` ${status.version}` : ""}`, mode: status.installed ? "real" : "mock" }
+      };
+    });
+    guarded("POST", "/api/panel/ddws/install", "panel.config.write", async () => dws.install());
+    guarded("PUT", "/api/panel/ddws/bind", "panel.config.write", (exchange) => {
+      const group = body(exchange).group?.trim() ?? "";
+      const record = dws.bind(group, caller(exchange).userId ?? caller(exchange).principalId);
+      return { bound: true, group: record.group };
+    });
+    guarded("DELETE", "/api/panel/ddws/bind", "panel.config.write", () => {
+      dws.unbind();
+      return { bound: false };
+    });
+    guarded("POST", "/api/panel/ddws/test", "panel.write", async (exchange) => {
+      const text = body(exchange).text?.trim() || "01\u95E8\u9762\u677F dws \u8FDE\u901A\u6027\u6D4B\u8BD5";
+      try {
+        const sent = await dws.sendToGroup(text);
+        return { ok: true, group: sent.group };
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
+    ctx.platformBus.on(PlatformEvents.PanelMessageCreated, (payload) => {
+      const data = payload ?? {};
+      if (!data.messageId || data.ddSync !== "pending") return;
+      if (soft(ctx, "dingtalkBridge")) return;
+      void dws.sendToGroup(String(data.text ?? "")).then(
+        (sent) => ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, { messageId: data.messageId, ok: true, via: "dws-cli", group: sent.group }),
+        (error) => ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, {
+          messageId: data.messageId,
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      );
+    });
+    ctx.logger("panel-core").info("01\u95E8\u88C5\u6001\u9489\u9489\u9762\u5DF2\u6302\u8F7D\uFF1Adws CLI \u6865\uFF08/api/panel/ddws/* + ddSync \u6295\u9012\uFF09");
+  }
+  {
+    let seedTries = 0;
+    const seedTimer = setInterval(() => {
+      seedTries += 1;
+      const iamNow = soft(ctx, "iam");
+      if (!iamNow) {
+        if (seedTries >= 60) {
+          clearInterval(seedTimer);
+          ctx.logger("panel-core").info("iam \u672A\u5C31\u7EEA\uFF0C\u8DF3\u8FC7 01\u95E8\u57FA\u7EBF\u7BA1\u7406\u5458\u79CD\u5B50\uFF08\u7EAF\u6F14\u793A\u6001\uFF09");
+        }
+        return;
+      }
+      clearInterval(seedTimer);
+      if (iamNow.orgs().count() > 0) return;
+      try {
+        iamNow.ensureBuiltinRoles();
+        const root = iamNow.createOrg({ name: process.env.ORG_NAME ?? "\u5143\u51B0\u53EF\u96C6\u56E2" });
+        const roleSuper = iamNow.roles().findOne((role) => role.code === "super_admin");
+        const { user, initialPassword } = iamNow.createUser({
+          username: "admin",
+          displayName: "\u5E73\u53F0\u7BA1\u7406\u5458",
+          orgId: root.id,
+          title: "\u5E73\u53F0\u7BA1\u7406\u5458",
+          roleIds: [roleSuper.id],
+          password: process.env.ADMIN_PASSWORD
+        });
+        iamNow.users().update(user.id, { status: "active" });
+        void user;
+        if (initialPassword) {
+          const file = join(ctx.opsStorage.dataDirPath, "admin-initial-password.txt");
+          if (!existsSync(file)) {
+            writeFileSync(file, `\u5E73\u53F0\u7BA1\u7406\u5458 admin \u7684\u521D\u59CB\u53E3\u4EE4\uFF08\u4EC5\u751F\u6210\u4E00\u6B21\uFF1B\u9996\u6B21\u767B\u5F55\u540E\u8BF7\u59A5\u5584\u4FDD\u7BA1\u5E76\u5220\u9664\u672C\u6587\u4EF6\uFF09\uFF1A
+${initialPassword}
+`, "utf8");
+          }
+        }
+        ctx.logger("panel-core").info("01\u95E8\u88C5\u6001\u57FA\u7EBF\u79CD\u5B50\u5B8C\u6210\uFF1A\u5185\u7F6E\u89D2\u8272 + \u6839\u7EC4\u7EC7 + \u5E73\u53F0\u7BA1\u7406\u5458 admin\uFF08\u521D\u59CB\u53E3\u4EE4\u89C1 data/admin-initial-password.txt\uFF09");
+      } catch (error) {
+        ctx.logger("panel-core").warn(`01\u95E8\u88C5\u6001\u57FA\u7EBF\u79CD\u5B50\u5931\u8D25\uFF08\u4E0D\u963B\u65AD\u88C5\u914D\uFF09\uFF1A${error instanceof Error ? error.message : String(error)}`);
+      }
+    }, 500);
+    ctx.effect(() => () => clearInterval(seedTimer));
+  }
   const publicDir = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
   if (existsSync(publicDir)) {
     http.register("GET", "/panel", (exchange) => {

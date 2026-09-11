@@ -76,12 +76,22 @@ async function tryRefresh() {
   if (!refreshing) {
     refreshing = (async () => {
       try {
-        const response = await fetch(mapPath('/api/auth/refresh'), {
+        // 刷新双通道：console 在场走 /api/auth/refresh（公开白名单）；404（console 缺席的
+        // 01门装态）回落面板自持的 /api/panel/auth/refresh——401 是真实刷新失败，不回退。
+        let response = await fetch(mapPath('/api/auth/refresh'), {
           method: 'POST',
           headers: proxyHeaders({ 'content-type': 'application/json' }),
           body: JSON.stringify({ refreshToken: session.refreshToken }),
           signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
         })
+        if (response.status === 404) {
+          response = await fetch(mapPath('/api/panel/auth/refresh'), {
+            method: 'POST',
+            headers: proxyHeaders({ 'content-type': 'application/json' }),
+            body: JSON.stringify({ refreshToken: session.refreshToken }),
+            signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
+          })
+        }
         const payload = await response.json().catch(() => null)
         if (!response.ok || payload?.ok === false) return false
         localStorage.setItem(scopedKey('gate01_token'), payload.data.token)

@@ -14,7 +14,7 @@
 | 轨道 | 分支 | 职责 |
 |---|---|---|
 | **宿主轨** | 上游 `01men/ybkk-AIOS` main | 宿主平台/控制台开发：platform-core、console、authn/oidc、agent、portal、iam、usage、skillhub、nas-authz、plugin-dsh-bridge（宿主桥）；API/事件**契约所有者** |
-| **定制轨** | `custom/dsh-rq`（本分支） | **唯一交付物＝「01门」**（AI 代理与人类的协作前台，2026-09-10 定版）：@ybkk/gate-01 一键装进 dsh（4×dist 预构建产物，`/gate01` 挂载），包内随附 ops-platform-core/ops-dsh-bridge 基座 + ops-panel-core/ops-rq-card 定制面；产品定版 `docs/plan-gate01.md` |
+| **定制轨** | `custom/dsh-rq`（本分支） | **唯一交付物＝「01门」**（AI 代理与人类的协作前台，2026-09-10 定版）：@ybkk/gate-01 一键装进 dsh（6×dist 预构建产物，`/gate01` 挂载；2026-09-11 可用性补环 4→6：+iam/+authn 登录与身份面），包内随附 ops-platform-core/ops-iam/ops-authn/ops-dsh-bridge 基座 + ops-panel-core/ops-rq-card 定制面；产品定版 `docs/plan-gate01.md` |
 
 宿主平台功能已于 2026-09 整体移植进上游 main（89074d9/80a65e3/ff1a8de，交接清单
 `docs/handoff-host-features-to-main.md`）。此后：**控制台/宿主面的需求与缺陷一律去主分支做**，
@@ -43,7 +43,7 @@
    - rq-card 浏览器半（`src/client/**`、`src/wire.ts`、build.mjs、package.json）有任何改动，
      必须先 `node packages/plugin-rq-card/build.mjs` 重建 `lib/client.js`——selftest
      「fresh-install 装机模拟」段校验 build-id 指纹，忘重建即红；
-   - 4 随附包（platform-core、plugin-dsh-bridge、plugin-panel-core、plugin-rq-card）的
+   - 6 随附包（platform-core、plugin-iam、plugin-authn、plugin-dsh-bridge、plugin-panel-core、plugin-rq-card）的
      `src/**` 有任何改动，必须先 `npm run build:dist` 重建 `packages/*/dist/`（预构建产物
      提交入库，安装形态零 TS 装载，plan-gate01 G3 自解）——selftest 装机段校验
      `dist/.build-id` 指纹（scripts/dist-build-id.mjs），忘重建即红；
@@ -58,7 +58,7 @@
 | 区 | 目录/文件 | 规则 |
 |---|---|---|
 | **宿主面**（主分支拥有并演进） | `packages/platform-core`、`packages/plugin-console`、`packages/plugin-authn`、`packages/plugin-agent`、`packages/plugin-audit`、`packages/plugin-portal`、`packages/plugin-iam`、`packages/plugin-usage`、`packages/plugin-skillhub`、`packages/plugin-app`、`packages/plugin-mcp`、`packages/plugin-nas`、`src/boot-all.ts`、`cordis.yml` | 定制分支**原则上禁止修改**；缺陷/需求走交接清单回流；合并冲突以 main 为准。**受控漂移例外**（plan-gate01 改名/收缩的必然后果，登记 docs/handoff-f-remainder-to-main.md I/J 节）：platform-core/src/version.ts:12 PLATFORM_PACKAGE 值、boot-all.ts 定制包 import 行（2 行）、cordis.yml 装配字段（externalBase/mountPath=/gate01、rq-card entry name）、plugin-dsh-bridge inject 收缩（8→3 键，运行期防御式访问已对齐） |
-| **01门 装配（本分支拥有并演进）** | `cordis.patch.yml`（4×dist 产物收缩）、根 `package.json`（@ybkk/gate-01，files 精确闭包）、`packages/*/dist/**`（预构建产物，随 src 变更经 `npm run build:dist` 重建） | 01门 产品装配，主分支不消费 |
+| **01门 装配（本分支拥有并演进）** | `cordis.patch.yml`（6×dist 产物装配）、根 `package.json`（@ybkk/gate-01，files 精确闭包）、`packages/*/dist/**`（预构建产物，随 src 变更经 `npm run build:dist` 重建） | 01门 产品装配，主分支不消费 |
 | **定制面**（本分支拥有并演进） | `packages/plugin-panel-core`、`packages/plugin-rq-card`、`packages/plugin-dingtalk-bridge`、`scenegraphs/*.json` 业务数据 | 自由演进；主分支侧仅接收性维护 |
 | **治理/文档**（本分支所有） | `AGENTS.md`、`PROJECT.md`、`scripts/hooks/`、`docs/handoff-*`、`docs/plan-*` | 本分支维护，主分支不消费 |
 

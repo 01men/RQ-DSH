@@ -94,12 +94,72 @@ async function renderLocalCard(root, base) {
   // next 传绝对 URL（G1 票据分支白名单 = 回环/私网）：同源相对路径只落裸跳转，面板拿不到会话
   const here = encodeURIComponent(location.origin + location.pathname + location.search + location.hash)
   let hubReachable = false
+  let loginAvailable = false
+  let loginUnavailable = false
   try {
-    const response = await fetch(`${base}/api/health`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(3000) })
-    const payload = await response.json().catch(() => null)
-    hubReachable = response.ok && payload?.ok === true
+    // 数据面探测：/api/health 是 console 的路由（01门装态缺席），改探面板自有
+    // /api/panel/depts——任何 HTTP 应答（200 演示放行 / 401 严格态）都证明数据面在场。
+    const response = await fetch(`${base}/api/panel/depts`, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(3000) })
+    hubReachable = response.status > 0 && response.status !== 404
   } catch { /* 本机数据面缺席 = 纯 01门 装态 */ }
   if (hubReachable) {
+    // 登录面探测（2026-09-11 写通道补环）：console 在场 → 走控制台登录页；console 缺席但
+    // authn 在场（01门 6-entry 装态面板自持登录面）→ 本卡片直接给同源登录表单。
+    // 探针 = 空 body POST /api/panel/auth/login（panel 自有命名空间，不依赖 console）：
+    //   400 = 登录面可用；503 = 认证面未装配（纯演示形态）；401 = console 中间件在守（走控制台）。
+    let probeStatus = 0
+    try {
+      const probe = await fetch(`${base}/api/panel/auth/login`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+        signal: AbortSignal.timeout(3000),
+      })
+      probeStatus = probe.status
+    } catch { /* 探测失败按不可登录处理 */ }
+    loginAvailable = probeStatus === 400
+    loginUnavailable = probeStatus === 503
+  }
+  if (hubReachable && loginUnavailable) {
+    body.innerHTML = `
+      <div class="wz-ok">🖥 本机数据面已就绪，但认证面未装配（纯演示形态）。</div>
+      <p class="wz-hint">当前可以只读浏览内置演示数据；账号登录需要装配中包含认证中心（ops-authn）。</p>`
+  } else if (hubReachable && loginAvailable) {
+    body.innerHTML = `
+      <div class="wz-ok">✅ 本机数据面已就绪，可直接登录。</div>
+      <div class="wz-form">
+        <input type="text" id="wzLocalUser" placeholder="账号" autocomplete="username" value="">
+        <input type="password" id="wzLocalPass" placeholder="密码" autocomplete="current-password">
+        <button class="btn primary" id="wzLocalGo">登录</button>
+      </div>
+      <div id="wzLocalErr" class="wz-err"></div>
+      <p class="wz-hint">首次部署：管理员账号 admin，初始口令见服务器数据目录 admin-initial-password.txt。</p>`
+    body.querySelector('#wzLocalGo').onclick = async (event) => {
+      const button = event.target
+      const errBox = body.querySelector('#wzLocalErr')
+      errBox.textContent = ''
+      button.disabled = true
+      try {
+        const response = await fetch(`${base}/api/panel/auth/login`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            username: body.querySelector('#wzLocalUser').value.trim(),
+            password: body.querySelector('#wzLocalPass').value,
+          }),
+          signal: AbortSignal.timeout(15_000),
+        })
+        const payload = await response.json().catch(() => null)
+        if (!response.ok || payload?.ok === false) throw new Error(payload?.error?.message ?? '登录失败')
+        session.save(payload.data.token, payload.data.user)
+        if (payload.data.refreshToken) session.saveRefresh(payload.data.refreshToken)
+        window.location.reload()
+      } catch (error) {
+        button.disabled = false
+        errBox.textContent = error.message
+      }
+    }
+  } else if (hubReachable) {
     body.innerHTML = `
       <div class="wz-ok">✅ 本机数据面已就绪。</div>
       <a href="${base}/?next=${here}#/login"><button class="btn primary">在本机控制台登录</button></a>

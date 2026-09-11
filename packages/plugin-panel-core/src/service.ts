@@ -25,6 +25,7 @@ import { PlatformEvents } from '../../platform-core/src/bus.ts'
 import type { SceneActivity, ScenegraphPack } from '../../platform-core/src/scenegraph.ts'
 import { ACTIVITY_LABELS } from '../../platform-core/src/scenegraph.ts'
 import { newId } from '../../platform-core/src/ids.ts'
+import { resolvePanelModelGateway } from './llm-bridge.ts'
 
 // ---------------------------------------------------------------------------
 // 记录模型
@@ -525,7 +526,7 @@ export class PanelService extends Service {
       `以下是频道「${channel?.name ?? ''}」最近对话：\n${contextText}`,
     ].filter(Boolean).join('\n\n')
     try {
-      const gateway = this.soft('modelGateway')
+      const gateway = resolvePanelModelGateway(this.ctx)?.gateway
       if (!gateway) throw new Error('模型网关未接入（01门演示态）——连接宿主后可用')
       const result = await gateway.invoke({
         model, orgId, subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
@@ -591,7 +592,7 @@ export class PanelService extends Service {
       options.contextNote ?? '',
     ].filter(Boolean).join('\n\n')
     try {
-      const gateway = this.soft('modelGateway')
+      const gateway = resolvePanelModelGateway(this.ctx)?.gateway
       if (!gateway) throw new Error('模型网关未接入（01门演示态）——连接宿主后可用')
       const result = await gateway.invoke({
         model, orgId, subject: options.userId ? `user:${options.userId}` : 'panel:tool',
@@ -678,7 +679,9 @@ export class PanelService extends Service {
     let model = options.modelOverride?.trim() ?? ''
     if (!model) {
       // 只自动选「在线且已配 endpoint」的模型——无 endpoint 的模型调用必失败，不应被自动选中（J1 行为加固）
-      const online = this.soft('modelGateway')?.models().all().filter((item) => item.status === 'online' && item.endpoint.trim() !== '') ?? []
+      // （dsh 桥目录条目 endpoint 为「内置通道」占位非空 → 天然可被自动选中，正是 01门装态的期望行为）
+      const online = resolvePanelModelGateway(this.ctx)?.gateway.models().all()
+        .filter((item: { status: string; endpoint: string }) => item.status === 'online' && item.endpoint.trim() !== '') ?? []
       if (online.length === 0) return { ok: false, reason: '模型目录暂无在线模型——请管理员在「模型管理」中接入后再直调技能' }
       model = online[0]!.slug
     }
@@ -688,7 +691,7 @@ export class PanelService extends Service {
       options.contextNote ?? '',
     ].filter(Boolean).join('\n\n')
     try {
-      const gateway = this.soft('modelGateway')
+      const gateway = resolvePanelModelGateway(this.ctx)?.gateway
       if (!gateway) throw new Error('模型网关未接入（01门演示态）——连接宿主后可用')
       const result = await gateway.invoke({
         model, orgId, subject: options.userId ? `user:${options.userId}` : 'panel:tool',
