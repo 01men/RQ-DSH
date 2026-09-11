@@ -1,5 +1,13 @@
 # 榕器 · 企业AI资源管理平台
 
+> **本仓库定位（定制轨 RQ-DSH）**：本仓库是榕器的**定制轨发布仓**（分支 `custom/dsh-rq`），唯一交付物为
+> **「01门」——AI 代理与人类的协作前台**：cordis 插件形态一键装进 dsh（`dsh plugin add github:01men/RQ-DSH`
+> / npm `@ybkk/gate-01`），打开 `http://127.0.0.1:<端口>/gate01/panel/` 即见内置演示看板；连接宿主后全量数据
+> 经本机代理接入（浏览器零跨域），登录在宿主侧完成。定制轨范围：一线面板/看板（plugin-panel-core）、
+> 执行卡（plugin-rq-card）、钉钉桥（plugin-dingtalk-bridge）、scenegraphs 业务数据。宿主平台主仓库见
+> [01men/ybkk-AIOS](https://github.com/01men/ybkk-AIOS)（本分支经 merge 吸收上游 main，下文为宿主平台说明）。
+> 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md)。
+
 基于 **DeepSeek Harness（dsh）「一切皆插件」** 架构实现的企业级 AI 资源管理平台。
 对应设计方案：《企业服务资源统一管理方案 V1.0》与《技术实现规划》；生态平台演进设计见
 [docs/ecosystem-design-v1.2.md](docs/ecosystem-design-v1.2.md)（商业化部分已随 M0 废止，见文内横幅），

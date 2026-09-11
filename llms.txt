@@ -4,6 +4,14 @@
 
 RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: unified identity (IAM / OIDC SSO), permissions, usage metering and audit for six asset types — MCP services, skills, agents, AI apps, model routes and NAS file storage — delivered as private deployment (annual license + governance package).
 
+## 本仓库定位（定制轨 · 01门）
+
+> 本仓库（01men/RQ-DSH）是榕器的**定制轨发布仓**，唯一交付物为**「01门」——AI 代理与人类的协作前台**。cordis 插件形态一键装进 dsh（`dsh plugin add github:01men/RQ-DSH` / npm `@ybkk/gate-01` / `link:` / `file:` 四通道），打开 `http://127.0.0.1:<端口>/gate01/panel/` 即见内置演示看板；连接宿主后全量数据经本机代理接入（浏览器零跨域），登录在宿主侧完成；`dsh plugin remove` 卸载干净、重装即恢复；安装产物为预构建 dist（零 TS 装载/零生命周期脚本）。宿主平台主仓库见 [01men/ybkk-AIOS](https://github.com/01men/ybkk-AIOS)。
+
+- 定制轨范围：一线面板/看板（plugin-panel-core）、会话执行卡（plugin-rq-card）、钉钉桥（plugin-dingtalk-bridge）、scenegraphs 业务数据；dsh 部署装配
+- 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md) ｜ 降级台账：[docs/gate01-degradation-ledger.md](docs/gate01-degradation-ledger.md)
+- 双轨治理：宿主面需求在主分支（ybkk-AIOS）进行，定制分支经 merge 吸收上游；定制→上游仅允许交接清单文档受控回流
+
 ## 核心能力（均为已实现功能）
 
 - 统一身份与访问管理（IAM）：多级组织树、角色/用户组、权限点矩阵、钉钉连接器定时自动同步、全员名册 API（`GET /api/iam/roster`，PII 最小化）
