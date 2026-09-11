@@ -1,10 +1,8 @@
-# 插件声明：id、版本、依赖与权限点
-# OPT-P0-01（2026-09-12）：先落权限声明面（usage.admin 被 plugin-usage/src/tools.ts 引用，
-# 未声明即契约 lint 红）；api/events/ui 四面由 OPT-P2-04 补齐。
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
 id: dsh-plugin-usage
 version: 1.1.0
 label: 计量与成本
-depends: ['dsh-plugin-platform-core']
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam']
 provides:
   services:
     - usage

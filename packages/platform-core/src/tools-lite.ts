@@ -86,6 +86,10 @@ export class ToolRuntimeLite extends Service {
     if (output === undefined || typeof output !== 'object' || typeof output.render !== 'function') {
       throw new TypeError(`工具 "${name}" 必须声明 output { schema, render }`)
     }
+    // OPT-P2-04：schema 强校验——契约强度对齐原报告叙述（此前只查 render 不查 schema）
+    if (output.schema === undefined || output.schema === null || typeof output.schema !== 'object' || Array.isArray(output.schema)) {
+      throw new TypeError(`工具 "${name}" 必须声明 output.schema（非空对象根，JSON Schema）`)
+    }
     if (this.definitions.has(name)) throw new Error(`[tools] 工具名重复：${name}`)
     this.definitions.set(name, definition)
     try {

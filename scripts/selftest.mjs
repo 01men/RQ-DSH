@@ -4194,6 +4194,10 @@ try {
   const busPipelineTest = spawn(process.execPath, ['packages/platform-core/src/bus.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => busPipelineTest.on('close', resolve))
   check('平台总线管道随包单测全绿（node --test）', busPipelineTest.exitCode === 0, `exit=${busPipelineTest.exitCode}`)
+  // 工具注册契约自证（OPT-P2-04：output.schema 强校验，无 schema 注册即抛）
+  const toolsLiteTest = spawn(process.execPath, ['packages/platform-core/src/tools-lite.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => toolsLiteTest.on('close', resolve))
+  check('工具注册契约随包单测全绿（node --test）', toolsLiteTest.exitCode === 0, `exit=${toolsLiteTest.exitCode}`)
   // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
   const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
   check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',

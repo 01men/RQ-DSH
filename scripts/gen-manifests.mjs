@@ -175,6 +175,38 @@ const PLUGINS = [
     ui: { routes: ['#/connectors'], menus: [{ group: 'AI 资源', items: ['连接器'] }] },
   },
   {
+    dir: 'usage', id: 'dsh-plugin-usage', label: '计量与成本',
+    depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam'], permissions: ['usage.read', 'usage.write', 'usage.admin'],
+    services: [['usage', 'ctx.usage', '计量事实源：idempotency_key 幂等 + 消费水位 + 3 次重试 + 死信 + 重放（at-least-once），保留策略 730d 巡检']],
+    events: [
+      ['audit.alert.fired', 'emit', '计量对账异常触发告警（跨域发布，audit 域命名空间）'],
+    ],
+    api: ['# REST 面由 console 聚合暴露（见 console 清单 usage.* 各条）；工具面如下'],
+    tools: ['usage_query', 'usage_reconcile', 'usage_replay', 'usage_deadletter_retry'],
+    ui: { routes: [], menus: [] },
+  },
+  {
+    dir: 'market', id: 'dsh-plugin-market', label: '插件市场',
+    depends: ['dsh-plugin-platform-core', 'dsh-plugin-authn', 'dsh-plugin-usage'], permissions: ['market.read', 'market.submit', 'market.approve', 'market.install', 'market.developer'],
+    services: [['market', 'ctx.market', '插件提交→两级审批→上架→安装计量；开发者门户与沙箱预检（REST 面由 console 聚合暴露）']],
+    events: [],
+    api: ['# REST 面由 console 聚合暴露（见 console 清单 market.* 各条）；工具面如下'],
+    tools: ['market_plugin_list'],
+    ui: { routes: [], menus: [] },
+  },
+  {
+    dir: 'modelgw', id: 'dsh-plugin-modelgw', label: '模型网关',
+    depends: ['dsh-plugin-platform-core', 'dsh-plugin-usage'], permissions: ['modelgw.read', 'modelgw.invoke', 'modelgw.admin'],
+    services: [['modelGateway', 'ctx.modelGateway', '模型目录/渠道组降级链/预算熔断/遥测（REST 面由 console 聚合暴露）']],
+    events: [
+      ['modelgw.degraded', 'emit', '渠道组降级链切换（IAW 1-2）'],
+      ['modelgw.budget.warning', 'emit', '预算熔断预警（IAW 1-4）'],
+    ],
+    api: ['# REST 面由 console 聚合暴露（见 console 清单 modelgw.* 各条）；工具面如下'],
+    tools: ['model_list'],
+    ui: { routes: [], menus: [] },
+  },
+  {
     dir: 'skillhub', id: 'dsh-plugin-skillhub', label: 'Skill 市场',
     depends: ['dsh-plugin-platform-core', 'dsh-plugin-resource-core', 'dsh-plugin-audit'], permissions: ['skill.read', 'skill.submit', 'skill.approve', 'skill.publish', 'skill.install', 'skill.storage.write'],
     services: [['skillHub', 'ctx.skillHub', '提交→静态扫描→两级审批→版本化上架 + 安装依赖登记 + 评分检索 + skill.zip 包存储（local/NAS）；下载/安装进 usage 计量（skill:* 资源），弃用原因落库持久化']],
