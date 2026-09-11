@@ -23,6 +23,14 @@
 > 同批加固：安全响应头默认开启（`SECURITY_HEADERS=off` 可关）、usage 事件保留策略默认 730 天
 > （`USAGE_RETENTION_DAYS`，0=永久）——详见
 > [docs/release-notes-2026-09-11-optimization.md](docs/release-notes-2026-09-11-optimization.md)。
+>
+> **IAW 缺口批次 + F 域余量反馈（2026-09-11）**：新增 **flow-core 流程编排域**（TF 编排 + 步骤状态机 /
+> 模板库 contextPack / SLA 与进度 / 甘特时间轴，[contract-c2-flow-tf.md](docs/contract-c2-flow-tf.md)）·
+> **数据要素域**（数据集登记 / 四维质量分 / 血缘反向追溯 / 指标字典口径仲裁）· **模型渠道治理**
+> （分级路由 / 渠道组降级链 / 预算熔断，[contract-c1-modelgw-channel-governance.md](docs/contract-c1-modelgw-channel-governance.md)）·
+> **Agent 自治与 A2A**（autonomy A0-A3 + 点名调用端点，[contract-c3-agent-a2a.md](docs/contract-c3-agent-a2a.md)）·
+> IAM 场景级授权（sceneCode，deny→allow→fail-closed）· 审计证据锚点与场景维度时间线 · 通知中心持久化——
+> 详见 [docs/release-notes-2026-09-11-iaw-batch.md](docs/release-notes-2026-09-11-iaw-batch.md)。
 
 ---
 
@@ -574,4 +582,4 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 
 ---
 
-> 最近更新：2026-09-11 · M1-1 契约冻结 v1 齐套（J1 直调落地 + J2/J3 成文）+ 安全响应头与 usage 保留策略加固（[docs/release-notes-2026-09-11-optimization.md](docs/release-notes-2026-09-11-optimization.md)）；selftest 数量以本次运行为准。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
+> 最近更新：2026-09-12 · IAW 缺口批次落地（19/20 项）——flow-core 流程编排域、数据要素域、模型渠道治理、Agent 自治与 A2A、IAM 场景级授权、审计证据锚点、通知中心持久化（[docs/release-notes-2026-09-11-iaw-batch.md](docs/release-notes-2026-09-11-iaw-batch.md)）+ F 域余量反馈批次（scenegraph 校验口径对齐、面板登录面 PUBLIC_PATHS、next 消费共享模块）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
