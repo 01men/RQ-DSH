@@ -169,7 +169,7 @@ async function main() {
 
   /* 3. 版本决策 */
   const treeV = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version
-  const view = sh(`npm view ${PKG_NAME} version --registry ${NPMJS}`, { capture: true })
+  const view = sh(`npm view ${PKG_NAME} version --prefer-online --registry ${NPMJS}`, { capture: true })
   const latestV = view.ok ? view.out : null
   const target = decideTarget(treeV, latestV)
   console.log(`[release] 版本决策：树 ${treeV} / npm latest ${latestV ?? '(未发布)'} → 目标 ${target}` +
@@ -217,15 +217,17 @@ async function main() {
     die(failed)
   }
 
-  /* 8. 发布验证（npmjs 即时可见；轮询兜底） */
+  /* 8. 发布验证（--prefer-online 绕开 npm 本地请求缓存——packument 带 max-age≈60s，
+       发布后裸 view 会命中缓存造成「未即时查到」假警报；CDN 边缘最坏也只滞后 ~60s） */
   let published = false
-  for (let i = 0; i < 5 && !published; i++) {
-    await sleep(1500)
-    const v = sh(`npm view ${PKG_NAME} version --registry ${NPMJS}`, { capture: true })
+  for (let i = 0; i < 10 && !published; i++) {
+    await sleep(3000)
+    const v = sh(`npm view ${PKG_NAME} version --prefer-online --registry ${NPMJS}`, { capture: true })
     published = v.ok && v.out === target
   }
   if (!published) {
-    console.warn(`[release] ⚠ npmjs 未即时查到 ${target}，请人工复核：npm view ${PKG_NAME} version --registry ${NPMJS}`)
+    console.warn(`[release] ⚠ 30s 内未查到 ${target}——publish 的「+ ${PKG_NAME}@${target}」行已表明 registry 受理，` +
+        `此处多为 CDN 缓存滞后（≤60s）。人工复核：npm view ${PKG_NAME} version --prefer-online --registry ${NPMJS}`)
   }
 
   /* 9. 发布记录回填 */
