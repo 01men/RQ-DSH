@@ -45,6 +45,21 @@ dsh plugin add --profile <全新profile> @ybkk/gate-01
 # 6. 发布记录回填本手册 + 推送备份
 ```
 
+## 自动化发布（2026-09-11 定版）
+
+`npm run release`（scripts/release.mjs）一条命令完成上面「开发侧执行」全流程并自动回填本手册：
+
+```
+git 护栏（custom/dsh-rq + 干净树）→ npmjs 登录校验（失效自动拉起 npm login 浏览器 2FA）
+→ 版本决策（树版本 > npm latest 直接复用；相等自动 patch；patch/minor/major/--version 可覆盖）
+→ build:dist + 浏览器半重建 → lint:manifests + selftest → npm pack 校验
+→ npm publish（官方源，--access public）→ npm view 验证 → 发布记录回填
+→ 提交 + 推送备份（铁律 3）
+```
+
+演练：`npm run release -- --dry-run --skip-tests`。发布中断重跑即续（版本决策幂等；
+publish 失败自动回滚版本落盘）。真机冒烟仍需人工执行（§开发侧执行 5）。
+
 ## 注意事项
 
 - **file:/tgg 本地安装的刷新陷阱**：pnpm 对 `file:` 目录依赖取 inode 快照，源 `dist/` 重写后
