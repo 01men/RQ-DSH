@@ -20,28 +20,28 @@ function mapOps(labels) {
   });
 }
 const DEMO_ORG_ID = "demo-org";
-function seedPanel(ctx, autoDemo = false) {
+function seedPanel(ctx, panel, autoDemo = false) {
   const logger = ctx.logger("panel-seed");
-  if (ctx.panel.deptConfigs().count() > 0) {
-    seedBuiltInActivations(ctx, logger, autoDemo);
-    if (autoDemo) seedDemoContent(ctx, logger);
+  if (panel.deptConfigs().count() > 0) {
+    seedBuiltInActivations(ctx, panel, logger, autoDemo);
+    if (autoDemo) seedDemoContent(ctx, panel, logger);
     return;
   }
   const iam = ctx.reflect.get("iam", false);
   for (const meta of DEPT_META) {
     const matchedOrg = iam?.orgs().findOne((org) => org.name === meta.label);
-    ctx.panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...matchedOrg ? { orgId: matchedOrg.id } : {} });
+    panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...matchedOrg ? { orgId: matchedOrg.id } : {} });
   }
-  seedBuiltInActivations(ctx, logger, autoDemo);
+  seedBuiltInActivations(ctx, panel, logger, autoDemo);
   logger.info("\u9762\u677F\u57FA\u7EBF\uFF1A\u4E94\u90E8\u95E8\u9AA8\u67B6 + \u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/YB01/JB01\uFF09\u5B8C\u6210");
   if (process.env.DEMO_SEED !== "1" && !autoDemo) return;
-  seedDemoContent(ctx, logger);
+  seedDemoContent(ctx, panel, logger);
 }
-function seedBuiltInActivations(ctx, logger, autoDemo) {
+function seedBuiltInActivations(ctx, panel, logger, autoDemo) {
   const iam = ctx.reflect.get("iam", false);
   const findRootOrgId = () => iam?.orgs().find((org) => org.parentId === null).at(0)?.id;
   const seedTo = (orgId) => {
-    seedActivations(ctx, orgId);
+    seedActivations(panel, orgId);
     logger.info(`\u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/YB01/JB01\uFF09\u5DF2\u6536\u655B\u81F3\u7EC4\u7EC7 ${orgId}`);
   };
   const rootOrgId = findRootOrgId();
@@ -91,10 +91,10 @@ function seedBuiltInActivations(ctx, logger, autoDemo) {
   } catch {
   }
 }
-function seedActivations(ctx, orgId) {
+function seedActivations(panel, orgId) {
   for (const code of ["QB01", "YB01", "JB01"]) {
-    if (ctx.panel.activations().findOne((item) => item.orgId === orgId && item.code === code)) continue;
-    ctx.panel.activations().insert({
+    if (panel.activations().findOne((item) => item.orgId === orgId && item.code === code)) continue;
+    panel.activations().insert({
       id: newId("act"),
       code,
       orgId,
@@ -104,16 +104,16 @@ function seedActivations(ctx, orgId) {
     });
   }
 }
-function seedDemoContent(ctx, logger) {
+function seedDemoContent(ctx, panel, logger) {
   const demoPath = join(dirname(fileURLToPath(import.meta.url)), "demo-content.json");
   const demo = JSON.parse(readFileSync(demoPath, "utf8"));
   const iam = ctx.reflect.get("iam", false);
   const demoOrgId = iam?.orgs().find((org) => org.parentId === null).at(0)?.id ?? DEMO_ORG_ID;
-  seedActivations(ctx, demoOrgId);
+  seedActivations(panel, demoOrgId);
   for (const [deptId, content] of Object.entries(demo.depts)) {
-    const config = ctx.panel.deptConfigs().get(deptId);
+    const config = panel.deptConfigs().get(deptId);
     if (!config) continue;
-    const alreadySeeded = ctx.panel.channels().find((item) => item.dept === deptId).length > 0;
+    const alreadySeeded = panel.channels().find((item) => item.dept === deptId).length > 0;
     if (config.agents.length === 0 && config.kpis.length === 0) {
       const agents = content.agents.map((agent) => ({
         name: agent.n,
@@ -131,20 +131,20 @@ function seedDemoContent(ctx, logger) {
         source: "mock",
         rows: widget.rows
       }));
-      ctx.panel.deptConfigs().update(config.id, { agents, kpis, widgets });
+      panel.deptConfigs().update(config.id, { agents, kpis, widgets });
     }
     if (alreadySeeded) continue;
     for (const [name] of content.chans) {
-      ctx.panel.channels().insert({ id: newId("pchan"), dept: deptId, name, createdBy: "seed" });
+      panel.channels().insert({ id: newId("pchan"), dept: deptId, name, createdBy: "seed" });
     }
-    const channels = ctx.panel.channels().find((item) => item.dept === deptId);
+    const channels = panel.channels().find((item) => item.dept === deptId);
     const mainChannel = channels.at(0);
     for (const msg of content.msgs) {
       if (!mainChannel) break;
       const ddSync = msg.dd === "origin" ? "origin" : msg.dd === true ? "sent" : "none";
       const senderType = msg.t === "sys" ? "system" : msg.t === "agent" ? "agent" : "human";
       try {
-        ctx.panel.messages().insert({
+        panel.messages().insert({
           id: newId("pmsg"),
           channelId: mainChannel.id,
           dept: deptId,
@@ -176,7 +176,7 @@ function seedDemoContent(ctx, logger) {
     ];
     for (const [dept, title, lane, sceneCode] of demoTasks) {
       if (dept !== deptId) continue;
-      ctx.panel.tasks().insert({
+      panel.tasks().insert({
         id: newId("ptask"),
         dept: deptId,
         title,
@@ -195,7 +195,7 @@ function seedDemoContent(ctx, logger) {
     ];
     for (const [dept, kind, title, contentText] of demoArtifacts) {
       if (dept !== deptId) continue;
-      ctx.panel.artifacts().insert({
+      panel.artifacts().insert({
         id: newId("part"),
         dept: deptId,
         kind,

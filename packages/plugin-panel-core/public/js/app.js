@@ -113,6 +113,8 @@ const state = {
   ddStatus: null,
   bridges: [],
   ddSync: localStorage.getItem('panel_ddsync') === '1',
+  /** dws 激活弹窗每页面加载至多自动弹一次（用户关闭后不缠人，顶栏 ⇄ 随时可再开）。 */
+  ddPromptShown: false,
   /** 模型目录（modelgw 事实源 / dsh 配置桥只读）；chatModel='' 表示跟随各 Agent 资产配置。 */
   models: [],
   modelSource: '',
@@ -174,6 +176,7 @@ function showModal(title, bodyHtml) {
 }
 
 function hideModal() {
+  stopDdLoginPoll()
   $id('mask')?.classList.remove('show')
 }
 
@@ -337,22 +340,42 @@ async function init() {
 }
 
 async function refreshDingtalk() {
-  // 双源探测：宿主面钉钉桥（/api/dingtalk/*）优先；01门装态桥缺席 → 回退面板自持 dws CLI 面。
+  // 双源探测（2026-09-11 起本地 dws 面全形态注册）：宿主桥在场且身份已绑 → 宿主态（行为不变）；
+  // 宿主绑定缺席（桥缺席的装态，或桥在场但未绑）→ 本地 dws 面兜底——用户可不经宿主平台直接用自家钉钉。
+  let status = null
+  let bridges = []
   try {
-    const [status, bridges] = await Promise.all([api.get('/api/dingtalk/status'), api.get('/api/dingtalk/bridges')])
-    state.ddStatus = status
-    state.bridges = bridges.bridges
-  } catch {
+    const [hostStatus, hostBridges] = await Promise.all([api.get('/api/dingtalk/status'), api.get('/api/dingtalk/bridges')])
+    status = hostStatus
+    bridges = hostBridges.bridges
+  } catch { /* 宿主桥缺席（01门装态）→ 走本地面 */ }
+  if (!status?.bound) {
     try {
-      state.ddStatus = await api.get('/api/panel/ddws/status')
-      state.bridges = []
-    } catch {
-      state.ddStatus = null
-      state.bridges = []
-    }
+      const dwsStatus = await api.get('/api/panel/ddws/status')
+      if (!status?.bound) { status = dwsStatus; bridges = [] }
+    } catch { /* 本地面也不可用 → 维持现状（可能全 null） */ }
   }
+  state.ddStatus = status
+  state.bridges = bridges
   renderTopRight()
+  maybePromptDdActivation()
   scheduleDdPull()
+}
+
+/**
+ * 01门装态（dws 桥）激活弹窗（2026-09-11 用户需求：未登录或未绑定就弹激活指令）：
+ * 进入面板后首次刷新即弹（每页面加载至多一次，用户关掉不缠人）；演示态只读不弹。
+ */
+function maybePromptDdActivation() {
+  if (state.ddPromptShown || state.demoMode) return
+  const dd = state.ddStatus
+  if (dd?.via !== 'dws-cli') return
+  const needLogin = Boolean(dd.auth && !dd.auth.authenticated)
+  const unbound = !dd.bound
+  if (!needLogin && !unbound) return
+  if ($id('mask')?.classList.contains('show')) return
+  state.ddPromptShown = true
+  void showBind()
 }
 
 /** 模型目录（GET /api/panel/models）：失败时置空（协作栏退化为「未接入模型」提示）。 */
@@ -2759,16 +2782,36 @@ function showModelForm(existing) {
   }
 }
 
-/** dws CLI 桥模式绑定面（装态无钉钉桥时）：安装 dws CLI → 绑定目标群 → 测试投递。 */
+/** dws 登录轮询定时器（模块级单例；弹窗关闭/换绑重渲/登录成功都要停）。 */
+let ddLoginTimer = null
+function stopDdLoginPoll() {
+  if (ddLoginTimer) { clearInterval(ddLoginTimer); ddLoginTimer = null }
+}
+
+/** 登录步骤 HTML（未登录 → 发起按钮；已登录 → 绿勾+组织/账号）。 */
+function dwsLoginStepHtml(auth) {
+  const done = Boolean(auth?.authenticated)
+  return `<div class="step ${done ? 'done' : ''}"><div class="no">${done ? '✓' : '2'}</div><div>
+      <div class="st-t">登录钉钉（dws 设备码授权——本面板代发起，无需终端、不与宿主平台绑定）</div>
+      <div class="st-d">${done
+        ? `已登录：${esc(auth.corpName ?? '')}${auth.userName ? ` · ${esc(auth.userName)}` : ''}`
+        : '点击「发起登录」生成授权链接与用户码，在浏览器打开并输入用户码完成钉钉授权，本页自动感知。'}</div>
+      ${done ? '' : '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn dd" id="dwsLoginStart">🔑 发起登录</button><span id="dwsLoginBox" style="flex:1;min-width:220px"></span></div>'}</div></div>`
+}
+
+/** dws CLI 桥模式绑定面（装态无钉钉桥时）：安装 dws CLI → 登录钉钉 → 绑定目标群 → 测试投递。 */
 function showBindDws(status) {
+  stopDdLoginPoll()
+  const auth = status.auth
   const steps = [
     `<div class="step ${status.installed ? 'done' : ''}"><div class="no">${status.installed ? '✓' : '1'}</div><div>
       <div class="st-t">dws CLI（钉钉官方命令行）</div>
       <div class="st-d">${status.installed
-        ? `已安装（${esc(status.version ?? '')}）。授权态由 dws 自身管理（终端 dws login）。`
+        ? `已安装（${esc(status.version ?? '')}）。授权态由 dws 自身管理，下一步在面板直接发起登录。`
         : esc(status.installHint ?? '未检测到 dws CLI')}</div>
       ${status.installed ? '' : '<div style="margin-top:8px"><button class="btn dd" id="dwsInstall">⬇ 一键安装 dws CLI</button></div>'}</div></div>`,
-    `<div class="step ${status.bound ? 'done' : ''}"><div class="no">${status.bound ? '✓' : '2'}</div><div>
+    dwsLoginStepHtml(auth),
+    `<div class="step ${status.bound ? 'done' : ''}"><div class="no">${status.bound ? '✓' : '3'}</div><div>
       <div class="st-t">绑定目标钉钉群（群名或 openConversationId）</div>
       <div class="st-d">${status.bound
         ? `已绑定：${esc(status.group ?? status.bound?.displayName ?? '')}——开启「钉钉同步」的面板消息将投递到该群。`
@@ -2778,13 +2821,13 @@ function showBindDws(status) {
         <button class="btn primary" id="dwsBindSave">${status.bound ? '换绑' : '绑定'}</button>
         ${status.bound ? '<button class="btn" id="dwsUnbind">解绑</button>' : ''}
       </div></div></div>`,
-    `<div class="step"><div class="no">3</div><div>
+    `<div class="step"><div class="no">4</div><div>
       <div class="st-t">测试投递</div>
       <div class="st-d">向绑定群真实发送一条测试消息（走 dws chat，失败原因如实回显）。</div>
       <div style="margin-top:8px"><button class="btn" id="dwsTest" ${status.installed && status.bound ? '' : 'disabled'}>📤 发送测试消息</button></div></div></div>`,
   ]
   showModal('⇄ 钉钉连接（dws CLI 模式）', `${steps.join('')}
-    <p class="note">安全边界：钉钉授权态归 dws CLI 自身（本面板零凭证）；安装/绑群/投递全程审计留痕；投递失败会落到消息同步状态与告警，绝不静默丢消息。</p>`)
+    <p class="note">安全边界：钉钉授权态归 dws CLI 自身（本面板零凭证，登录走官方设备码授权）；安装/登录/绑群/投递全程审计留痕；投递失败会落到消息同步状态与告警，绝不静默丢消息。</p>`)
   const installBtn = $id('dwsInstall')
   if (installBtn) {
     installBtn.onclick = async (event) => {
@@ -2798,6 +2841,59 @@ function showBindDws(status) {
       }
       await refreshDingtalk()
       showBindDws(state.ddStatus ?? status)
+    }
+  }
+  const loginBtn = $id('dwsLoginStart')
+  if (loginBtn) {
+    loginBtn.onclick = async () => {
+      loginBtn.disabled = true
+      loginBtn.textContent = '⏳ 正在发起…'
+      const box = $id('dwsLoginBox')
+      try {
+        const result = await api.post('/api/panel/ddws/login', {}, { timeoutMs: 40_000 })
+        if (result.already) {
+          void toast(`dws 已处于登录态（${result.auth?.corpName ?? '钉钉'}）`)
+          await refreshDingtalk()
+          showBindDws(state.ddStatus ?? status)
+          return
+        }
+        if (!result.started) {
+          if (box) box.innerHTML = `<span style="color:#dc2626;font-size:12px">${esc(result.message ?? '发起登录失败')}</span>`
+          loginBtn.disabled = false
+          loginBtn.textContent = '🔑 发起登录'
+          return
+        }
+        if (box) {
+          box.innerHTML = `<div style="font-size:12px;line-height:1.7">
+            <div>用户码：<b style="font-size:15px;letter-spacing:2px">${esc(result.userCode ?? '（见授权页）')}</b>${result.expiresInSeconds ? ` <span style="color:var(--txt2)">${Math.round(result.expiresInSeconds / 60)} 分钟内有效</span>` : ''}</div>
+            <div><a class="btn primary" href="${esc(result.verifyUrl)}" target="_blank" rel="noopener" style="display:inline-block;margin-top:4px;text-decoration:none">📱 打开钉钉授权页</a></div>
+            <div style="color:var(--txt2);margin-top:4px">授权完成后本页自动继续（3 秒轮询中）。</div>
+          </div>`
+        }
+        stopDdLoginPoll()
+        ddLoginTimer = setInterval(async () => {
+          try {
+            const poll = await api.get('/api/panel/ddws/login')
+            if (poll.authenticated) {
+              stopDdLoginPoll()
+              void toast(`✓ 钉钉登录成功（${poll.auth?.corpName ?? 'dws'}${poll.auth?.userName ? ` · ${poll.auth.userName}` : ''}）`)
+              await refreshDingtalk()
+              if ($id('mask')?.classList.contains('show')) showBindDws(state.ddStatus ?? status)
+              return
+            }
+            if (!poll.active && poll.message) {
+              stopDdLoginPoll()
+              if (box) box.innerHTML = `<span style="color:#dc2626;font-size:12px">${esc(poll.message)}</span>`
+              loginBtn.disabled = false
+              loginBtn.textContent = '🔑 重新发起登录'
+            }
+          } catch { /* 瞬时网络错误下一轮再试 */ }
+        }, 3000)
+      } catch (error) {
+        void toast(error.message, 'error')
+        loginBtn.disabled = false
+        loginBtn.textContent = '🔑 发起登录'
+      }
     }
   }
   const saveBtn = $id('dwsBindSave')

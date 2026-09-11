@@ -12,7 +12,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { newId } from '../../../platform-core/src/ids.ts'
-import type { DeptAgent, DeptKpi, DeptWidget, MessageCardOp } from '../service.ts'
+import type { DeptAgent, DeptKpi, DeptWidget, MessageCardOp, PanelService } from '../service.ts'
 
 /** 五部门骨架（原型 DEPT_META 一比一：主题色即部门身份）。 */
 const DEPT_META: Array<Pick<import('../service.ts').DeptConfigRecord, 'id' | 'label' | 'icon' | 'theme' | 'collab' | 'acts' | 'colors'>> = [
@@ -38,36 +38,38 @@ function mapOps(labels: string[]): MessageCardOp[] {
 /** 演示组织主键（01门 装态无组织目录时的激活/计量归属，与 index.ts orgIdOf 兜底同值）。 */
 export const DEMO_ORG_ID = 'demo-org'
 
-export function seedPanel(ctx: Context, autoDemo = false): void {
+export function seedPanel(ctx: Context, panel: PanelService, autoDemo = false): void {
   const logger = ctx.logger('panel-seed')
   // 幂等双入口：首启（集合空）播基线+演示；demoAuth 装态下 loader 热重载会以空 config
   // 重放 apply——先播了基线骨架、后到的 autoDemo 需要能补齐演示内容（真机 gate01-npm 实证）
-  if (ctx.panel.deptConfigs().count() > 0) {
+  if (panel.deptConfigs().count() > 0) {
     // 存量部署：内置行业激活仍随启动幂等收敛（升级获得新增内置行业码的默认授权），
     // 部门骨架/演示内容不重播
-    seedBuiltInActivations(ctx, logger, autoDemo)
-    if (autoDemo) seedDemoContent(ctx, logger)
+    seedBuiltInActivations(ctx, panel, logger, autoDemo)
+    if (autoDemo) seedDemoContent(ctx, panel, logger)
     return
   }
 
   // -- 基线：五部门骨架 + 内置行业激活 + 组织名自动绑定（账号组织打通） ------------
   // 组织目录缺席（01门演示态）→ 部门不绑组织（范围权限全开放）+ 跳过内置激活登记，
   // 骨架与演示内容照常播种（plan-gate01 决策 2：未连接宿主时内置演示看板）
+  // 注意：panel 服务必须显式传参（dsh loader 代理 ctx 对未声明键的裸访问硬抛 without
+  // inject——panel 不可自 inject，与 service.ts soft() 同源教训，真机 gate01-local 实证）。
   const iam = ctx.reflect.get('iam', false) as any | undefined
   for (const meta of DEPT_META) {
     // 组织名与部门名一致时自动绑定（真实部署按企业组织树命名即可零配置打通）；
     // 不一致时由管理员经 PUT /api/panel/:dept/config 手工绑定
     const matchedOrg = iam?.orgs().findOne((org: { name: string }) => org.name === meta.label)
-    ctx.panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...(matchedOrg ? { orgId: matchedOrg.id } : {}) })
+    panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...(matchedOrg ? { orgId: matchedOrg.id } : {}) })
   }
   // 内置图谱资产（packages/platform-core/scenegraphs/ 随平台分发）默认授权根组织；
   // 其余组织/行业走「申请 → 审批（industry.activation，high）→ 激活」链路
-  seedBuiltInActivations(ctx, logger, autoDemo)
+  seedBuiltInActivations(ctx, panel, logger, autoDemo)
   logger.info('面板基线：五部门骨架 + 内置行业激活（QB01/YB01/JB01）完成')
 
   // 演示内容门控：DEMO_SEED=1（全量形态显式演示）或 autoDemo（01门 demoAuth 装态自动演示）
   if (process.env.DEMO_SEED !== '1' && !autoDemo) return
-  seedDemoContent(ctx, logger)
+  seedDemoContent(ctx, panel, logger)
 }
 
 /**
@@ -77,12 +79,12 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
  *   面板 seed 先于 iam 根组织 ~500ms，激活被误挂 demo-org 而实名用户解析到真实根组织 → 行业全落锁）；
  * - iam 缺席（纯演示形态）才落 demo-org 兜底。
  */
-function seedBuiltInActivations(ctx: Context, logger: { info(msg: string): void }, autoDemo: boolean): void {
+function seedBuiltInActivations(ctx: Context, panel: PanelService, logger: { info(msg: string): void }, autoDemo: boolean): void {
   const iam = ctx.reflect.get('iam', false) as any | undefined
   const findRootOrgId = (): string | undefined =>
     iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0)?.id
   const seedTo = (orgId: string): void => {
-    seedActivations(ctx, orgId)
+    seedActivations(panel, orgId)
     logger.info(`内置行业激活（QB01/YB01/JB01）已收敛至组织 ${orgId}`)
   }
   const rootOrgId = findRootOrgId()
@@ -127,17 +129,17 @@ function seedBuiltInActivations(ctx: Context, logger: { info(msg: string): void 
  */
 /** 内置行业激活幂等登记（QB01 家电 / YB01 钢铁 / JB01 工程机械 默认授权；其余 11 行业走申请审批）：
  *  demoAuth 装态下 demo-org 兜底，重放安全。 */
-function seedActivations(ctx: Context, orgId: string): void {
+function seedActivations(panel: PanelService, orgId: string): void {
   for (const code of ['QB01', 'YB01', 'JB01']) {
-    if (ctx.panel.activations().findOne((item) => item.orgId === orgId && item.code === code)) continue
-    ctx.panel.activations().insert({
+    if (panel.activations().findOne((item) => item.orgId === orgId && item.code === code)) continue
+    panel.activations().insert({
       id: newId('act'), code, orgId, status: 'active',
       activatedAt: new Date().toISOString(), activatedBy: 'seed（内置资产包默认授权）',
     })
   }
 }
 
-function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(msg: string): void }): void {
+function seedDemoContent(ctx: Context, panel: PanelService, logger: { info(msg: string): void; warn(msg: string): void }): void {
   type DemoMsg = { t: string; n?: string; icon?: string; x: string; dd?: boolean | string; card?: { t: string; ops: string[] } }
   type DemoDept = {
     kpis: Array<[string, string]>
@@ -152,13 +154,13 @@ function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(m
   // 行业激活面幂等补齐（「有骨架无激活」中间态——如宿主强杀丢失部分持久层——也能恢复）
   const iam = ctx.reflect.get('iam', false) as any | undefined
   const demoOrgId = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0)?.id ?? DEMO_ORG_ID
-  seedActivations(ctx, demoOrgId)
+  seedActivations(panel, demoOrgId)
 
   for (const [deptId, content] of Object.entries(demo.depts)) {
-    const config = ctx.panel.deptConfigs().get(deptId)
+    const config = panel.deptConfigs().get(deptId)
     if (!config) continue
     // 幂等标记：该部门已有频道 = 演示内容（频道/会话/任务/知识）已播过，只补配置面
-    const alreadySeeded = ctx.panel.channels().find((item) => item.dept === deptId).length > 0
+    const alreadySeeded = panel.channels().find((item) => item.dept === deptId).length > 0
 
     if (config.agents.length === 0 && config.kpis.length === 0) {
       const agents: DeptAgent[] = content.agents.map((agent) => ({
@@ -174,14 +176,14 @@ function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(m
         source: 'mock',
         rows: widget.rows,
       }))
-      ctx.panel.deptConfigs().update(config.id, { agents, kpis, widgets })
+      panel.deptConfigs().update(config.id, { agents, kpis, widgets })
     }
 
     if (alreadySeeded) continue
     for (const [name] of content.chans) {
-      ctx.panel.channels().insert({ id: newId('pchan'), dept: deptId, name, createdBy: 'seed' })
+      panel.channels().insert({ id: newId('pchan'), dept: deptId, name, createdBy: 'seed' })
     }
-    const channels = ctx.panel.channels().find((item) => item.dept === deptId)
+    const channels = panel.channels().find((item) => item.dept === deptId)
     const mainChannel = channels.at(0)
 
     for (const msg of content.msgs) {
@@ -189,7 +191,7 @@ function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(m
       const ddSync = msg.dd === 'origin' ? 'origin' as const : msg.dd === true ? 'sent' as const : 'none' as const
       const senderType = msg.t === 'sys' ? 'system' as const : msg.t === 'agent' ? 'agent' as const : 'human' as const
       try {
-        ctx.panel.messages().insert({
+        panel.messages().insert({
           id: newId('pmsg'), channelId: mainChannel.id, dept: deptId,
           senderType,
           ...(msg.n ? { senderName: msg.n } : {}),
@@ -220,7 +222,7 @@ function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(m
     ]
     for (const [dept, title, lane, sceneCode] of demoTasks) {
       if (dept !== deptId) continue
-      ctx.panel.tasks().insert({
+      panel.tasks().insert({
         id: newId('ptask'), dept: deptId, title, lane, assigneeType: 'human',
         ...(sceneCode ? { sceneCode } : {}), createdBy: 'seed',
       })
@@ -236,7 +238,7 @@ function seedDemoContent(ctx: Context, logger: { info(msg: string): void; warn(m
     ]
     for (const [dept, kind, title, contentText] of demoArtifacts) {
       if (dept !== deptId) continue
-      ctx.panel.artifacts().insert({
+      panel.artifacts().insert({
         id: newId('part'), dept: deptId, kind: kind as 'report' | 'order' | 'quote' | 'diagnosis' | 'other',
         title, content: contentText ?? '', createdBy: 'seed',
       })

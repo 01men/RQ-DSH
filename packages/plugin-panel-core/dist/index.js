@@ -901,7 +901,7 @@ function apply(ctx, config = {}) {
     }
   }, { access: "public" });
   const dingtalkBridgePresent = Boolean(soft(ctx, "dingtalkBridge"));
-  if (!dingtalkBridgePresent) {
+  {
     const dws = new DwsCli(ctx);
     guarded("GET", "/api/panel/ddws/status", "panel.read", async () => {
       const status = await dws.status();
@@ -914,6 +914,12 @@ function apply(ctx, config = {}) {
       };
     });
     guarded("POST", "/api/panel/ddws/install", "panel.config.write", async () => dws.install());
+    guarded("POST", "/api/panel/ddws/login", "panel.config.write", async () => dws.startLogin());
+    guarded("GET", "/api/panel/ddws/login", "panel.read", async () => dws.loginState());
+    guarded("DELETE", "/api/panel/ddws/login", "panel.config.write", () => {
+      dws.cancelLogin();
+      return { cancelled: true };
+    });
     guarded("PUT", "/api/panel/ddws/bind", "panel.config.write", (exchange) => {
       const group = body(exchange).group?.trim() ?? "";
       const record = dws.bind(group, caller(exchange).userId ?? caller(exchange).principalId);
@@ -967,7 +973,8 @@ function apply(ctx, config = {}) {
     ctx.platformBus.on(PlatformEvents.PanelMessageCreated, (payload) => {
       const data = payload ?? {};
       if (!data.messageId || data.ddSync !== "pending") return;
-      if (soft(ctx, "dingtalkBridge")) return;
+      const bridgeSvc = soft(ctx, "dingtalkBridge");
+      if (bridgeSvc?.bridgeChannels?.().find((item) => item.purpose === "channel").length > 0) return;
       void dws.sendToGroup(String(data.text ?? "")).then(
         (sent) => ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, { messageId: data.messageId, ok: true, via: "dws-cli", group: sent.group }),
         (error) => ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, {
@@ -977,7 +984,7 @@ function apply(ctx, config = {}) {
         })
       );
     });
-    ctx.logger("panel-core").info("01\u95E8\u88C5\u6001\u9489\u9489\u9762\u5DF2\u6302\u8F7D\uFF1Adws CLI \u6865\uFF08/api/panel/ddws/* + ddSync \u6295\u9012\uFF09");
+    ctx.logger("panel-core").info(`01\u95E8\u672C\u5730\u9489\u9489\u9762\u5DF2\u6302\u8F7D\uFF1Adws CLI \u6865\uFF08/api/panel/ddws/*\uFF0C\u5BBF\u4E3B\u6865${dingtalkBridgePresent ? "\u5728\u573A\u5171\u5B58" : "\u7F3A\u5E2D\u72EC\u4EFB"}\uFF1BddSync \u6295\u9012\u6309\u7FA4\u6865\u5F52\u5C5E\u88C1\u51B3\uFF09`);
   }
   {
     let seedTries = 0;
@@ -1038,7 +1045,7 @@ ${initialPassword}
     });
     http.serveStatic("/panel", publicDir, "/index.html");
   }
-  void seedPanel(ctx, demoAuth);
+  void seedPanel(ctx, panel, demoAuth);
   const renderJson = (args, value) => [{ type: "text", text: JSON.stringify(value, null, 2) }];
   ctx.tools.register({
     name: "panel_agents_list",

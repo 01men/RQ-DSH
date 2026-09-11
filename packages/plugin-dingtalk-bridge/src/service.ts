@@ -182,6 +182,10 @@ export class DingtalkBridgeService extends Service {
     this.ctx.platformBus.on(PlatformEvents.PanelMessageCreated, (payload) => {
       const data = payload as { messageId?: string; dept?: string; ddSync?: string; senderName?: string; text?: string; title?: string } | undefined
       if (data?.ddSync !== 'pending' || !data.messageId) return
+      // 与 panel-core dws 本地直连面共存（2026-09-11）：无 channel 群桥时本桥让位——
+      // dws 钩子已无条件注册并承接诚实回执；若本桥仍发 ok:false「未绑定群桥」，会与 dws
+      // 迟到的 ok:true 形成双回执（先 failed+告警、后 sent），状态抖动 + 告警噪声。
+      if (this.bridgeChannels().find((item) => item.purpose === 'channel').length === 0) return
       void this.deliver({
         messageId: data.messageId, dept: data.dept,
         title: `${data.senderName ?? '面板消息'} · 部门面板`,

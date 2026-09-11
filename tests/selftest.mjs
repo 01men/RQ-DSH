@@ -31,6 +31,8 @@ import * as update from '../packages/plugin-update/src/index.ts'
 import * as portal from '../packages/plugin-portal/src/index.ts'
 import * as consolePlugin from '../packages/plugin-console/src/index.ts'
 import * as panelCore from '../packages/plugin-panel-core/src/index.ts'
+// dws 设备流输出/授权态解析纯函数（01门装态钉钉面：解析器直测不经服务层）
+import { parseAuthStatus as dwsParseAuthStatus, parseDeviceFlowOutput as dwsParseDeviceFlow } from '../packages/plugin-panel-core/src/dws.ts'
 import * as dingtalkBridge from '../packages/plugin-dingtalk-bridge/src/index.ts'
 import * as dshBridge from '../packages/plugin-dsh-bridge/src/index.ts'
 import * as rqCard from '../packages/plugin-rq-card/src/index.ts'
@@ -5820,6 +5822,79 @@ try {
     const demoStream = await fetch(`${demoBase}/api/panel/stream?dept=rd&token=whatever`).then((r) => r.json().catch(() => null))
     check('01门演示态：SSE ?token= 自校验失败（验收断言：前端 30s 轮询承接）',
       demoStream?.error?.code === 'STREAM_AUTH_FAILED', JSON.stringify(demoStream))
+  }
+
+  // ================================================================ 01门装态钉钉面：dws CLI 登录授权面
+  section('钉钉 dws CLI 桥（01门装态：登录授权面 / 设备流解析 / 未登录激活指令）')
+  {
+    // 解析器直测（纯函数；样本取自 dws v1.0.61 真实输出，含盒线噪声字符）
+    const sample = [
+      '● Step 1: Requesting device authorization code...',
+      '  ╭──────────────╮',
+      '  │    link: https://login.dingtalk.com/oauth2/device/verify.htm   │',
+      '  │    authorization code: VSGN-KGWV   │',
+      '  │  Or open the following link:   │',
+      '  │    https://login.dingtalk.com/oauth2/device/verify.htm?user_code=VSGN-KGWV   │',
+      '  │  Authorization code will expire in 900 seconds.   │',
+      '  ╰──────────────╯',
+    ].join('\n')
+    const info = dwsParseDeviceFlow(sample)
+    check('dws 设备流解析：link/userCode/verifyUrl/有效期全提取',
+      info.link === 'https://login.dingtalk.com/oauth2/device/verify.htm'
+      && info.userCode === 'VSGN-KGWV'
+      && info.verifyUrl === 'https://login.dingtalk.com/oauth2/device/verify.htm?user_code=VSGN-KGWV'
+      && info.expiresInSeconds === 900, JSON.stringify(info))
+    const partial = dwsParseDeviceFlow('● Step 1: Requesting device authorization code...')
+    check('dws 设备流解析：激活指令未到不臆造 verifyUrl', !partial.verifyUrl && !partial.userCode, JSON.stringify(partial))
+    const authOk = dwsParseAuthStatus(JSON.stringify({ success: true, authenticated: true, corp_name: '杭州榕器创科技有限公司', user_name: '师圆圆', user_id: '213626652923846088', expires_at: '2026-09-11T23:30:34' }))
+    check('dws auth status 解析：已登录态全字段提取',
+      authOk.authenticated === true && authOk.corpName === '杭州榕器创科技有限公司' && authOk.userName === '师圆圆', JSON.stringify(authOk))
+    const authBad = dwsParseAuthStatus('dws: command not found')
+    check('dws auth status 解析：异常输出诚实降级为未登录（不粉饰）',
+      authBad.authenticated === false && Boolean(authBad.raw), JSON.stringify(authBad))
+
+    // E2E（iam+authn+panel 三件套 gate，dingtalk-bridge 缺席 → ddws 面在场）：真实登录 token 走授权面
+    const ddGate = new Context()
+    const ddDir = join('data-selftest', 'gate01-ddws-7397')
+    await mkdir(ddDir, { recursive: true })
+    // 基线种子口令取 ADMIN_PASSWORD env（DEMO_SEED 的 Ybk@2026 属演示种子，本 gate 不开）；
+    // 主实例子进程已在此前 spawn（env 快照隔离），此改动不外溢。
+    process.env.ADMIN_PASSWORD = 'Ybk@2026'
+    await ddGate.plugin(platformCore, { dataDir: ddDir, http: { port: 7397, host: '127.0.0.1' }, startHttp: true })
+    await ddGate.plugin(iam)
+    await ddGate.plugin(authn)
+    await ddGate.plugin(panelCore)
+    const G3 = 'http://127.0.0.1:7397'
+    const g3 = async (method, path, init = {}) => { const r = await fetch(`${G3}${path}`, { method, ...init }); return { status: r.status, body: await r.json().catch(() => null) } }
+    let ddToken = ''
+    for (let i = 0; i < 40 && !ddToken; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      try {
+        const login = await g3('POST', '/api/panel/auth/login', { headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: 'admin', password: 'Ybk@2026' }) })
+        if (login.body?.data?.token) ddToken = login.body.data.token
+      } catch { /* 种子未就绪重试 */ }
+    }
+    check('ddws gate：panel 命名空间登录成功（iam+authn 基线种子链）', Boolean(ddToken))
+    const ddHeaders = { 'content-type': 'application/json', authorization: `Bearer ${ddToken}` }
+    const ddSt = await g3('GET', '/api/panel/ddws/status', { headers: ddHeaders })
+    check('ddws status：形状完整（installed/bound/auth.authenticated 布尔 + mode）',
+      ddSt.status === 200 && typeof ddSt.body?.data?.installed === 'boolean' && typeof ddSt.body?.data?.bound === 'boolean'
+      && typeof ddSt.body?.data?.auth?.authenticated === 'boolean' && ddSt.body?.data?.mode === 'dws-cli', JSON.stringify(ddSt.body))
+    const ddLogin = await g3('POST', '/api/panel/ddws/login', { headers: ddHeaders, body: '{}' })
+    const ddL = ddLogin.body?.data ?? {}
+    const ddShape = (ddL.started === true && Boolean(ddL.verifyUrl))
+      || (ddL.started === false && ddL.already === true && ddL.auth?.authenticated === true)
+      || (ddL.started === false && typeof ddL.message === 'string' && !ddL.already)
+    check('ddws login：三态互斥且形状合法（已登录幂等 / 发起带激活指令 / 未装带指引）',
+      ddLogin.status === 200 && ddShape, JSON.stringify(ddLogin.body))
+    const ddPoll = await g3('GET', '/api/panel/ddws/login', { headers: ddHeaders })
+    check('ddws login 轮询：active/authenticated 布尔形状',
+      ddPoll.status === 200 && typeof ddPoll.body?.data?.active === 'boolean' && typeof ddPoll.body?.data?.authenticated === 'boolean', JSON.stringify(ddPoll.body))
+    const ddCancel = await g3('DELETE', '/api/panel/ddws/login', { headers: ddHeaders })
+    check('ddws login 取消：幂等可取消', ddCancel.status === 200 && ddCancel.body?.data?.cancelled === true, JSON.stringify(ddCancel.body))
+    const ddNoAuth = await g3('GET', '/api/panel/ddws/login')
+    check('ddws 面：无凭证 → 401 fail-closed', ddNoAuth.status === 401, JSON.stringify(ddNoAuth.body))
+    await rm(ddDir, { recursive: true, force: true }).catch(() => {})
   }
 
   // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）

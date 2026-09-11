@@ -1054,10 +1054,12 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
   }, { access: 'public' })
 
   const dingtalkBridgePresent = Boolean(soft(ctx, 'dingtalkBridge'))
-  if (!dingtalkBridgePresent) {
+  // -- 01门本地钉钉面（dws CLI）——无条件注册（2026-09-11 起不再以「桥缺席」为前提） --------------
+  // 命名空间铁律不变：dws 面全部挂在 /api/panel/ddws/*（绝不碰 /api/dingtalk/*，那是
+  // plugin-dingtalk-bridge 的路由面）。宿主桥在场时本面作为「本地直连钉钉」共存——用户可不经
+  // 宿主平台（连接器/iam 扫码）直接用自家钉钉 dws；消息投递归属在事件时裁决（见下方钩子）。
+  {
     const dws = new DwsCli(ctx)
-    // 命名空间铁律：dws 面全部挂在 /api/panel/ddws/*（panel 自有命名空间）——绝不动 /api/dingtalk/*，
-    // 那是 plugin-dingtalk-bridge 的路由面；本插件装配序先于桥，抢注同名路径会整面遮蔽桥的路由。
     guarded('GET', '/api/panel/ddws/status', 'panel.read', async () => {
       const status = await dws.status()
       return {
@@ -1069,6 +1071,16 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
       }
     })
     guarded('POST', '/api/panel/ddws/install', 'panel.config.write', async () => dws.install())
+    // 登录授权面（2026-09-11 用户需求：不与宿主平台绑定，面板本地代发起 dws 登录）：
+    // POST 发起设备流登录（返回激活指令：授权链接+用户码，前端弹窗直出）；
+    // GET 轮询会话状态（前端 3s 轮询，授权完成即 authenticated:true）；
+    // DELETE 取消进行中的登录会话。授权态归 dws CLI 自身（本面板零凭证铁律不变）。
+    guarded('POST', '/api/panel/ddws/login', 'panel.config.write', async () => dws.startLogin())
+    guarded('GET', '/api/panel/ddws/login', 'panel.read', async () => dws.loginState())
+    guarded('DELETE', '/api/panel/ddws/login', 'panel.config.write', () => {
+      dws.cancelLogin()
+      return { cancelled: true }
+    })
     guarded('PUT', '/api/panel/ddws/bind', 'panel.config.write', (exchange) => {
       const group = body<{ group?: string }>(exchange).group?.trim() ?? ''
       const record = dws.bind(group, caller(exchange).userId ?? caller(exchange).principalId)
@@ -1117,14 +1129,15 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
         return { ok: false as const, inserted: 0, error: error instanceof Error ? error.message : String(error) }
       }
     })
-    // 消息 ddSync 出向钩子：钉钉桥缺席时，开启「钉钉同步」的消息经 dws CLI 投递；
-    // 投递结果以 DingtalkDelivered 事件回流（上方监听器统一推进 ddSync 状态与告警留痕）。
-    // 事件时守卫：本插件装配序先于 dingtalk-bridge，apply 期探测不到桥不代表桥不在——
-    // 真正投递前再查一次，桥在场（全量形态）即整体让位，杜绝双投。
+    // 消息 ddSync 出向钩子（投递归属事件时裁决——装配序不可靠，apply 期探测不算数）：
+    //   a. 宿主桥在场且有 channel 群桥 → 桥全权处理（本钩子让位：桥在 deliver 前自查，杜绝双投）；
+    //   b. 否则本钩子负责：dws 已绑群 → dws 投递；未绑群 → 诚实失败回执（QA T-04「无群桥也要
+    //      回执」语义由本钩子承接——钉钉桥无 channel 群桥时不再自行发 ok:false，见其 service.ts）。
     ctx.platformBus.on(PlatformEvents.PanelMessageCreated, (payload) => {
       const data = (payload ?? {}) as { messageId?: string; ddSync?: string; text?: string }
       if (!data.messageId || data.ddSync !== 'pending') return
-      if (soft(ctx, 'dingtalkBridge')) return
+      const bridgeSvc = soft(ctx, 'dingtalkBridge') as { bridgeChannels?: () => { find: (fn: (item: { purpose: string }) => boolean) => Array<{ purpose: string }> } } | undefined
+      if (bridgeSvc?.bridgeChannels?.().find((item) => item.purpose === 'channel').length > 0) return
       void dws.sendToGroup(String(data.text ?? '')).then(
         (sent) => ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, { messageId: data.messageId, ok: true, via: 'dws-cli', group: sent.group }),
         (error) => ctx.platformBus.emit(PlatformEvents.DingtalkDelivered, {
@@ -1133,7 +1146,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
         }),
       )
     })
-    ctx.logger('panel-core').info('01门装态钉钉面已挂载：dws CLI 桥（/api/panel/ddws/* + ddSync 投递）')
+    ctx.logger('panel-core').info(`01门本地钉钉面已挂载：dws CLI 桥（/api/panel/ddws/*，宿主桥${dingtalkBridgePresent ? '在场共存' : '缺席独任'}；ddSync 投递按群桥归属裁决）`)
   }
 
   // 基线管理员种子（延迟重试）：iam 在场且组织目录为空（01门+authn 首启）→ 与 console seed
@@ -1209,7 +1222,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
   // -- 种子（基线骨架 + DEMO_SEED=1 演示内容） ---------------------------------------
 
   // 演示内容播种：demoAuth 装态自动演示（决策 2），全量形态维持 DEMO_SEED=1 显式门控
-  void seedPanel(ctx, demoAuth)
+  void seedPanel(ctx, panel, demoAuth)
 
   // -- panel_* 工具族（共享 tools 键，dsh 下即原生 ToolRuntime） ------------------------
 
