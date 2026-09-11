@@ -237,13 +237,17 @@ export function apply(ctx: Context) {
   }))
 
   guarded('POST', '/api/panel/models', 'panel.config.write', (exchange) => {
-    const input = body<{ slug?: string; displayName?: string; provider?: string; endpoint?: string; apiKey?: string; listCentsPerKTokens?: number; costCentsPerKTokens?: number; status?: string }>(exchange)
+    const input = body<{ slug?: string; displayName?: string; provider?: string; endpoint?: string; apiKey?: string; listCentsPerKTokens?: number; costCentsPerKTokens?: number; status?: string; dataClassLimit?: string }>(exchange)
     const slug = input.slug?.trim() ?? ''
     if (!slug) throw new Error('模型 slug 必填（如 deepseek-chat）')
     if (!/^[A-Za-z0-9._-]{2,64}$/.test(slug)) throw new Error(`slug 仅允许字母/数字/._-（2-64 位）：${slug}`)
     if (!input.endpoint?.trim()) throw new Error('endpoint 必填（OpenAI 兼容基址；未配置不可调用，绝不造假回复）')
     if (!Number.isFinite(input.listCentsPerKTokens) || (input.listCentsPerKTokens ?? -1) < 0) throw new Error('listCentsPerKTokens 必须是非负数（挂牌价，分/千 tokens）')
     const status = input.status === 'offline' ? 'offline' as const : 'online' as const
+    // 数据分级上限（IAW 交接 1-1）：公开/内部/秘密，缺省 internal（存量登记兼容）
+    const dataClassLimit = input.dataClassLimit === 'public' || input.dataClassLimit === 'internal' || input.dataClassLimit === 'secret'
+      ? input.dataClassLimit as 'public' | 'internal' | 'secret'
+      : 'internal' as const
     // 编辑时密钥留空 = 保持既有密钥（表单不回填密钥的约定），不得覆盖为默认引用
     const existing = ctx.modelGateway.models().findOne((item) => item.slug === slug)
     const model = ctx.modelGateway.upsertModel({
@@ -255,8 +259,9 @@ export function apply(ctx: Context) {
       listCentsPerKTokens: input.listCentsPerKTokens!,
       costCentsPerKTokens: input.costCentsPerKTokens ?? Math.floor(input.listCentsPerKTokens! / 2),
       status,
+      dataClassLimit,
     })
-    changeLog(exchange, 'panel.model.upsert', 'model', model.id, model.slug, status === 'online' ? '上线' : '下线')
+    changeLog(exchange, 'panel.model.upsert', 'model', model.id, model.slug, `${status === 'online' ? '上线' : '下线'}，分级上限=${dataClassLimit}`)
     return maskedModel(model)
   })
 

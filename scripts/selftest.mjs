@@ -4951,7 +4951,315 @@ try {
     await new Promise((resolve) => sim.close(resolve))
   }
 
-  // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
+  // ================================================================ IAW 交接批次（docs/handoff-iaw-gaps-to-main.md 2026-09-11）
+  // 批次共享主体（模块顶层声明，跨分节复用）：根组织 / 成员账号 / 仅 console.login 的机器凭证
+  const iawRootOrg = (await api('GET', '/api/iam/orgs', { token: admin })).data.find((org) => org.parentId === null)
+  // 成员挂 mfg 部门绑定的组织（面板组织子树范围语义：通知/面板可见性同源）
+  const iawMfgOrgId = (await api('GET', '/api/panel/depts', { token: admin })).data.depts.find((dept) => dept.id === 'mfg')?.orgId
+  const iawMemberOrgId = iawMfgOrgId ?? iawRootOrg.id
+  const iawMemberRole = (await api('GET', '/api/iam/roles', { token: admin })).data.roles.find((role) => role.code === 'member')
+  const iawMemberInit = await api('POST', '/api/iam/users', { token: admin, body: { username: 'iaw_member', displayName: 'IAW 成员', orgId: iawMemberOrgId, roleIds: [iawMemberRole.id] } })
+  const iawMemberInitPassword = iawMemberInit.data?.initialPassword ?? 'Ybk@2026'
+  const iawMemberToken = (await api('POST', '/api/auth/login', { body: { username: 'iaw_member', password: iawMemberInitPassword } })).data.token
+  const iawCred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'iaw-no-panel', refType: 'external', scopes: ['console.login'] } })
+  const iawMachine = (await api('POST', '/api/auth/client-credentials', { body: { clientId: iawCred.data.clientId, clientSecret: iawCred.data.clientSecret } })).data.token
+
+  section('IAW 4-1/4-2：usage 成本摘要与反馈聚合（面板度量驾驶舱数据源）')
+  {
+    const iawAdminSummary = await api('GET', '/api/usage/summary?window=today', { token: admin })
+    check('4-1：管理员查摘要（scope=platform，cost_cents/byResource 齐备）',
+      iawAdminSummary.ok && iawAdminSummary.data.scope === 'platform' && iawAdminSummary.data.window === 'today'
+      && Number.isFinite(iawAdminSummary.data.cost_cents) && Array.isArray(iawAdminSummary.data.byResource)
+      && Number.isFinite(iawAdminSummary.data.input_tokens) && Number.isFinite(iawAdminSummary.data.output_tokens),
+      JSON.stringify({ scope: iawAdminSummary.data?.scope, cost: iawAdminSummary.data?.cost_cents }))
+    const iawMonth = await api('GET', '/api/usage/summary?window=month', { token: admin })
+    check('4-1：month 窗口边界为当月 1 日（UTC 口径）',
+      iawMonth.ok && iawMonth.data.from === `${new Date().toISOString().slice(0, 7)}-01T00:00:00.000Z` && iawMonth.data.window === 'month',
+      JSON.stringify({ from: iawMonth.data?.from }))
+    const iawMemberSummary = await api('GET', '/api/usage/summary?window=today&org=other-org', { token: iawMemberToken })
+    check('4-1：panel.read 成员强制收敛自身组织（传入 org=other 被忽略，scope=self-org）',
+      iawMemberSummary.ok && iawMemberSummary.data.scope === 'self-org' && iawMemberSummary.data.org === iawMemberOrgId,
+      JSON.stringify({ scope: iawMemberSummary.data?.scope, org: iawMemberSummary.data?.org }))
+    const iawDenied = await api('GET', '/api/usage/summary', { token: iawMachine })
+    check('4-1：无 panel.read 主体被拒 403', iawDenied.status === 403, String(iawDenied.status))
+
+    // 4-2：一组全新 up/down 反馈 → 聚合口径与采纳率
+    const fbUp = await api('POST', '/api/usage/feedback', { token: iawMemberToken, body: { resource: 'panel:mfg.qb01', messageId: 'iaw-msg-up-1', score: 'up' } })
+    const fbDown = await api('POST', '/api/usage/feedback', { token: iawMemberToken, body: { resource: 'panel:mfg.qb01', messageId: 'iaw-msg-down-1', score: 'down' } })
+    check('4-2：反馈落账（零价快照 up/down 各一条）', fbUp.ok && fbDown.ok, JSON.stringify({ up: fbUp.error, down: fbDown.error }))
+    await api('POST', '/api/usage/feedback', { token: iawMemberToken, body: { resource: 'panel:mfg.qb01', messageId: 'iaw-msg-up-2', score: 'up' } })
+    const fbReplayIaw = await api('POST', '/api/usage/feedback', { token: iawMemberToken, body: { resource: 'panel:mfg.qb01', messageId: 'iaw-msg-up-1', score: 'up' } })
+    check('4-2：同键重放幂等（不重复计数）', fbReplayIaw.ok && fbReplayIaw.data.event_id === fbUp.data.event_id)
+    const fbStats = await api('GET', '/api/usage/feedback-stats?days=7', { token: iawMemberToken })
+    const iawRow = (fbStats.data?.byResource ?? []).find((row) => row.resource === 'panel:mfg.qb01')
+    check('4-2：采纳率聚合（自测行 up=2/down=1，adoptionRate≈0.667，scope 收敛自身组织）',
+      fbStats.ok && fbStats.data.scope === 'self-org' && iawRow && iawRow.up === 2 && iawRow.down === 1
+      && Math.abs(iawRow.adoptionRate - 2 / 3) < 0.001 && fbStats.data.adoptionRate > 0 && fbStats.data.adoptionRate <= 1,
+      JSON.stringify({ up: iawRow?.up, down: iawRow?.down, rate: iawRow?.adoptionRate, global: fbStats.data.adoptionRate }))
+    const fbStatsAdmin = await api('GET', '/api/usage/feedback-stats?days=7', { token: admin })
+    check('4-2：usage.read 主体可跨组织聚合（scope=platform 且含同资源行）',
+      fbStatsAdmin.ok && fbStatsAdmin.data.scope === 'platform'
+      && fbStatsAdmin.data.byResource.some((row) => row.resource === 'panel:mfg.qb01' && row.up >= 2))
+  }
+
+  section('IAW 5-1/5-2：结论级证据锚点 + 场景维度审计时间线')
+  {
+    const evPost = await api('POST', '/api/audit/evidence', { token: iawMemberToken, body: {
+      sceneCode: 'QB01-G-4-1', messageId: 'iaw-msg-ev-1', subject: 'user:iaw_member',
+      anchors: [
+        { kind: 'dataset', id: 'ds_selftest_a', name: '自测数据集A', qualityScore: 92 },
+        { kind: 'query', id: 'q-77', timeWindow: { from: '2026-09-01', to: '2026-09-11' }, hitRows: 42 },
+      ],
+    } })
+    check('5-1：证据登记（2 锚点落库发 id，panel.write）', evPost.ok && evPost.data.anchors.length === 2, JSON.stringify(evPost.error))
+    const evGet = await api('GET', `/api/audit/evidence/${evPost.data.id}`, { token: iawMemberToken })
+    check('5-1：证据反查（锚点/时间窗/命中行数原样可读）',
+      evGet.ok && evGet.data.anchors[1].hitRows === 42 && evGet.data.anchors[0].qualityScore === 92 && evGet.data.sceneCode === 'QB01-G-4-1')
+    const ev404 = await api('GET', '/api/audit/evidence/evd_not_exist', { token: iawMemberToken })
+    check('5-1：不存在的证据 404', ev404.status === 404, String(ev404.status))
+    const evBad = await api('POST', '/api/audit/evidence', { token: iawMemberToken, body: { anchors: [{ kind: 'bogus', id: 'x' }] } })
+    check('5-1：非法锚点 kind 被拒 400', !evBad.ok && /kind 非法/.test(evBad.error.message), JSON.stringify(evBad.error))
+    const evMachineDenied = await api('POST', '/api/audit/evidence', { token: iawMachine, body: { anchors: [{ kind: 'doc', id: 'd1' }] } })
+    check('5-1：无 panel.write 主体登记被拒 403', evMachineDenied.status === 403, String(evMachineDenied.status))
+
+    // 5-2：任务带 sceneCode 创建/流转 → 审计时间线可反查
+    const tlTask = await api('POST', '/api/panel/mfg/tasks', { token: admin, body: { title: 'IAW 时间线自测任务', lane: 'doing', sceneCode: 'QB01-G-4-2' } })
+    check('5-2：带场景任务创建', tlTask.ok && tlTask.data.task.sceneCode === 'QB01-G-4-2', JSON.stringify(tlTask.error))
+    const tlMove = await api('POST', `/api/panel/tasks/${tlTask.data.task.id}/transition`, { token: admin, body: { lane: 'done' } })
+    check('5-2：任务流转', tlMove.ok, JSON.stringify(tlMove.error))
+    const tl = await api('GET', '/api/audit/timeline?sceneCode=QB01-G-4-2', { token: iawMemberToken })
+    const tlActions = (tl.data?.items ?? []).map((item) => item.action)
+    check('5-2：场景时间线含 create+transition（panel.read 可读，倒序）',
+      tl.ok && tlActions.includes('panel.task.create') && tlActions.includes('panel.task.transition')
+      && tl.data.items[0].at >= tl.data.items[tl.data.items.length - 1].at,
+      JSON.stringify(tlActions))
+    const tlEmpty = await api('GET', '/api/audit/timeline?sceneCode=QB01-NOPE-0-0', { token: iawMemberToken })
+    check('5-2：无痕场景时间线为空（诚实空集）', tlEmpty.ok && tlEmpty.data.total === 0 && tlEmpty.data.items.length === 0)
+    const tlDenied = await api('GET', '/api/audit/timeline', { token: iawMachine })
+    check('5-2：无 panel.read 主体被拒 403', tlDenied.status === 403, String(tlDenied.status))
+  }
+
+  section('IAW 8-1：通知中心持久化（任务/告警落账 + since/已读游标）')
+  {
+    const before = await api('GET', '/api/notifications', { token: iawMemberToken })
+    const baselineUnread = before.data?.unread ?? 0
+    // 任务事件 → 部门绑定组织范围通知（mfg 绑定组织后组织子树成员可见）
+    const ntfTask = await api('POST', '/api/panel/mfg/tasks', { token: admin, body: { title: 'IAW 通知自测任务', lane: 'todo' } })
+    check('8-1：触发事件（任务创建→流转产生 panel.task.updated）', ntfTask.ok, JSON.stringify(ntfTask.error))
+    await api('POST', `/api/panel/tasks/${ntfTask.data.task.id}/transition`, { token: admin, body: { lane: 'doing' } })
+    const after = await api('GET', '/api/notifications', { token: iawMemberToken })
+    const taskNotif = (after.data?.items ?? []).find((item) => item.type === 'task' && /IAW 通知自测任务/.test(item.title))
+    check('8-1：任务通知持久化并按组织范围可见（unread 递增）',
+      after.ok && Boolean(taskNotif) && after.data.unread >= baselineUnread + 1,
+      JSON.stringify({ count: after.data?.items?.length, unread: after.data?.unread }))
+    // 告警事件（全局范围）：告警规则 threshold=0 + 一次越权 → audit.authz.denied → 告警 → 通知
+    const ruleIaw = await api('POST', '/api/audit/alert-rules', { token: admin, body: { name: 'IAW 通知自测规则', metric: 'permission_denied', threshold: 0, severity: 'warning' } })
+    const deniedHit = await api('POST', '/api/iam/orgs', { token: iawMachine, body: { name: 'IAW 通知触发越权' } })
+    check('8-1：越权探针（403 触发 permission_denied 链路）', deniedHit.status === 403 && ruleIaw.ok, JSON.stringify({ denied: deniedHit.status }))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const afterAlert = await api('GET', '/api/notifications', { token: iawMemberToken })
+    check('8-1：告警通知落账（type=alert，全局范围）',
+      afterAlert.ok && (afterAlert.data.items ?? []).some((item) => item.type === 'alert' && /IAW 通知自测规则/.test(item.title)),
+      JSON.stringify(afterAlert.data?.items?.slice(0, 2).map((item) => item.title)))
+    // 已读游标 + since 增量
+    const markRead = await api('POST', '/api/notifications/read-cursor', { token: iawMemberToken, body: {} })
+    check('8-1：已读游标推进', markRead.ok && markRead.data.unread === 0, JSON.stringify(markRead.data))
+    const afterRead = await api('GET', '/api/notifications', { token: iawMemberToken })
+    check('8-1：游标后 unread=0 且历史可见（游标语义非删除）', afterRead.ok && afterRead.data.unread === 0 && afterRead.data.items.length >= 1)
+    const sinceNow = await api('GET', '/api/notifications?since=' + encodeURIComponent(markRead.data.readCursor), { token: iawMemberToken })
+    check('8-1：since 增量拉取（游标后零新增）', sinceNow.ok && sinceNow.data.items.length === 0, JSON.stringify(sinceNow.data?.items?.length))
+    const machineNotif = await api('GET', '/api/notifications', { token: iawMachine })
+    check('8-1：机器主体无个人通知面（空集诚实返回）', machineNotif.ok && machineNotif.data.items.length === 0 && /机器主体/.test(machineNotif.data.note ?? ''))
+  }
+
+  section('IAW 1-1..1-4：模型渠道分级路由 / 降级链 / 遥测 / 预算熔断')
+  {
+    // 双 stub：主渠道恒 500，备渠道正常应答
+    const gwPrimaryStub = createServer((req, res) => {
+      if ((req.url ?? '').endsWith('/chat/completions')) { res.writeHead(500).end('{"error":"primary down"}'); return }
+      res.writeHead(404).end('{}')
+    })
+    const gwBackupStub = createServer((req, res) => {
+      if ((req.url ?? '').endsWith('/chat/completions')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ choices: [{ message: { content: '降级链自测：备用渠道应答' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }))
+        return
+      }
+      res.writeHead(404).end('{}')
+    })
+    await new Promise((resolve) => gwPrimaryStub.listen(0, '127.0.0.1', resolve))
+    await new Promise((resolve) => gwBackupStub.listen(0, '127.0.0.1', resolve))
+    try {
+      const primaryPort = gwPrimaryStub.address().port
+      const backupPort = gwBackupStub.address().port
+      // 1-1 分级：public 上限渠道 + secret 数据 → 直接拒绝（选择器锁死+原因）
+      const regPub = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'iaw-pub', displayName: '公开级渠道', endpoint: `http://127.0.0.1:${backupPort}/v1`, apiKey: 'stub', costCentsPerKTokens: 0, dataClassLimit: 'public' } })
+      const regSecret = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'iaw-scr', displayName: '秘密级渠道', endpoint: `http://127.0.0.1:${primaryPort}/v1`, apiKey: 'stub', costCentsPerKTokens: 1, dataClassLimit: 'secret' } })
+      const regSecretOk = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'iaw-scrok', displayName: '秘密级可用渠道', endpoint: `http://127.0.0.1:${backupPort}/v1`, apiKey: 'stub', costCentsPerKTokens: 1, dataClassLimit: 'secret' } })
+      const regBackup = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'iaw-bkp', displayName: '内部级备用渠道', endpoint: `http://127.0.0.1:${backupPort}/v1`, apiKey: 'stub', costCentsPerKTokens: 1 } })
+      check('1-1：四渠道登记（public/secret-500/secret-ok/默认 internal）', regPub.ok && regSecret.ok && regSecretOk.ok && regBackup.ok, JSON.stringify({ pub: regPub.error, scr: regSecret.error, scrok: regSecretOk.error, bkp: regBackup.error }))
+      const gradedDeny = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'iaw-pub', messages: [{ role: 'user', content: 'x' }], orgId: iawRootOrg.id, dataClass: 'secret' } })
+      check('1-1：秘密数据 → 公开级渠道被锁死拒绝（错误含原因）',
+        gradedDeny.status === 400 && /数据分级越界/.test(gradedDeny.error.message) && /锁死/.test(gradedDeny.error.message),
+        JSON.stringify(gradedDeny.error))
+      const gradedAllow = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'iaw-scrok', messages: [{ role: 'user', content: '分级内调用' }], orgId: iawRootOrg.id, dataClass: 'secret' } })
+      check('1-1：秘密数据 → 秘密级渠道放行（真实应答）', gradedAllow.ok && gradedAllow.data.content.includes('备用渠道应答'), JSON.stringify(gradedAllow.error))
+
+      // 1-2 降级链：主(500) → 备(ok)，manual=true
+      const grpPut = await api('PUT', '/api/modelgw/channel-groups', { token: admin, body: { slug: 'iaw-grp', name: 'IAW 自测渠道组', primary: 'iaw-scr', backup1: 'iaw-bkp', manual: true, stepTimeoutMs: 2000 } })
+      check('1-2：渠道组登记（主/备/转人工）', grpPut.ok && grpPut.data.primary === 'iaw-scr' && grpPut.data.backup1 === 'iaw-bkp' && grpPut.data.manual === true, JSON.stringify(grpPut.error))
+      const fbCall = await api('POST', '/api/modelgw/channel-groups/iaw-grp/invoke', { token: admin, body: { prompt: '降级链自测' } })
+      check('1-2：主渠道 5xx → 备渠道自动接管（真实应答 + degradations 留痕）',
+        fbCall.ok && fbCall.data.ok === true && fbCall.data.model === 'iaw-bkp' && Array.isArray(fbCall.data.degradations) && fbCall.data.degradations.length === 1
+        && /HTTP 500/.test(fbCall.data.degradations[0].reason),
+        JSON.stringify({ model: fbCall.data?.model, degradations: fbCall.data?.degradations }))
+      // 1-3 遥测：主渠道失败 1 次 → 可用率下降；ttft 诚实缺列
+      const telPrimary = await api('GET', '/api/modelgw/iaw-scr/telemetry?window=7d', { token: admin })
+      check('1-3：主渠道遥测（failures>=1，availability<1，ttftMs=null 诚实缺列）',
+        telPrimary.ok && telPrimary.data.failures >= 1 && telPrimary.data.availability !== null && telPrimary.data.availability < 1
+        && telPrimary.data.ttftMs === null && /TTFT/.test(telPrimary.data.note),
+        JSON.stringify({ inv: telPrimary.data?.invocations, fail: telPrimary.data?.failures, avail: telPrimary.data?.availability }))
+      const telBackup = await api('GET', '/api/modelgw/iaw-bkp/telemetry?window=7d', { token: admin })
+      check('1-3：备用渠道遥测（degraded 标记 + TPS 代理口径）',
+        telBackup.ok && telBackup.data.invocations >= 1 && telBackup.data.degradedInvocations >= 1
+        && (telBackup.data.avgTps === null || telBackup.data.avgTps > 0),
+        JSON.stringify({ inv: telBackup.data?.invocations, deg: telBackup.data?.degradedInvocations }))
+      const tel404 = await api('GET', '/api/modelgw/iaw-none/telemetry', { token: admin })
+      check('1-3：未登记模型遥测 404', tel404.status === 404, String(tel404.status))
+
+      // 1-4 预算：org 级日预算 1 分 + block → 熔断；摘要带预算进度
+      const budgetPut = await api('PUT', '/api/modelgw/budgets', { token: admin, body: { orgId: iawRootOrg.id, dailyLimitCents: 1, monthlyLimitCents: 100, warnRatio: 0.5, action: 'block' } })
+      check('1-4：预算登记（日 1 分 block / 月 100 分）', budgetPut.ok && budgetPut.data.dailyLimitCents === 1, JSON.stringify(budgetPut.error))
+      const budgetBlocked = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'iaw-scr', messages: [{ role: 'user', content: '预算内调用' }], orgId: iawRootOrg.id } })
+      check('1-4：日预算触达 → 调用前熔断（错误含「预算熔断」）',
+        budgetBlocked.status === 400 && /预算熔断/.test(budgetBlocked.error.message), JSON.stringify(budgetBlocked.error))
+      const summaryBudget = await api('GET', `/api/usage/summary?window=today&org=${encodeURIComponent(iawRootOrg.id)}`, { token: admin })
+      check('1-4：成本摘要携带预算进度（budget.daily.limitCents=1）',
+        summaryBudget.ok && summaryBudget.data.budget && summaryBudget.data.budget.daily
+        && summaryBudget.data.budget.daily.limitCents === 1 && summaryBudget.data.budget.daily.breached === true,
+        JSON.stringify(summaryBudget.data?.budget))
+      // 放宽预算（action=warn + 大额），避免影响后续分节
+      const budgetRelax = await api('PUT', '/api/modelgw/budgets', { token: admin, body: { orgId: iawRootOrg.id, dailyLimitCents: 100000, monthlyLimitCents: 1000000, warnRatio: 0.99, action: 'warn' } })
+      check('1-4：预算放宽（upsert 同键覆盖）', budgetRelax.ok && budgetRelax.data.action === 'warn', JSON.stringify(budgetRelax.error))
+    } finally {
+      await new Promise((resolve) => gwPrimaryStub.close(resolve))
+      await new Promise((resolve) => gwBackupStub.close(resolve))
+    }
+  }
+
+  section('IAW 6-1：场景级授权策略（scene ABAC）与 iam.check 自检')
+  {
+    const iawMemberId = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('iaw_member'), { token: admin })).data.users.find((user) => user.username === 'iaw_member').id
+    const polPut = await api('PUT', '/api/iam/scene-policies', { token: admin, body: {
+      sceneCode: 'QB01-G-4-1',
+      entries: [
+        { principalType: 'role', principalId: '*', actions: ['scene.export'], effect: 'deny' },
+        { principalType: 'user', principalId: iawMemberId, actions: ['*'], effect: 'allow' },
+      ],
+      note: 'IAW 自测策略：全员禁导出，该成员全放行',
+    } })
+    check('6-1：策略登记（deny 导出 + 成员 allow，v1）', polPut.ok && polPut.data.version === 1, JSON.stringify(polPut.error))
+    const versionConflict = await api('PUT', '/api/iam/scene-policies', { token: admin, body: { sceneCode: 'QB01-G-4-1', expectedVersion: 99, entries: [{ principalType: 'role', principalId: '*', actions: ['x'], effect: 'allow' }] } })
+    check('6-1：version 乐观锁冲突被拒 400', versionConflict.status === 400 && /版本冲突/.test(versionConflict.error.message), JSON.stringify(versionConflict.error))
+    const checkAllow = await api('POST', '/api/iam/scene-authz/check', { token: iawMemberToken, body: { sceneCode: 'QB01-G-4-1', action: 'panel.read' } })
+    check('6-1：iam.check allow 命中（成员 allow 条目）', checkAllow.ok && checkAllow.data.decision === 'allow', JSON.stringify(checkAllow.data))
+    const checkDeny = await api('POST', '/api/iam/scene-authz/check', { token: iawMemberToken, body: { sceneCode: 'QB01-G-4-1', action: 'scene.export' } })
+    check('6-1：iam.check deny 优先命中（全员禁导出）', checkDeny.ok && checkDeny.data.decision === 'deny', JSON.stringify(checkDeny.data))
+    const checkDefault = await api('POST', '/api/iam/scene-authz/check', { token: iawMemberToken, body: { sceneCode: 'QB01-NOPE-9-9', action: 'panel.read' } })
+    check('6-1：未配置策略场景回落 default（存量 RBAC 口径不变）', checkDefault.ok && checkDefault.data.decision === 'default', JSON.stringify(checkDefault.data))
+    const polList = await api('GET', '/api/iam/scene-policies?sceneCode=QB01-G-4-1', { token: iawMemberToken })
+    check('6-1：member 无 iam.org.read 策略列表被拒 403', polList.status === 403, String(polList.status))
+    const machineCheck = await api('POST', '/api/iam/scene-authz/check', { token: iawMachine, body: { sceneCode: 'QB01-G-4-1', action: 'panel.read', userId: iawMemberId } })
+    check('6-1：机器代查被拒 403（无 iam.user.read）', machineCheck.status === 403, String(machineCheck.status))
+    const polDel = await api('DELETE', `/api/iam/scene-policies/${polPut.data.id}`, { token: admin })
+    check('6-1：策略删除（回滚自测环境）', polDel.ok && polDel.data.deleted === true)
+    const afterDel = await api('POST', '/api/iam/scene-authz/check', { token: iawMemberToken, body: { sceneCode: 'QB01-G-4-1', action: 'scene.export' } })
+    check('6-1：删除后回落 default（fail-closed 随策略移除）', afterDel.ok && afterDel.data.decision === 'default')
+  }
+
+  section('IAW 2-1..2-4：数据要素域（数据集登记/质量分/血缘/指标字典仲裁）')
+  {
+    const dsPut = await api('PUT', '/api/resource/datasets', { token: admin, body: { code: 'ds_selftest_a', name: '自测数据集A', sourceSystem: '自测台账', classification: 'secret', refreshFrequency: '每日', sceneCodes: ['QB01-G-4-1', 'QB01-G-4-2'] } })
+    check('2-1：数据集登记（分级/来源/刷新/双场景）', dsPut.ok && dsPut.data.classification === 'secret' && dsPut.data.sceneCodes.length === 2, JSON.stringify(dsPut.error))
+    await api('PUT', '/api/resource/datasets', { token: admin, body: { code: 'ds_selftest_a', name: '自测数据集A（改）', sourceSystem: '自测台账', classification: 'internal', sceneCodes: ['QB01-G-4-1'] } })
+    const dsList = await api('GET', '/api/resource/datasets?scene=QB01-G-4-1', { token: admin })
+    const dsRow = (dsList.data?.datasets ?? []).find((item) => item.code === 'ds_selftest_a')
+    check('2-1：按场景过滤 + upsert 幂等（sceneCount=1）', dsList.ok && Boolean(dsRow) && dsRow.sceneCount === 1 && dsRow.classification === 'internal', JSON.stringify(dsRow))
+    const dsQuality = await api('PUT', '/api/resource/datasets/ds_selftest_a/quality', { token: admin, body: { completeness: 90, accuracy: 80, timeliness: 100, consistency: 70 } })
+    check('2-2：质量分四维登记（等权 overall=85）', dsQuality.ok && dsQuality.data.quality.overall === 85, JSON.stringify(dsQuality.error))
+    const dsBadQuality = await api('PUT', '/api/resource/datasets/ds_selftest_a/quality', { token: admin, body: { completeness: 120, accuracy: 80, timeliness: 100, consistency: 70 } })
+    check('2-2：越界质量分被拒 400', dsBadQuality.status === 400 && /0-100/.test(dsBadQuality.error.message), JSON.stringify(dsBadQuality.error))
+    await api('PUT', '/api/resource/datasets', { token: admin, body: { code: 'ds_selftest_b', name: '自测数据集B（派生）', sourceSystem: '自测台账', classification: 'internal' } })
+    const lineagePut = await api('PUT', '/api/resource/lineage', { token: admin, body: { derived: 'ds_selftest_b', source: 'ds_selftest_a' } })
+    check('2-3：血缘边登记（派生→源）', lineagePut.ok && lineagePut.data.toId === 'ds_selftest_a', JSON.stringify(lineagePut.error))
+    const lineageUp = await api('GET', '/api/resource/lineage?dataset=ds_selftest_b', { token: admin })
+    const lineageDown = await api('GET', '/api/resource/lineage?dataset=ds_selftest_a', { token: admin })
+    check('2-3：反向追溯（B 的 upstream=A，A 的 downstream=B）',
+      lineageUp.ok && lineageUp.data.upstream.some((item) => item.code === 'ds_selftest_a')
+      && lineageDown.ok && lineageDown.data.downstream.some((item) => item.code === 'ds_selftest_b'),
+      JSON.stringify({ up: lineageUp.data?.upstream, down: lineageDown.data?.downstream }))
+    // 2-4 指标字典：口径冲突留账 + 仲裁
+    const mDef1 = await api('PUT', '/api/resource/metrics/gm_selftest/definitions', { token: admin, body: { name: '毛利额（口径一）', unit: '元', description: '收入-成本（含税口径）' } })
+    const mDefSame = await api('PUT', '/api/resource/metrics/gm_selftest/definitions', { token: admin, body: { name: '毛利额（口径一）', unit: '元', description: '收入-成本（含税口径）' } })
+    check('2-4：口径登记（首条 active；同内容幂等）', mDef1.ok && mDef1.data.definition.status === 'active' && mDefSame.data.definition.id === mDef1.data.definition.id)
+    const mDef2 = await api('PUT', '/api/resource/metrics/gm_selftest/definitions', { token: admin, body: { name: '毛利额（口径二）', unit: '元', description: '收入-成本（不含税口径）' } })
+    check('2-4：口径冲突并存（新定义 superseded 待仲裁）', mDef2.ok && mDef2.data.conflict === true && mDef2.data.definition.status === 'superseded', JSON.stringify(mDef2.data))
+    const mList = await api('GET', '/api/resource/metrics/gm_selftest/definitions', { token: admin })
+    check('2-4：定义列表双条（按时间倒序）', mList.ok && mList.data.definitions.length === 2 && mList.data.definitions[0].id === mDef2.data.definition.id)
+    const mArb = await api('POST', '/api/resource/metrics/gm_selftest/arbitrate', { token: admin, body: { definitionId: mDef2.data.definition.id } })
+    check('2-4：仲裁定版（口径二 active，取代 1 条）', mArb.ok && mArb.data.active.status === 'active' && mArb.data.superseded === 1, JSON.stringify(mArb.data))
+    const dsWriteDenied = await api('PUT', '/api/resource/datasets', { token: iawMachine, body: { code: 'ds_x', name: 'x', sourceSystem: 'x', classification: 'public' } })
+    check('2-1：无 resource.dataset.write 被拒 403', dsWriteDenied.status === 403, String(dsWriteDenied.status))
+  }
+
+  section('IAW 3-1..3-4：事务流引擎（模板库 / TF 编排 / 步骤状态机 / SLA 进度）')
+  {
+    const tplPut = await api('PUT', '/api/flow/templates', { token: admin, body: {
+      code: 'tpl_iaw_selftest', name: 'IAW 自测模板', sceneCode: 'QB01-G-4-1', slaMinutes: 120,
+      steps: [
+        { key: 's1', name: '现场复核', actorType: 'human' },
+        { key: 's2', name: 'Agent 诊断', actorType: 'agent', assignee: '设备运维 Agent' },
+        { key: 's3', name: '网关归档', actorType: 'gateway' },
+      ],
+      contextPack: { kpiRef: '一次装机合格率', window: '7d' },
+    } })
+    check('3-2：模板登记（3 步 + SLA + 上下文包）', tplPut.ok && tplPut.data.steps.length === 3, JSON.stringify(tplPut.error))
+    const tplList = await api('GET', '/api/flow/templates?sceneCode=QB01-G-4-1', { token: iawMemberToken })
+    check('3-2：按场景查模板（panel 成员 flow.read 可读）', tplList.ok && tplList.data.templates.some((item) => item.code === 'tpl_iaw_selftest'))
+    const tplDenied = await api('PUT', '/api/flow/templates', { token: iawMemberToken, body: { code: 'tpl_x', name: 'x', steps: [{ key: 'a', name: 'a', actorType: 'human' }] } })
+    check('3-2：member 无 flow.admin 被拒 403', tplDenied.status === 403, String(tplDenied.status))
+    // 实例化：模板复制推广 + 上下文包自动注入 + SLA 折算 dueAt
+    const flowCreate = await api('POST', '/api/flow/flows', { token: iawMemberToken, body: { name: 'IAW 自测事务流', templateCode: 'tpl_iaw_selftest', sceneCode: 'QB01-G-4-1', dept: 'mfg' } })
+    check('3-1/3-2：TF 模板实例化（首步 running + contextPack 注入 + dueAt 折算）',
+      flowCreate.ok && flowCreate.data.steps[0].status === 'running' && flowCreate.data.steps[1].status === 'pending'
+      && flowCreate.data.contextPack && flowCreate.data.contextPack.kpiRef === '一次装机合格率'
+      && Boolean(flowCreate.data.dueAt) && /^tf_/.test(flowCreate.data.code),
+      JSON.stringify(flowCreate.error))
+    const flowId = flowCreate.data.id
+    const wrongOrder = await api('POST', `/api/flow/flows/${flowId}/steps/s2/transition`, { token: iawMemberToken, body: { action: 'complete' } })
+    check('3-1：步骤状态机拒绝跳序（pending 不可 complete）', wrongOrder.status === 400 && /不允许/.test(wrongOrder.error.message), JSON.stringify(wrongOrder.error))
+    const s1 = await api('POST', `/api/flow/flows/${flowId}/steps/s1/transition`, { token: iawMemberToken, body: { action: 'complete', note: '复核完成' } })
+    check('3-1：s1 complete → s2 自动 running', s1.ok && s1.data.completed === false && s1.data.flow.currentStep === 's2', JSON.stringify(s1.data?.flow?.steps))
+    const s2 = await api('POST', `/api/flow/flows/${flowId}/steps/s2/transition`, { token: iawMemberToken, body: { action: 'complete' } })
+    check('3-1：s2 complete → s3 自动 running', s2.ok && s2.data.flow.currentStep === 's3')
+    const s3 = await api('POST', `/api/flow/flows/${flowId}/steps/s3/transition`, { token: iawMemberToken, body: { action: 'skip', note: '网关缺位跳过' } })
+    check('3-1：s3 skip → TF completed（进度 100）', s3.ok && s3.data.completed === true && s3.data.flow.status === 'completed' && s3.data.flow.progress === 100, JSON.stringify({ status: s3.data?.flow?.status, progress: s3.data?.flow?.progress }))
+    const flowGet = await api('GET', `/api/flow/flows/${flowId}`, { token: iawMemberToken })
+    check('3-3/3-4：TF 详情（elapsedMinutes/finishedAt/步骤时间轴齐备，甘特数据源）',
+      flowGet.ok && flowGet.data.status === 'completed' && Number.isFinite(flowGet.data.elapsedMinutes)
+      && flowGet.data.steps.every((step) => Boolean(step.startedAt)) && flowGet.data.steps.every((step) => Boolean(step.finishedAt) || step.status === 'running'),
+      JSON.stringify({ status: flowGet.data?.status }))
+    // 自由编排 + 取消
+    const flowAdhoc = await api('POST', '/api/flow/flows', { token: admin, body: { name: 'IAW 自由编排流', steps: [{ key: 'a', name: '步骤A', actorType: 'human' }], sceneCode: 'QB01-G-4-2' } })
+    const flowCancel = await api('POST', `/api/flow/flows/${flowAdhoc.data.id}/cancel`, { token: admin, body: { note: '自测取消' } })
+    check('3-1：自由编排 + 取消（status=cancelled）', flowAdhoc.ok && flowCancel.ok && flowCancel.data.status === 'cancelled', JSON.stringify(flowCancel.error))
+    const afterCancel = await api('POST', `/api/flow/flows/${flowAdhoc.data.id}/steps/a/transition`, { token: admin, body: { action: 'start' } })
+    check('3-1：已结束 TF 步骤不可流转', afterCancel.status === 400 && /已结束/.test(afterCancel.error.message), JSON.stringify(afterCancel.error))
+    const flowList = await api('GET', '/api/flow/flows?sceneCode=QB01-G-4-1&status=completed', { token: iawMemberToken })
+    check('3-1：TF 列表按场景+状态过滤（视图字段 progress/slaBreached 随行）',
+      flowList.ok && flowList.data.flows.some((item) => item.id === flowId && Number.isFinite(item.progress) && item.slaBreached === false),
+      JSON.stringify(flowList.data?.flows?.length))
+  }
 
   // ================================================================ 收尾终检：凭证零进平台（红线一，T-24）
   section('凭证零进平台（红线一 · T-24 全目录扫描）')

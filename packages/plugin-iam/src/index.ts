@@ -199,6 +199,7 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'iam.user.freeze', label: '冻结/注销账号', group: '组织账号' },
   { point: 'iam.role.write', label: '管理角色', group: '组织账号' },
   { point: 'iam.connector.write', label: '管理三方接入', group: '组织账号' },
+  { point: 'iam.scene.write', label: '管理场景级授权策略（场景 ABAC）', group: '组织账号' },
   { point: 'iam.roster.read', label: '读取全员名册（组织数据通道，接入应用拉取）', group: '组织账号' },
   { point: 'authn.principal.read', label: '查看身份/凭证', group: '统一认证' },
   { point: 'authn.principal.write', label: '管理机器凭证', group: '统一认证' },
@@ -237,9 +238,12 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'agent.write', label: '管理 Agent', group: 'Agent 本体' },
   { point: 'agent.approve', label: '审批 Agent 上线', group: 'Agent 本体' },
   { point: 'agent.offline', label: '下线 Agent', group: 'Agent 本体' },
+  { point: 'agent.a2a.invoke', label: 'A2A 跨运行时点名调用（IAW 7-1）', group: 'Agent 本体' },
   { point: 'app.read', label: '查看 AI 应用', group: 'AI 应用' },
   { point: 'app.write', label: '管理 AI 应用', group: 'AI 应用' },
   { point: 'app.offline', label: '下线 AI 应用', group: 'AI 应用' },
+  // 数据要素域（IAW 交接 2-1..2-4）：数据集登记/质量分/血缘/指标字典
+  { point: 'resource.dataset.write', label: '管理数据要素（数据集/质量分/血缘/指标字典）', group: '数据要素' },
   { point: 'audit.read', label: '查看审计日志', group: '审计' },
   { point: 'audit.rule.write', label: '管理告警规则', group: '审计' },
   { point: 'approval.read', label: '查看审批中心', group: '审批' },
@@ -266,14 +270,18 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'scenegraph.read', label: '查看行业场景图谱', group: '部门面板' },
   { point: 'scenegraph.activate', label: '管理行业授权激活（审批执行）', group: '部门面板' },
   { point: 'dingtalk.message.send', label: '钉钉桥接消息投递（群桥绑定/推送/回决回调）', group: '部门面板' },
+  // 事务流引擎（IAW 交接 3-1..3-4，宿主新域 flow）
+  { point: 'flow.read', label: '查看事务流（编排/模板/SLA）', group: '事务流' },
+  { point: 'flow.write', label: '事务流流转（创建实例/步骤推进/取消）', group: '事务流' },
+  { point: 'flow.admin', label: '管理事务流模板库', group: '事务流' },
 ]
 
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [
   { code: 'super_admin', name: '平台超级管理员', builtin: true, description: '拥有全部权限点', permissions: ['*'] },
   { code: 'org_admin', name: '组织管理员', builtin: true, description: '管理本组织账号与用户组', permissions: ['console.login', 'iam.*', 'approval.read'] },
-  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS/连接器资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'connector.*', 'approval.read'] },
+  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS/连接器资源与数据要素', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'connector.*', 'resource.dataset.write', 'approval.read'] },
   { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'agent.write', 'app.read', 'app.write', 'nas.read', 'connector.catalog.read', 'connector.connection.read', 'connector.invoke'] },
-  { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read', 'panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read'] },
+  { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read', 'panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read', 'flow.read', 'flow.write'] },
   { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'authn.oidc.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'nas.read', 'audit.read', 'approval.read', 'connector.runs.read', 'connector.connection.read'] },
 ]
 
@@ -283,19 +291,59 @@ export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedA
  * 重新比对（幂等），历史标记（connector-permissions-v1）仅作观测。
  */
 export const BUILTIN_ROLE_MIGRATION: Record<string, string[]> = {
-  resource_admin: ['connector.gateway.write', 'connector.catalog.read', 'connector.connection.read', 'connector.connection.write', 'connector.invoke', 'connector.permgroup.write', 'connector.runs.read'],
+  resource_admin: ['connector.gateway.write', 'connector.catalog.read', 'connector.connection.read', 'connector.connection.write', 'connector.invoke', 'connector.permgroup.write', 'connector.runs.read', 'resource.dataset.write', 'flow.admin'],
   // developer 补 agent.write：与 app.write 对称——开发者应能注册/提报更新 Agent（2026-08 修复"总是报没有 agent.write 权限"）
-  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke', 'agent.write', 'panel.read', 'scenegraph.read'],
+  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke', 'agent.write', 'panel.read', 'scenegraph.read', 'flow.read'],
   // auditor 补 nas.authz.read：审计员可查看 NAS 数据权限规则与判定留痕（dev-plan-nas-authz §2.3）
-  auditor: ['connector.runs.read', 'connector.connection.read', 'nas.authz.read', 'panel.read', 'scenegraph.read'],
+  auditor: ['connector.runs.read', 'connector.connection.read', 'nas.authz.read', 'panel.read', 'scenegraph.read', 'flow.read'],
   // 部门面板（review-dsh-agent-panel-v2 Phase 0）：业务成员=member 直用面板；org_admin 增配置与行业激活；
   // 存量库经迁移补点，新装库直接来自 BuiltinRoles 定义（两处必须同步）
-  member: ['panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read'],
-  org_admin: ['panel.read', 'panel.write', 'panel.task.write', 'panel.config.write', 'scenegraph.read', 'scenegraph.activate'],
+  member: ['panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read', 'flow.read', 'flow.write'],
+  org_admin: ['panel.read', 'panel.write', 'panel.task.write', 'panel.config.write', 'scenegraph.read', 'scenegraph.activate', 'flow.read', 'flow.write', 'flow.admin'],
 }
 
 /** 兼容别名：迁移通道创建时的历史命名（仅 connector 批次）。 */
 export const CONNECTOR_ROLE_MIGRATION = BUILTIN_ROLE_MIGRATION
+
+// ---------------------------------------------------------------------------
+// 场景级授权（IAW 交接 6-1：角色 L1-L5 × 场景 ABAC 细粒度）
+// ---------------------------------------------------------------------------
+
+/**
+ * 场景授权策略条目：按角色/用户 × 动作 × allow/deny 的 ABAC 规则行。
+ * action 键与权限点同形（panel.read/panel.task.write…）或业务自定义动作键（如 'scene.export'）；
+ * principalId='*' 为通配。
+ */
+export interface ScenePolicyEntry {
+  principalType: 'role' | 'user'
+  principalId: string
+  actions: string[]
+  effect: 'allow' | 'deny'
+}
+
+/**
+ * 场景授权策略：挂 sceneCode 维度（ScenegraphScene.code，如 QB01-A-2-5）。
+ * 判定语义（fail-closed）：场景无任何策略 → default（回落角色 RBAC 与部门范围权限，存量行为不变）；
+ * 有策略 → deny 条目优先命中即拒，allow 命中即放行，都不命中一律拒绝。
+ * version 乐观锁：并发编辑以 expectedVersion 对账（冲突抛错，先读后写）。
+ */
+export interface ScenePolicyRecord extends RecordBase {
+  sceneCode: string
+  /** 组织维度收敛（缺省=全组织通用策略）；同场景可按组织各挂一条。 */
+  orgId?: string
+  entries: ScenePolicyEntry[]
+  note?: string
+  version: number
+}
+
+export interface SceneCheckDecision {
+  /** default=场景未配置策略（回落 RBAC）；allow/deny=场景策略裁决。 */
+  decision: 'allow' | 'deny' | 'default'
+  reason: string
+  policyId?: string
+  sceneCode: string
+  action: string
+}
 
 // ---------------------------------------------------------------------------
 // 三方连接器接口
@@ -737,6 +785,104 @@ export class IamService extends Service {
       status: 'active',
       plan: 'standard',
     })
+  }
+
+  // -- 场景级授权（IAW 交接 6-1） ---------------------------------------------
+
+  scenePolicies(): Collection<ScenePolicyRecord> {
+    const collection = this.ctx.opsStorage.collection<ScenePolicyRecord>('iam:scenePolicies')
+    collection.uniqueOn('scene_org', (policy) => `${policy.sceneCode}|${policy.orgId ?? ''}`)
+    return collection
+  }
+
+  /**
+   * 登记场景授权策略（upsert by sceneCode+orgId，version 乐观锁）：
+   * expectedVersion 与存量 version 不一致时拒绝（并发编辑对账）；新建不带 expectedVersion。
+   */
+  upsertScenePolicy(input: { sceneCode: string; orgId?: string; entries: ScenePolicyEntry[]; note?: string; expectedVersion?: number }): ScenePolicyRecord {
+    if (!input.sceneCode?.trim()) throw new Error('场景策略 sceneCode 必填（如 QB01-A-2-5）')
+    if (!Array.isArray(input.entries) || input.entries.length === 0) throw new Error('场景策略 entries 至少一条（空策略请用 DELETE 移除）')
+    for (const entry of input.entries) {
+      if (!['role', 'user'].includes(entry.principalType)) throw new Error(`策略条目 principalType 非法：${entry.principalType}（role/user）`)
+      if (!entry.principalId?.trim()) throw new Error('策略条目 principalId 必填（roleId/userId/*）')
+      if (!Array.isArray(entry.actions) || entry.actions.length === 0) throw new Error('策略条目 actions 至少一项')
+      if (!['allow', 'deny'].includes(entry.effect)) throw new Error(`策略条目 effect 非法：${entry.effect}（allow/deny）`)
+      if (entry.principalType === 'role' && entry.principalId !== '*' && !this.roles().get(entry.principalId)) {
+        throw new Error(`策略条目引用的角色不存在：${entry.principalId}`)
+      }
+      if (entry.principalType === 'user' && entry.principalId !== '*' && !this.users().get(entry.principalId)) {
+        throw new Error(`策略条目引用的用户不存在：${entry.principalId}`)
+      }
+    }
+    const existing = this.scenePolicies().findOne((item) => item.sceneCode === input.sceneCode && (item.orgId ?? '') === (input.orgId ?? ''))
+    if (existing) {
+      if (input.expectedVersion !== undefined && input.expectedVersion !== existing.version) {
+        throw new Error(`场景策略版本冲突：当前 v${existing.version}，请求基于 v${input.expectedVersion}（请刷新后重试）`)
+      }
+      const updated = this.scenePolicies().update(existing.id, {
+        entries: input.entries,
+        ...(input.note !== undefined ? { note: input.note } : {}),
+        version: existing.version + 1,
+      })
+      this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: input.sceneCode, orgId: input.orgId ?? null, policyId: updated.id, version: updated.version, action: 'updated' })
+      return updated
+    }
+    const created = this.scenePolicies().insert({
+      id: newId('scp'), sceneCode: input.sceneCode,
+      ...(input.orgId ? { orgId: input.orgId } : {}),
+      entries: input.entries,
+      ...(input.note ? { note: input.note } : {}),
+      version: 1,
+    })
+    this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: input.sceneCode, orgId: input.orgId ?? null, policyId: created.id, version: 1, action: 'created' })
+    return created
+  }
+
+  deleteScenePolicy(id: string): { deleted: boolean } {
+    const policy = this.scenePolicies().get(id)
+    if (!policy) throw new Error(`场景策略不存在：${id}`)
+    this.scenePolicies().remove(id)
+    this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: policy.sceneCode, orgId: policy.orgId ?? null, policyId: id, action: 'deleted' })
+    return { deleted: true }
+  }
+
+  /**
+   * iam.check(scene, action)（IAW 交接 6-1）：场景维度 ABAC 判定。
+   * 判定序：①场景无策略 → default（回落 hasPermission 角色链路，存量行为不变）；
+   * ②deny 条目命中（用户/角色/通配 × 动作）→ deny；③allow 命中 → allow；④其余 → deny（fail-closed）。
+   * 本判定是场景维度的**细粒度收敛**，不替代角色 RBAC：调用方应同时满足 hasPermission(基础权限点)。
+   */
+  checkScene(userId: string, sceneCode: string, action: string): SceneCheckDecision {
+    const user = this.users().get(userId)
+    if (!user) {
+      return { decision: 'deny', reason: `用户不存在：${userId}`, sceneCode, action }
+    }
+    const policies = this.scenePolicies().all().filter((item) =>
+      item.sceneCode === sceneCode && ((item.orgId ?? '') === '' || item.orgId === user.orgId))
+    if (policies.length === 0) {
+      return { decision: 'default', reason: '场景未配置授权策略，回落角色 RBAC 与部门范围权限（存量口径）', sceneCode, action }
+    }
+    const matches = (entry: ScenePolicyEntry): boolean =>
+      (entry.principalId === '*' && entry.principalType === 'role')
+      || (entry.principalType === 'user' && (entry.principalId === '*' || entry.principalId === userId))
+      || (entry.principalType === 'role' && user.roleIds.includes(entry.principalId))
+    const actionHit = (entry: ScenePolicyEntry): boolean => entry.actions.includes('*') || entry.actions.includes(action)
+    for (const policy of policies) {
+      for (const entry of policy.entries) {
+        if (entry.effect === 'deny' && matches(entry) && actionHit(entry)) {
+          return { decision: 'deny', reason: `场景策略 deny 命中（policy=${policy.id}）`, policyId: policy.id, sceneCode, action }
+        }
+      }
+    }
+    for (const policy of policies) {
+      for (const entry of policy.entries) {
+        if (entry.effect === 'allow' && matches(entry) && actionHit(entry)) {
+          return { decision: 'allow', reason: `场景策略 allow 命中（policy=${policy.id}）`, policyId: policy.id, sceneCode, action }
+        }
+      }
+    }
+    const policy = policies[0]!
+    return { decision: 'deny', reason: `场景已配置授权策略且无命中条目（fail-closed，policy=${policy.id}）`, policyId: policy.id, sceneCode, action }
   }
 
   createTenant(input: { name: string; plan?: TenantRecord['plan'] }): TenantRecord {

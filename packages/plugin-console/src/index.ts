@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { existsSync, readdirSync, createReadStream } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
-import type { HttpExchange } from '../../platform-core/src/index.ts'
+import type { HttpExchange, Collection, RecordBase } from '../../platform-core/src/index.ts'
 import { createPluginContext, newId, platformVersionInfo, PlatformEvents } from '../../platform-core/src/index.ts'
 import { nonbillableUsage } from '../../plugin-usage/src/index.ts'
 import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
@@ -575,6 +575,113 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     }
   })
 
+  // -- 通知中心（IAW 交接 8-1：跨会话持久化 + since 游标 + 已读游标） ----------------
+  //
+  // 面板/控制台的通知此前只存在于 SSE 内存动态与 bus 环形缓冲（300 条，重启即失），
+  // 这里补持久层：任务/审批/告警三类平台事件统一落 console:notifications，
+  // 消费端 GET /api/notifications?since= 拉增量、POST read-cursor 推已读游标（跨设备漫游）。
+
+  interface NotificationRecord extends RecordBase {
+    type: 'task' | 'approval' | 'alert' | 'system'
+    title: string
+    body?: string
+    scope: { kind: 'global' } | { kind: 'org'; orgId: string } | { kind: 'user'; userId: string }
+    at: string
+  }
+
+  const notifications = (): Collection<NotificationRecord> => {
+    const collection = ctx.opsStorage.collection<NotificationRecord>('console:notifications')
+    collection.uniqueOn('notif-dedup', (n) => `${n.type}:${n.title}:${n.at.slice(0, 13)}`)
+    return collection
+  }
+
+  const notificationCursors = (): Collection<{ userId: string; at: string } & RecordBase> => {
+    const collection = ctx.opsStorage.collection<{ userId: string; at: string } & RecordBase>('console:notificationCursors')
+    collection.uniqueOn('user', (row) => row.userId)
+    return collection
+  }
+
+  const orgContainsId = (rootId: string, orgId: string): boolean => {
+    let current = ctx.iam.orgs().get(orgId)
+    let guard = 0
+    while (current && guard++ < 32) {
+      if (current.id === rootId) return true
+      current = current.parentId ? ctx.iam.orgs().get(current.parentId) : undefined
+    }
+    return false
+  }
+
+  const pushNotification = (input: { type: NotificationRecord['type']; title: string; body?: string; scope: NotificationRecord['scope'] }): void => {
+    const at = new Date().toISOString()
+    const collection = notifications()
+    collection.insert({ id: newId('ntf'), at, ...input })
+    // 保留窗 30 天 + 硬上限 2000 条（环形语义：最旧的先出）
+    const cutoff = new Date(Date.now() - 30 * 86_400_000).toISOString()
+    const all = collection.all().sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+    for (const stale of all.filter((n) => n.at < cutoff)) collection.remove(stale.id)
+    const overflow = collection.all().length - 2000
+    if (overflow > 0) for (const item of collection.all().sort((a, b) => a.at.localeCompare(b.at)).slice(0, overflow)) collection.remove(item.id)
+  }
+
+  // 事件生产者：告警（全局）/ 审批（全局，审批中心治理面）/ 任务（部门绑定的组织子树）。
+  // 面板 deptConfigs 集合按平台稳定键跨插件只读（dsh-bridge softRead 同款惯例），读不到降级全局范围。
+  ctx.platformBus.on(PlatformEvents.AlertFired, (payload) => {
+    const p = payload as { severity?: string; title?: string; message?: string }
+    try {
+      pushNotification({ type: 'alert', title: p.title ?? '平台告警', body: p.message ?? '', scope: { kind: 'global' } })
+    } catch { /* 通知落库失败不阻塞事件链 */ }
+  })
+  ctx.platformBus.on(PlatformEvents.ApprovalCreated, (payload) => {
+    const p = payload as { approvalId?: string; title?: string }
+    try {
+      pushNotification({ type: 'approval', title: `待审批：${p.title ?? p.approvalId ?? ''}`, body: '已在审批中心挂起，请及时处理', scope: { kind: 'global' } })
+    } catch { /* 通知落库失败不阻塞事件链 */ }
+  })
+  ctx.platformBus.on(PlatformEvents.PanelTaskUpdated, (payload) => {
+    const p = payload as { taskId?: string; dept?: string; lane?: string; title?: string }
+    try {
+      const deptOrgId = ctx.opsStorage.collection<{ orgId?: string }>('panel:deptConfigs').get(p.dept ?? '')?.orgId
+      const laneLabel = ({ todo: '待办', doing: '进行中', review: '待审', done: '完成' } as Record<string, string>)[p.lane ?? ''] ?? p.lane ?? ''
+      pushNotification({
+        type: 'task', title: `任务流转：${p.title ?? p.taskId ?? ''}`, body: `泳道 → ${laneLabel}`,
+        scope: deptOrgId ? { kind: 'org', orgId: deptOrgId } : { kind: 'global' },
+      })
+    } catch { /* 通知落库失败不阻塞事件链 */ }
+  })
+
+  guarded('GET', '/api/notifications', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    if (!info.userId) return { items: [], unread: 0, readCursor: null, note: '机器主体无个人通知面（v1 口径）' }
+    const since = exchange.query.get('since') ?? ''
+    const limit = Math.min(Number(exchange.query.get('limit') ?? 50) || 50, 200)
+    const user = ctx.iam.users().get(info.userId)
+    const visible = (n: NotificationRecord): boolean =>
+      n.scope.kind === 'global'
+      || (n.scope.kind === 'user' && n.scope.userId === info.userId)
+      || (n.scope.kind === 'org' && Boolean(user) && orgContainsId(n.scope.orgId, user!.orgId))
+    const cursor = notificationCursors().findOne((row) => row.userId === info.userId)
+    const all = notifications().all().filter((n) => visible(n))
+    return {
+      items: all.filter((n) => n.at > since).sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit),
+      unread: all.filter((n) => n.at > (cursor?.at ?? '')).length,
+      readCursor: cursor?.at ?? null,
+      now: new Date().toISOString(),
+    }
+  })
+
+  guarded('POST', '/api/notifications/read-cursor', 'console.login', (exchange) => {
+    const info = caller(exchange)
+    if (!info.userId) return exchange.fail(403, 'FORBIDDEN', '机器主体无个人通知面（v1 口径）')
+    const input = body<{ at?: string }>(exchange)
+    const now = new Date().toISOString()
+    const at = input.at && !Number.isNaN(Date.parse(input.at)) && input.at <= now ? input.at : now
+    const collection = notificationCursors()
+    const existing = collection.findOne((row) => row.userId === info.userId)
+    if (existing) collection.update(existing.id, { at })
+    else collection.insert({ id: newId('ncur'), userId: info.userId, at })
+    return { readCursor: at, unread: 0 }
+  })
+
   // -- 资产运营：统一台账 / 健康巡检 / 成本报表（企业 AI 资产运营管理） --------
   guarded('GET', '/api/assets/inventory', 'usage.read', (exchange) => {
     const days = Math.min(Math.max(Number(exchange.query.get('days') ?? 30) || 30, 1), 90)
@@ -1037,6 +1144,60 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     const role = ctx.iam.updateRole(exchange.params['id']!, input)
     changeLog(exchange, 'iam.role.update', 'role', role.id, role.name)
     return role
+  })
+
+  // -- 场景级授权（IAW 交接 6-1：角色 × 场景 ABAC） ------------------------------
+  // 策略治理走 iam.org.read/iam.scene.write；自检 checkScene 对 panel.read 持有者开放（面板选择器用）。
+  guarded('GET', '/api/iam/scene-policies', 'iam.org.read', (exchange) => ({
+    policies: ctx.iam.scenePolicies().all()
+      .filter((policy) => (exchange.query.get('sceneCode') ? policy.sceneCode === exchange.query.get('sceneCode') : true)),
+  }))
+
+  guarded('PUT', '/api/iam/scene-policies', 'iam.scene.write', (exchange) => {
+    const input = body<{ sceneCode: string; orgId?: string; entries: Array<{ principalType: 'role' | 'user'; principalId: string; actions: string[]; effect: 'allow' | 'deny' }>; note?: string; expectedVersion?: number }>(exchange)
+    const policy = ctx.iam.upsertScenePolicy({
+      sceneCode: input.sceneCode,
+      ...(input.orgId ? { orgId: input.orgId } : {}),
+      entries: input.entries ?? [],
+      ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
+    })
+    changeLog(exchange, 'iam.scene_policy.upsert', 'scene_policy', policy.id, policy.sceneCode, `${policy.entries.length} 条，v${policy.version}`)
+    return policy
+  })
+
+  guarded('DELETE', '/api/iam/scene-policies/:id', 'iam.scene.write', (exchange) => {
+    const result = ctx.iam.deleteScenePolicy(exchange.params['id']!)
+    changeLog(exchange, 'iam.scene_policy.delete', 'scene_policy', exchange.params['id']!, exchange.query.get('sceneCode') ?? '')
+    return result
+  })
+
+  /**
+   * 场景访问自检（iam.check(scene, action) 的 HTTP 面）：panel.read 持有者查自己的场景判定。
+   * userId 参数仅 iam.user.read 持有者可代查（治理面排障）；其余主体强制自查。
+   */
+  guarded('POST', '/api/iam/scene-authz/check', 'panel.read', (exchange) => {
+    const info = caller(exchange)
+    const input = body<{ sceneCode: string; action: string; userId?: string }>(exchange)
+    if (!input.sceneCode?.trim() || !input.action?.trim()) {
+      exchange.fail(400, 'BAD_REQUEST', 'sceneCode 与 action 必填')
+      return
+    }
+    let targetUserId = info.userId ?? ''
+    if (input.userId && input.userId !== info.userId) {
+      if (!info.permissions.includes('*') && !info.permissions.includes('iam.user.read')) {
+        exchange.fail(403, 'FORBIDDEN', '代查他人场景判定需要 iam.user.read')
+        return
+      }
+      targetUserId = input.userId
+    }
+    if (!targetUserId) {
+      exchange.fail(403, 'FORBIDDEN', '机器主体请携带 userId 参数且调用方需持有 iam.user.read')
+      return
+    }
+    const decision = ctx.iam.checkScene(targetUserId, input.sceneCode, input.action)
+    changeLog(exchange, 'iam.scene_policy.check', 'scene_policy', input.sceneCode, input.action, `${decision.decision}（${targetUserId}）`)
+    return { ...decision, checkedUser: targetUserId }
   })
 
   guarded('GET', '/api/iam/groups', 'iam.user.read', () => ({
@@ -2600,6 +2761,152 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     }
   })
 
+  // -- 数据要素域（IAW 交接 2-1..2-4：数据集/质量分/血缘/指标字典） ----------------
+  // 读面（panel.read）：面板场景抽屉/数据空间消费；写面（resource.dataset.write）：资源管理员治理。
+  guarded('GET', '/api/resource/datasets', 'panel.read', (exchange) => ({
+    datasets: ctx.resourceCore.listDatasets({
+      ...(exchange.query.get('scene') ? { sceneCode: exchange.query.get('scene')! } : {}),
+      ...(exchange.query.get('classification') ? { classification: exchange.query.get('classification')! } : {}),
+      ...(exchange.query.get('org') ? { orgId: exchange.query.get('org')! } : {}),
+      ...(exchange.query.get('q') ? { q: exchange.query.get('q')! } : {}),
+    }),
+  }))
+
+  guarded('PUT', '/api/resource/datasets', 'resource.dataset.write', (exchange) => {
+    const input = body<{ code: string; name: string; sourceSystem: string; classification: 'public' | 'internal' | 'secret'; refreshFrequency?: string; ownerOrgId?: string; sceneCodes?: string[]; note?: string }>(exchange)
+    const dataset = ctx.resourceCore.upsertDataset(input)
+    changeLog(exchange, 'resource.dataset.upsert', 'dataset', dataset.id, dataset.name, `${dataset.code} 分级=${dataset.classification} 场景=${dataset.sceneCodes.join(',') || '无'}`)
+    return dataset
+  })
+
+  guarded('PUT', '/api/resource/datasets/:code/quality', 'resource.dataset.write', (exchange) => {
+    const input = body<{ completeness: number; accuracy: number; timeliness: number; consistency: number; note?: string }>(exchange)
+    const dataset = ctx.resourceCore.scoreDataset(exchange.params['code']!, input)
+    changeLog(exchange, 'resource.dataset.score', 'dataset', dataset.id, dataset.name, `overall=${dataset.quality?.overall}`)
+    return dataset
+  })
+
+  guarded('GET', '/api/resource/lineage', 'panel.read', (exchange) => {
+    const dataset = exchange.query.get('dataset') ?? ''
+    if (!dataset) {
+      exchange.fail(400, 'BAD_REQUEST', 'dataset 参数必填（数据集编号）')
+      return
+    }
+    return ctx.resourceCore.lineage(dataset)
+  })
+
+  guarded('PUT', '/api/resource/lineage', 'resource.dataset.write', (exchange) => {
+    const input = body<{ derived: string; source: string; kind?: string }>(exchange)
+    if (!input.derived?.trim() || !input.source?.trim()) {
+      exchange.fail(400, 'BAD_REQUEST', 'derived 与 source（数据集编号）必填')
+      return
+    }
+    const edge = ctx.resourceCore.addLineage(input.derived.trim(), input.source.trim(), input.kind ?? 'lineage')
+    changeLog(exchange, 'resource.lineage.add', 'dataset_lineage', edge.id, `${input.source} → ${input.derived}`)
+    return edge
+  })
+
+  guarded('GET', '/api/resource/metrics/:code/definitions', 'panel.read', (exchange) => ({
+    code: exchange.params['code'],
+    definitions: ctx.resourceCore.metricDefinitionsOf(exchange.params['code']!),
+  }))
+
+  guarded('PUT', '/api/resource/metrics/:code/definitions', 'resource.dataset.write', (exchange) => {
+    const input = body<{ name: string; unit?: string; description?: string; payload?: Record<string, unknown> }>(exchange)
+    const info = caller(exchange)
+    const result = ctx.resourceCore.putMetricDefinition({
+      code: exchange.params['code']!,
+      name: input.name,
+      ...(input.unit ? { unit: input.unit } : {}),
+      ...(input.description ? { description: input.description } : {}),
+      ...(input.payload ? { payload: input.payload } : {}),
+      recordedBy: info.userId ?? info.principalId,
+    })
+    changeLog(exchange, 'resource.metric.define', 'metric_definition', result.definition.id, `${exchange.params['code']}：${input.name}`, result.conflict ? '口径冲突留账（待仲裁）' : '登记')
+    return result
+  })
+
+  guarded('POST', '/api/resource/metrics/:code/arbitrate', 'resource.dataset.write', (exchange) => {
+    const input = body<{ definitionId: string }>(exchange)
+    if (!input.definitionId?.trim()) {
+      exchange.fail(400, 'BAD_REQUEST', 'definitionId 必填（仲裁胜出的口径定义）')
+      return
+    }
+    const info = caller(exchange)
+    const result = ctx.resourceCore.arbitrateMetric(exchange.params['code']!, input.definitionId, info.userId ?? info.principalId)
+    changeLog(exchange, 'resource.metric.arbitrate', 'metric_definition', input.definitionId, exchange.params['code'] ?? '', `取代 ${result.superseded} 条旧口径`)
+    return result
+  })
+
+  // -- A2A 跨运行时调用（IAW 交接 7-1 最小闭环） ---------------------------------
+  // 平台原生 Agent 的 A2A 端点：外部运行时（Hermes/OpenClaw/WorkBuddy）凭机器凭证点名调用；
+  // 响应回显 autonomy/runtime 供调用方做 A0-A3 交互深度协商（v1：级别随响应透出，深度协商留 v2）。
+  guarded('POST', '/api/agents/:id/a2a/invoke', 'agent.a2a.invoke', async (exchange) => {
+    const input = body<{ message: string; dataClass?: string; contextNote?: string }>(exchange)
+    if (!input.message?.trim()) {
+      exchange.fail(400, 'BAD_REQUEST', 'message 必填（A2A 点名调用内容）')
+      return
+    }
+    const ref = exchange.params['id']!
+    const agent = ctx.resourceCore.get('agent', ref) ?? ctx.resourceCore.bySlug('agent', ref)
+    if (!agent) {
+      exchange.fail(404, 'NOT_FOUND', `Agent 不存在：${ref}`)
+      return
+    }
+    if (agent.status !== 'online') {
+      exchange.fail(400, 'BAD_REQUEST', `Agent 未上线（${agent.status}），A2A 仅对 online 开放`)
+      return
+    }
+    const attrs = agent.attrs as Record<string, unknown>
+    const model = String(attrs.model ?? '')
+    if (!model) return { ok: false, reason: 'Agent 未配置模型（model 属性为空）' }
+    const info = caller(exchange)
+    const orgId = (info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined) ?? agent.orgId ?? ''
+    const subject = info.refType === 'agent' && info.refId ? `agent:${info.refId}` : (info.userId ? `user:${info.userId}` : `a2a:${info.principalId}`)
+    const dataClass = input.dataClass === 'public' || input.dataClass === 'internal' || input.dataClass === 'secret' ? input.dataClass : undefined
+    const systemPrompt = String(attrs.systemPrompt ?? `你是企业数字同事「${agent.name}」。${String(attrs.description ?? '')}`)
+    try {
+      const result = await ctx.modelGateway.invoke({
+        model,
+        orgId,
+        subject,
+        ...(dataClass ? { dataClass } : {}),
+        messages: [
+          { role: 'system', content: input.contextNote ? `${systemPrompt}\n\n${input.contextNote}` : systemPrompt },
+          { role: 'user', content: input.message },
+        ],
+      })
+      try {
+        ctx.usage.record(nonbillableUsage({
+          org: orgId, subject, principal: orgId ? `org:${orgId}` : 'platform', resource: `agent:${agent.id}`,
+          idempotency_key: `a2a:${agent.id}:${info.principalId}:${newId('a2a')}`,
+        }))
+      } catch { /* 计量面缺席不阻塞 A2A */ }
+      ctx.audit.record({
+        type: 'invoke', actorType: info.kind === 'human' ? 'human' : 'machine', actorId: subject, actorName: info.name,
+        action: 'agent.a2a.invoke', resourceType: 'agent', resourceId: agent.id, resourceName: agent.name,
+        result: 'ok', detail: `runtime=${String(attrs.runtime ?? 'dsh')} autonomy=${String(attrs.autonomy ?? 'A0')} model=${result.model}`,
+      })
+      ctx.platformBus.emit(PlatformEvents.AgentA2aInvoked, {
+        agentId: agent.id, slug: agent.slug, from: subject, model: result.model,
+        autonomy: String(attrs.autonomy ?? 'A0'), runtime: String(attrs.runtime ?? 'dsh'),
+      })
+      return {
+        ok: true, reply: result.content, model: result.model,
+        autonomy: String(attrs.autonomy ?? 'A0'), runtime: String(attrs.runtime ?? 'dsh'),
+        inputTokens: result.inputTokens, outputTokens: result.outputTokens,
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      ctx.audit.record({
+        type: 'invoke', actorType: info.kind === 'human' ? 'human' : 'machine', actorId: subject, actorName: info.name,
+        action: 'agent.a2a.invoke', resourceType: 'agent', resourceId: agent.id, resourceName: agent.name,
+        result: 'error', detail: `失败：${reason}`,
+      })
+      return { ok: false, reason, autonomy: String(attrs.autonomy ?? 'A0'), runtime: String(attrs.runtime ?? 'dsh') }
+    }
+  })
+
   /** Agent 详情页 SSO 配置块（不含 secret；含 discovery，供前端与 dsh 免登接入使用）。 */
   const agentSsoView = (agentId: string) => {
     const ssoClient = ctx.oidc.clientsForAgent(agentId)[0]
@@ -3298,6 +3605,39 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     }
   })
 
+  // -- 证据锚点与场景时间线（IAW 交接 5-1/5-2） ---------------------------------
+  // 面板消费面：结论级证据登记/反查 + 场景维度审计时间线（panel.read/write；治理面全量审计仍走 audit.read）。
+  guarded('POST', '/api/audit/evidence', 'panel.write', (exchange) => {
+    const input = body<{ anchors: Array<{ kind: string; id: string; name?: string; timeWindow?: { from: string; to: string }; hitRows?: number; qualityScore?: number }>; sceneCode?: string; messageId?: string; sessionId?: string; subject?: string; note?: string }>(exchange)
+    const record = ctx.audit.recordEvidence({
+      anchors: input.anchors ?? [],
+      ...(input.sceneCode ? { sceneCode: input.sceneCode } : {}),
+      ...(input.messageId ? { messageId: input.messageId } : {}),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.subject ? { subject: input.subject } : {}),
+      ...(input.note ? { note: input.note } : {}),
+    })
+    changeLog(exchange, 'audit.evidence.record', 'evidence', record.id, input.anchors?.map((anchor) => anchor.id).join(',') ?? '', `${input.anchors?.length ?? 0} 个锚点${input.messageId ? `，绑定消息 ${input.messageId}` : ''}`)
+    return record
+  })
+
+  guarded('GET', '/api/audit/evidence/:id', 'panel.read', (exchange) => {
+    const record = ctx.audit.getEvidence(exchange.params['id']!)
+    if (!record) {
+      exchange.fail(404, 'NOT_FOUND', `证据登记不存在：${exchange.params['id']}`)
+      return
+    }
+    return record
+  })
+
+  guarded('GET', '/api/audit/timeline', 'panel.read', (exchange) => {
+    return ctx.audit.timeline({
+      ...(exchange.query.get('sceneCode') ? { sceneCode: exchange.query.get('sceneCode')! } : {}),
+      ...(exchange.query.get('since') ? { since: exchange.query.get('since')! } : {}),
+      ...(exchange.query.get('limit') ? { limit: Number(exchange.query.get('limit')) } : {}),
+    })
+  })
+
   // -- 租户（多租户最小集，v1.2 第 2 步） ------------------------------------
   guarded('GET', '/api/iam/tenants', 'iam.org.read', () => ({
     tenants: ctx.iam.tenants().all(),
@@ -3455,6 +3795,146 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
   guarded('PUT', '/api/usage/capability-grants', 'usage.admin', (exchange) => {
     const input = body<{ principal: string; capabilities: string[]; source?: string }>(exchange)
     return ctx.usage.grantCapabilities(input.principal, input.capabilities, input.source ?? 'console')
+  })
+
+  // -- 成本摘要与反馈聚合（IAW 交接 4-1/4-2，面板度量驾驶舱数据源） ----------------
+  // 权限分层：panel.read 可查，但非 usage.read 主体强制收敛到自身组织（scope=self-org）。
+  // 窗口边界为 UTC 日界（与 usage byDay/costReport 口径一致）。
+  const usageWindowBounds = (window: string): { from: string; to: string } => {
+    const now = new Date()
+    const to = now.toISOString()
+    if (window === 'month') return { from: `${now.toISOString().slice(0, 7)}-01T00:00:00.000Z`, to }
+    return { from: `${now.toISOString().slice(0, 10)}T00:00:00.000Z`, to }
+  }
+
+  guarded('GET', '/api/usage/summary', 'panel.read', (exchange) => {
+    const info = caller(exchange)
+    const canCrossOrg = info.permissions.includes('*') || info.permissions.includes('usage.read')
+    const window = exchange.query.get('window') === 'month' ? 'month' : 'today'
+    const { from, to } = usageWindowBounds(window)
+    let org = exchange.query.get('org') ?? undefined
+    let subject = exchange.query.get('subject') ?? undefined
+    if (!canCrossOrg) {
+      const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
+      org = user?.orgId ?? '__no_org__' // 组织解析失败 → 空聚合（fail-closed，不透穿全平台成本）
+      subject = undefined
+    }
+    const summary = ctx.usage.summary({ from, to, ...(org ? { org } : {}), ...(subject ? { subject } : {}) })
+    // 预算进度（1-4 联动）：modelgw 预算在位时随摘要返回，缺席=无预算配置
+    let budget: unknown = null
+    try {
+      budget = (ctx.modelGateway as unknown as { budgetStatusFor?: (org: string) => unknown } | undefined)?.budgetStatusFor?.(org ?? '') ?? null
+    } catch { /* 预算面缺席不阻塞摘要 */ }
+    return { window, scope: canCrossOrg ? 'platform' : 'self-org', ...(org ? { org } : {}), ...(subject ? { subject } : {}), budget, ...summary }
+  })
+
+  guarded('GET', '/api/usage/feedback-stats', 'panel.read', (exchange) => {
+    const info = caller(exchange)
+    const canCrossOrg = info.permissions.includes('*') || info.permissions.includes('usage.read')
+    const daysParam = Number(exchange.query.get('days') ?? 30)
+    const days = exchange.query.get('days') === 'all' ? 0 : Math.min(Math.max(Number.isFinite(daysParam) ? daysParam : 30, 1), 365)
+    const from = days > 0 ? new Date(Date.now() - days * 86_400_000).toISOString() : undefined
+    let org = exchange.query.get('org') ?? undefined
+    if (!canCrossOrg) {
+      const user = info.userId ? ctx.iam.users().get(info.userId) : undefined
+      org = user?.orgId ?? '__no_org__'
+    }
+    const stats = ctx.usage.feedbackStats({ ...(from ? { from } : {}), ...(org ? { org } : {}) })
+    return { windowDays: days, scope: canCrossOrg ? 'platform' : 'self-org', ...(org ? { org } : {}), ...stats }
+  })
+
+  // -- 模型渠道治理（IAW 交接 1-2/1-3/1-4：渠道组/遥测/预算，modelgw 域面） --------
+  guarded('GET', '/api/modelgw/channel-groups', 'panel.read', () => ({
+    groups: ctx.modelGateway.channelGroups().all().map((group) => ({
+      ...group,
+      chain: [group.primary, group.backup1, group.backup2].filter(Boolean),
+      stepTimeoutMs: group.stepTimeoutMs ?? 8000,
+    })),
+  }))
+
+  guarded('PUT', '/api/modelgw/channel-groups', 'panel.config.write', (exchange) => {
+    const input = body<{ slug: string; name: string; primary: string; backup1?: string; backup2?: string; manual?: boolean; stepTimeoutMs?: number; enabled?: boolean }>(exchange)
+    if (!input.slug?.trim() || !input.primary?.trim() || !input.name?.trim()) {
+      exchange.fail(400, 'BAD_REQUEST', 'slug/name/primary 必填')
+      return
+    }
+    if (input.stepTimeoutMs !== undefined && (input.stepTimeoutMs < 500 || input.stepTimeoutMs > 60_000)) {
+      exchange.fail(400, 'BAD_REQUEST', 'stepTimeoutMs 应在 500-60000ms 之间（PRD §4.1 口径 8000）')
+      return
+    }
+    const group = ctx.modelGateway.upsertChannelGroup({
+      slug: input.slug.trim(), name: input.name.trim(), primary: input.primary.trim(),
+      ...(input.backup1 ? { backup1: input.backup1.trim() } : {}),
+      ...(input.backup2 ? { backup2: input.backup2.trim() } : {}),
+      ...(input.manual !== undefined ? { manual: input.manual } : {}),
+      ...(input.stepTimeoutMs !== undefined ? { stepTimeoutMs: input.stepTimeoutMs } : {}),
+      enabled: input.enabled ?? true,
+    })
+    changeLog(exchange, 'modelgw.channel_group.upsert', 'modelgw_channel_group', group.id, group.name)
+    return group
+  })
+
+  /**
+   * 降级链调用入口（IAW 交接 1-2）：按渠道组 主→备1→备2 逐级尝试，每步 stepTimeoutMs 超时；
+   * 每次降级发 modelgw.degraded（面板 SSE 提示条消费）。全链失败且组配 manual=true →
+   * 200 + ok:false + escalated:true（转人工），不造假回复。
+   */
+  guarded('POST', '/api/modelgw/channel-groups/:slug/invoke', 'panel.write', async (exchange) => {
+    const input = body<{ messages?: Array<{ role: string; content: string }>; prompt?: string; dataClass?: string; maxTokens?: number }>(exchange)
+    const messages = input.messages ?? (input.prompt ? [{ role: 'user', content: input.prompt }] : [])
+    if (messages.length === 0) {
+      exchange.fail(400, 'BAD_REQUEST', 'messages（或 prompt）必填')
+      return
+    }
+    const info = caller(exchange)
+    const orgId = (info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined)
+      ?? ctx.iam.orgs().find((org) => org.parentId === null).at(0)?.id ?? ''
+    const dataClass = input.dataClass === 'public' || input.dataClass === 'internal' || input.dataClass === 'secret' ? input.dataClass : undefined
+    const result = await ctx.modelGateway.invokeWithFallback({
+      group: exchange.params['slug']!,
+      orgId,
+      subject: info.userId ? `user:${info.userId}` : `machine:${info.principalId}`,
+      messages,
+      ...(dataClass ? { dataClass } : {}),
+      ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
+    })
+    return result
+  })
+
+  guarded('GET', '/api/modelgw/:slug/telemetry', 'panel.read', (exchange) => {
+    const slug = exchange.params['slug']!
+    if (!ctx.modelGateway.models().findOne((item) => item.slug === slug)) {
+      exchange.fail(404, 'NOT_FOUND', `模型不存在：${slug}`)
+      return
+    }
+    const windowDays = Math.min(Math.max(Number(exchange.query.get('window')?.replace(/d$/, '') ?? 7) || 7, 1), 30)
+    return ctx.modelGateway.telemetryFor(slug, windowDays)
+  })
+
+  guarded('GET', '/api/modelgw/budgets', 'panel.read', (exchange) => ({
+    budgets: ctx.modelGateway.budgets().all()
+      .filter((budget) => (exchange.query.get('org') ? (budget.orgId ?? '') === exchange.query.get('org') : true)),
+  }))
+
+  guarded('PUT', '/api/modelgw/budgets', 'panel.config.write', (exchange) => {
+    const input = body<{ orgId?: string; modelSlug?: string; dailyLimitCents?: number; monthlyLimitCents?: number; warnRatio?: number; action?: 'warn' | 'block'; enabled?: boolean }>(exchange)
+    for (const [key, value] of [['dailyLimitCents', input.dailyLimitCents], ['monthlyLimitCents', input.monthlyLimitCents]] as const) {
+      if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+        exchange.fail(400, 'BAD_REQUEST', `${key} 应为非负数（分）`)
+        return
+      }
+    }
+    const budget = ctx.modelGateway.upsertBudget({
+      ...(input.orgId ? { orgId: input.orgId } : {}),
+      ...(input.modelSlug ? { modelSlug: input.modelSlug } : {}),
+      ...(input.dailyLimitCents !== undefined ? { dailyLimitCents: input.dailyLimitCents } : {}),
+      ...(input.monthlyLimitCents !== undefined ? { monthlyLimitCents: input.monthlyLimitCents } : {}),
+      warnRatio: input.warnRatio ?? 0.8,
+      action: input.action ?? 'warn',
+      enabled: input.enabled ?? true,
+    })
+    changeLog(exchange, 'modelgw.budget.upsert', 'modelgw_budget', budget.id, budget.orgId ?? '（平台级）')
+    return budget
   })
 
   // -- 第三方插件市场（v1.2 第 3/5/7 步） ------------------------------------
@@ -3641,7 +4121,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
   }))
 
   guarded('POST', '/api/modelgw/models', 'modelgw.admin', (exchange) => {
-    const input = body<{ slug: string; displayName?: string; provider?: string; endpoint: string; apiKey?: string; costCentsPerKTokens?: number; status?: 'online' | 'offline' }>(exchange)
+    const input = body<{ slug: string; displayName?: string; provider?: string; endpoint: string; apiKey?: string; costCentsPerKTokens?: number; status?: 'online' | 'offline'; dataClassLimit?: 'public' | 'internal' | 'secret' }>(exchange)
     const model = ctx.modelGateway.upsertModel({
       slug: input.slug,
       displayName: input.displayName ?? input.slug,
@@ -3650,8 +4130,9 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
       apiKey: input.apiKey ?? 'env:MODEL_API_KEY',
       costCentsPerKTokens: input.costCentsPerKTokens ?? 0,
       status: input.status ?? 'online',
+      ...(input.dataClassLimit !== undefined ? { dataClassLimit: input.dataClassLimit } : {}),
     })
-    changeLog(exchange, 'modelgw.model.upsert', 'model', model.id, model.slug)
+    changeLog(exchange, 'modelgw.model.upsert', 'model', model.id, model.slug, `分级上限=${model.dataClassLimit ?? 'internal'}`)
     return model
   })
 
@@ -3667,7 +4148,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   guarded('POST', '/api/modelgw/invoke', 'modelgw.invoke', async (exchange) => {
     const info = caller(exchange)
-    const input = body<{ model: string; messages: Array<{ role: string; content: string }>; orgId?: string; maxTokens?: number; temperature?: number }>(exchange)
+    const input = body<{ model: string; messages: Array<{ role: string; content: string }>; orgId?: string; maxTokens?: number; temperature?: number; dataClass?: 'public' | 'internal' | 'secret' }>(exchange)
     // 默认用量归口组织：调用者所属组织（人）或凭证组织（机器）
     const orgId = input.orgId
       ?? (info.kind === 'human' && info.userId ? ctx.iam.users().get(info.userId)?.orgId : undefined)
@@ -3683,6 +4164,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
       subject,
       ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
       ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),
+      ...(input.dataClass !== undefined ? { dataClass: input.dataClass } : {}),
     })
   })
 

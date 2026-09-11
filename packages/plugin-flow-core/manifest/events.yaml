@@ -1,0 +1,15 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-flow-core
+events:
+  - name: flow.created
+    mode: emit
+    description: TF 创建（面板 SSE 扇出）
+  - name: flow.step.updated
+    mode: emit
+    description: TF 步骤状态机流转（面板 SSE 扇出）
+  - name: flow.completed
+    mode: emit
+    description: TF 全链完成
+  - name: flow.template.changed
+    mode: emit
+    description: 模板库变更

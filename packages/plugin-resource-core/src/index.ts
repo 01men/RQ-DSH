@@ -118,6 +118,58 @@ export interface TransitionResult {
 }
 
 // ---------------------------------------------------------------------------
+// 数据要素域（IAW 交接 2-1..2-4：数据集登记 / 质量分 / 血缘 / 指标字典）
+// ---------------------------------------------------------------------------
+
+/** 数据分级（与 modelgw DataClass 同值域）：渠道分级路由（1-1）按此选路。 */
+export type DatasetClassification = 'public' | 'internal' | 'secret'
+
+/** 质量分四维（PRD §7.3）：完整性/准确性/时效性/一致性，等权均值=overall（v1 口径）。 */
+export interface DatasetQualityScore {
+  completeness: number
+  accuracy: number
+  timeliness: number
+  consistency: number
+  overall: number
+  scoredAt: string
+  note?: string
+}
+
+export interface DatasetRecord extends RecordBase {
+  /** 数据集编号（业务唯一键，如 ds_qb01_market）。 */
+  code: string
+  name: string
+  /** 来源系统（如 钉钉/ERP/NAS/手工台账）。 */
+  sourceSystem: string
+  classification: DatasetClassification
+  /** 刷新频率描述（实时/每小时/每日/每周/手工）。 */
+  refreshFrequency?: string
+  ownerOrgId?: string
+  /** 关联场景编号（ScenegraphScene.code）。 */
+  sceneCodes: string[]
+  quality?: DatasetQualityScore
+  note?: string
+}
+
+/**
+ * 指标定义（2-4 指标字典）：同一指标码允许多条定义并存——口径冲突按「记录人/时间」
+ * 全量留账（不覆盖不合并），仲裁动作把某条置 active、其余 superseded。
+ */
+export interface MetricDefinitionRecord extends RecordBase {
+  code: string
+  name: string
+  unit?: string
+  description?: string
+  /** 口径明细（计算公式/来源表字段/统计窗口等，生产方契约）。 */
+  payload?: Record<string, unknown>
+  recordedBy: string
+  recordedAt: string
+  status: 'active' | 'superseded'
+  /** 仲裁时被其取代的定义 id 链。 */
+  supersedes?: string
+}
+
+// ---------------------------------------------------------------------------
 // 服务
 // ---------------------------------------------------------------------------
 
@@ -416,6 +468,194 @@ export class ResourceCoreService extends Service {
     }
     visit(type, id, 1)
     return result.sort((a, b) => a.depth - b.depth)
+  }
+
+  // -- 数据要素域（IAW 交接 2-1..2-4） ---------------------------------------
+
+  datasets(): Collection<DatasetRecord> {
+    const collection = this.ctx.opsStorage.collection<DatasetRecord>('resource:datasets')
+    collection.uniqueOn('dataset_code', (item) => item.code)
+    return collection
+  }
+
+  /** 数据集登记（upsert by code）：来源系统/分级/刷新频率/关联场景（2-1）。 */
+  upsertDataset(input: {
+    code: string
+    name: string
+    sourceSystem: string
+    classification: DatasetClassification
+    refreshFrequency?: string
+    ownerOrgId?: string
+    sceneCodes?: string[]
+    note?: string
+  }): DatasetRecord {
+    if (!input.code?.trim() || !/^[A-Za-z0-9._-]{2,64}$/.test(input.code)) {
+      throw new Error(`数据集 code 非法（字母/数字/._-，2-64 位）：${input.code}`)
+    }
+    if (!input.name?.trim()) throw new Error('数据集名称必填')
+    if (!input.sourceSystem?.trim()) throw new Error('来源系统必填（sourceSystem）')
+    if (!['public', 'internal', 'secret'].includes(input.classification)) {
+      throw new Error(`数据分级非法：${input.classification}（public/internal/secret）`)
+    }
+    const sceneCodes = [...new Set((input.sceneCodes ?? []).map((code) => code.trim()).filter(Boolean))]
+    const existing = this.datasets().findOne((item) => item.code === input.code)
+    if (existing) {
+      const updated = this.datasets().update(existing.id, {
+        name: input.name.trim(),
+        sourceSystem: input.sourceSystem.trim(),
+        classification: input.classification,
+        ...(input.refreshFrequency !== undefined ? { refreshFrequency: input.refreshFrequency } : {}),
+        ...(input.ownerOrgId !== undefined ? { ownerOrgId: input.ownerOrgId } : {}),
+        sceneCodes,
+        ...(input.note !== undefined ? { note: input.note } : {}),
+      })
+      this.ctx.platformBus.emit('resource.dataset.changed', { code: updated.code, action: 'updated', sceneCodes })
+      return updated
+    }
+    const created = this.datasets().insert({
+      id: newId('ds'),
+      code: input.code.trim(),
+      name: input.name.trim(),
+      sourceSystem: input.sourceSystem.trim(),
+      classification: input.classification,
+      ...(input.refreshFrequency ? { refreshFrequency: input.refreshFrequency } : {}),
+      ...(input.ownerOrgId ? { ownerOrgId: input.ownerOrgId } : {}),
+      sceneCodes,
+      ...(input.note ? { note: input.note } : {}),
+    })
+    this.ctx.platformBus.emit('resource.dataset.changed', { code: created.code, action: 'created', sceneCodes })
+    return created
+  }
+
+  /** 数据集列表（2-1 面板最小接口口径）：按场景/分级/组织/关键词过滤。 */
+  listDatasets(filter: { sceneCode?: string; classification?: string; orgId?: string; q?: string } = {}): Array<DatasetRecord & { sceneCount: number }> {
+    const q = filter.q?.toLowerCase()
+    return this.datasets().all()
+      .filter((item) => {
+        if (filter.sceneCode && !item.sceneCodes.includes(filter.sceneCode)) return false
+        if (filter.classification && item.classification !== filter.classification) return false
+        if (filter.orgId && item.ownerOrgId !== filter.orgId) return false
+        if (q && !`${item.name} ${item.code} ${item.sourceSystem}`.toLowerCase().includes(q)) return false
+        return true
+      })
+      .map((item) => ({ ...item, sceneCount: item.sceneCodes.length }))
+      .sort((a, b) => a.code.localeCompare(b.code))
+  }
+
+  /** 质量分登记（2-2）：四维 0-100，overall 等权均值；登记快照不回写历史引用。 */
+  scoreDataset(code: string, score: { completeness: number; accuracy: number; timeliness: number; consistency: number; note?: string }): DatasetRecord {
+    const dataset = this.datasets().findOne((item) => item.code === code)
+    if (!dataset) throw new Error(`数据集不存在：${code}（请先登记）`)
+    const dims = ['completeness', 'accuracy', 'timeliness', 'consistency'] as const
+    for (const dim of dims) {
+      const value = score[dim]
+      if (!Number.isFinite(value) || value < 0 || value > 100) throw new Error(`质量分 ${dim} 应为 0-100，收到 ${value}`)
+    }
+    const overall = Math.round(((score.completeness + score.accuracy + score.timeliness + score.consistency) / 4) * 10) / 10
+    const quality: DatasetQualityScore = {
+      completeness: score.completeness, accuracy: score.accuracy,
+      timeliness: score.timeliness, consistency: score.consistency,
+      overall, scoredAt: new Date().toISOString(),
+      ...(score.note ? { note: score.note } : {}),
+    }
+    const updated = this.datasets().update(dataset.id, { quality })
+    this.ctx.platformBus.emit('resource.dataset.changed', { code, action: 'quality_scored', overall })
+    return updated
+  }
+
+  /**
+   * 数据血缘（2-3）：复用依赖图，边语义「派生集 --依赖--> 源集」（fromType/toType='dataset'，kind='lineage'）。
+   * 反向追溯=谁派生自我（downstream）；顺向=我来自谁（upstream）。
+   */
+  lineage(code: string): {
+    dataset: string
+    upstream: Array<{ code: string; name: string; kind: string }>
+    downstream: Array<{ code: string; name: string; kind: string }>
+  } {
+    const nameOf = (datasetCode: string): string => this.datasets().findOne((item) => item.code === datasetCode)?.name ?? datasetCode
+    const collect = (edgeFrom: boolean): Array<{ code: string; name: string; kind: string }> => {
+      const rows = edgeFrom
+        ? this.dependencies().find((item) => item.fromType === 'dataset' && item.fromId === code)
+        : this.dependencies().find((item) => item.toType === 'dataset' && item.toId === code)
+      return rows.map((row) => ({ code: edgeFrom ? row.toId : row.fromId, name: nameOf(edgeFrom ? row.toId : row.fromId), kind: row.kind }))
+    }
+    return { dataset: code, upstream: collect(true), downstream: collect(false) }
+  }
+
+  /** 登记血缘边（派生集 derived 依赖源集 source）。 */
+  addLineage(derived: string, source: string, kind = 'lineage'): DependencyRecord {
+    if (derived === source) throw new Error('血缘边两端不能是同一数据集')
+    for (const code of [derived, source]) {
+      if (!this.datasets().findOne((item) => item.code === code)) throw new Error(`数据集未登记：${code}（请先登记再建血缘）`)
+    }
+    return this.addDependency({ fromType: 'dataset', fromId: derived, toType: 'dataset', toId: source, kind })
+  }
+
+  metricDefinitions(): Collection<MetricDefinitionRecord> {
+    return this.ctx.opsStorage.collection<MetricDefinitionRecord>('resource:metricDefinitions')
+  }
+
+  /**
+   * 指标口径登记（2-4）：同码不覆盖不合并——内容相同的重复登记幂等返回既有条目；
+   * 内容不同即新定义并存（口径冲突按记录人/时间全量留账），仲裁决定 active。
+   */
+  putMetricDefinition(input: {
+    code: string
+    name: string
+    unit?: string
+    description?: string
+    payload?: Record<string, unknown>
+    recordedBy: string
+  }): { definition: MetricDefinitionRecord; conflict: boolean } {
+    if (!input.code?.trim()) throw new Error('指标码 code 必填（如 gm_revenue）')
+    if (!input.name?.trim()) throw new Error('指标名称必填')
+    if (!input.recordedBy?.trim()) throw new Error('记录人 recordedBy 必填（口径问责）')
+    const fingerprint = JSON.stringify([input.name, input.unit ?? '', input.description ?? '', input.payload ?? {}])
+    const existing = this.metricDefinitions().all().filter((item) => item.code === input.code)
+    const same = existing.find((item) => JSON.stringify([item.name, item.unit ?? '', item.description ?? '', item.payload ?? {}]) === fingerprint)
+    if (same) return { definition: same, conflict: false }
+    const activeCount = existing.filter((item) => item.status === 'active').length
+    const definition = this.metricDefinitions().insert({
+      id: newId('mdef'),
+      code: input.code.trim(),
+      name: input.name.trim(),
+      ...(input.unit ? { unit: input.unit } : {}),
+      ...(input.description ? { description: input.description } : {}),
+      ...(input.payload ? { payload: input.payload } : {}),
+      recordedBy: input.recordedBy.trim(),
+      recordedAt: new Date().toISOString(),
+      // 首条定义默认 active；已有 active 的新口径并存为 superseded（待仲裁）
+      status: existing.length === 0 ? 'active' : 'superseded',
+    })
+    this.ctx.platformBus.emit('resource.metric.changed', { code: definition.code, definitionId: definition.id, action: 'recorded', activeCount })
+    return { definition, conflict: existing.filter((item) => item.status === 'active').length > 0 }
+  }
+
+  metricDefinitionsOf(code: string): Array<MetricDefinitionRecord & { conflictCount: number }> {
+    const all = this.metricDefinitions().all().filter((item) => item.code === code)
+      .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
+    return all.map((item) => ({ ...item, conflictCount: all.length }))
+  }
+
+  /** 口径仲裁（2-4）：指定某条定义为 active，其余同码定义置 superseded。 */
+  arbitrateMetric(code: string, definitionId: string, actor: string): { active: MetricDefinitionRecord; superseded: number } {
+    const all = this.metricDefinitions().all().filter((item) => item.code === code)
+    const target = all.find((item) => item.id === definitionId)
+    if (!target) throw new Error(`指标定义不存在：${definitionId}（code=${code}）`)
+    let superseded = 0
+    for (const item of all) {
+      if (item.id === definitionId) {
+        if (item.status !== 'active') this.metricDefinitions().update(item.id, { status: 'active', supersedes: undefined })
+        continue
+      }
+      if (item.status === 'active') {
+        this.metricDefinitions().update(item.id, { status: 'superseded', supersedes: definitionId })
+        superseded++
+      }
+    }
+    this.metricDefinitions().update(definitionId, { status: 'active' })
+    this.ctx.platformBus.emit('resource.metric.changed', { code, definitionId, action: 'arbitrated', actor, superseded })
+    return { active: this.metricDefinitions().get(definitionId)!, superseded }
   }
 }
 

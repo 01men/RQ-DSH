@@ -10,6 +10,17 @@ endpoints:
   - GET /api/skills/usage-heatmap（技能热力图：skill × 日 使用矩阵）
   - GET /api/usage/report/monthly（J4 月度用量报表：部门/Agent/Skill tokens 三维聚合；format=csv 自助导出）
   - POST /api/usage/retention/purge（usage.admin；保留策略手动巡检，body.days 可临时收紧窗口，0=跳过）
+  - GET /api/usage/summary?window=today|month&org=&subject=（panel.read；IAW 4-1 成本摘要+预算进度，非 usage.read 主体强制收敛自身组织）
+  - GET /api/usage/feedback-stats?days=7|30|90|all（panel.read；IAW 4-2 产出采纳率聚合）
+  - GET /api/notifications?since=&limit= · POST /api/notifications/read-cursor（console.login；IAW 8-1 通知中心持久化+已读游标）
+  - GET /api/modelgw/channel-groups（panel.read）· PUT /api/modelgw/channel-groups（panel.config.write；IAW 1-2 渠道组降级链）
+  - GET /api/modelgw/:slug/telemetry?window=7d（panel.read；IAW 1-3 渠道遥测，TTFT 诚实缺列）
+  - GET /api/modelgw/budgets（panel.read）· PUT /api/modelgw/budgets（panel.config.write；IAW 1-4 预算熔断）
+  - PUT /api/iam/scene-policies（iam.scene.write）· GET /api/iam/scene-policies（iam.org.read）· DELETE /:id（IAW 6-1 场景级授权）· POST /api/iam/scene-authz/check（panel.read 自查）
+  - GET /api/resource/datasets?scene=（panel.read）· PUT /api/resource/datasets · PUT /api/resource/datasets/:code/quality（resource.dataset.write；IAW 2-1/2-2）
+  - GET /api/resource/lineage?dataset=（panel.read）· PUT /api/resource/lineage（resource.dataset.write；IAW 2-3 血缘）
+  - GET/PUT /api/resource/metrics/:code/definitions（读 panel.read / 写 resource.dataset.write）· POST /api/resource/metrics/:code/arbitrate（IAW 2-4 指标口径仲裁）
+  - POST /api/agents/:id/a2a/invoke（agent.a2a.invoke；IAW 7-1 A2A 跨运行时点名调用，autonomy/runtime 随响应透出）
   - GET/POST /api/apps/beacon（公开访客埋点：GET 1x1 GIF / POST JSON；?app=&vid=&uid= → PV 累加、UV 去重；IP+应用 60 次/分钟限流）
   - 静态托管 public/ SPA（飞书级控制台）
 

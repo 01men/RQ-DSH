@@ -24,6 +24,7 @@ import * as update from '@dsh-ops/plugin-update'
 import * as portal from '@dsh-ops/plugin-portal'
 import * as consolePlugin from '@dsh-ops/plugin-console'
 import * as panelCore from '@dsh-ops/plugin-panel-core'
+import * as flowCore from '@dsh-ops/plugin-flow-core'
 import * as dingtalkBridge from '@dsh-ops/plugin-dingtalk-bridge'
 
 export interface BootOptions {
@@ -63,6 +64,8 @@ export async function bootAll(ctx: Context, options: BootOptions): Promise<void>
   // 部门面板（review-dsh-agent-panel-v2）：REST 依赖 console 鉴权中间件先行注册（/api/* Bearer 面）；
   // 自注册路由经 httpServer.routeMatrix 共享登记处汇入 RBAC 断言矩阵
   await ctx.plugin(panelCore)
+  // 事务流引擎（IAW 交接 3-1..3-4，宿主新域）：/api/flow/* 自注册 guarded 路由，同样依赖 console 中间件先行
+  await ctx.plugin(flowCore)
   // 钉钉桥接（群桥/出向投递/审批推送/告警通道）：订阅 panel.message.created 与 audit.alert.fired
   await ctx.plugin(dingtalkBridge)
 }

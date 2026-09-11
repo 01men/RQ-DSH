@@ -87,6 +87,21 @@ export const PlatformEvents = {
   ScenegraphUpdated: 'scenegraph.updated',
   // 钉钉桥接（plugin-dingtalk-bridge）：出向投递回执（面板据此更新 ddSync 状态）
   DingtalkDelivered: 'dingtalk-bridge.delivered',
+  // 模型网关治理（IAW 交接 1-2/1-4）：降级链流转与预算阈值告警（面板 SSE 可直接消费）
+  ModelgwDegraded: 'modelgw.degraded',
+  ModelgwBudgetWarning: 'modelgw.budget.warning',
+  // 场景级授权（IAW 交接 6-1）：策略变更（组织内治理联动）
+  IamScenePolicyChanged: 'iam.scene_policy.changed',
+  // 数据要素域（IAW 交接 2-1..2-4）：数据集/指标字典登记变更
+  DatasetChanged: 'resource.dataset.changed',
+  MetricDefinitionChanged: 'resource.metric.changed',
+  // 事务流引擎（IAW 交接 3-1，宿主新域 flow）：TF 编排与步骤状态机（面板 SSE 可直接消费）
+  FlowCreated: 'flow.created',
+  FlowStepUpdated: 'flow.step.updated',
+  FlowCompleted: 'flow.completed',
+  FlowTemplateChanged: 'flow.template.changed',
+  // Agent 域（IAW 交接 7-1）：A2A 跨运行时调用
+  AgentA2aInvoked: 'agent.a2a.invoked',
 } as const
 
 /** 平台保留命名空间：第三方插件（source=plugin:*）禁止发射。 */
@@ -96,6 +111,8 @@ const PLATFORM_RESERVED_PREFIXES = [
   'platform.', 'approval.', 'connector.', 'console.', 'connect.', 'behavior.',
   // 部门面板 / 场景图谱 / 钉钉桥接（review-dsh-agent-panel-v2 Phase 0）
   'panel.', 'scenegraph.', 'dingtalk-bridge.',
+  // 模型网关治理 / 事务流引擎 / 数据要素（IAW 交接批次 2026-09-11）
+  'modelgw.', 'flow.', 'resource.',
 ]
 
 export class PlatformBusService extends Service {

@@ -17,6 +17,23 @@ import * as auditTools from './tools.ts'
 
 export type AuditType = 'auth' | 'authz' | 'invoke' | 'change'
 
+/**
+ * 结论级证据锚点（IAW 交接 5-1，additive）：Agent 结论与数据事实的绑定单元。
+ * kind 值域：dataset 数据集 / field 字段 / window 时间窗 / query 命中行 / doc 文档。
+ */
+export interface EvidenceAnchor {
+  kind: 'dataset' | 'field' | 'window' | 'query' | 'doc'
+  /** 引用标识：数据集编号 / 字段路径 / 查询 id 等（生产方契约）。 */
+  id: string
+  name?: string
+  /** 时间窗锚点（window/query 类）：结论所依据的数据区间。 */
+  timeWindow?: { from: string; to: string }
+  /** 命中行数（query 类）。 */
+  hitRows?: number
+  /** 引用时点质量分 0-100（dataset/field 类，登记快照不回写）。 */
+  qualityScore?: number
+}
+
 export interface AuditLogRecord extends RecordBase {
   type: AuditType
   actorType: 'human' | 'machine' | 'system'
@@ -29,6 +46,23 @@ export interface AuditLogRecord extends RecordBase {
   result: 'ok' | 'denied' | 'error'
   detail: string
   actChain?: Array<{ name: string; type: string }>
+  /** 场景维度（IAW 交接 5-2，additive）：面板任务/诊断等带场景编号的动作落此维度，供审计时间线反查。 */
+  sceneCode?: string
+  /** 证据锚点（IAW 交接 5-1，additive）：直接内联（invoke 类结论事件）或引用证据登记 id。 */
+  evidence?: EvidenceAnchor[]
+  evidenceIds?: string[]
+}
+
+/** 证据登记（IAW 交接 5-1）：锚点包独立落库发 id，会话消息/审计事件以 evidenceId 引用。 */
+export interface EvidenceRecord extends RecordBase {
+  sceneCode?: string
+  /** 绑定的会话消息（dsh 消息 id）与频道（可选）。 */
+  messageId?: string
+  sessionId?: string
+  /** 结论主体（user:<id> / agent:<id>）。 */
+  subject?: string
+  anchors: EvidenceAnchor[]
+  note?: string
 }
 
 export interface AlertRuleRecord extends RecordBase {
@@ -306,10 +340,81 @@ export class AuditService extends Service {
     return this.ctx.opsStorage.collection<ApprovalRecord>('audit:approvals')
   }
 
+  evidence(): Collection<EvidenceRecord> {
+    return this.ctx.opsStorage.collection<EvidenceRecord>('audit:evidence')
+  }
+
   // -- 审计日志 -----------------------------------------------------------
 
   record(entry: Omit<AuditLogRecord, 'id' | 'createdAt' | 'updatedAt'>): AuditLogRecord {
     return this.logs().insert({ id: newId('log'), ...entry })
+  }
+
+  // -- 证据锚点（IAW 交接 5-1） ---------------------------------------------
+
+  /**
+   * 证据登记：锚点包校验后落库发 id。校验为结构性校验（kind 值域 / id 必填 / 窗口与行数形态），
+   * 不校验引用的数据集是否真实存在——那属于数据要素域（resource datasets）的对账职责。
+   */
+  recordEvidence(input: {
+    anchors: EvidenceAnchor[]
+    sceneCode?: string
+    messageId?: string
+    sessionId?: string
+    subject?: string
+    note?: string
+  }): EvidenceRecord {
+    if (!Array.isArray(input.anchors) || input.anchors.length === 0) throw new Error('证据锚点至少一项（anchors）')
+    if (input.anchors.length > 20) throw new Error('证据锚点过多（≤20）：结论级证据应引用事实，不是搬运数据')
+    for (const anchor of input.anchors) {
+      if (!['dataset', 'field', 'window', 'query', 'doc'].includes(anchor.kind)) throw new Error(`证据锚点 kind 非法：${anchor.kind}（dataset/field/window/query/doc）`)
+      if (!anchor.id?.trim()) throw new Error('证据锚点 id 必填（数据集编号/字段路径/查询 id 等）')
+      if (anchor.timeWindow && (!anchor.timeWindow.from || !anchor.timeWindow.to)) throw new Error('证据锚点 timeWindow 需要 from/to')
+      if (anchor.hitRows !== undefined && (!Number.isFinite(anchor.hitRows) || anchor.hitRows < 0)) throw new Error('证据锚点 hitRows 应为非负数')
+      if (anchor.qualityScore !== undefined && (!Number.isFinite(anchor.qualityScore) || anchor.qualityScore < 0 || anchor.qualityScore > 100)) throw new Error('证据锚点 qualityScore 应为 0-100')
+    }
+    return this.evidence().insert({
+      id: newId('evd'),
+      anchors: input.anchors,
+      ...(input.sceneCode ? { sceneCode: input.sceneCode } : {}),
+      ...(input.messageId ? { messageId: input.messageId } : {}),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.subject ? { subject: input.subject } : {}),
+      ...(input.note ? { note: input.note } : {}),
+    })
+  }
+
+  getEvidence(id: string): EvidenceRecord | undefined {
+    return this.evidence().get(id)
+  }
+
+  // -- 场景时间线（IAW 交接 5-2） -------------------------------------------
+
+  /**
+   * 场景/任务维度审计时间线：带 sceneCode 维度的审计日志倒序时间线（面板概览「最近动态」
+   * 与场景抽屉的数据源；无 sceneCode 维度的全量审计仍走 query()/logs）。
+   */
+  timeline(filter: { sceneCode?: string; since?: string; limit?: number } = {}): { total: number; items: Array<{
+    id: string; at: string; type: AuditType; action: string; actorName: string
+    resourceType: string; resourceId: string; resourceName: string
+    result: AuditLogRecord['result']; detail: string; sceneCode?: string; evidenceIds: string[]
+  }> } {
+    const all = this.logs().find((log) => {
+      if (filter.sceneCode && log.sceneCode !== filter.sceneCode) return false
+      if (filter.since && log.createdAt < filter.since) return false
+      return true
+    })
+    const items = all
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, Math.min(filter.limit ?? 50, 200))
+      .map((log) => ({
+        id: log.id, at: log.createdAt, type: log.type, action: log.action, actorName: log.actorName,
+        resourceType: log.resourceType, resourceId: log.resourceId, resourceName: log.resourceName,
+        result: log.result, detail: log.detail,
+        ...(log.sceneCode ? { sceneCode: log.sceneCode } : {}),
+        evidenceIds: log.evidenceIds ?? [],
+      }))
+    return { total: all.length, items }
   }
 
   query(filter: {
@@ -320,6 +425,7 @@ export class AuditService extends Service {
     result?: string
     q?: string
     since?: string
+    sceneCode?: string
     limit?: number
   }): { total: number; items: AuditLogRecord[] } {
     const all = this.logs().find((log) => {
@@ -329,6 +435,7 @@ export class AuditService extends Service {
       if (filter.resourceId && log.resourceId !== filter.resourceId) return false
       if (filter.result && log.result !== filter.result) return false
       if (filter.since && log.createdAt < filter.since) return false
+      if (filter.sceneCode && log.sceneCode !== filter.sceneCode) return false
       if (filter.q && !`${log.action} ${log.actorName} ${log.resourceName} ${log.detail}`.toLowerCase().includes(filter.q.toLowerCase())) return false
       return true
     })

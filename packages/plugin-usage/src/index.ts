@@ -449,6 +449,95 @@ export class UsageService extends Service {
   }
 
   /**
+   * 成本/用量摘要（IAW 交接 4-1：面板侧成本查询的最小接口）。
+   * 窗口 [from, to) 内按 org / subject 过滤的聚合：事件数、内部成本（cost_cents 口径，
+   * charge_cents 零价快照恒 0）、tokens 三分（input/output/其他）与按资源分项。
+   * 权限分层由 HTTP 层负责：usage.read 可查任意主体，panel.read 只读自身组织（scope 收敛在端点做）。
+   */
+  summary(filter: { from: string; to: string; org?: string; subject?: string }): UsageSummary {
+    if (!filter.from || !filter.to) throw new Error('summary 需要 from/to 窗口')
+    const conditions = ['e.occurred_at >= ?', 'e.occurred_at < ?']
+    const params: Array<string | number> = [filter.from, filter.to]
+    if (filter.org) { conditions.push('e.org = ?'); params.push(filter.org) }
+    if (filter.subject) { conditions.push('e.subject = ?'); params.push(filter.subject) }
+    const where = ` WHERE ${conditions.join(' AND ')}`
+    const whereAnd = ` AND ${conditions.join(' AND ')}`
+    const tokensExpr = "COALESCE((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%'), 0)"
+    const byResource = this.ctx.txnStore.sql<{ resource: string; events: number; tokens: number; cost_cents: number; charge_cents: number }>(
+      `SELECT e.resource AS resource, COUNT(*) AS events, ${tokensExpr} AS tokens,` +
+      " COALESCE(SUM(CAST(json_extract(e.pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents," +
+      " COALESCE(SUM(CAST(json_extract(e.pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents" +
+      ` FROM usage_events e${where} GROUP BY e.resource ORDER BY cost_cents DESC, events DESC`,
+      params,
+    ).map((row) => ({ resource: row.resource, events: Number(row.events), tokens: Number(row.tokens), cost_cents: Number(row.cost_cents), charge_cents: Number(row.charge_cents) }))
+    const tokenSplit = (key: string): number => Number((this.ctx.txnStore.sql<{ n: number }>(
+      "SELECT COALESCE(SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)), 0) AS n FROM usage_events e, json_each(e.meters_json) m" +
+      ` WHERE json_extract(m.value, '$.key') = ?${whereAnd}`,
+      [key, ...params],
+    )[0] ?? { n: 0 }).n)
+    return {
+      from: filter.from,
+      to: filter.to,
+      events: byResource.reduce((sum, row) => sum + row.events, 0),
+      cost_cents: byResource.reduce((sum, row) => sum + row.cost_cents, 0),
+      charge_cents: byResource.reduce((sum, row) => sum + row.charge_cents, 0),
+      input_tokens: tokenSplit('input_tokens'),
+      output_tokens: tokenSplit('output_tokens'),
+      byResource,
+    }
+  }
+
+  /**
+   * 产出反馈聚合（IAW 交接 4-2：Agent 产出采纳率）。
+   * 数据源：👍/👎 反馈落账的零价快照 usage 事件（幂等键前缀 feedback:，D2 口径）；
+   * score 取幂等键末段（:up/:down），资源/主体取事件字段。adoptionRate = up/(up+down)，无反馈时为 null。
+   */
+  feedbackStats(filter: { from?: string; to?: string; org?: string } = {}): {
+    from?: string; to?: string
+    up: number; down: number; total: number; adoptionRate: number | null
+    byResource: Array<{ resource: string; up: number; down: number; total: number; adoptionRate: number | null }>
+    byDay: Array<{ day: string; up: number; down: number }>
+  } {
+    const conditions = ["idempotency_key LIKE 'feedback:%'"]
+    const params: Array<string | number> = []
+    if (filter.from) { conditions.push('occurred_at >= ?'); params.push(filter.from) }
+    if (filter.to) { conditions.push('occurred_at < ?'); params.push(filter.to) }
+    if (filter.org) { conditions.push('org = ?'); params.push(filter.org) }
+    const rows = this.ctx.txnStore.sql<{ resource: string; subject: string; org: string; day: string; idempotency_key: string }>(
+      `SELECT resource, subject, org, substr(occurred_at, 1, 10) AS day, idempotency_key FROM usage_events WHERE ${conditions.join(' AND ')}`,
+      params,
+    ).map((row) => ({ ...row, score: row.idempotency_key.slice(row.idempotency_key.lastIndexOf(':') + 1) }))
+    const count = (score: string) => rows.filter((row) => row.score === score).length
+    const rate = (up: number, total: number): number | null => (total === 0 ? null : Math.round((up / total) * 1000) / 1000)
+    const resources = new Map<string, { up: number; down: number }>()
+    const days = new Map<string, { up: number; down: number }>()
+    for (const row of rows) {
+      const bucket = resources.get(row.resource) ?? { up: 0, down: 0 }
+      if (row.score === 'up') bucket.up++
+      if (row.score === 'down') bucket.down++
+      resources.set(row.resource, bucket)
+      const day = days.get(row.day) ?? { up: 0, down: 0 }
+      if (row.score === 'up') day.up++
+      if (row.score === 'down') day.down++
+      days.set(row.day, day)
+    }
+    const up = count('up')
+    const down = count('down')
+    return {
+      ...(filter.from ? { from: filter.from } : {}),
+      ...(filter.to ? { to: filter.to } : {}),
+      up,
+      down,
+      total: rows.length,
+      adoptionRate: rate(up, rows.length),
+      byResource: [...resources.entries()].map(([resource, bucket]) => ({
+        resource, up: bucket.up, down: bucket.down, total: bucket.up + bucket.down, adoptionRate: rate(bucket.up, bucket.up + bucket.down),
+      })).sort((a, b) => b.total - a.total),
+      byDay: [...days.entries()].map(([day, bucket]) => ({ day, ...bucket })).sort((a, b) => a.day.localeCompare(b.day)),
+    }
+  }
+
+  /**
    * J4 月度用量报表聚合（M0-3：用量透明计量报表；契约口径见 docs/contract-j4-usage-report.md）。
    * tokens 三维聚合：部门（org 归口字段）/ Agent（subject=agent:*）/ Skill（resource=skill:*），
    * 附模型维度（byModel，additive）与全口径 totals；tokens 取计量键名含 "tokens" 的米值求和
@@ -691,6 +780,19 @@ export interface MonthlyUsageReport {
   bySkill: MonthlyUsageReportRow[]
   /** 模型维度（resource=model:*，additive 便于成本穿透）。 */
   byModel: MonthlyUsageReportRow[]
+}
+
+/** 成本/用量摘要（IAW 交接 4-1）：窗口聚合 + tokens 三分 + 按资源分项。 */
+export interface UsageSummary {
+  from: string
+  to: string
+  events: number
+  /** 内部成本参考（分）；charge_cents 为零价快照兼容字段（恒 0）。 */
+  cost_cents: number
+  charge_cents: number
+  input_tokens: number
+  output_tokens: number
+  byResource: Array<{ resource: string; events: number; tokens: number; cost_cents: number; charge_cents: number }>
 }
 
 interface ReportRow {
