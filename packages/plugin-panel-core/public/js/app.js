@@ -8,7 +8,9 @@
  * （realtime.js 复用）；演示态/远端形态/会话过期等既有服务行为全部保留。
  * 设计来源：WorkBuddy 原型 + 《行业 AI 工作台 PRD v1.0》（IAW-DS 设计系统）。
  * 原则：不做假数据、不放空占位入口——未实现的能力登记在 docs/handoff-iaw-gaps-to-main.md，
- * 界面上诚实缺席。
+ * 界面上诚实缺席。唯一例外是行业演示预览（2026-09-11 用户需求）：locked/pending 行业
+ * 进入只读预览——图谱为真实预置数据，会话/任务为图谱确定性派生的演示数据且全部带
+ * 「演示」徽标（previewMessages/previewTasks），写操作 / 调用 / 交互一律拦截（previewLocked）。
  */
 import { api, session, setBase as apiSetBase, ApiError } from './api.js'
 import { setBase as depsSetBase, ui as uiDep, realtime as realtimeDep } from './deps.js'
@@ -96,6 +98,8 @@ const state = {
   industry: null,
   /** 用户显式选择行业后置真：部门总览的默认行业不再覆盖用户选择（服务端默认只作用一次）。 */
   industryPinned: false,
+  /** 行业演示预览（locked/pending 行业只读可看）：内置图谱 + 确定性演示会话/任务，写操作全拦。 */
+  industryDemo: false,
   scenegraph: null,
   /** 罗盘状态：环节（links key）过滤 + 价值标签过滤。 */
   thread: 'ALL',
@@ -502,9 +506,9 @@ function navDef() {
   const modelCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.models)).size : 0
   const talentCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.talent)).size : 0
   const dataCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.data)).size : 0
-  const inboxCount = state.tasks.filter((t) => t.lane !== 'done' && (t.assigneeName === session.user?.displayName || t.lane === 'review')).length
+  const inboxCount = activeTasks().filter((t) => t.lane !== 'done' && (t.assigneeName === session.user?.displayName || t.lane === 'review')).length
   const unread = (state.overview?.channels ?? []).reduce((sum, c) => sum + (c.unread ?? 0), 0)
-    + state.tasks.filter((t) => t.lane === 'review').length
+    + activeTasks().filter((t) => t.lane === 'review').length
   return {
     map: [
       ['compass', '场景罗盘', '◎', sceneCount ? String(sceneCount) : ''],
@@ -514,7 +518,7 @@ function navDef() {
       ['roadmap', '转型路线图', '⇥', ''],
     ],
     flow: [
-      ['flow', '全部任务', '▦', state.tasks.length ? String(state.tasks.length) : ''],
+      ['flow', '全部任务', '▦', activeTasks().length ? String(activeTasks().length) : ''],
       ['inbox', '我的收件箱', '☞', inboxCount ? String(inboxCount) : ''],
     ],
     cap: [
@@ -543,6 +547,7 @@ function renderShell() {
       <button class="btn" id="demoLogin">登录</button>
       <button class="btn primary" id="demoOpenWizard">连接宿主</button>
     </div>` : ''}
+    <div id="iawPreviewBar"></div>
     <div class="iaw-app" id="iawApp" data-industry="${esc(state.industry?.code ?? '')}">
       <header class="iaw-topbar">
         <div class="iaw-logo">IAW</div>
@@ -680,7 +685,7 @@ function renderTopRight() {
   const waic = state.board?.waic?.chargeCents
   const ddBound = state.ddStatus?.bound
   const unread = (state.overview?.channels ?? []).reduce((sum, c) => sum + (c.unread ?? 0), 0)
-    + state.tasks.filter((t) => t.lane === 'review').length
+    + activeTasks().filter((t) => t.lane === 'review').length
   const user = session.user ?? (state.demoMode ? { displayName: '演示访客' } : null)
   host.innerHTML = `
     <div class="iaw-health" title="模型渠道健康 · ${state.streamDowngraded ? '实时走 30s 轮询' : '实时通道正常'}"><span class="iaw-dot ${healthCls}"></span><span>${healthTxt}</span></div>
@@ -708,6 +713,7 @@ function renderTopRight() {
 
 /** 状态栏：实时通道三态 + 环境标记 + 图谱统计。 */
 function renderStatus(kind) {
+  renderPreviewBar()
   const bar = $id('iawStatusbar')
   if (!bar) return
   let live = ''
@@ -720,7 +726,7 @@ function renderStatus(kind) {
     else if (health.consecutivePollFailures > 0) live = down('实时轮询连续失败。点击重建实时通道。')
     else live = '<span class="live" title="实时通道不可用（如钉钉 webview），已按 30 秒轮询兜底"><span class="iaw-dot warn"></span>30s 轮询</span>'
   }
-  const env = [state.demoMode ? '演示态' : '', state.remoteHub ? `远端 ${state.remoteHub.hubBase}` : '', EMBEDDED ? '嵌入形态' : ''].filter(Boolean).join(' · ')
+  const env = [state.industryDemo ? '演示预览' : '', state.demoMode ? '演示态' : '', state.remoteHub ? `远端 ${state.remoteHub.hubBase}` : '', EMBEDDED ? '嵌入形态' : ''].filter(Boolean).join(' · ')
   bar.innerHTML = `
     <span>${env || '01门'}</span>
     ${live}
@@ -732,15 +738,121 @@ function renderStatus(kind) {
   $id('iawLive')?.addEventListener('click', () => { reconnectStream(); void toast('正在重建实时通道…') })
 }
 
+/** 演示预览横幅（locked/pending 行业只读可看）：行业说明 + 激活入口 + 退出预览。 */
+function renderPreviewBar() {
+  const bar = $id('iawPreviewBar')
+  if (!bar) return
+  if (!state.industryDemo || !state.industry) {
+    if (bar.innerHTML !== '') bar.innerHTML = ''
+    return
+  }
+  const ind = state.industry
+  bar.innerHTML = `
+    <span class="ic">🧪</span>
+    <span class="tx"><b>演示预览</b> · 「${esc(ind.name)}（${esc(ind.code)}）」尚未激活——当前展示<b>内置演示数据（只读）</b>，不能使用 / 调用 / 交互；${ind.state === 'pending' ? '激活申请审批中，可在审批中心跟进' : '激活后解锁完整功能'}。</span>
+    ${ind.state === 'locked' ? '<button class="btn primary" id="iawPreviewActivate">🔐 提交激活申请</button>' : '<span class="pv-pending">审批中</span>'}
+    <button class="btn" id="iawPreviewExit">退出预览</button>`
+  $id('iawPreviewActivate')?.addEventListener('click', () => showActivate(ind))
+  $id('iawPreviewExit')?.addEventListener('click', () => void exitIndustryPreview())
+}
+
+/** 演示预览护栏：未激活行业只读——写操作 / 调用一律在入口拦截并给出可行动文案。 */
+function previewLocked() {
+  if (!state.industryDemo) return false
+  void toast('演示预览（只读）：该行业未激活——激活后解锁使用 / 调用 / 交互', 'error')
+  return true
+}
+
+// ---------------------------------------------------------------------------
+// 演示预览数据（2026-09-11 用户需求：未激活行业给看演示数据）：
+// 从当前行业图谱包确定性派生「协作会话 / 任务」假数据——引用真实场景编号/痛点/四要素，
+// 全部带 demo 标记（消息气泡打「演示」徽标），绝不混入真实频道消息。
+// ---------------------------------------------------------------------------
+
+const previewPick = (arr, i) => (arr.length ? arr[i % arr.length] : undefined)
+
+function previewMessages() {
+  const pack = state.scenegraph?.pack
+  if (!pack) return []
+  const scenes = packScenes(pack)
+  if (!scenes.length) return []
+  const at = (hoursAgo) => new Date(Date.now() - hoursAgo * 3600_000).toISOString()
+  const s1 = previewPick(scenes, 0)
+  const s2 = previewPick(scenes, Math.floor(scenes.length / 3))
+  const s3 = previewPick(scenes, Math.floor(scenes.length * 2 / 3))
+  const list = (xs, n) => xs.slice(0, n).join('、')
+  const phase = (s) => (s.s <= 2 ? '阶段一 · 起步补基' : s.s === 3 ? '阶段二 · 集成提升' : '阶段三 · 引领示范')
+  return [
+    { id: 'pv-sys', senderType: 'system', senderName: '01门', text: `以下为「${pack.name}」内置演示数据（只读预览）——激活行业后解锁真实协作`, mentions: [], ddSync: 'none', demo: true, createdAt: at(26) },
+    { id: 'pv-m1', senderType: 'human', senderName: '演示 · 工艺组 · 王工', text: `@数字同事 场景 ${s1.code} ${s1.name} 现状 ${'★'.repeat(Math.min(4, s1.s))}，痛点「${s1.pain.slice(0, 42)}…」，请按一图四清单评估改造优先级`, mentions: ['数字同事'], ddSync: 'none', demo: true, createdAt: at(25) },
+    {
+      id: 'pv-m2', senderType: 'agent', senderName: `${pack.name} · 数字同事`, senderIcon: '🤖',
+      text: `已按四清单评估 ${s1.code}：知识模型侧优先引入 ${list(s1.models, 2)}；数据侧打通 ${list(s1.data, 2)}；工具侧可沿用 ${list(s1.tools, 2)}。现状 ${s1.s}/4，建议归入「${phase(s1)}」，详见场景详情抽屉。`,
+      mentions: [], ddSync: 'none', demo: true, createdAt: at(24),
+      card: {
+        title: `生成任务卡：${s1.code} 数字化改造评估`,
+        ops: [
+          { id: 'op1', label: '生成任务卡', style: 'primary', action: 'task.create' },
+          { id: 'op2', label: '推送钉钉卡片', style: 'dd', action: 'dd.push' },
+        ],
+        done: [],
+      },
+    },
+    { id: 'pv-m3', senderType: 'human', senderName: '演示 · 生产部 · 李经理', text: `收到。${s2.code}（${s2.name}）这条线更急：「${s2.pain.slice(0, 42)}…」，麻烦一起看下`, mentions: [], ddSync: 'none', demo: true, createdAt: at(6) },
+    { id: 'pv-m4', senderType: 'agent', senderName: `${pack.name} · 数字同事`, senderIcon: '🤖', text: `${s2.code} 已列入转型路线图「${phase(s2)}」（现状 ${s2.s}/4）；对标场景可用 ${s3.code}（${s3.name}）做贯通度比对——「场景对比」视图可直接勾选。`, mentions: [], ddSync: 'none', demo: true, createdAt: at(5) },
+  ]
+}
+
+function previewTasks() {
+  const pack = state.scenegraph?.pack
+  if (!pack) return []
+  const scenes = packScenes(pack)
+  if (!scenes.length) return []
+  const lanes = ['todo', 'doing', 'review', 'todo', 'doing', 'review', 'done']
+  const owners = [
+    { assigneeType: 'agent', assigneeName: '演示 · 数字同事' },
+    { assigneeType: 'human', assigneeName: '演示 · 工艺组 · 王工' },
+    { assigneeType: 'human', assigneeName: '演示 · 生产部 · 李经理' },
+  ]
+  const titleTemplates = [
+    (s) => `场景诊断：${s.code} ${s.name}`,
+    (s) => `四清单补全：${s.code} 工具/数据缺口梳理`,
+    (s) => `改造立项评估：${s.code} ${s.name}`,
+    (s) => `${s.code} 数字化方案评审`,
+    (s) => `${s.code} 要素接入排期（${s.tools[0] ?? '工具链'}）`,
+    (s) => `跨场景贯通对标：${s.code}`,
+    (s) => `${s.code} 改造验收与评级更新`,
+  ]
+  return lanes.map((lane, i) => {
+    const scene = previewPick(scenes, i * 5 + 1)
+    if (!scene) return null
+    return {
+      id: `pv-t${i + 1}`, dept: state.dept, title: titleTemplates[i](scene), lane,
+      sceneCode: scene.code, createdBy: 'demo-preview',
+      createdAt: new Date(Date.now() - (i + 1) * 3600_000 * 7).toISOString(),
+      ...owners[i % owners.length],
+    }
+  }).filter(Boolean)
+}
+
+/** 展示用数据源：演示预览态回演示数据，其余回真实持久层。 */
+function activeTasks() {
+  return state.industryDemo ? previewTasks() : state.tasks
+}
+function activeMessages() {
+  return state.industryDemo ? previewMessages() : state.messages
+}
+
 /** 事务流条：进行中任务 + 最近动态（真实任务面，不虚构进度）。 */
 function renderFlowbar() {
   const bar = $id('iawFlowbar')
   if (!bar) return
-  const doing = state.tasks.filter((t) => t.lane === 'doing')
-  const review = state.tasks.filter((t) => t.lane === 'review')
-  const latest = state.tasks.filter((t) => t.lane !== 'done').sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))[0]
-  const total = state.tasks.length
-  const done = state.tasks.filter((t) => t.lane === 'done').length
+  const tasks = activeTasks()
+  const doing = tasks.filter((t) => t.lane === 'doing')
+  const review = tasks.filter((t) => t.lane === 'review')
+  const latest = tasks.filter((t) => t.lane !== 'done').sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))[0]
+  const total = tasks.length
+  const done = tasks.filter((t) => t.lane === 'done').length
   const pct = total ? Math.round((done / total) * 100) : 0
   bar.innerHTML = `
     <div class="prog" style="width:${pct}%"></div>
@@ -759,12 +871,14 @@ function renderFlowbar() {
 function renderIndMenu() {
   const menu = $id('iawIndMenu')
   menu.innerHTML = '<div class="iaw-ind-menu-label">14 个重点行业 · 一图四清单</div>' + state.industries.map((ind) => {
-    const st = ind.state === 'active' ? '<span class="st active">已激活</span>' : ind.state === 'pending' ? '<span class="st pending">审批中</span>' : '<span class="st locked">待授权</span>'
+    const st = ind.state === 'active' ? '<span class="st active">已激活</span>'
+      : ind.state === 'pending' ? '<span class="st pending">审批中 · 可预览</span>'
+        : '<span class="st locked">待授权 · 可预览</span>'
     return `<button class="iaw-ind-item ${ind.code === state.industry?.code ? 'on' : ''}" data-code="${esc(ind.code)}">
       <span class="badge" style="background:${IND_COLOR[ind.code] ?? 'var(--ind-500)'}">${esc(IND_AB[ind.code] ?? '·')}</span>
       <span class="nm">${esc(ind.name)}<span style="display:block;font-size:10px;color:var(--text-tertiary)">${esc(ind.sub)}</span></span>
       ${st}</button>`
-  }).join('') + `<div style="border-top:1px solid var(--border-subtle);margin-top:6px;padding:9px 10px;font-size:11px;color:var(--text-tertiary)">切换/使用需宿主平台授权激活（usage 计量 + audit 留痕）</div>`
+  }).join('') + `<div style="border-top:1px solid var(--border-subtle);margin-top:6px;padding:9px 10px;font-size:11px;color:var(--text-tertiary)">未激活行业可点击进入<b>演示预览（只读）</b>——切换 / 使用需宿主平台授权激活（usage 计量 + audit 留痕）</div>`
   menu.querySelectorAll('.iaw-ind-item').forEach((el) => {
     el.onclick = (event) => {
       event.stopPropagation()
@@ -779,24 +893,55 @@ async function pickIndustry(code) {
   if (!ind) return
   if (ind.state === 'active') {
     state.industry = ind
+    state.industryDemo = false
     state.industryPinned = true
     try { localStorage.setItem('iaw_industry', ind.code) } catch { /* 忽略 */ }
-    state.scenegraph = null
-    state.thread = 'ALL'
-    state.tagFilter.clear()
-    $id('iawApp')?.setAttribute('data-industry', ind.code)
-    $id('iawIndName').textContent = ind.name
-    renderIndMenu()
-    renderStatus()
-    await switchDept(state.dept, { keepSpace: true })
+    await applyIndustrySwitch(ind)
     richToast('已切换行业主题', `主色 / 密度 / 动效节奏按 <b>${esc(ind.name)}</b> 覆盖，布局不变。`)
     return
   }
-  if (ind.state === 'pending') {
-    void toast('该行业授权申请审批中，可在控制台「审批中心」跟进')
-    return
+  // locked / pending：进入演示预览（2026-09-11 用户需求）——未激活也能看各行业预置数据
+  //（图谱 + 确定性演示会话/任务），只是不能使用 / 调用 / 交互；激活入口收进预览横幅。
+  state.industry = ind
+  state.industryDemo = true
+  state.industryPinned = true
+  // 演示预览不持久化：刷新后回到已激活行业，避免「演示态」被误当成组织真实行业
+  try { localStorage.removeItem('iaw_industry') } catch { /* 忽略 */ }
+  await applyIndustrySwitch(ind)
+  richToast(ind.state === 'pending' ? '演示预览 · 授权审批中' : '已进入演示预览',
+    `「<b>${esc(ind.name)}</b>」尚未激活——当前展示内置演示数据（只读），激活后解锁使用 / 调用 / 交互。`)
+}
+
+/** 行业切换公共落位（激活 / 预览共用）：清图谱缓存 → 主题与标题 → 全量重渲染。 */
+async function applyIndustrySwitch(ind) {
+  state.scenegraph = null
+  state.thread = 'ALL'
+  state.tagFilter.clear()
+  $id('iawApp')?.setAttribute('data-industry', ind.code)
+  $id('iawIndName').textContent = ind.name
+  renderIndMenu()
+  renderStatus()
+  await switchDept(state.dept, { keepSpace: true })
+}
+
+/** 退出演示预览：回到已激活行业（无激活行业则回未激活态）。 */
+async function exitIndustryPreview() {
+  const active = state.industries.find((item) => item.state === 'active')
+  state.industryDemo = false
+  state.industry = active ?? null
+  state.industryPinned = false
+  try { localStorage.removeItem('iaw_industry') } catch { /* 忽略 */ }
+  if (active) {
+    await applyIndustrySwitch(active)
+    void toast('已退出演示预览，回到已激活行业')
+  } else {
+    $id('iawApp')?.setAttribute('data-industry', '')
+    $id('iawIndName') && ($id('iawIndName').textContent = '未激活行业')
+    renderIndMenu()
+    renderStatus()
+    await switchDept(state.dept, { keepSpace: true })
+    void toast('已退出演示预览')
   }
-  showActivate(ind)
 }
 
 function showActivate(ind) {
@@ -821,6 +966,7 @@ function showActivate(ind) {
       ind.state = 'pending'
       hideModal()
       renderIndMenu()
+      renderStatus()
       void toast('激活申请已提交，请等待平台管理员审批')
     } catch (error) {
       event.target.disabled = false
@@ -862,11 +1008,12 @@ function defsHasNav() {
   return navDef()[state.space]?.some((n) => n[0] === state.nav) ?? false
 }
 
-/** 装载当前视图数据（失败显式提示，不白屏）。 */
+/** 装载当前视图数据（失败显式提示，不白屏）。演示预览态：只拉图谱，真实消息/任务不拉（展示层用演示数据）。 */
 async function loadViewData() {
   try {
-    const wantsGraph = ['compass', 'thread', 'compare', 'roadmap', 'tools', 'kmodels', 'talent', 'elements'].includes(state.nav) || state.nav === 'cockpit'
-    const wantsTasks = ['flow', 'inbox'].includes(state.nav) || state.nav === 'cockpit' || state.space === 'collab'
+    // 演示预览态总是装载图谱：演示会话/任务由图谱包确定性派生（previewMessages/previewTasks）
+    const wantsGraph = state.industryDemo || ['compass', 'thread', 'compare', 'roadmap', 'tools', 'kmodels', 'talent', 'elements'].includes(state.nav) || state.nav === 'cockpit'
+    const wantsTasks = !state.industryDemo && (['flow', 'inbox'].includes(state.nav) || state.nav === 'cockpit' || state.space === 'collab')
     const jobs = []
     if (wantsGraph && state.industry && !state.scenegraph) {
       jobs.push(api.get(`/api/panel/scenegraph?industry=${state.industry.code.toUpperCase()}`).then((res) => { state.scenegraph = res }).catch(() => { state.scenegraph = null }))
@@ -876,8 +1023,9 @@ async function loadViewData() {
       const q = state.boardPlatform ? `?platform=${encodeURIComponent(state.boardPlatform)}` : ''
       jobs.push(api.get(`/api/panel/board${q}`).then((res) => { state.board = res }).catch(() => { state.board = null }))
     }
-    // 协作栏常驻：当前频道消息始终装载（不再只在 rooms 视图拉取——2026-09-11 E2E 发现修复）
-    if (state.channelId) {
+    // 协作栏常驻：当前频道消息始终装载（不再只在 rooms 视图拉取——2026-09-11 E2E 发现修复）；
+    // 演示预览态跳过（含已读游标推进——预览绝不产生任何写副作用）
+    if (!state.industryDemo && state.channelId) {
       jobs.push(api.get(`/api/panel/${state.dept}/messages?channelId=${state.channelId}&limit=80`).then((res) => {
         state.messages = res.messages
         return api.post(`/api/panel/channels/${state.channelId}/read`).catch(() => {})
@@ -1210,14 +1358,14 @@ function viewCockpit(pack) {
   const ov = state.overview
   const ind = state.industry
   const scenes = packScenes(pack)
-  const byLane = Object.fromEntries(LANE_ORDER.map((lane) => [lane, state.tasks.filter((t) => t.lane === lane).length]))
-  const doneRate = state.tasks.length ? Math.round(byLane.done / state.tasks.length * 100) : 0
+  const byLane = Object.fromEntries(LANE_ORDER.map((lane) => [lane, activeTasks().filter((t) => t.lane === lane).length]))
+  const doneRate = activeTasks().length ? Math.round(byLane.done / activeTasks().length * 100) : 0
 
   let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>度量驾驶舱</h1><p>${esc(ind?.name ?? '')} · ${esc(ov?.dept?.label ?? '')} · 数据窗口：近 7 天</p></div><div class="spacer"></div>
     ${(state.board?.availablePlatforms ?? []).map((pf) => `<button class="iaw-chip ${state.boardPlatform === pf ? 'on' : ''}" data-bplat="${esc(pf)}">${esc(PLATFORM_LABELS[pf] ?? pf)}</button>`).join('')}</div>`
 
   h += '<div class="iaw-metrics-row" style="margin-bottom:16px">'
-  h += statCard('任务完成率', `${doneRate}<small>%</small>`, `${byLane.done} / ${state.tasks.length} 个任务`, doneRate >= 60 ? 'up' : 'down')
+  h += statCard('任务完成率', `${doneRate}<small>%</small>`, `${byLane.done} / ${activeTasks().length} 个任务`, doneRate >= 60 ? 'up' : 'down')
   h += statCard('平均现状评级', pack && scenes.length ? (scenes.reduce((sum, s) => sum + s.s, 0) / scenes.length).toFixed(2) + '<small>/ 4</small>' : '—', pack ? `${scenes.length} 个场景` : '图谱未装载', 'neutral')
   h += statCard('进行中任务', String(byLane.doing), `${byLane.review} 个待审`, byLane.review > 0 ? 'down' : 'neutral')
   h += statCard('沉淀产物', String(state.artifacts.length), '报告 / 工单 / 诊断', 'neutral')
@@ -1303,16 +1451,17 @@ function viewCockpit(pack) {
 // ---------------------------------------------------------------------------
 
 function viewFlow() {
-  const review = state.tasks.filter((t) => t.lane === 'review')
+  const tasks = activeTasks()
+  const review = tasks.filter((t) => t.lane === 'review')
   let h = '<div class="iaw-view">'
   h += `<div class="iaw-page-head"><div><h1>事务流工作台</h1><p>最小执行单元是任务：待办 → 进行中 → 待审 → 完成；Agent 产出经门禁确认后落账</p></div><div class="spacer"></div>
-    ${session.can('panel.task.write') ? '<button class="iaw-btn iaw-btn-primary" id="iawNewTask">＋ 新建任务</button>' : ''}</div>`
+    ${!state.industryDemo && session.can('panel.task.write') ? '<button class="iaw-btn iaw-btn-primary" id="iawNewTask">＋ 新建任务</button>' : ''}</div>`
   if (review.length > 0) {
     h += `<div class="iaw-gatebar"><span>▲</span><div class="sp"><b>门禁待确认</b>：${review.length} 个任务停在「待审」——Agent/同事的产出需人工复核后才能闭环。</div><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" id="iawGateJump">去处理</button></div>`
   }
   h += '<div class="iaw-fkanban">'
   for (const lane of LANE_ORDER) {
-    const arr = state.tasks.filter((t) => t.lane === lane)
+    const arr = tasks.filter((t) => t.lane === lane)
     h += `<div class="iaw-fklane"><div class="iaw-fklane-h">${LANE_LABELS[lane]}<span class="cnt">${arr.length}</span></div><div class="iaw-fklane-b">`
     for (const t of arr) {
       h += `<div class="iaw-task" data-task="${esc(t.id)}" data-lane="${esc(t.lane)}">
@@ -1321,12 +1470,12 @@ function viewFlow() {
           <span class="who">${t.assigneeType === 'agent' ? '🤖' : '🧑'} ${esc(t.assigneeName ?? '未指派')}</span>
           ${t.sceneCode ? `<span class="scene" data-scene="${esc(t.sceneCode)}">${esc(t.sceneCode)}</span>` : ''}
           <span style="margin-left:auto;display:flex;gap:4px">
-            ${lane !== 'todo' ? `<button class="iaw-chip" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(lane) - 1]}" title="回退">←</button>` : ''}
-            ${lane !== 'done' ? `<button class="iaw-chip" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(lane) + 1]}" title="推进">→</button>` : ''}
+            ${!state.industryDemo && lane !== 'todo' ? `<button class="iaw-chip" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(lane) - 1]}" title="回退">←</button>` : ''}
+            ${!state.industryDemo && lane !== 'done' ? `<button class="iaw-chip" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(lane) + 1]}" title="推进">→</button>` : ''}
           </span>
         </div></div>`
     }
-    h += `<button class="iaw-chip" data-addlane="${lane}" style="justify-content:center">＋ 新建</button></div></div>`
+    h += `${state.industryDemo ? '' : `<button class="iaw-chip" data-addlane="${lane}" style="justify-content:center">＋ 新建</button>`}</div></div>`
   }
   h += '</div>'
   h += '<div class="iaw-sect-title">事务流模板 / 甘特排程<span class="line"></span></div>'
@@ -1337,15 +1486,16 @@ function viewFlow() {
 
 function viewInbox() {
   const me = session.user?.displayName ?? ''
-  const mine = state.tasks.filter((t) => t.lane !== 'done' && (t.assigneeName === me || t.lane === 'review'))
-  const involved = state.tasks.filter((t) => t.lane === 'done' && t.assigneeName === me)
+  const tasks = activeTasks()
+  const mine = tasks.filter((t) => t.lane !== 'done' && (t.assigneeName === me || t.lane === 'review'))
+  const involved = tasks.filter((t) => t.lane === 'done' && t.assigneeName === me)
   let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>我的收件箱</h1><p>${esc(me || '当前用户')} · 待我处理 ${mine.length} 项</p></div></div><div class="iaw-grid-2">`
   h += '<div class="iaw-panel"><div class="iaw-panel-h"><h3>待我处理</h3></div>'
   h += mine.map((t) => `<div class="iaw-elem" style="margin-bottom:8px;border-left:3px solid var(--${t.lane === 'review' ? 'warning' : 'ind'}-500);border-radius:0 10px 10px 0">
     <div class="eh">${esc(t.title)}</div>
     <ul><li>${esc(LANE_LABELS[t.lane] ?? t.lane)} · ${t.assigneeType === 'agent' ? 'Agent 产出' : '同事指派'}${t.sceneCode ? ` · 场景 ${esc(t.sceneCode)}` : ''}</li></ul>
     <div style="display:flex;gap:8px;margin-top:8px">
-      ${t.lane !== 'done' ? `<button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(t.lane) + 1]}">推进到「${LANE_LABELS[LANE_ORDER[LANE_ORDER.indexOf(t.lane) + 1]]}」</button>` : ''}
+      ${!state.industryDemo && t.lane !== 'done' ? `<button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(t.lane) + 1]}">推进到「${LANE_LABELS[LANE_ORDER[LANE_ORDER.indexOf(t.lane) + 1]]}」</button>` : ''}
       ${t.sceneCode ? `<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-scene="${esc(t.sceneCode)}">查看场景</button>` : ''}
     </div></div>`).join('') || '<div class="iaw-empty" style="padding:20px">暂无待处理事项——任务被指派给你或停在待审时会出现在这里</div>'
   h += '</div>'
@@ -1459,7 +1609,7 @@ function viewRooms() {
   const bridgeIds = new Set(state.bridges.filter((b) => b.purpose === 'channel').map((b) => b.channelId))
   let h = '<div class="iaw-view" style="display:flex;flex-direction:column;gap:12px;height:100%">'
   h += `<div class="iaw-page-head" style="margin-bottom:0"><div><h1>协作频道</h1><p>人 × 数字同事 × 钉钉 · 消息即协作，产物自动沉淀</p></div><div class="spacer"></div>
-    <button class="iaw-btn iaw-btn-primary" id="iawNewChannel">＋ 发起协作</button></div>`
+    ${state.industryDemo ? '' : '<button class="iaw-btn iaw-btn-primary" id="iawNewChannel">＋ 发起协作</button>'}</div>`
   h += '<div class="iaw-chips">' + channels.map((c) => `
     <span class="iaw-chip2 ${c.id === state.channelId ? 'on' : ''}" data-channel="${esc(c.id)}"># ${esc(c.name)}
     ${bridgeIds.has(c.id) ? '<span title="已绑定钉钉群桥">⇄</span>' : ''}
@@ -1482,7 +1632,9 @@ function viewAgents() {
     </div>
     <div style="font-size:12px;color:var(--text-secondary);min-height:34px">${esc(agent.desc)}</div>
     <div style="display:flex;gap:8px;margin-top:8px">
-      <button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-atagent="${esc(agent.name)}">@ 唤起协作</button>
+      ${state.industryDemo
+        ? '<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" disabled title="演示预览（只读）——激活行业后可唤起">@ 唤起协作</button>'
+        : `<button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-atagent="${esc(agent.name)}">@ 唤起协作</button>`}
     </div></div>`).join('') || '<div class="iaw-empty">本部门暂无 Agent 阵容（面板配置中添加）</div>'
   h += '</div>'
   h += `<div class="iaw-sect-title">执行原则<span class="line"></span></div>
@@ -1500,7 +1652,9 @@ function viewMembers() {
   }
   h += '<div class="iaw-panel"><table class="iaw-tbl"><thead><tr><th>姓名</th><th>职务</th><th>组织</th><th></th></tr></thead><tbody>'
   h += members.map((m) => `<tr><td class="n">${esc(m.name)}</td><td>${esc(m.title ?? '—')}</td><td>${esc(m.orgName ?? '—')}</td>
-    <td><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-atagent="${esc(m.name)}">@ 唤起</button></td></tr>`).join('')
+    <td>${state.industryDemo
+      ? '<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" disabled title="演示预览（只读）——激活行业后可唤起">@ 唤起</button>'
+      : `<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-atagent="${esc(m.name)}">@ 唤起</button>`}</td></tr>`).join('')
     || '<tr><td colspan="4" style="text-align:center;color:var(--text-tertiary)">名册为空（组织目录缺失或部门未绑定组织）</td></tr>'
   h += '</tbody></table>'
   h += '<div class="iaw-alert i" style="margin-top:10px"><span>▣</span><div class="sp"><b>场景级授权（角色分级的 ABAC 细粒度授权）属宿主平台 iam 域能力</b>，已登记交接清单。</div></div>'
@@ -1509,12 +1663,12 @@ function viewMembers() {
 }
 
 function viewNotice() {
-  const review = state.tasks.filter((t) => t.lane === 'review')
+  const review = activeTasks().filter((t) => t.lane === 'review')
   const unreadChannels = (state.overview?.channels ?? []).filter((c) => c.unread > 0)
   let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>通知中心</h1><p>任务、门禁、未读、实时动态（内存保留最近 100 条）</p></div></div><div class="iaw-grid-2">`
   h += '<div class="iaw-panel"><div class="iaw-panel-h"><h3>门禁与未读</h3></div>'
   h += review.map((t) => `<div class="iaw-alert w"><span>▲</span><div class="sp"><b>任务待审：${esc(t.title)}</b><br>${t.assigneeType === 'agent' ? 'Agent 产出' : '同事提交'}${t.sceneCode ? ` · 场景 ${esc(t.sceneCode)}` : ''}</div>
-    <button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-move="${esc(t.id)}" data-to="done">确认通过</button></div>`).join('')
+    ${state.industryDemo ? '' : `<button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-move="${esc(t.id)}" data-to="done">确认通过</button>`}</div>`).join('')
   h += unreadChannels.map((c) => `<div class="iaw-alert i"><span>💬</span><div class="sp"><b># ${esc(c.name)}</b><br>${c.unread} 条未读消息</div><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-channel="${esc(c.id)}">去查看</button></div>`).join('')
   h += (review.length + unreadChannels.length === 0) ? '<div class="iaw-empty" style="padding:16px">暂无待办通知</div>' : ''
   h += '</div>'
@@ -1592,6 +1746,7 @@ function wireView(host) {
   host.querySelectorAll('[data-move]').forEach((el) => {
     el.onclick = async (event) => {
       event.stopPropagation()
+      if (previewLocked()) return
       try {
         await api.post(`/api/panel/tasks/${el.dataset.move}/transition`, { lane: el.dataset.to })
         await refreshView()
@@ -1605,7 +1760,7 @@ function wireView(host) {
   host.querySelectorAll('[data-task]').forEach((el) => {
     el.onclick = (event) => {
       if (event.target.closest('[data-move],[data-scene]')) return
-      const task = state.tasks.find((t) => t.id === el.dataset.task)
+      const task = activeTasks().find((t) => t.id === el.dataset.task)
       if (task?.sceneCode) void openScene(task.sceneCode)
       else showNewTask(task?.lane ?? 'todo')
     }
@@ -1713,11 +1868,11 @@ function closeDrawer() {
 }
 
 function sceneTasks(code) {
-  return state.tasks.filter((t) => t.sceneCode === code)
+  return activeTasks().filter((t) => t.sceneCode === code)
 }
 
 function sceneMessages(code) {
-  return state.messages.filter((m) => m.sceneCode === code)
+  return activeMessages().filter((m) => m.sceneCode === code)
 }
 
 function renderDrawer(hit) {
@@ -1771,12 +1926,13 @@ function renderDrawer(hit) {
       ${statCard('人才技能', String(scene.talent.length), scene.talent.length < 2 ? '待补全' : '可用', scene.talent.length < 2 ? 'down' : 'up')}
     </div>`
     body += `<div style="margin-top:14px;display:flex;gap:8px">
-      <button class="iaw-btn iaw-btn-primary" id="iawDrDiag">🤖 派数字同事诊断</button>
-      <button class="iaw-btn iaw-btn-ghost" id="iawDrSyncDD">📤 同步钉钉群</button></div>`
+      ${state.industryDemo ? '' : `<button class="iaw-btn iaw-btn-primary" id="iawDrDiag">🤖 派数字同事诊断</button>
+      <button class="iaw-btn iaw-btn-ghost" id="iawDrSyncDD">📤 同步钉钉群</button>`}
+      ${state.industryDemo ? '<span class="iaw-pill iaw-pill-neutral" style="align-self:center" title="演示预览（只读）">🔒 激活后可派诊断 / 同步钉钉</span>' : ''}</div>`
   } else if (state.sceneTab === 3) {
     const related = sceneTasks(scene.code)
     body += `<div class="iaw-panel" style="box-shadow:none;border:1px solid var(--border-subtle)"><div class="iaw-panel-h"><h3>该场景的执行任务</h3><div class="spacer"></div>
-      ${session.can('panel.task.write') ? `<button class="iaw-btn iaw-btn-primary iaw-btn-sm" id="iawDrNewTask">＋ 新建任务</button>` : ''}</div>`
+      ${!state.industryDemo && session.can('panel.task.write') ? `<button class="iaw-btn iaw-btn-primary iaw-btn-sm" id="iawDrNewTask">＋ 新建任务</button>` : ''}</div>`
     body += related.map((t) => `<div class="iaw-elem" style="margin-bottom:8px"><div class="eh">${esc(t.title)}<span class="iaw-pill iaw-pill-neutral cnt">${LANE_LABELS[t.lane] ?? t.lane}</span></div>
       <ul><li>${t.assigneeType === 'agent' ? '🤖' : '🧑'} ${esc(t.assigneeName ?? '未指派')}</li></ul></div>`).join('')
       || '<div class="iaw-empty" style="padding:12px">暂无任务——从模板创建或交给数字同事</div>'
@@ -1800,8 +1956,9 @@ function renderDrawer(hit) {
     <div class="iaw-dr-tabs">${tabs.map((t, i) => `<button class="${i === state.sceneTab ? 'on' : ''}" data-drtab="${i}">${t}${i === 1 ? `<span class="cnt">${elemTotal}</span>` : ''}${i === 3 ? `<span class="cnt">${sceneTasks(scene.code).length}</span>` : ''}</button>`).join('')}</div>
     <div class="iaw-dr-body">${body}</div>
     <div class="iaw-dr-foot">
-      ${session.can('panel.write') ? '<button class="iaw-btn iaw-btn-primary" id="iawDrDiagFoot">🤖 交给数字同事诊断</button>' : ''}
-      <button class="iaw-btn iaw-btn-ghost" id="iawDrAsk">✍ 让协作栏继续推进</button>
+      ${!state.industryDemo && session.can('panel.write') ? '<button class="iaw-btn iaw-btn-primary" id="iawDrDiagFoot">🤖 交给数字同事诊断</button>' : ''}
+      ${state.industryDemo ? '' : '<button class="iaw-btn iaw-btn-ghost" id="iawDrAsk">✍ 让协作栏继续推进</button>'}
+      ${state.industryDemo ? '<span style="align-self:center;font-size:11px;color:var(--text-tertiary)">演示预览（只读）——激活后可派诊断与协作推进</span>' : ''}
     </div>`
 
   $id('iawDrClose').onclick = closeDrawer
@@ -1834,6 +1991,7 @@ function renderDrawer(hit) {
 
 /** 派数字同事诊断（真实端点：生成任务 + 频道系统行，协作栏跟进）。 */
 async function diagnoseScene(code) {
+  if (previewLocked()) return
   try {
     await api.post(`/api/panel/${state.dept}/scenes/${code}/diagnose`)
     closeDrawer()
@@ -1847,6 +2005,7 @@ async function diagnoseScene(code) {
 
 /** 场景卡同步钉钉（QA BUG-G-03 前置状态检查三连：连接器/绑定/群桥）。 */
 async function syncSceneToDingtalk(code, btn) {
+  if (previewLocked()) return
   if (!state.ddStatus?.connector?.configured) {
     void toast('钉钉桥接未配置：请联系管理员在控制台「三方集成」配置钉钉连接器', 'error')
     return
@@ -1957,35 +2116,49 @@ function messageHtml(m, ddBound) {
       <div class="iaw-skill-exec"><span class="iaw-se-spin"></span> 正在执行「${esc(m.skillName)}」${esc(m.text ? `：${m.text.slice(0, 40)}` : '')}…</div></div></div>`
   }
   if (m.senderType === 'system') return `<div class="iaw-sys">⚡ ${md(m.text)}</div>`
+  // 演示预览消息（previewMessages 派生）：meta 打「演示」徽标；操作卡按钮禁用（title 说明原因）
+  const demoBadge = m.demo ? '<span class="role demo">演示</span>' : ''
   const ddBadge = m.ddSync === 'sent'
     ? '<div style="font-size:10px;color:var(--text-tertiary);margin-top:4px">⇄ 已同步钉钉</div>'
     : m.ddSync === 'pending' ? '<div style="font-size:10px;color:var(--text-tertiary);margin-top:4px">⇄ 钉钉投递中…</div>'
       : m.ddSync === 'failed' ? '<div style="font-size:10px;color:var(--danger-600);margin-top:4px">⇄ 钉钉投递失败</div>'
         : ''
   const card = m.card
-    ? `<div class="card"><div class="t">${esc(m.card.title)}</div><div class="ops">${m.card.ops.map((op) => `
-        <button class="iaw-btn ${m.card.done.includes(op.id) ? 'iaw-btn-ghost' : op.style === 'dd' ? 'iaw-btn-ghost' : 'iaw-btn-primary'} iaw-btn-sm"
-          data-op="${esc(op.id)}" data-msg="${esc(m.id)}" ${m.card.done.includes(op.id) ? 'disabled' : ''}>${esc(op.label)}${m.card.done.includes(op.id) ? ' ✓' : ''}</button>`).join('')}
+    ? `<div class="card"><div class="t">${esc(m.card.title)}</div><div class="ops">${m.card.ops.map((op) => {
+        const done = m.card.done.includes(op.id)
+        const locked = state.industryDemo && !done
+        return `<button class="iaw-btn ${done ? 'iaw-btn-ghost' : op.style === 'dd' ? 'iaw-btn-ghost' : 'iaw-btn-primary'} iaw-btn-sm"
+          data-op="${esc(op.id)}" data-msg="${esc(m.id)}" ${done || state.industryDemo ? 'disabled' : ''}${locked ? ' title="演示数据——激活行业后可执行"' : ''}>${esc(op.label)}${done ? ' ✓' : ''}</button>`
+      }).join('')}
       </div></div>`
     : ''
   if (m.senderType === 'human' && m.senderId && m.senderId === session.user?.id) {
     return `<div class="iaw-msg u"><div class="av" style="background:var(--warning-500)">我</div>
-      <div class="bd"><div class="meta" style="justify-content:flex-end">${esc(m.senderName)}</div><div>${md(m.text)}</div>${ddBadge}</div></div>`
+      <div class="bd"><div class="meta" style="justify-content:flex-end">${esc(m.senderName)}${demoBadge}</div><div>${md(m.text)}</div>${ddBadge}</div></div>`
   }
   if (m.senderType === 'agent') {
     return `<div class="iaw-msg a"><div class="av">${esc(m.senderIcon ?? '🤖')}</div>
-      <div class="bd"><div class="meta">${esc(m.senderName)} <span class="role">Agent</span>${m.model ? `<span class="role">🧠 ${esc(m.model)}</span>` : ''}</div>
+      <div class="bd"><div class="meta">${esc(m.senderName)} <span class="role">Agent</span>${m.model ? `<span class="role">🧠 ${esc(m.model)}</span>` : ''}${demoBadge}</div>
       <div>${md(m.text)}</div>${card}${ddBadge}</div></div>`
   }
   const fromDd = m.ddSync === 'origin'
   return `<div class="iaw-msg"><div class="av" style="background:var(--neutral-500)">${esc((m.senderName ?? '?').slice(0, 1))}</div>
-    <div class="bd"><div class="meta">${esc(m.senderName)}${fromDd ? '<span class="role">● 来自钉钉</span>' : ''}</div>
+    <div class="bd"><div class="meta">${esc(m.senderName)}${fromDd ? '<span class="role">● 来自钉钉</span>' : ''}${demoBadge}</div>
     <div>${md(m.text)}</div>${card}${ddBadge}</div></div>`
 }
 
 function renderConversation(host) {
   if (!host) return
   const ddBound = Boolean(state.ddStatus?.bound)
+  // 演示预览态：频道会话整体切到确定性演示数据（与真实频道/消息无关，只读）
+  if (state.industryDemo) {
+    host.innerHTML = previewMessages().map((m) => messageHtml(m, ddBound)).join('')
+    host.querySelectorAll('[data-scene]').forEach((el) => {
+      el.onclick = () => void openScene(el.dataset.scene)
+    })
+    host.scrollTop = host.scrollHeight
+    return
+  }
   if (!state.channelId) {
     host.innerHTML = '<div class="iaw-empty">本部门还没有协作频道——在「协作空间 · 协作频道」发起。</div>'
     return
@@ -1994,7 +2167,7 @@ function renderConversation(host) {
     <div class="iaw-msg a"><div class="av">${esc(card.icon)}</div>
       <div class="bd"><div class="meta">${esc(card.name)} <span class="role">Agent</span>${card.model ? `<span class="role">🧠 ${esc(card.model)}</span>` : ''}${card.fallback ? '<span class="role" style="color:var(--warning-600)">转人工</span>' : ''}</div>
       <div class="iaw-stream">${md(card.text)}${card.fallback ? '' : '<span class="cursor"></span>'}</div></div></div>`).join('')
-  host.innerHTML = state.messages.map((m) => messageHtml(m, ddBound)).join('') + streamHtml
+  host.innerHTML = activeMessages().map((m) => messageHtml(m, ddBound)).join('') + streamHtml
   host.querySelectorAll('[data-op]').forEach((el) => {
     el.onclick = () => void doCardAction(el.dataset.msg, el.dataset.op, el)
   })
@@ -2013,6 +2186,7 @@ function renderConversation(host) {
 }
 
 async function doCardAction(messageId, opId, btn) {
+  if (previewLocked()) { btn.disabled = false; return }
   btn.disabled = true
   try {
     const result = await api.post(`/api/panel/messages/${messageId}/card-action`, { opId })
@@ -2042,6 +2216,10 @@ function clearDraft() {
 function composerHtml(place) {
   const dept = state.overview?.dept
   if (!dept) return ''
+  // 演示预览态：输入区整体替换为锁定提示（不发请求、不可输入，交互面诚实缺席）
+  if (state.industryDemo) {
+    return `<div class="iaw-composer"><div class="box locked">🔒 演示预览（只读）——「${esc(state.industry?.name ?? '')}」激活后解锁发消息 / @数字同事 / 直调技能</div></div>`
+  }
   const bound = Boolean(state.ddStatus?.bound)
   const onlineModels = state.models.filter((model) => model.status === 'online')
   const modelSwitch = onlineModels.length > 0
@@ -2141,7 +2319,10 @@ function wireComposer(host) {
 
 function atMention(name, inputEl) {
   const input = inputEl ?? $id('iawComposerInput')
-  if (!input) { void toast('协作栏不可用'); return }
+  if (!input) {
+    void toast(state.industryDemo ? '演示预览（只读）：激活行业后可在协作栏唤起数字同事' : '协作栏不可用')
+    return
+  }
   input.value = `@${name} ${input.value}`
   saveDraft(input)
   input.focus()
@@ -2149,7 +2330,10 @@ function atMention(name, inputEl) {
 
 function insertSkill(name, inputEl) {
   const input = inputEl ?? $id('iawComposerInput')
-  if (!input) { void toast('协作栏不可用'); return }
+  if (!input) {
+    void toast(state.industryDemo ? '演示预览（只读）：激活行业后可直调技能' : '协作栏不可用')
+    return
+  }
   input.value = `/${name} ${input.value}`
   saveDraft(input)
   input.focus()
@@ -2198,6 +2382,7 @@ function mentionsRosterAgent(text) {
 }
 
 async function sendMessage(input) {
+  if (previewLocked()) return
   const text = input.value.trim()
   if (!text || !state.channelId) return
   const skillCmd = parseSkillCommand(text)
@@ -2415,7 +2600,7 @@ async function openCmdk(prefill = '') {
   for (const channel of (state.overview?.channels ?? [])) {
     sources.push({ group: '频道', icon: '#', label: channel.name, sub: `${channel.unread ?? 0} 未读`, act: () => { mask.remove(); state.channelId = channel.id; localStorage.setItem(`panel_channel_${state.dept}`, channel.id); state.space = 'collab'; state.nav = 'rooms'; renderSeg(); renderNav(); void refreshView() } })
   }
-  for (const task of state.tasks.filter((t) => t.lane !== 'done').slice(0, 20)) {
+  for (const task of activeTasks().filter((t) => t.lane !== 'done').slice(0, 20)) {
     sources.push({ group: '任务', icon: '📌', label: task.title, sub: LANE_LABELS[task.lane] ?? task.lane, act: () => { mask.remove(); state.space = 'flow'; state.nav = 'flow'; renderSeg(); renderNav(); void refreshView() } })
   }
   for (const member of (state.overview?.members ?? [])) {
@@ -2457,6 +2642,7 @@ function showHelp() {
 // ---------------------------------------------------------------------------
 
 function showNewChannel() {
+  if (previewLocked()) return
   showModal('＋ 发起协作（新建频道）', `
     <div style="display:flex;flex-direction:column;gap:10px">
       <input id="chanName" placeholder="频道名（如：异常快速响应群）" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">
@@ -2488,6 +2674,7 @@ function showNewChannel() {
 }
 
 function showNewTask(lane, sceneCode) {
+  if (previewLocked()) return
   showModal('📌 新建任务', `
     <div style="display:flex;flex-direction:column;gap:10px">
       <input id="taskTitle" placeholder="任务标题" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">

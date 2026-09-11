@@ -431,3 +431,16 @@
 .iaw-stream .cursor{display:inline-block;width:7px;height:13px;background:var(--ind-500);vertical-align:-2px;margin-left:2px;animation:iaw-cursor 1s steps(2) infinite;border-radius:1px}
 @keyframes iaw-cursor{0%,49%{opacity:1}50%,100%{opacity:0}}
 .iaw-stream-meta{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-tertiary);margin-top:6px}
+
+/* ============ 行业演示预览（2026-09-11：locked/pending 行业只读可看） ============ */
+/* 横幅在 .iaw-app 之外（#app flex 列，位于演示登录横幅同层），样式自洽不依赖主题令牌 */
+.iaw-preview-bar{display:flex;align-items:center;gap:10px;padding:7px 16px;background:linear-gradient(90deg,#FFF8EB 0%,#FFFBF2 60%,#FFFFFF 100%);border-bottom:1px solid #FFEFCC;font-size:12.5px;color:#9C6608;flex:none}
+.iaw-preview-bar .ic{font-size:15px;flex:none}
+.iaw-preview-bar .tx{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.iaw-preview-bar .tx b{font-weight:600}
+.iaw-preview-bar .btn{min-height:26px;height:26px;padding:2px 12px;font-size:12px;border:1px solid #E8A317;border-radius:8px;background:#fff;color:#9C6608;font-weight:500;cursor:pointer;flex:none}
+.iaw-preview-bar .btn:hover{filter:brightness(.97);background:#FFF6E0}
+.iaw-preview-bar .btn.primary{background:#E8A317;border-color:#E8A317;color:#fff}
+.iaw-preview-bar .pv-pending{font-size:11px;padding:2px 9px;border-radius:999px;background:#FFEFCC;color:#9C6608;font-weight:500;flex:none;white-space:nowrap}
+.iaw-app .iaw-msg .role.demo{background:var(--warning-50);color:var(--warning-700);font-weight:500}
+.iaw-composer .box.locked{display:flex;align-items:center;gap:8px;padding:13px 14px;color:var(--text-tertiary);font-size:12.5px;background:var(--bg-subtle);border-style:dashed;justify-content:center}
