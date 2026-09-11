@@ -6,9 +6,12 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 
 ## 本仓库定位（定制轨 · 01门）
 
-> 本仓库（01men/RQ-DSH）是榕器的**定制轨发布仓**，唯一交付物为**「01门」——AI 代理与人类的协作前台**。cordis 插件形态一键装进 dsh（`dsh plugin add github:01men/RQ-DSH` / npm `@ybkk/gate-01` / `link:` / `file:` 四通道），打开 `http://127.0.0.1:<端口>/gate01/panel/` 即见内置演示看板；连接宿主后全量数据经本机代理接入（浏览器零跨域），登录在宿主侧完成；`dsh plugin remove` 卸载干净、重装即恢复；安装产物为预构建 dist（零 TS 装载/零生命周期脚本）。宿主平台主仓库见 [01men/ybkk-AIOS](https://github.com/01men/ybkk-AIOS)。
+> 本仓库（01men/RQ-DSH）是榕器的**定制轨发布仓**，唯一交付物为**「01门」——AI 代理与人类的协作前台**。cordis 插件形态一键装进 dsh（`dsh plugin add github:01men/RQ-DSH` / npm `@ybkk/gate-01`（已发布 1.2.0） / `link:` / `file:` 四通道），打开 `http://127.0.0.1:<端口>/gate01/panel/` 即见内置演示看板；连接宿主后全量数据经本机代理接入（浏览器零跨域），登录在宿主侧完成；`dsh plugin remove` 卸载干净、重装即恢复；安装产物为预构建 dist（零 TS 装载/零生命周期脚本）。宿主平台主仓库见 [01men/ybkk-AIOS](https://github.com/01men/ybkk-AIOS)。
 
 - 定制轨范围：一线面板/看板（plugin-panel-core）、会话执行卡（plugin-rq-card）、钉钉桥（plugin-dingtalk-bridge）、scenegraphs 业务数据；dsh 部署装配
+- 行业 AI 工作台（IAW）v1.0：五空间信息架构、14 行业图谱包（packages/platform-core/scenegraphs/）与 14 行业主题引擎；未激活行业可只读预览预置图谱与演示数据
+- 钉钉设备流登录：面板代发起授权，未登录/未绑定自动弹出激活指令
+- npm 发布通道：scripts/release.mjs 一键发布（登录自愈/版本决策/构建回归/发布验证/记录回填/推送备份）
 - 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md) ｜ 降级台账：[docs/gate01-degradation-ledger.md](docs/gate01-degradation-ledger.md)
 - 双轨治理：宿主面需求在主分支（ybkk-AIOS）进行，定制分支经 merge 吸收上游；定制→上游仅允许交接清单文档受控回流
 
@@ -52,4 +55,4 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - 生产部署默认基线初始化（零演示数据）；演示数据仅 `DEMO_SEED=1` 显式注入，请勿在生产启用
 - 全部文件操作经 MCP 文件网关并按真实用户身份（X-On-Behalf-User）留痕；测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock
 
-（更新日期：2026-09-11）
+（更新日期：2026-09-12）
