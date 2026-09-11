@@ -5,6 +5,7 @@ import { $, $$, h, toast, esc } from './ui.js'
 import { openCmdk } from './cmdk.js'
 import { replayPlatformTheme, PLATFORM_KEY } from './platform.js'
 import { resolveLanding, isBareLanding, LANDING_PREF_KEY } from './landing.js'
+import { consumeNextSources, exitWithNext } from './next-redirect.js'
 
 // 平台主题（WP-05/B3）：启动即回放记忆的平台（免闪默认色）。写入方为平台身份下发方
 // （applyPlatformTheme——卡片包域回流后的工作台校准、或部署方预置 heng_ops_platform 键）。
@@ -245,7 +246,7 @@ async function refreshBadges() {
 // 全局路由
 window.addEventListener('hashchange', navigate)
 
-// 启动链：会话就绪 → 落地分诊 → 首帧渲染（docs/entry-switching.md）。
+// 启动链：会话就绪 → 已登录态 next 消费 → 落地分诊 → 首帧渲染（docs/entry-switching.md）。
 // 会话链与部门面板同款：已有令牌 → 宿主 Cookie 直通（独立形态 /dsh-bridge/* 不存在，静默跳过）；
 // ?ticket= 由登录页消费（仅未登录落到登录页时生效）。
 // 落地分诊：纯业务身份裸落地 → 进部门面板（一个入口按身份落地）；
@@ -253,6 +254,13 @@ window.addEventListener('hashchange', navigate)
 // 深链（#/其他页面）与页内导航永不触发分诊。
 async function boot() {
   if (!session.token) await exchangeBridgeSession()
+  // 已登录态 next 消费（交接 F 清单 P 节，2026-09-11）：next 的解析/白名单/出口原本只在登录页，
+  // 而控制台路由在已有会话时直接渲染外壳——宿主已登录时打开「宿主/?next=<面板地址>」参数被
+  // 静默丢弃，远程 dsh 面板向导的跨源扫码回跳死洞（须先登出宿主才能走通）。现于启动链按
+  // finishLogin 同规则出口（跨源签一次性自助票带 #entry_ticket= 回跳 / 同源直接跳转），
+  // 已登录态扫码通道变成「打开宿主页 → 立即带票弹回面板」的静默授权；未登录态与既有登录页
+  // 行为不变（登录页出口在 next-redirect.js 共享面，同一规则）。
+  if (session.token && (await exitWithNext({ ...consumeNextSources(), api }))) return
   const user = session.user
   if (user && isBareLanding(location.hash) && resolveLanding(user) === 'panel') {
     let pref = ''

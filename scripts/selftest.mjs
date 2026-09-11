@@ -1171,6 +1171,31 @@ try {
     check('四态：rq-card 随包单测全绿（node --test）', stateTest.exitCode === 0, `exit=${stateTest.exitCode}`)
   }
 
+  // ================================================================ 交接 F 清单 M 节：scenegraph 校验器口径对齐原文
+  section('场景图谱校验器（F 清单 M 节：8 类价值标签 / tags 可空 / links 可选，既有包零改动兼容）')
+  {
+    const sg = await import(new URL('../packages/platform-core/src/scenegraph.ts', import.meta.url).href)
+    const baseScene = (overrides = {}) => ({
+      code: 'TST01-A-1-1', name: '测试场景', type: '主场景', s: 3, tags: ['降本'], pain: '痛点',
+      tools: ['t'], models: ['m'], data: ['d'], talent: ['p'], ...overrides,
+    })
+    const packOf = (scene, extra = {}) => ({
+      code: 'TST01', name: '测试行业', icon: '🧪', version: 'v1', chains: '测试链',
+      activities: { mfg: [scene] }, ...extra,
+    })
+    const errorsOf = (pack) => sg.validateScenegraph(pack, 'm节自测')
+    check('M：原文口径标签 增收/安全/环保 入白名单（8 类=原文 7 类+节能兼容保留）',
+      errorsOf(packOf(baseScene({ tags: ['增收', '安全', '环保'] }))).length === 0
+      && errorsOf(packOf(baseScene({ tags: ['节能'] }))).length === 0
+      && sg.SCENE_TAGS.length === 8, JSON.stringify(sg.SCENE_TAGS))
+    check('M：词表外标签仍被拒', errorsOf(packOf(baseScene({ tags: ['虚构标签'] }))).some((line) => line.includes('tags 非法')))
+    check('M：tags 空数组放行（原文未标注场景如实装载，不造假标签）',
+      errorsOf(packOf(baseScene({ tags: [] }))).length === 0)
+    check('M：tags 缺位（非数组）仍被拒', errorsOf(packOf(baseScene({ tags: undefined }))).some((line) => line.includes('tags 非法')))
+    check('M：links 可选字段零校验负担（带环节链的包零错误，既有包无需改动）',
+      errorsOf(packOf(baseScene(), { links: [{ key: 'A', name: '铁前' }, { key: 'B', name: '炼铁' }] })).length === 0)
+  }
+
   // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
 
   // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
@@ -4088,6 +4113,10 @@ try {
   const landingTest = spawn(process.execPath, ['packages/plugin-console/public/js/landing.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => landingTest.on('close', resolve))
   check('落地分诊随包单测全绿（node --test）', landingTest.exitCode === 0, `exit=${landingTest.exitCode}`)
+  // 登录回跳共享面随包单测（F 清单 P 节：一次读取消费/白名单/出口规则，next-redirect.test.mjs）
+  const nextRedirectTest = spawn(process.execPath, ['packages/plugin-console/public/js/next-redirect.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => nextRedirectTest.on('close', resolve))
+  check('登录回跳共享面随包单测全绿（node --test）', nextRedirectTest.exitCode === 0, `exit=${nextRedirectTest.exitCode}`)
   // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
   const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
   check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',
@@ -4096,10 +4125,12 @@ try {
   check('控制台启动链含宿主会话直通 + 落地分诊（exchangeBridgeSession/resolveLanding）',
     consoleBoot.includes('exchangeBridgeSession') && consoleBoot.includes('resolveLanding'))
   const loginSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'pages', 'login.js'), 'utf8')
-  check('登录回跳接线（?next= 一次读取共享 + 401 暂存 heng_ops_next 消费 + 跨源白名单双 sanitize）',
-    loginSrc.includes('urlNextParam') && loginSrc.includes("sanitizeNext(urlNextParam")
-    && loginSrc.includes("sanitizeCrossOriginNext(urlNextParam")
-    && loginSrc.includes('heng_ops_next') && loginSrc.includes('sanitizeNext'))
+  const nextRedirectSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'next-redirect.js'), 'utf8')
+  check('登录回跳接线（F 清单 P 节：消费面提升共享模块 next-redirect.js，login/app 双消费者同规则）',
+    loginSrc.includes('consumeNextSources') && loginSrc.includes('exitWithNext')
+    && consoleBoot.includes('exitWithNext') && consoleBoot.includes('consumeNextSources')
+    && nextRedirectSrc.includes('sanitizeNext') && nextRedirectSrc.includes('sanitizeCrossOriginNext')
+    && nextRedirectSrc.includes('heng_ops_next') && nextRedirectSrc.includes('heng_ops_next_cross'))
   const panelApp = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'app.js'), 'utf8')
   check('面板侧切换接线（管理控制台 data-landing 偏好 + 401 引导带 ?next= 回面板）',
     panelApp.includes('data-landing') && panelApp.includes('next='))

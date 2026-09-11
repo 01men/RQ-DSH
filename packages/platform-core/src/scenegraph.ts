@@ -16,8 +16,11 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 
-/** 价值标签（工信部口径五类）。 */
-export const SCENE_TAGS = ['提质', '降本', '增效', '节能', '新模式'] as const
+/**
+ * 价值标签（交接 F 清单 M 节，2026-09-11）：工信部原文口径为 降本/提质/增效/增收/安全/环保/新模式；
+ * 「节能」为既有 qb01 包兼容保留（原文无此标签，存量图谱零改动照常过校验）。
+ */
+export const SCENE_TAGS = ['提质', '降本', '增效', '节能', '新模式', '增收', '安全', '环保'] as const
 export type SceneTag = (typeof SCENE_TAGS)[number]
 
 /** 业务活动键（ACT 映射：研发设计 rd / 生产制造 mfg / 供应链 scm / 运维服务 svc / 数字营销 mkt / 经营管理 mgmt / 法财税 fin）。 */
@@ -58,6 +61,12 @@ export interface ScenegraphPack {
   version: string
   /** 行业主线链条（一条主线）。 */
   chains: string
+  /**
+   * 行业环节链（交接 F 清单 M 节，2026-09-11，可选）：原文图谱按行业环节组织（如钢铁 A 铁前/B 炼铁…），
+   * chains 单字符串无法结构化消费。缺位时前端从场景编号第三段反推（既有 qb01 包无需改动）。
+   * 校验器不对该字段做强校验（生产方契约）。
+   */
+  links?: Array<{ key: string; name: string }>
   /** 业务活动 → 场景清单（5 类业务活动到 N 个场景的挂载）。 */
   activities: Partial<Record<SceneActivity, ScenegraphScene[]>>
 }
@@ -98,8 +107,11 @@ export function validateScenegraph(input: unknown, source = 'scenegraph'): strin
       if (!scene?.name || typeof scene.name !== 'string') errors.push(`${at}.name 必填`)
       if (scene?.type !== '主场景' && scene?.type !== '细分场景') errors.push(`${at}.type 非法（主场景/细分场景）`)
       if (!Number.isInteger(scene?.s) || scene.s < 1 || scene.s > 5) errors.push(`${at}.s 现状评级须为 1-5 整数`)
-      if (!Array.isArray(scene?.tags) || scene.tags.length === 0 || scene.tags.some((tag) => !SCENE_TAGS.includes(tag))) {
-        errors.push(`${at}.tags 非法（应为 ${SCENE_TAGS.join('/')} 的非空子集）`)
+      // tags 可为空数组（交接 F 清单 M 节，2026-09-11）：原文相当比例场景未显式标注价值标签
+      // （实测 807 场景中 504 个无标注）——此前唯一合规做法是虚构标签，违反「不造假数据」红线；
+      // 放宽后按原文如实装载，按标签筛选的场景视图自然排除无标注场景
+      if (!Array.isArray(scene?.tags) || scene.tags.some((tag) => !SCENE_TAGS.includes(tag))) {
+        errors.push(`${at}.tags 非法（应为 ${SCENE_TAGS.join('/')} 的子集，可为空数组）`)
       }
       if (!scene?.pain || typeof scene.pain !== 'string') errors.push(`${at}.pain 必填`)
       for (const list of ['tools', 'models', 'data', 'talent'] as const) {

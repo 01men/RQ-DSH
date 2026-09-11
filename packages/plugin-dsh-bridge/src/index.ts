@@ -327,15 +327,23 @@ export function apply(ctx: Context, config: DshBridgeConfig = {}) {
 
   // ---- 身份半：票据兑换 + 绑定 + 会话关联 ------------------------------------
   const binding = bindingService
-  // EntryTicketService（provide 'entryTickets'）与 authn 平级，由 plugin-authn 装配
-  const entryTickets = (softRead(ctx, 'entryTickets') as unknown as {
+  // EntryTicketService（provide 'entryTickets'）与 authn 平级，由 plugin-authn 装配。
+  // N 节（交接 F 清单，2026-09-11）修复：请求期惰性解析——dsh Loader 并发装载 patch entry 时
+  // authn 可能晚于本插件发布 entryTickets，apply 期软读是竞态写法（软读到 undefined 即整段
+  // 早退，/dsh-bridge/* 身份面整体 404、宿主 Cookie 直通失效）。惰性解析后：注册面不再受
+  // 装配时序影响；服务就绪前的兑换请求得到明确错误，就绪即通。
+  const entryTicketsAt = () => (softRead(ctx, 'entryTickets') as unknown as {
     redeem(ticket: string, clientIp: string): { refType: string; refId: string; identity: { sub: string; name?: string; roles?: string[]; org?: { id?: string } } }
   } | undefined)
-  if (!binding || !entryTickets) {
-    ctx.logger('dsh-bridge').warn('身份半未装配：缺少 identityBinding 或 entryTickets 服务（仅挂载半生效）')
+  if (!binding) {
+    ctx.logger('dsh-bridge').warn('身份半未装配：缺少 identityBinding 服务（仅挂载半生效）')
     return
   }
-  const redeemTicket = (ticket: string) => entryTickets.redeem(ticket, 'dsh-bridge')
+  const redeemTicket = (ticket: string) => {
+    const entryTickets = entryTicketsAt()
+    if (!entryTickets) throw new Error('entryTickets 服务未就绪（装配进行中），请稍后重试')
+    return entryTickets.redeem(ticket, 'dsh-bridge')
+  }
 
   /** 同源收紧：带 Origin 的请求必须与 Host 同 authority（dsh fence 同语义，防跨站驱动绑定面）。 */
   const sameOrigin = (req: IncomingMessage): boolean => {
