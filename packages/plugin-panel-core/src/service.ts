@@ -437,8 +437,6 @@ export class PanelService extends Service {
     senderType: 'human' | 'agent' | 'system'
     senderId?: string
     senderName: string
-    /** agent 型消息的展示图标（如技能直调的 ⚡）。 */
-    senderIcon?: string
     text: string
     ddSync: boolean
     card?: MessageRecord['card']
@@ -497,23 +495,72 @@ export class PanelService extends Service {
     }
   }
 
-  async invokeAgent(dept: DeptConfigRecord, agentCard: DeptAgent, trigger: MessageRecord, modelOverride?: string): Promise<void> {
+  /** Agent 应答落库 + 事件广播（invokeAgent / streamAgentReply 共用）。 */
+  private async insertAgentReply(dept: DeptConfigRecord, agentCard: DeptAgent, trigger: MessageRecord, text: string, card?: MessageRecord['card'], usedModel?: string): Promise<MessageRecord> {
+    const record = this.messages().insert({
+      id: newId('pmsg'), channelId: trigger.channelId, dept: dept.id,
+      senderType: 'agent', senderName: agentCard.name, senderIcon: agentCard.icon,
+      text, mentions: [], ...(card ? { card: { ...card, done: [] } } : {}),
+      ddSync: 'none', agentName: agentCard.name, ...(usedModel ? { model: usedModel } : {}),
+      ...(trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}),
+    })
+    this.ctx.platformBus.emit(PlatformEvents.PanelMessageCreated, {
+      messageId: record.id, dept: dept.id, channelId: trigger.channelId,
+      senderName: agentCard.name, text, ddSync: 'none', card: record.card, title: record.card?.title ?? '',
+    })
+    return record
+  }
+
+  /**
+   * Agent 调用前置解析（invokeAgent / streamAgentReply 共用）：资产绑定 → 模型取向 →
+   * 频道上下文 + 部门场景图谱摘要组装。返回 ok:false 时 reason 为可展示的诚实降级文案。
+   */
+  private prepareAgentInvocation(
+    dept: DeptConfigRecord,
+    agentCard: DeptAgent,
+    trigger: MessageRecord,
+    modelOverride?: string,
+    contextNote?: string,
+  ): { ok: true; model: string; systemPrompt: string; userText: string } | { ok: false; reason: string } {
     const channel = this.channels().get(trigger.channelId)
+    const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
+    const asset = ref ? this.soft('resourceCore')?.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
+    if (!asset) return { ok: false, reason: '未绑定 Agent 资产（请在控制台「Agent 本体」登记并在此配置 agentRef）' }
+    // 模型取向：对话框显式切换的模型优先，未指定则跟随 Agent 资产的 model 属性
+    const model = modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
+    if (!model) return { ok: false, reason: 'Agent 资产未配置模型（model 属性为空），且本次会话未指定模型' }
+    // 组装频道上下文（最近 8 条）+ 部门场景图谱摘要
+    const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8)
+    const contextText = recent.map((m) => `${m.senderName}: ${m.text}`).join('\n')
+    const sceneSummary = this.sceneSummaryForDept(dept)
+    const systemPrompt = [
+      String((asset.attrs as Record<string, unknown> | undefined)?.systemPrompt ?? `你是企业部门协作面板中的数字同事「${agentCard.name}」（${agentCard.desc}）。`),
+      sceneSummary ? `本部门挂载的行业场景图谱要点：\n${sceneSummary}` : '',
+      contextNote ?? '',
+      channel ? `以下是频道「${channel.name}」最近对话：\n${contextText}` : '',
+    ].filter(Boolean).join('\n\n')
+    return { ok: true, model, systemPrompt, userText: trigger.text }
+  }
+
+  /** Agent 调用后的协作计量（D1 裁决键格式；org 主键缺省跳过，计量失败不阻塞协作面）。 */
+  private meterAgentCall(dept: DeptConfigRecord, trigger: MessageRecord, agentCard: DeptAgent): void {
     const orgId = this.callerOrgId(trigger.senderId)
-    const reply = async (text: string, card?: MessageRecord['card'], usedModel?: string) => {
-      const record = this.messages().insert({
-        id: newId('pmsg'), channelId: trigger.channelId, dept: dept.id,
-        senderType: 'agent', senderName: agentCard.name, senderIcon: agentCard.icon,
-        text, mentions: [], ...(card ? { card: { ...card, done: [] } } : {}),
-        ddSync: 'none', agentName: agentCard.name, ...(usedModel ? { model: usedModel } : {}),
-        ...(trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}),
+    if (!orgId) return
+    try {
+      this.soft('usage')?.record({
+        org: orgId,
+        subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
+        principal: `org:${orgId}`,
+        resource: this.meterResource(dept.id, orgId),
+        meters: [{ key: 'calls', value: 1, unit: 'call' }],
+        idempotency_key: `panel:agent:${trigger.id}:${agentCard.name}`,
       })
-      this.ctx.platformBus.emit(PlatformEvents.PanelMessageCreated, {
-        messageId: record.id, dept: dept.id, channelId: trigger.channelId,
-        senderName: agentCard.name, text, ddSync: 'none', card: record.card, title: record.card?.title ?? '',
-      })
-      return record
-    }
+    } catch { /* 计量失败不阻塞回包 */ }
+  }
+
+  async invokeAgent(dept: DeptConfigRecord, agentCard: DeptAgent, trigger: MessageRecord, modelOverride?: string): Promise<void> {
+    const reply = (text: string, card?: MessageRecord['card'], usedModel?: string) =>
+      this.insertAgentReply(dept, agentCard, trigger, text, card, usedModel)
     const fallbackToHuman = async (reason: string) => {
       await reply(`「${agentCard.name}」暂不能自主应答：${reason}已转人工待办，请相关同事跟进。`)
       this.tasks().insert({
@@ -522,30 +569,18 @@ export class PanelService extends Service {
         lane: 'todo', assigneeType: 'human', createdBy: `agent:${agentCard.name}`, messageId: trigger.id,
       })
     }
-    // 解析 Agent 资产（agentRef = agent:<idOrSlug>）；资产目录缺失（演示态）等同未绑定 → 诚实转人工
-    const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
-    const asset = ref ? this.soft('resourceCore')?.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
-    if (!asset) return void fallbackToHuman('未绑定 Agent 资产（请在控制台「Agent 本体」登记并在此配置 agentRef）')
-    // 模型取向：对话框显式切换的模型优先，未指定则跟随 Agent 资产的 model 属性
-    const model = modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
-    if (!model) return void fallbackToHuman('Agent 资产未配置模型（model 属性为空），且本次会话未指定模型')
-    // 组装频道上下文（最近 8 条）+ 部门场景图谱摘要，单轮调用
-    const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8)
-    const contextText = recent.map((m) => `${m.senderName}: ${m.text}`).join('\n')
-    const sceneSummary = this.sceneSummaryForDept(dept)
-    const systemPrompt = [
-      String((asset.attrs as Record<string, unknown> | undefined)?.systemPrompt ?? `你是企业部门协作面板中的数字同事「${agentCard.name}」（${agentCard.desc}）。`),
-      sceneSummary ? `本部门挂载的行业场景图谱要点：\n${sceneSummary}` : '',
-      `以下是频道「${channel?.name ?? ''}」最近对话：\n${contextText}`,
-    ].filter(Boolean).join('\n\n')
+    const prepared = this.prepareAgentInvocation(dept, agentCard, trigger, modelOverride)
+    if (!prepared.ok) return void fallbackToHuman(prepared.reason)
     try {
       const gateway = resolvePanelModelGateway(this.ctx)?.gateway
       if (!gateway) throw new Error('模型网关未接入（01门演示态）——连接宿主后可用')
       const result = await gateway.invoke({
-        model, orgId, subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
+        model: prepared.model,
+        orgId: this.callerOrgId(trigger.senderId),
+        subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: trigger.text },
+          { role: 'system', content: prepared.systemPrompt },
+          { role: 'user', content: prepared.userText },
         ],
       })
       await reply(result.content, undefined, result.model)
@@ -553,19 +588,80 @@ export class PanelService extends Service {
       const message = error instanceof Error ? error.message : String(error)
       await fallbackToHuman(`模型网关调用失败（${message}）。`)
     } finally {
-      // 面板协作计量（D1 裁决键格式）：org 主键缺省时跳过计量（计量面不阻塞协作面）
-      if (orgId) {
-        try {
-          this.soft('usage')?.record({
-            org: orgId,
-            subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
-            principal: `org:${orgId}`,
-            resource: this.meterResource(dept.id, orgId),
-            meters: [{ key: 'calls', value: 1, unit: 'call' }],
-            idempotency_key: `panel:agent:${trigger.id}:${agentCard.name}`,
-          })
-        } catch { /* 计量失败不阻塞回包 */ }
+      this.meterAgentCall(dept, trigger, agentCard)
+    }
+  }
+
+  /**
+   * Agent 流式应答（2026-09-11 用户需求：频道内 @数字同事 → SSE 增量卡片）：
+   * onEvent 收 {type:'start'|'delta'|'done'|'fallback'}；dsh 模型桥走原生 text-delta 流，
+   * modelgw（单轮 invoke）整段作为单个 delta 下发——通道能力不同，流式语义一致。
+   * 完成后照常落库 + 广播（其他端经 SSE 收到持久消息）；降级与转人工语义与 invokeAgent 一致。
+   */
+  async streamAgentReply(
+    dept: DeptConfigRecord,
+    agentCard: DeptAgent,
+    trigger: MessageRecord,
+    modelOverride: string | undefined,
+    onEvent: (event: { type: 'start' | 'delta' | 'done' | 'fallback'; text?: string; agent?: string; icon?: string; model?: string; reason?: string }) => void,
+  ): Promise<void> {
+    onEvent({ type: 'start', agent: agentCard.name, icon: agentCard.icon })
+    const fallback = async (reason: string) => {
+      onEvent({ type: 'fallback', agent: agentCard.name, reason })
+      await this.insertAgentReply(dept, agentCard, trigger, `「${agentCard.name}」暂不能自主应答：${reason}已转人工待办，请相关同事跟进。`)
+      this.tasks().insert({
+        id: newId('ptask'), dept: dept.id, title: `跟进：${trigger.text.slice(0, 40)}`,
+        detail: `Agent「${agentCard.name}」不可用（${reason}），由消息 ${trigger.id} 转人工`,
+        lane: 'todo', assigneeType: 'human', createdBy: `agent:${agentCard.name}`, messageId: trigger.id,
+      })
+      onEvent({ type: 'done', agent: agentCard.name })
+    }
+    const prepared = this.prepareAgentInvocation(dept, agentCard, trigger, modelOverride)
+    if (!prepared.ok) return void fallback(prepared.reason)
+    try {
+      const resolved = resolvePanelModelGateway(this.ctx)
+      if (!resolved) throw new Error('模型网关未接入（01门演示态）——连接宿主后可用')
+      const gateway = resolved.gateway as {
+        invoke(input: Record<string, unknown>): Promise<{ content: string; model: string }>
+        streamEvents?(input: Record<string, unknown>): AsyncIterable<{ delta?: string; model?: string }>
       }
+      const messages = [
+        { role: 'system', content: prepared.systemPrompt },
+        { role: 'user', content: prepared.userText },
+      ]
+      let content = ''
+      let usedModel = ''
+      if (typeof gateway.streamEvents === 'function') {
+        for await (const chunk of gateway.streamEvents({
+          model: prepared.model,
+          messages,
+          subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
+        })) {
+          if (chunk.delta) {
+            content += chunk.delta
+            onEvent({ type: 'delta', agent: agentCard.name, text: chunk.delta, model: chunk.model })
+          }
+          if (chunk.model) usedModel = chunk.model
+        }
+      } else {
+        // modelgw 单轮形态：整段作为单个 delta（不造假流式动画，通道能力如实呈现）
+        const result = await gateway.invoke({
+          model: prepared.model,
+          orgId: this.callerOrgId(trigger.senderId),
+          subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
+          messages,
+        })
+        content = result.content
+        usedModel = result.model
+        onEvent({ type: 'delta', agent: agentCard.name, text: content, model: result.model })
+      }
+      await this.insertAgentReply(dept, agentCard, trigger, content, undefined, usedModel || undefined)
+      onEvent({ type: 'done', agent: agentCard.name })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      await fallback(`模型网关调用失败（${message}）。`)
+    } finally {
+      this.meterAgentCall(dept, trigger, agentCard)
     }
   }
 

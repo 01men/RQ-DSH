@@ -114,6 +114,22 @@ class DshModelGateway {
   }
   /** 真实单轮调用：走 ctx.llm.stream 全链（适配器/重试/计量归 dsh），失败如实抛出。 */
   async invoke(input) {
+    let content = "";
+    let outputTokens = 0;
+    let finalModel = "";
+    for await (const chunk of this.streamEvents(input)) {
+      if (chunk.delta) content += chunk.delta;
+      if (chunk.model) finalModel = chunk.model;
+      if (chunk.outputTokens) outputTokens = chunk.outputTokens;
+    }
+    return { model: finalModel, content, outputTokens };
+  }
+  /**
+   * 流式原语（2026-09-11 面板流式应答卡）：逐块转发模型 text-delta；结束块携带
+   * finish 信息与最终 model/outputTokens。失败在迭代期如实抛出（调用方已输出的
+   * 增量按失败处理：不落库、不发 done——诚实降级语义与 invoke 同规）。
+   */
+  async *streamEvents(input) {
     const target = await this.resolveTarget(input.model);
     const system = input.messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n") || void 0;
     const messages = input.messages.filter((m) => m.role !== "system").map((m) => ({
@@ -135,9 +151,12 @@ class DshModelGateway {
         ...input.maxTokens !== void 0 ? { maxTokens: input.maxTokens } : {},
         ...input.signal ? { signal: input.signal } : {}
       })) {
-        if (chunk.type === "text-delta" && chunk.text) content += chunk.text;
-        else if (chunk.type === "usage" && chunk.usage?.outputTokens) outputTokens = chunk.usage.outputTokens;
-        else if (chunk.type === "finish") {
+        if (chunk.type === "text-delta" && chunk.text) {
+          content += chunk.text;
+          yield { delta: chunk.text };
+        } else if (chunk.type === "usage" && chunk.usage?.outputTokens) {
+          outputTokens = chunk.usage.outputTokens;
+        } else if (chunk.type === "finish") {
           finishKind = chunk.reason?.kind ?? "stop";
           if (chunk.reason?.failure) {
             failureText = chunk.reason.failure.message ?? chunk.reason.failure.code ?? "\u4E0A\u6E38\u5931\u8D25";
@@ -151,7 +170,7 @@ class DshModelGateway {
       throw new Error(`dsh \u6A21\u578B\u901A\u9053\u8C03\u7528\u5931\u8D25\uFF08${finishKind}\uFF09\uFF1A${failureText || "\u4E0A\u6E38\u672A\u8FD4\u56DE\u5185\u5BB9"}`);
     }
     if (!content.trim()) throw new Error("dsh \u6A21\u578B\u901A\u9053\u8FD4\u56DE\u7A7A\u5185\u5BB9\uFF08\u672A\u751F\u6210\u56DE\u590D\uFF0C\u4E0D\u9020\u5047\u56DE\u590D\uFF09");
-    return { model: input.model === "default" ? `${target.provider}:${target.model}` : input.model, content, outputTokens };
+    yield { model: input.model === "default" ? `${target.provider}:${target.model}` : input.model, outputTokens };
   }
   /** 目录只读：写操作诚实拒绝（配置事实源在 dsh）。 */
   static READ_ONLY_MESSAGE = "\u6A21\u578B\u76EE\u5F55\u7531 dsh \u914D\u7F6E\u6258\u7BA1\uFF08settings.yaml agent-default-model \u4E0E llm \u9002\u914D\u5668\u914D\u7F6E\uFF09\u2014\u201401\u95E8\u9762\u677F\u53EA\u8BFB\uFF0C\u8BF7\u5728 dsh \u4FA7\u589E\u5220\u6539\u6A21\u578B";

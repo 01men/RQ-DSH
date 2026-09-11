@@ -182,6 +182,33 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
 | `packages/platform-core/src/scenegraph.ts`（`validateScenegraph` tags 校验） | 「tags 非空」放宽为「可为空数组」 | 原文相当比例场景未显式标注价值标签（实测 807 场景中 504 个无标注）——此前唯一合规做法是虚构标签，违反本项目「不造假数据」红线；放宽后按原文如实装载，按标签筛选的场景视图自然排除无标注场景 |
 | `packages/platform-core/src/scenegraph.ts`（`ScenegraphPack.links?`） | 新增**可选**字段 `links?: Array<{key,name}>`（行业环节链） | 原文图谱按行业环节组织（如钢铁 A 铁前/B 炼铁…），此前仅 `chains` 单字符串无法结构化消费；缺位时前端从场景编号第三段反推（既有 qb01 包无需改动）。校验器不对该字段做强校验 |
 
+## N. 装态可用性修复漂移（2026-09-11 下午，用户实测四问题修复配套）——请 main 评审采纳
+
+背景：用户真机实测暴露 4 个可用性问题（宿主已登录态面板无法完成授权 / 控制台跳转 MIME 白屏 /
+协作消息链路不通 / 钉钉拉取缺失），修复涉及 2 个宿主面文件的最小加法改动：
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `packages/plugin-console/src/index.ts`（`PUBLIC_PATHS`） | +`/api/panel/auth/login`、`/api/panel/auth/refresh` | 面板自持登录面（panel 命名空间，转发同一 authn 后端）在全量形态曾被 console 鉴权中间件拦截为 401——宿主已登录用户在面板本页登录被迫「先登出」。白名单不放行任何数据（鉴权由 authn.login 自身承担，口令错误仍 401） |
+| `packages/plugin-dsh-bridge/src/index.ts`（身份半 entryTickets 解析） | apply 期软读 → **请求期惰性解析**（`entryTicketsAt()`） | dsh Loader 并发装载 patch entry 时 authn 可能晚于 dsh-bridge 发布 entryTickets——apply 期软读是竞态写法，装态身份半整体缺席（/dsh-bridge/* 404），宿主 Cookie 直通失效。惰性解析后服务就绪前兑换请求得到明确错误，就绪即通 |
+
+## O. IAW 协作首位改版（2026-09-11 下午，用户裁决五项）——定制面自研，main 不消费
+
+1. **协作空间移至首位**（五空间序：协作/图谱/执行/能力/数据），默认进入协作频道；协作空间在场时
+   右侧 Agent 协作栏自动收起（`rail-off`）——同一会话只保留一个协作窗口。
+2. **图谱空间补三视图**（原型/PRD 定义、WorkBuddy 原型占位的落地）：主线贯通（跨场景要素复用度
+   计算）、场景对比（≤3 场景并排比对）、转型路线图（按评级三阶段 + 快赢清单）——全部由图谱真实
+   数据计算，零虚构；场景图谱包增量合并 +12 个「数据完整」场景（321→333，scripts/merge-scene-list.mjs
+   可复放；四清单缺项场景依旧不造数入库）。
+3. **Agent 流式应答**：POST /api/panel/:dept/agent-stream（SSE-over-POST，guarded + panel.write），
+   @数字同事 → {start/delta/done/fallback} 事件流，dsh 模型桥走原生 text-delta 流、modelgw 单轮
+   整段下发（不造假流式动画）；完成后照常落库 + 广播。前端流式卡为瞬时层（内存态，不进消息库）。
+4. **钉钉入向拉取（dws CLI 桥）**：POST /api/panel/ddws/pull 按 messageId 幂等去重落频道；
+   前端「⇣ 拉取」按钮 + ddSync 开启时 60s 自动拉取。
+5. **着陆归一**：panel-core 新增 `landingRedirect` 装配开关（仅 cordis.patch.yml 声明）——装态
+   `/gate01/` 302 到 `/gate01/panel/`，杜绝「无 console 装配下 SPA 兜底把缺资源壳页发给浏览器 →
+   module MIME 白屏」。全量形态不声明，根路径着陆归 console（行为不变）。
+
 ## 决策回执（请 main 侧填写后回传）
 
 > main 侧已回填（2026-09-10，基线 main `5977067` 重算残余差异；实施与验证记录见 main 仓库

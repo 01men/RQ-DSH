@@ -133,6 +133,39 @@ ${tail}`
     }
     return { group: target, ...version ? { version } : {} };
   }
+  /**
+   * 入向拉取：dws chat +chat-messages 读绑定群最新消息（默认当前时间向前 --limit 条）。
+   * 返回归一化消息（createTime 按 dws 输出的本地时区解析为 ISO）；失败抛错，绝不静默。
+   */
+  async pullLatestMessages(limit = 20, group) {
+    const { installed } = await this.probe();
+    if (!installed) throw new Error(`dws CLI \u672A\u5B89\u88C5\uFF0C\u65E0\u6CD5\u62C9\u53D6\u3002${INSTALL_HINT}`);
+    const target = group?.trim() || readBinding(this.ctx)?.group;
+    if (!target) throw new Error("\u672A\u7ED1\u5B9A\u9489\u9489\u7FA4\uFF1A\u8BF7\u5148\u5728\u9762\u677F\u300C\u9489\u9489\u300D\u7ED1\u5B9A\u76EE\u6807\u7FA4");
+    const capped = Math.min(Math.max(Math.floor(limit) || 20, 1), 50);
+    const result = await exec("dws", ["chat", "+chat-messages", "--group", target, "--limit", String(capped), "--no-reactions", "--format", "json"], SPAWN_TIMEOUT_MS);
+    if (!result.ok) {
+      const tail = (result.stderr || result.stdout).trim().split(/\r?\n/).slice(-4).join("\uFF1B");
+      throw new Error(`dws \u62C9\u53D6\u5931\u8D25\uFF1A${tail || "dws \u547D\u4EE4\u9000\u51FA\u7801\u975E 0\uFF08\u8BF7\u68C0\u67E5 dws login \u6388\u6743\u6001\u4E0E\u7FA4\u540D\uFF09"}`);
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      throw new Error("dws \u62C9\u53D6\u5931\u8D25\uFF1ACLI \u8FD4\u56DE\u4E86\u65E0\u6CD5\u89E3\u6790\u7684\u8F93\u51FA\uFF08\u8BF7\u68C0\u67E5 dws \u7248\u672C \u22651.0\uFF09");
+    }
+    if (parsed && parsed.ok === false) {
+      const reason = typeof parsed.error === "string" ? parsed.error : parsed.error?.message;
+      throw new Error(`dws \u62C9\u53D6\u5931\u8D25\uFF1A${reason ?? "CLI \u8FD4\u56DE ok:false"}`);
+    }
+    return (parsed.messages ?? []).filter((m) => m.messageId && (m.text ?? "").trim()).map((m) => ({
+      messageId: String(m.messageId),
+      sender: String(m.sender ?? "\u9489\u9489\u6210\u5458"),
+      text: String(m.text ?? "").trim(),
+      // dws createTime 为 "YYYY-MM-DD HH:mm:ss" 本地时区形态 → 按本地时区解析
+      createdAt: new Date(String(m.createTime ?? "").replace(" ", "T")).toISOString()
+    }));
+  }
 }
 export {
   DwsCli,

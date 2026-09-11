@@ -185,12 +185,18 @@ function apply(ctx, config = {}) {
   });
   ctx.logger("dsh-bridge").info(`\u6995\u5668\u6570\u636E\u9762\u5DF2\u6302\u8F7D\u81F3 dsh webServer\uFF1A${mountPath}/*\uFF08\u5355\u8FDB\u7A0B\u5355\u5165\u53E3\uFF09`);
   const binding = bindingService;
-  const entryTickets = softRead(ctx, "entryTickets");
-  if (!binding || !entryTickets) {
-    ctx.logger("dsh-bridge").warn("\u8EAB\u4EFD\u534A\u672A\u88C5\u914D\uFF1A\u7F3A\u5C11 identityBinding \u6216 entryTickets \u670D\u52A1\uFF08\u4EC5\u6302\u8F7D\u534A\u751F\u6548\uFF09");
+  const entryTicketsAt = () => softRead(ctx, "entryTickets");
+  if (!binding) {
+    ctx.logger("dsh-bridge").warn("\u8EAB\u4EFD\u534A\u672A\u88C5\u914D\uFF1A\u7F3A\u5C11 identityBinding \u670D\u52A1\uFF08\u4EC5\u6302\u8F7D\u534A\u751F\u6548\uFF09");
     return;
   }
-  const redeemTicket = (ticket) => entryTickets.redeem(ticket, "dsh-bridge");
+  const redeemTicket = (ticket) => {
+    const tickets = entryTicketsAt();
+    if (!tickets || typeof tickets.redeem !== "function") {
+      throw new Error("\u8EAB\u4EFD\u9762\u672A\u5C31\u7EEA\uFF08entryTickets \u670D\u52A1\u5C1A\u672A\u88C5\u914D\uFF09\u2014\u2014\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+    }
+    return tickets.redeem(ticket, "dsh-bridge");
+  };
   const sameOrigin = (req) => {
     const origin = req.headers.origin;
     if (!origin) return true;

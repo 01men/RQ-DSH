@@ -117,8 +117,10 @@ async function consoleSessionPassthrough() {
 async function hostBridgeSession() {
   try {
     const statusPayload = await fetch('/dsh-bridge/status').then((r) => r.json()).catch(() => null)
-    if (!statusPayload?.data?.bound) return { hostBridge: false }
-    if (!localStorage.getItem(TOKEN_KEY)) {
+    // 端点在场（有效 JSON 信封）= dsh 宿主形态成立——与「已绑定」区分：未绑定（无 rq_sid）
+    // 也要让面板知道宿主在侧（侧栏「宿主主界面」跳转、dsh 对话入口的形态判定依赖它）。
+    if (!statusPayload?.ok) return { hostBridge: false }
+    if (!localStorage.getItem(TOKEN_KEY) && statusPayload.data?.bound) {
       const payload = await fetch('/dsh-bridge/session', { method: 'POST' })
         .then((r) => r.json()).catch(() => null)
       if (payload?.ok) saveSession(payload.data)

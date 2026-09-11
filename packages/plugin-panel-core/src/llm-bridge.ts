@@ -192,6 +192,23 @@ export class DshModelGateway {
 
   /** 真实单轮调用：走 ctx.llm.stream 全链（适配器/重试/计量归 dsh），失败如实抛出。 */
   async invoke(input: BridgedInvokeInput): Promise<BridgedInvokeResult> {
+    let content = ''
+    let outputTokens = 0
+    let finalModel = ''
+    for await (const chunk of this.streamEvents(input)) {
+      if (chunk.delta) content += chunk.delta
+      if (chunk.model) finalModel = chunk.model
+      if (chunk.outputTokens) outputTokens = chunk.outputTokens
+    }
+    return { model: finalModel, content, outputTokens }
+  }
+
+  /**
+   * 流式原语（2026-09-11 面板流式应答卡）：逐块转发模型 text-delta；结束块携带
+   * finish 信息与最终 model/outputTokens。失败在迭代期如实抛出（调用方已输出的
+   * 增量按失败处理：不落库、不发 done——诚实降级语义与 invoke 同规）。
+   */
+  async *streamEvents(input: BridgedInvokeInput): AsyncIterable<{ delta?: string; model?: string; outputTokens?: number }> {
     const target = await this.resolveTarget(input.model)
     const system = input.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n') || undefined
     const messages = input.messages
@@ -215,9 +232,12 @@ export class DshModelGateway {
         ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
         ...(input.signal ? { signal: input.signal } : {}),
       })) {
-        if (chunk.type === 'text-delta' && chunk.text) content += chunk.text
-        else if (chunk.type === 'usage' && chunk.usage?.outputTokens) outputTokens = chunk.usage.outputTokens
-        else if (chunk.type === 'finish') {
+        if (chunk.type === 'text-delta' && chunk.text) {
+          content += chunk.text
+          yield { delta: chunk.text }
+        } else if (chunk.type === 'usage' && chunk.usage?.outputTokens) {
+          outputTokens = chunk.usage.outputTokens
+        } else if (chunk.type === 'finish') {
           finishKind = chunk.reason?.kind ?? 'stop'
           if (chunk.reason?.failure) {
             failureText = chunk.reason.failure.message ?? chunk.reason.failure.code ?? '上游失败'
@@ -231,7 +251,7 @@ export class DshModelGateway {
       throw new Error(`dsh 模型通道调用失败（${finishKind}）：${failureText || '上游未返回内容'}`)
     }
     if (!content.trim()) throw new Error('dsh 模型通道返回空内容（未生成回复，不造假回复）')
-    return { model: input.model === 'default' ? `${target.provider}:${target.model}` : input.model, content, outputTokens }
+    yield { model: input.model === 'default' ? `${target.provider}:${target.model}` : input.model, outputTokens }
   }
 
   /** 目录只读：写操作诚实拒绝（配置事实源在 dsh）。 */

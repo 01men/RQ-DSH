@@ -269,37 +269,77 @@ class PanelService extends Service {
       await this.invokeAgent(dept, agentCard, message, modelOverride);
     }
   }
-  async invokeAgent(dept, agentCard, trigger, modelOverride) {
+  /** Agent 应答落库 + 事件广播（invokeAgent / streamAgentReply 共用）。 */
+  async insertAgentReply(dept, agentCard, trigger, text, card, usedModel) {
+    const record = this.messages().insert({
+      id: newId("pmsg"),
+      channelId: trigger.channelId,
+      dept: dept.id,
+      senderType: "agent",
+      senderName: agentCard.name,
+      senderIcon: agentCard.icon,
+      text,
+      mentions: [],
+      ...card ? { card: { ...card, done: [] } } : {},
+      ddSync: "none",
+      agentName: agentCard.name,
+      ...usedModel ? { model: usedModel } : {},
+      ...trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}
+    });
+    this.ctx.platformBus.emit(PlatformEvents.PanelMessageCreated, {
+      messageId: record.id,
+      dept: dept.id,
+      channelId: trigger.channelId,
+      senderName: agentCard.name,
+      text,
+      ddSync: "none",
+      card: record.card,
+      title: record.card?.title ?? ""
+    });
+    return record;
+  }
+  /**
+   * Agent 调用前置解析（invokeAgent / streamAgentReply 共用）：资产绑定 → 模型取向 →
+   * 频道上下文 + 部门场景图谱摘要组装。返回 ok:false 时 reason 为可展示的诚实降级文案。
+   */
+  prepareAgentInvocation(dept, agentCard, trigger, modelOverride, contextNote) {
     const channel = this.channels().get(trigger.channelId);
+    const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
+    const asset = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
+    if (!asset) return { ok: false, reason: "\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08\u8BF7\u5728\u63A7\u5236\u53F0\u300CAgent \u672C\u4F53\u300D\u767B\u8BB0\u5E76\u5728\u6B64\u914D\u7F6E agentRef\uFF09" };
+    const model = modelOverride ?? String(asset.attrs?.model ?? "");
+    if (!model) return { ok: false, reason: "Agent \u8D44\u4EA7\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u4F1A\u8BDD\u672A\u6307\u5B9A\u6A21\u578B" };
+    const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8);
+    const contextText = recent.map((m) => `${m.senderName}: ${m.text}`).join("\n");
+    const sceneSummary = this.sceneSummaryForDept(dept);
+    const systemPrompt = [
+      String(asset.attrs?.systemPrompt ?? `\u4F60\u662F\u4F01\u4E1A\u90E8\u95E8\u534F\u4F5C\u9762\u677F\u4E2D\u7684\u6570\u5B57\u540C\u4E8B\u300C${agentCard.name}\u300D\uFF08${agentCard.desc}\uFF09\u3002`),
+      sceneSummary ? `\u672C\u90E8\u95E8\u6302\u8F7D\u7684\u884C\u4E1A\u573A\u666F\u56FE\u8C31\u8981\u70B9\uFF1A
+${sceneSummary}` : "",
+      contextNote ?? "",
+      channel ? `\u4EE5\u4E0B\u662F\u9891\u9053\u300C${channel.name}\u300D\u6700\u8FD1\u5BF9\u8BDD\uFF1A
+${contextText}` : ""
+    ].filter(Boolean).join("\n\n");
+    return { ok: true, model, systemPrompt, userText: trigger.text };
+  }
+  /** Agent 调用后的协作计量（D1 裁决键格式；org 主键缺省跳过，计量失败不阻塞协作面）。 */
+  meterAgentCall(dept, trigger, agentCard) {
     const orgId = this.callerOrgId(trigger.senderId);
-    const reply = async (text, card, usedModel) => {
-      const record = this.messages().insert({
-        id: newId("pmsg"),
-        channelId: trigger.channelId,
-        dept: dept.id,
-        senderType: "agent",
-        senderName: agentCard.name,
-        senderIcon: agentCard.icon,
-        text,
-        mentions: [],
-        ...card ? { card: { ...card, done: [] } } : {},
-        ddSync: "none",
-        agentName: agentCard.name,
-        ...usedModel ? { model: usedModel } : {},
-        ...trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}
+    if (!orgId) return;
+    try {
+      this.soft("usage")?.record({
+        org: orgId,
+        subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime",
+        principal: `org:${orgId}`,
+        resource: this.meterResource(dept.id, orgId),
+        meters: [{ key: "calls", value: 1, unit: "call" }],
+        idempotency_key: `panel:agent:${trigger.id}:${agentCard.name}`
       });
-      this.ctx.platformBus.emit(PlatformEvents.PanelMessageCreated, {
-        messageId: record.id,
-        dept: dept.id,
-        channelId: trigger.channelId,
-        senderName: agentCard.name,
-        text,
-        ddSync: "none",
-        card: record.card,
-        title: record.card?.title ?? ""
-      });
-      return record;
-    };
+    } catch {
+    }
+  }
+  async invokeAgent(dept, agentCard, trigger, modelOverride) {
+    const reply = (text, card, usedModel) => this.insertAgentReply(dept, agentCard, trigger, text, card, usedModel);
     const fallbackToHuman = async (reason) => {
       await reply(`\u300C${agentCard.name}\u300D\u6682\u4E0D\u80FD\u81EA\u4E3B\u5E94\u7B54\uFF1A${reason}\u5DF2\u8F6C\u4EBA\u5DE5\u5F85\u529E\uFF0C\u8BF7\u76F8\u5173\u540C\u4E8B\u8DDF\u8FDB\u3002`);
       this.tasks().insert({
@@ -313,31 +353,18 @@ class PanelService extends Service {
         messageId: trigger.id
       });
     };
-    const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
-    const asset = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
-    if (!asset) return void fallbackToHuman("\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08\u8BF7\u5728\u63A7\u5236\u53F0\u300CAgent \u672C\u4F53\u300D\u767B\u8BB0\u5E76\u5728\u6B64\u914D\u7F6E agentRef\uFF09");
-    const model = modelOverride ?? String(asset.attrs?.model ?? "");
-    if (!model) return void fallbackToHuman("Agent \u8D44\u4EA7\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u4F1A\u8BDD\u672A\u6307\u5B9A\u6A21\u578B");
-    const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8);
-    const contextText = recent.map((m) => `${m.senderName}: ${m.text}`).join("\n");
-    const sceneSummary = this.sceneSummaryForDept(dept);
-    const systemPrompt = [
-      String(asset.attrs?.systemPrompt ?? `\u4F60\u662F\u4F01\u4E1A\u90E8\u95E8\u534F\u4F5C\u9762\u677F\u4E2D\u7684\u6570\u5B57\u540C\u4E8B\u300C${agentCard.name}\u300D\uFF08${agentCard.desc}\uFF09\u3002`),
-      sceneSummary ? `\u672C\u90E8\u95E8\u6302\u8F7D\u7684\u884C\u4E1A\u573A\u666F\u56FE\u8C31\u8981\u70B9\uFF1A
-${sceneSummary}` : "",
-      `\u4EE5\u4E0B\u662F\u9891\u9053\u300C${channel?.name ?? ""}\u300D\u6700\u8FD1\u5BF9\u8BDD\uFF1A
-${contextText}`
-    ].filter(Boolean).join("\n\n");
+    const prepared = this.prepareAgentInvocation(dept, agentCard, trigger, modelOverride);
+    if (!prepared.ok) return void fallbackToHuman(prepared.reason);
     try {
       const gateway = resolvePanelModelGateway(this.ctx)?.gateway;
       if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
       const result = await gateway.invoke({
-        model,
-        orgId,
+        model: prepared.model,
+        orgId: this.callerOrgId(trigger.senderId),
         subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime",
         messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: trigger.text }
+          { role: "system", content: prepared.systemPrompt },
+          { role: "user", content: prepared.userText }
         ]
       });
       await reply(result.content, void 0, result.model);
@@ -345,19 +372,74 @@ ${contextText}`
       const message = error instanceof Error ? error.message : String(error);
       await fallbackToHuman(`\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${message}\uFF09\u3002`);
     } finally {
-      if (orgId) {
-        try {
-          this.soft("usage")?.record({
-            org: orgId,
-            subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime",
-            principal: `org:${orgId}`,
-            resource: this.meterResource(dept.id, orgId),
-            meters: [{ key: "calls", value: 1, unit: "call" }],
-            idempotency_key: `panel:agent:${trigger.id}:${agentCard.name}`
-          });
-        } catch {
+      this.meterAgentCall(dept, trigger, agentCard);
+    }
+  }
+  /**
+   * Agent 流式应答（2026-09-11 用户需求：频道内 @数字同事 → SSE 增量卡片）：
+   * onEvent 收 {type:'start'|'delta'|'done'|'fallback'}；dsh 模型桥走原生 text-delta 流，
+   * modelgw（单轮 invoke）整段作为单个 delta 下发——通道能力不同，流式语义一致。
+   * 完成后照常落库 + 广播（其他端经 SSE 收到持久消息）；降级与转人工语义与 invokeAgent 一致。
+   */
+  async streamAgentReply(dept, agentCard, trigger, modelOverride, onEvent) {
+    onEvent({ type: "start", agent: agentCard.name, icon: agentCard.icon });
+    const fallback = async (reason) => {
+      onEvent({ type: "fallback", agent: agentCard.name, reason });
+      await this.insertAgentReply(dept, agentCard, trigger, `\u300C${agentCard.name}\u300D\u6682\u4E0D\u80FD\u81EA\u4E3B\u5E94\u7B54\uFF1A${reason}\u5DF2\u8F6C\u4EBA\u5DE5\u5F85\u529E\uFF0C\u8BF7\u76F8\u5173\u540C\u4E8B\u8DDF\u8FDB\u3002`);
+      this.tasks().insert({
+        id: newId("ptask"),
+        dept: dept.id,
+        title: `\u8DDF\u8FDB\uFF1A${trigger.text.slice(0, 40)}`,
+        detail: `Agent\u300C${agentCard.name}\u300D\u4E0D\u53EF\u7528\uFF08${reason}\uFF09\uFF0C\u7531\u6D88\u606F ${trigger.id} \u8F6C\u4EBA\u5DE5`,
+        lane: "todo",
+        assigneeType: "human",
+        createdBy: `agent:${agentCard.name}`,
+        messageId: trigger.id
+      });
+      onEvent({ type: "done", agent: agentCard.name });
+    };
+    const prepared = this.prepareAgentInvocation(dept, agentCard, trigger, modelOverride);
+    if (!prepared.ok) return void fallback(prepared.reason);
+    try {
+      const resolved = resolvePanelModelGateway(this.ctx);
+      if (!resolved) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
+      const gateway = resolved.gateway;
+      const messages = [
+        { role: "system", content: prepared.systemPrompt },
+        { role: "user", content: prepared.userText }
+      ];
+      let content = "";
+      let usedModel = "";
+      if (typeof gateway.streamEvents === "function") {
+        for await (const chunk of gateway.streamEvents({
+          model: prepared.model,
+          messages,
+          subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime"
+        })) {
+          if (chunk.delta) {
+            content += chunk.delta;
+            onEvent({ type: "delta", agent: agentCard.name, text: chunk.delta, model: chunk.model });
+          }
+          if (chunk.model) usedModel = chunk.model;
         }
+      } else {
+        const result = await gateway.invoke({
+          model: prepared.model,
+          orgId: this.callerOrgId(trigger.senderId),
+          subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime",
+          messages
+        });
+        content = result.content;
+        usedModel = result.model;
+        onEvent({ type: "delta", agent: agentCard.name, text: content, model: result.model });
       }
+      await this.insertAgentReply(dept, agentCard, trigger, content, void 0, usedModel || void 0);
+      onEvent({ type: "done", agent: agentCard.name });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await fallback(`\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${message}\uFF09\u3002`);
+    } finally {
+      this.meterAgentCall(dept, trigger, agentCard);
     }
   }
   callerOrgId(userId) {

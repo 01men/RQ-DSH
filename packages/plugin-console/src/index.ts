@@ -67,6 +67,11 @@ export const PUBLIC_PATHS = new Set([
   // 部门面板 SSE（review-dsh-agent-panel-v2 F13）：EventSource 无法携带 Bearer 头，
   // 端点公开但内部强制 ?token= 自校验（authn.verify，失败 fail-closed 401），降级轮询端点仍走 guarded
   '/api/panel/stream',
+  // 面板自持登录面（2026-09-11 用户实测「宿主已登录却无法完成面板授权」）：panel 命名空间
+  // /api/panel/auth/* 转发 authn.login/refresh（响应形状与 console 同规）——宿主已登录态下
+  // 无需登出即可在面板本页完成登录；鉴权由 authn.login 自身承担（口令错误 401），白名单不放行任何数据
+  '/api/panel/auth/login',
+  '/api/panel/auth/refresh',
 ])
 
 /** 动态路径的公开前缀（OIDC 授权页查询：仅回显客户端名/scope，不泄露 redirect_uri）。 */

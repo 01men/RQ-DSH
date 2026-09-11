@@ -47,6 +47,13 @@ export interface PanelConfig {
    * 严禁运行时探测 authn 是否在场来放行——那会把「全量形态中间件未覆盖」误判为演示态（fail-open）。
    */
   demoAuth?: boolean
+  /**
+   * 着陆归一开关（缺省 false）：仅 01门 装态（cordis.patch.yml）声明 true——装配无 console，
+   * 根路径没有控制台可落，SPA 兜底会把控制台缺失的壳页发给浏览器（相对资源 404 回落 HTML →
+   * module MIME 错误白屏）。声明后 GET / 302 到 ${externalBase}/panel/；全量形态永不声明，
+   * 根路径着陆归 console（行为不变）。
+   */
+  landingRedirect?: boolean
 }
 
 /** 演示访客身份（只读权限点：面板读 + 场景图谱读）。 */
@@ -557,7 +564,7 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
 
   guarded('POST', '/api/panel/:dept/messages', 'panel.write', async (exchange) => {
     const dept = deptOf(exchange)
-    const input = body<{ channelId?: string; text?: string; ddSync?: boolean; uniqueKey?: string; model?: string }>(exchange)
+    const input = body<{ channelId?: string; text?: string; ddSync?: boolean; uniqueKey?: string; model?: string; streamAgent?: boolean }>(exchange)
     if (!input.text?.trim()) throw new Error('消息内容必填')
     // 长度上限（QA T-06）：消息正文收敛到 10k 字符，杜绝超大 payload 对落库/SSE/轮询的连锁冲击
     if (input.text.length > 10_000) throw new Error('消息内容过长（上限 10000 字符）')
@@ -574,9 +581,58 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
       senderName: info.name, text: input.text.trim(), ddSync: input.ddSync === true,
       ...(input.uniqueKey ? { uniqueKey: input.uniqueKey } : {}),
       ...(requestedModel ? { modelOverride: requestedModel } : {}),
+      // streamAgent（2026-09-11 流式应答卡）：@数字同事 由前端流式端点驱动应答，跳过隐式派发防双跑；
+      // 流式端点不可用时前端回落拉取，应答缺失可由用户重发触发（诚实降级，不假装有人在打字）
+      ...(input.streamAgent === true ? { skipAgentDispatch: true } : {}),
     })
     return { message }
   })
+
+  /**
+   * Agent 流式应答（SSE-over-POST，2026-09-11 用户需求：@数字同事 → 增量卡片渲染）：
+   * 逐事件转发 {type:start|delta|done|fallback|end}；完成后应答照常落库并广播
+   * panel.message.created（其他端经既有 SSE 通道收到持久消息）。鉴权与部门范围校验
+   * 与 REST 面同规（requirePermission + deptOf），权限失败仍是干净 403/401。
+   */
+  http.register('POST', '/api/panel/:dept/agent-stream', async (exchange) => {
+    if (!requirePermission(exchange, 'panel.write')) return
+    const res = exchange.res
+    const sse = (payload: Record<string, unknown>) => {
+      try { res.write(`data: ${JSON.stringify(payload)}\n\n`) } catch { /* 连接已断 */ }
+    }
+    try {
+      const dept = deptOf(exchange)
+      const input = body<{ messageId?: string; model?: string }>(exchange)
+      const message = input.messageId ? panel.messages().get(input.messageId) : undefined
+      if (!message || message.dept !== dept.id || message.senderType !== 'human') {
+        exchange.fail(400, 'BAD_REQUEST', '消息不存在或不属于该部门')
+        return
+      }
+      if (res.headersSent) return
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' })
+      const mentioned = dept.agents.filter((agent) => message.text.includes(`@${agent.name}`))
+      if (mentioned.length === 0) {
+        sse({ type: 'end', note: '消息未点名任何数字同事' })
+        res.end()
+        return
+      }
+      const requestedModel = input.model?.trim() || undefined
+      for (const agentCard of mentioned) {
+        await panel.streamAgentReply(dept, agentCard, message, requestedModel, sse)
+      }
+      sse({ type: 'end' })
+      res.end()
+    } catch (error) {
+      // 流已开则只能在流内报错；未开流走标准错误信封
+      const message = error instanceof Error ? error.message : String(error)
+      if (res.headersSent) {
+        sse({ type: 'end', error: message })
+        res.end()
+      } else {
+        exchange.fail(400, 'BAD_REQUEST', message)
+      }
+    }
+  }, { access: 'guarded', permission: 'panel.write' })
 
   guarded('POST', '/api/panel/channels/:id/read', 'panel.read', (exchange) => {
     const info = caller(exchange)
@@ -1031,6 +1087,36 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) }
       }
     })
+    // 入向拉取（2026-09-11 用户需求「自动拉取最新消息」）：dws +chat-messages 读绑定群最新消息，
+    // 按 messageId 幂等去重落当前频道（senderType=human + ddSync='origin' + uniqueKey 去重键）。
+    // 拉取失败以 ok:false + error 回包（HTTP 200，降级是数据不是传输错误），前端可重试。
+    guarded('POST', '/api/panel/ddws/pull', 'panel.write', async (exchange) => {
+      const dept = deptOf(exchange)
+      const input = body<{ channelId?: string; limit?: number }>(exchange)
+      const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id
+      if (!channelId) throw new Error('部门暂无频道，请先创建')
+      const channel = panel.channels().get(channelId)
+      if (!channel || channel.dept !== dept.id) throw new Error(`频道不存在或不属于该部门：${channelId}`)
+      const info = caller(exchange)
+      try {
+        const incoming = await dws.pullLatestMessages(Math.floor(Number(input.limit) || 20))
+        let inserted = 0
+        for (const item of incoming) {
+          const uniqueKey = `dws:${item.messageId}`
+          if (panel.messages().findOne((m) => m.channelId === channelId && m.uniqueKey === uniqueKey)) continue
+          await panel.sendMessage({
+            dept: dept.id, channelId, senderType: 'human',
+            senderId: info.userId, senderName: `${item.sender} · 钉钉`,
+            text: item.text, ddSync: false, sceneCode: undefined,
+            uniqueKey,
+          })
+          inserted += 1
+        }
+        return { ok: true, inserted, fetched: incoming.length, group: channel.name }
+      } catch (error) {
+        return { ok: false as const, inserted: 0, error: error instanceof Error ? error.message : String(error) }
+      }
+    })
     // 消息 ddSync 出向钩子：钉钉桥缺席时，开启「钉钉同步」的消息经 dws CLI 投递；
     // 投递结果以 DingtalkDelivered 事件回流（上方监听器统一推进 ddSync 状态与告警留痕）。
     // 事件时守卫：本插件装配序先于 dingtalk-bridge，apply 期探测不到桥不代表桥不在——
@@ -1099,6 +1185,13 @@ export function apply(ctx: Context, config: PanelConfig = {}) {
 
   const publicDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'public')
   if (existsSync(publicDir)) {
+    // 01门装态着陆归一（config.landingRedirect，2026-09-11 用户实测 MIME 白屏修复）：装配无 console
+    // 时根路径没有控制台可落——302 到面板，杜绝 SPA 兜底把「缺资源的壳页」发给浏览器。
+    if (config.landingRedirect) {
+      http.register('GET', '/', (exchange) => {
+        exchange.res.writeHead(302, { location: `${http.externalBase}/panel/` }).end()
+      })
+    }
     // 目录形态归一：/panel（无尾斜杠）伺服 index.html 后相对资源 ./js/* 会解析到 /js/*（404→SPA 兜底→白屏），
     // 与 dsh-bridge 的 /gate01→/gate01/ 302 同语义；Location 带 externalBase（挂载形态 = /gate01/panel/）。
     // 注意路由按 split('/').filter(Boolean) 匹配，/panel 与 /panel/ 命中同一路由节点——

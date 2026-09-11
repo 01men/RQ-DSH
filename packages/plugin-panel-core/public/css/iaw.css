@@ -418,3 +418,16 @@
 @media (prefers-reduced-motion:reduce){
   .iaw-app *{animation-duration:.01ms!important;transition-duration:.01ms!important}
 }
+
+/* ============ 协作首位（2026-09-11）：协作空间收起右侧协作栏，频道会话全宽 ============ */
+.iaw-app.rail-off .iaw-body{grid-template-columns:240px minmax(0,1fr)}
+.iaw-app.rail-off .iaw-agent{display:none}
+
+/* ============ 主线贯通视图（2026-09-11 补原型视图） ============ */
+.iaw-thread-rows .iaw-panel-h h3{display:flex;align-items:center;gap:8px}
+
+/* ============ Agent 流式应答卡（SSE 增量渲染）：光标呼吸 + 渐入 ============ */
+.iaw-stream{border:1px solid var(--border-subtle);border-radius:var(--r-lg);padding:8px 10px;font-size:12px;background:var(--bg-surface);white-space:pre-wrap;max-height:260px;overflow-y:auto}
+.iaw-stream .cursor{display:inline-block;width:7px;height:13px;background:var(--ind-500);vertical-align:-2px;margin-left:2px;animation:iaw-cursor 1s steps(2) infinite;border-radius:1px}
+@keyframes iaw-cursor{0%,49%{opacity:1}50%,100%{opacity:0}}
+.iaw-stream-meta{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-tertiary);margin-top:6px}

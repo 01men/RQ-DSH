@@ -1,7 +1,8 @@
 /**
  * 行业 AI 工作台（IAW Workbench，2026-09-11 改版）：五空间信息架构
- * （图谱 map / 执行 flow / 能力 cap / 数据 data / 协作 collab）+ 右侧常驻 Agent 协作栏
+ * （协作 collab / 图谱 map / 执行 flow / 能力 cap / 数据 data——协作首位 2026-09-11 用户裁决）
  * + 行业主题引擎（14 行业 data-industry 令牌覆盖）+ 场景详情抽屉。
+ * 协作空间在场时右侧 Agent 协作栏自动收起（同一会话只留一个协作窗口）。
  *
  * 一切数据来自 /api/panel/* 与 /api/dingtalk/*；XSS 白名单渲染；SSE 优先 + 轮询降级
  * （realtime.js 复用）；演示态/远端形态/会话过期等既有服务行为全部保留。
@@ -85,9 +86,9 @@ const state = {
   demoMode: false,
   /** 远端宿主连接（形态 C）：{ hubBase, hubMountPrefix }；null=本机/未连接。 */
   remoteHub: null,
-  /** 五空间导航：space=map/flow/cap/data/collab；nav=空间内视图。#/board 深链 → cockpit。 */
-  space: 'map',
-  nav: 'compass',
+  /** 五空间导航：协作首位（2026-09-11 用户裁决）；space=collab/map/flow/cap/data；nav=空间内视图。#/board 深链 → cockpit。 */
+  space: 'collab',
+  nav: 'rooms',
   depts: [],
   dept: localStorage.getItem('panel_dept') ?? 'mfg',
   overview: null,
@@ -121,6 +122,11 @@ const state = {
   sceneTab: 0,
   /** 通知中心事件流（stream/poll 到达的系统级动态，内存环形，最多 100 条）。 */
   notices: [],
+  /** 协作栏常驻态之外的对比选择（场景对比视图）：最多 3 个场景编码。 */
+  compare: [],
+
+  /** 钉钉拉取（dws CLI 入向）：自动轮播定时器句柄。 */
+  ddPullTimer: null,
   stream: null,
   streamDept: '',
   /** 实时通道健康：downgraded=轮询降级态；stale=轮询连续失败（数据可能过期）。 */
@@ -219,16 +225,60 @@ function renderLoginGuide() {
     }
     return
   }
-  // 回跳语义：登录成功后带 next（绝对 URL）回到面板（G1 票据签发分支，boot.js 兑换建会话）；
+  // 回跳语义：登录成功后带 next（绝对 URL）回到面板（G1 票据分支，boot.js 兑换建会话）；
   // 尾斜杠不能省：/gate01 不带斜杠会触发 302，把 #fragment 与 next 参数一并吃掉。
   const here = encodeURIComponent(location.origin + location.pathname + location.search + location.hash)
   $id('app').innerHTML = `
     <div class="login-guide">
       <h1>🌳 01门 · 行业 AI 工作台</h1>
       <p>当前浏览器没有有效的平台会话。<br>
-      请从控制台登录后进入，或从钉钉/门户的「打开即工作台」入口点入（自动票据免登）。</p>
-      <a href="${basePath()}/?next=${here}#/login"><button class="btn primary">去控制台登录</button></a>
+      可直接在本页登录（账号密码），或从控制台登录后进入${state.hostBridge ? '（dsh 宿主在侧：主界面提供宿主会话直通）' : ''}。</p>
+      <button class="btn primary" id="loginHere">本页登录</button>
+      ${state.hostBridge
+        ? '<button class="btn" id="loginConsole">打开宿主主界面</button>'
+        : `<a href="${basePath()}/?next=${here}#/login"><button class="btn">去控制台登录</button></a>`}
     </div>`
+  $id('loginHere').onclick = () => showLoginModal()
+  $id('loginConsole')?.addEventListener('click', () => { location.href = '/' })
+}
+
+/**
+ * 本页登录（2026-09-11 用户裁决）：演示态/装态不再被「去控制台」死链困住——
+ * 面板自持登录面（/api/panel/auth/login，authn 在场即可用；全量形态经 console 公开白名单放行）。
+ * 登录成功整页刷新重走 boot 链（会话/权限一次就位）。
+ */
+function showLoginModal() {
+  showModal('🔐 登录行业 AI 工作台', `
+    <p class="note" style="margin-top:0">使用平台账号登录（与控制台/宿主同一账号体系）。首次部署：管理员账号 admin，初始口令见服务器数据目录 admin-initial-password.txt。</p>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <input type="text" id="iawLoginUser" placeholder="账号" autocomplete="username">
+      <input type="password" id="iawLoginPass" placeholder="密码" autocomplete="current-password">
+      <div id="iawLoginErr" class="wz-err" style="color:var(--danger-600);font-size:12px;min-height:16px"></div>
+      <button class="btn primary" id="iawLoginGo">登录</button>
+    </div>`)
+  const submit = async () => {
+    const button = $id('iawLoginGo')
+    const err = $id('iawLoginErr')
+    err.textContent = ''
+    button.disabled = true
+    try {
+      const payload = await api.post('/api/panel/auth/login', {
+        username: $id('iawLoginUser').value.trim(),
+        password: $id('iawLoginPass').value,
+      })
+      session.save(payload.token, payload.user)
+      if (payload.refreshToken) session.saveRefresh(payload.refreshToken)
+      hideModal()
+      window.location.reload()
+    } catch (error) {
+      err.textContent = error.message
+      button.disabled = false
+    }
+  }
+  $id('iawLoginGo').onclick = () => void submit()
+  for (const id of ['iawLoginUser', 'iawLoginPass']) {
+    $id(id).addEventListener('keydown', (event) => { if (event.key === 'Enter') void submit() })
+  }
 }
 
 async function init() {
@@ -298,6 +348,7 @@ async function refreshDingtalk() {
     }
   }
   renderTopRight()
+  scheduleDdPull()
 }
 
 /** 模型目录（GET /api/panel/models）：失败时置空（协作栏退化为「未接入模型」提示）。 */
@@ -435,16 +486,18 @@ function pushNotice(text) {
 // ---------------------------------------------------------------------------
 
 const SPACE_META = {
+  // 协作首位（2026-09-11 用户裁决）：进入工作台即对话，频道会话即主界面
+  collab: { label: '协作', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0112 0"/><path d="M16 5.5a3 3 0 010 5M18.5 20a6 6 0 00-3-5.2"/></svg>' },
   map: { label: '图谱', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="9" r="2.5"/><circle cx="9" cy="18" r="2.5"/><path d="M8.3 7.4l7.3 1.2M7.2 8.2l1.3 7.4M16.4 10.9l-5.6 5.6"/></svg>' },
   flow: { label: '执行', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="7" height="6" rx="1.5"/><rect x="14" y="14" width="7" height="6" rx="1.5"/><path d="M6.5 10v4.5a2 2 0 002 2H14"/></svg>' },
   cap: { label: '能力', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>' },
   data: { label: '数据', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/></svg>' },
-  collab: { label: '协作', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0112 0"/><path d="M16 5.5a3 3 0 010 5M18.5 20a6 6 0 00-3-5.2"/></svg>' },
 }
 
 function navDef() {
   const pack = state.scenegraph?.pack
   const sceneCount = pack ? Object.values(pack.activities).reduce((sum, list) => sum + list.length, 0) : 0
+  const linksCount = pack ? (pack.links ?? []).length : 0
   const toolCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.tools)).size : 0
   const modelCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.models)).size : 0
   const talentCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.talent)).size : 0
@@ -455,7 +508,10 @@ function navDef() {
   return {
     map: [
       ['compass', '场景罗盘', '◎', sceneCount ? String(sceneCount) : ''],
+      ['thread', '主线贯通', '⛓', linksCount ? String(linksCount) : ''],
+      ['compare', '场景对比', '≡', state.compare.length ? String(state.compare.length) : ''],
       ['cockpit', '度量驾驶舱', '▤', ''],
+      ['roadmap', '转型路线图', '⇥', ''],
     ],
     flow: [
       ['flow', '全部任务', '▦', state.tasks.length ? String(state.tasks.length) : ''],
@@ -483,7 +539,8 @@ function renderShell() {
   $id('app').innerHTML = `
     ${state.demoMode ? `
     <div id="demoBanner" class="demo-banner">
-      <span>🧪 当前展示的是<b>内置演示数据</b>——连接宿主后自动切换为真实业务面</span>
+      <span>🧪 当前展示的是<b>内置演示数据</b>（只读）——登录后解锁发消息、派任务等写操作</span>
+      <button class="btn" id="demoLogin">登录</button>
       <button class="btn primary" id="demoOpenWizard">连接宿主</button>
     </div>` : ''}
     <div class="iaw-app" id="iawApp" data-industry="${esc(state.industry?.code ?? '')}">
@@ -520,6 +577,7 @@ function renderShell() {
     const wizard = await import('./wizard.js')
     wizard.start({ base: basePath() })
   })
+  $id('demoLogin')?.addEventListener('click', () => showLoginModal())
   $id('iawIndBtn').onclick = (event) => { event.stopPropagation(); renderIndMenu(); $id('iawIndMenu').classList.toggle('open') }
   document.addEventListener('click', () => $id('iawIndMenu')?.classList.remove('open'))
   $id('iawSearchInput').addEventListener('keydown', (event) => {
@@ -558,7 +616,7 @@ function renderNav() {
   if (!group) return
   const defs = navDef()
   if (!defs[state.space].some((n) => n[0] === state.nav)) state.nav = defs[state.space][0][0]
-  const label = { map: '图谱空间', flow: '执行空间', cap: '能力空间', data: '数据空间', collab: '协作空间' }[state.space]
+  const label = { collab: '协作空间', map: '图谱空间', flow: '执行空间', cap: '能力空间', data: '数据空间' }[state.space]
   group.innerHTML = `<div class="iaw-nav-title">${label} · ${esc(state.industry?.name ?? '未激活')}</div>` +
     defs[state.space].map((n) => `
       <button class="iaw-nav-item ${state.nav === n[0] ? 'on' : ''}" data-nav="${n[0]}">
@@ -585,7 +643,7 @@ function renderSideFoot() {
     ${state.overview?.org ? `<div>组织：<b>${esc(state.overview.org.name)}</b></div>` : ''}
     <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
       ${session.can('panel.config.write') ? '<a href="javascript:void 0" id="iawCfgLink">面板配置</a>' : ''}
-      <a href="${basePath() || '/'}" data-landing="console" title="打开01门管理控制台">管理控制台 ↗</a>
+      ${consoleJumpLink()}
     </div>`
   // 显式跨工作台切换：记住去向（控制台启动分诊尊重该偏好，不再把人拽回面板）
   foot.querySelectorAll('[data-landing]').forEach((el) => {
@@ -594,6 +652,22 @@ function renderSideFoot() {
     })
   })
   $id('iawCfgLink')?.addEventListener('click', () => void showConfig())
+}
+
+/**
+ * 「管理控制台」跳转按连接形态指路（2026-09-11 用户实测 MIME 修复）：
+ *   - 远端连接（形态 C）→ 绑定宿主的控制台根（宿主面在 hub 上，不在本机）；
+ *   - dsh 宿主挂载形态 → 宿主主界面根（装态装配无控制台，/gate01 根≠控制台）；
+ *   - 独立形态 → 同源控制台（basePath 即控制台根，行为不变）。
+ */
+function consoleJumpLink() {
+  if (state.remoteHub) {
+    return `<a href="${esc(state.remoteHub.hubBase)}/" target="_blank" rel="noopener" title="打开绑定宿主（${esc(state.remoteHub.hubBase)}）的控制台">宿主控制台 ↗</a>`
+  }
+  if (state.hostBridge) {
+    return '<a href="/" title="打开 dsh 宿主主界面（当前装配无独立控制台）">宿主主界面 ↗</a>'
+  }
+  return `<a href="${basePath() || '/'}" data-landing="console" title="打开01门管理控制台">管理控制台 ↗</a>`
 }
 
 function renderTopRight() {
@@ -618,11 +692,10 @@ function renderTopRight() {
   $id('iawDdBrief').onclick = () => void showBind()
   $id('iawNoticeBtn').onclick = () => { state.space = 'collab'; state.nav = 'notice'; renderSeg(); renderNav(); void refreshView() }
   $id('iawHelpBtn').onclick = () => showHelp()
-  // 退出登录（QA P2-3）：车间共用电脑下一班不能沿用上一班身份
+  // 退出登录（QA P2-3）：车间共用电脑下一班不能沿用上一班身份；演示态头像 = 登录入口
   $id('iawUserAvatar').onclick = async () => {
     if (state.demoMode) {
-      const wizard = await import('./wizard.js')
-      wizard.start({ base: basePath() })
+      showLoginModal()
       return
     }
     if (!window.confirm(`退出当前账号（${user?.displayName ?? ''}）？`)) return
@@ -792,7 +865,7 @@ function defsHasNav() {
 /** 装载当前视图数据（失败显式提示，不白屏）。 */
 async function loadViewData() {
   try {
-    const wantsGraph = ['compass', 'tools', 'kmodels', 'talent', 'elements'].includes(state.nav) || state.nav === 'cockpit'
+    const wantsGraph = ['compass', 'thread', 'compare', 'roadmap', 'tools', 'kmodels', 'talent', 'elements'].includes(state.nav) || state.nav === 'cockpit'
     const wantsTasks = ['flow', 'inbox'].includes(state.nav) || state.nav === 'cockpit' || state.space === 'collab'
     const jobs = []
     if (wantsGraph && state.industry && !state.scenegraph) {
@@ -847,7 +920,10 @@ function renderView() {
   const pack = state.scenegraph?.pack
   const views = {
     compass: () => viewCompass(pack),
+    thread: () => viewThread(pack),
+    compare: () => viewCompare(pack),
     cockpit: () => viewCockpit(pack),
+    roadmap: () => viewRoadmap(pack),
     flow: () => viewFlow(),
     inbox: () => viewInbox(),
     mchannels: () => viewMChannels(),
@@ -864,6 +940,8 @@ function renderView() {
   main.innerHTML = render()
   main.scrollTop = 0
   wireView(main)
+  // 协作空间 = 全宽频道会话，右侧协作栏收起（同一会话只保留一个协作窗口，2026-09-11 用户裁决）
+  $id('iawApp')?.classList.toggle('rail-off', state.space === 'collab')
   renderFlowbar()
   renderStatus()
   renderNav()
@@ -949,6 +1027,150 @@ function viewCompass(pack) {
     }
     h += '</div></div>'
   }
+  h += '</div></div>'
+  return h
+}
+
+// ---------------------------------------------------------------------------
+// 图谱空间：主线贯通视图 / 场景对比 / 转型路线图（2026-09-11 补原型三视图，全部由图谱真实数据计算）
+// ---------------------------------------------------------------------------
+
+/** 行业环节链：links 缺位（如 qb01 包）时从场景编号第二段反推环节字母（名称暂用键名）。 */
+function packLinks(pack) {
+  if (pack.links?.length) return pack.links
+  const seen = new Map()
+  for (const s of packScenes(pack)) {
+    const key = String(s.code ?? '').split('-')[1] ?? ''
+    if (!key || seen.has(key)) continue
+    seen.set(key, { key, name: key })
+  }
+  return [...seen.values()]
+}
+
+/** 环节聚合：场景数 / 平均评级 / 四要素复用度（被 ≥2 场景共用的要素占比 = 数字主线贯通度）。 */
+function threadRows(pack) {
+  const links = packLinks(pack)
+  const scenes = packScenes(pack)
+  const rows = []
+  for (const link of links) {
+    const arr = scenes.filter((s) => sceneLinkKey(s, links).some((l) => l.key === link.key))
+    if (!arr.length) continue
+    const stats = {}
+    for (const key of ['tools', 'models', 'data', 'talent']) {
+      const counter = new Map()
+      for (const scene of arr) for (const item of new Set(scene[key])) counter.set(item, (counter.get(item) ?? 0) + 1)
+      const all = [...counter.keys()]
+      const shared = [...counter.entries()].filter(([, n]) => n >= 2)
+      // 贯通度 = 跨场景复用要素占比（0-100；单场景环节按 100 计——无断点可言）
+      stats[key] = { total: all.length, shared: shared.map(([name, n]) => ({ name, n })), pct: all.length === 0 ? 0 : arr.length === 1 ? 100 : Math.round(shared.length / all.length * 100) }
+    }
+    const pct = Math.round((stats.tools.pct + stats.models.pct + stats.data.pct + stats.talent.pct) / 4)
+    rows.push({
+      link,
+      scenes: arr,
+      avg: (arr.reduce((sum, s) => sum + s.s, 0) / arr.length).toFixed(1),
+      pct,
+      stats,
+    })
+  }
+  return rows
+}
+
+function viewThread(pack) {
+  if (!pack) return `<div class="iaw-view"><div class="iaw-empty">行业图谱未装载，主线贯通视图不可用。</div></div>`
+  const links = pack.links ?? []
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>主线贯通视图</h1><p>数字主线：跨场景贯通的数据 / 模型 / 工具接口串联与断点识别（贯通度 = 被两个以上场景共用的要素占比）</p></div></div>`
+  const rows = threadRows(pack)
+  if (!rows.length) return h + '<div class="iaw-empty">图谱中暂无环节场景。</div></div>'
+  h += '<div class="iaw-thread-rows">'
+  for (const row of rows) {
+    h += `<div class="iaw-panel" style="margin-bottom:12px"><div class="iaw-panel-h"><h3><span class="iaw-pill iaw-pill-neutral">${esc(row.link.key)}</span> ${esc(row.link.name)}</h3>
+      <div class="spacer"></div><span style="font-size:12px;color:var(--text-secondary)">${row.scenes.length} 个场景 · 平均评级 ${row.avg}</span>
+      <span class="iaw-pill ${row.pct >= 50 ? 'iaw-pill-cost' : row.pct >= 25 ? 'iaw-pill-eff' : 'iaw-pill-neutral'}">贯通度 ${row.pct}%</span></div>
+      <div class="iaw-barrows">`
+    const groups = [['data', '数据要素', 'var(--accent-teal)'], ['models', '知识模型', 'var(--accent-amber)'], ['tools', '工具软件', 'var(--accent-indigo)'], ['talent', '人才技能', 'var(--accent-violet)']]
+    for (const [key, label, color] of groups) {
+      const st = row.stats[key]
+      h += `<div class="iaw-bar-row"><span class="lb">${label}</span><div class="iaw-bar-track"><i style="width:${st.pct}%;background:${color}"></i></div><span class="vv">${st.pct}%</span></div>`
+    }
+    h += '</div>'
+    const shared = [...row.stats.data.shared.slice(0, 2), ...row.stats.models.shared.slice(0, 2)].map((x) => x.name)
+    h += shared.length ? `<div style="font-size:11px;color:var(--text-tertiary);margin-top:8px">贯通要素：${shared.map(esc).join(' · ')}</div>` : '<div style="font-size:11px;color:var(--text-tertiary);margin-top:8px">该环节暂无跨场景复用要素——数据/模型断点识别优先级最高</div>'
+    h += `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${row.scenes.slice(0, 6).map((s) => `<span class="scene" data-scene="${esc(s.code)}" style="cursor:pointer;font-family:var(--font-mono);font-size:10px;color:var(--text-link)">${esc(s.code)}</span>`).join('')}${row.scenes.length > 6 ? `<span style="font-size:10px;color:var(--text-tertiary)">等 ${row.scenes.length} 个</span>` : ''}</div>`
+    h += '</div>'
+  }
+  h += '</div></div>'
+  return h
+}
+
+function viewCompare(pack) {
+  if (!pack) return `<div class="iaw-view"><div class="iaw-empty">行业图谱未装载，场景对比不可用。</div></div>`
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>场景对比</h1><p>最多选 3 个场景并排比对：评级 / 价值标签 / 四要素清单 / 痛点（点击场景卡加入或移除）</p></div></div>`
+  const scenes = packScenes(pack)
+  const selected = state.compare.map((code) => scenes.find((s) => s.code === code)).filter(Boolean).slice(0, 3)
+  h += `<div class="iaw-card" style="padding:10px 12px;margin-bottom:12px"><input class="iaw-ghost-input" id="iawCmpSearch" placeholder="编码 / 名称筛选候选场景（当前已选 ${selected.length}/3）" style="width:min(360px,100%)"></div>`
+  h += '<div class="iaw-lanes"><div class="iaw-lane"><div class="iaw-lane-h"><div class="n">候选场景</div><div class="c">全环节</div><div class="s">${scenes.length}</div></div><div class="iaw-lane-body">'
+  for (const s of scenes) {
+    const on = state.compare.includes(s.code)
+    h += `<button class="iaw-node ${on ? 'on' : ''}" data-cmp="${esc(s.code)}" data-name="${esc(s.name)}" data-code="${esc(s.code)}">
+      <div class="r1"><span class="code">${esc(s.code)}</span><span class="type ${s.type === '主场景' ? 'main' : ''}">${esc(s.type)}</span></div>
+      <div class="nm">${esc(s.name)}</div>
+      <div class="r2">${stars(s.s)}<span class="ch">▣ ${s.tools.length + s.models.length + s.data.length + s.talent.length} 项</span></div>
+    </button>`
+  }
+  h += '</div></div></div>'
+  if (selected.length >= 2) {
+    h += '<div class="iaw-card" style="overflow:auto"><table class="iaw-tbl"><thead><tr><th style="min-width:96px">维度</th>'
+    h += selected.map((s) => `<th>${esc(s.code)}<br><span style="font-weight:400;font-size:11px">${esc(s.name)}</span></th>`).join('')
+    h += '</tr></thead><tbody>'
+    h += `<tr><td class="n">现状评级</td>${selected.map((s) => `<td>${stars(s.s)} <span style="font-size:11px;color:var(--text-tertiary)">${s.s}/4</span></td>`).join('')}</tr>`
+    h += `<tr><td class="n">转型价值</td>${selected.map((s) => `<td>${s.tags.map(tagPill).join(' ') || '<span style="color:var(--text-tertiary)">原文未标注</span>'}</td>`).join('')}</tr>`
+    const groups = [['tools', '工具软件'], ['models', '知识模型'], ['data', '数据要素'], ['talent', '人才技能']]
+    for (const [key, label] of groups) {
+      h += `<tr><td class="n">${label}</td>${selected.map((s) => `<td><ul style="margin:0;padding-left:14px;font-size:11px">${s[key].slice(0, 6).map((x) => `<li>${esc(x)}</li>`).join('')}${s[key].length > 6 ? `<li style="color:var(--text-tertiary)">等 ${s[key].length} 项</li>` : ''}</ul></td>`).join('')}</tr>`
+    }
+    h += `<tr><td class="n">痛点</td>${selected.map((s) => `<td style="font-size:11px">${esc(s.pain.slice(0, 80))}…</td>`).join('')}</tr>`
+    h += '</tbody></table></div>'
+  } else {
+    h += `<div class="iaw-empty" style="padding:22px">在上方再选 ${2 - selected.length} 个场景开始对比</div>`
+  }
+  h += '</div>'
+  return h
+}
+
+function viewRoadmap(pack) {
+  if (!pack) return `<div class="iaw-view"><div class="iaw-empty">行业图谱未装载，转型路线图不可用。</div></div>`
+  const scenes = packScenes(pack)
+  const total = scenes.length
+  const elems = (s) => s.tools.length + s.models.length + s.data.length + s.talent.length
+  // 三阶段路线（PRD 四档评级 → 改造节奏）：起步补基（≤2★）→ 集成提升（3★）→ 引领示范（4★）
+  const phases = [
+    { key: 'p1', title: '阶段一 · 起步补基', sub: '现状 ≤★★ 的场景：四清单补全与基础改造，优先解决「从无到有」', arr: scenes.filter((s) => s.s <= 2), pill: 'iaw-pill-neutral' },
+    { key: 'p2', title: '阶段二 · 集成提升', sub: '现状 ★★★ 的场景：系统集成为主，向跨场景贯通与数据闭环演进', arr: scenes.filter((s) => s.s === 3), pill: 'iaw-pill-eff' },
+    { key: 'p3', title: '阶段三 · 引领示范', sub: '现状 ★★★★ 的场景：保持领先并沉淀为行业示范样本', arr: scenes.filter((s) => s.s >= 4), pill: 'iaw-pill-cost' },
+  ]
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>转型路线图</h1><p>${esc(pack.name)} · ${total} 个场景按现状评级分三阶段推进（评级来源：图谱现状自评）</p></div></div>`
+  h += '<div class="iaw-grid-3">'
+  for (const phase of phases) {
+    const pct = total ? Math.round(phase.arr.length / total * 100) : 0
+    h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>${phase.title}</h3><span class="iaw-pill ${phase.pill}">${phase.arr.length} 个 · ${pct}%</span></div>
+      <div style="font-size:12px;color:var(--text-secondary);min-height:36px">${phase.sub}</div>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px">`
+    const top = phase.arr.slice(0, 8)
+    h += top.map((s) => `<div class="iaw-elem" style="margin:0"><div class="eh" style="cursor:pointer" data-scene="${esc(s.code)}"><span class="d" style="background:var(--ind-500)"></span><span style="font-family:var(--font-mono);font-size:10px">${esc(s.code)}</span>&nbsp;${esc(s.name)}<span class="iaw-pill iaw-pill-neutral cnt">${stars(s.s)}</span></div></div>`).join('')
+      || '<div class="iaw-empty" style="padding:8px">该阶段暂无场景</div>'
+    h += `</div>${phase.arr.length > top.length ? `<div style="font-size:10px;color:var(--text-tertiary);margin-top:6px">等 ${phase.arr.length} 个场景</div>` : ''}</div>`
+  }
+  h += '</div>'
+  // 快赢清单：要素齐备但评级 ≤2★ —— 基础最好的「低评级」场景，改造启动成本最低
+  const quickWins = scenes.filter((s) => s.s <= 2).sort((a, b) => elems(b) - elems(a)).slice(0, 8)
+  h += '<div class="iaw-sect-title">优先启动（快赢清单）<span class="line"></span></div><div class="iaw-grid-2">'
+  h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>要素齐备 · 评级待提升</h3></div>`
+  h += quickWins.map((s) => `<div class="iaw-alert i" style="margin-bottom:8px"><span>▲</span><div class="sp"><b><span data-scene="${esc(s.code)}" style="cursor:pointer">${esc(s.code)} ${esc(s.name)}</span></b><br>评级 ${s.s}/4 · 要素 ${elems(s)} 项已结构化——建议首批启动改造</div></div>`).join('')
+    || '<div class="iaw-empty" style="padding:16px">无 ≤2★ 场景，可聚焦集成提升阶段</div>'
+  h += '</div>'
+  h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>路线图口径</h3></div><div class="iaw-alert i"><span>▣</span><div class="sp">阶段划分按图谱现状评级（四档制）计算；改造进度（实际完成情况）以「执行空间」任务泳道为准——本视图回答「从哪里开始」，任务面回答「做到哪了」。</div></div>
+    <div class="iaw-alert i" style="margin-top:10px"><span>▣</span><div class="sp"><b>带投资估算 / 工期排布的转型路线图属宿主平台事务流引擎能力</b>，已登记交接清单。</div></div></div>`
   h += '</div></div>'
   return h
 }
@@ -1328,6 +1550,28 @@ function wireView(host) {
       renderView()
     }
   })
+  // 场景对比：点击场景卡加入/移除（≤3 个，FIFO 淘汰最旧）
+  host.querySelectorAll('[data-cmp]').forEach((el) => {
+    el.onclick = () => {
+      const code = el.dataset.cmp
+      const at = state.compare.indexOf(code)
+      if (at >= 0) state.compare.splice(at, 1)
+      else {
+        state.compare.push(code)
+        while (state.compare.length > 3) state.compare.shift()
+      }
+      renderView()
+    }
+  })
+  const cmpSearch = host.querySelector('#iawCmpSearch')
+  if (cmpSearch) {
+    cmpSearch.oninput = () => {
+      const q = cmpSearch.value.trim().toLowerCase()
+      host.querySelectorAll('[data-cmp]').forEach((n) => {
+        n.style.display = !q || n.dataset.code.toLowerCase().includes(q) || n.dataset.name.toLowerCase().includes(q) ? '' : 'none'
+      })
+    }
+  }
   const sceneSearch = host.querySelector('#iawSceneSearch')
   if (sceneSearch) {
     sceneSearch.oninput = () => {
@@ -1746,7 +1990,11 @@ function renderConversation(host) {
     host.innerHTML = '<div class="iaw-empty">本部门还没有协作频道——在「协作空间 · 协作频道」发起。</div>'
     return
   }
-  host.innerHTML = state.messages.map((m) => messageHtml(m, ddBound)).join('')
+  const streamHtml = [...streamCards.values()].map((card) => `
+    <div class="iaw-msg a"><div class="av">${esc(card.icon)}</div>
+      <div class="bd"><div class="meta">${esc(card.name)} <span class="role">Agent</span>${card.model ? `<span class="role">🧠 ${esc(card.model)}</span>` : ''}${card.fallback ? '<span class="role" style="color:var(--warning-600)">转人工</span>' : ''}</div>
+      <div class="iaw-stream">${md(card.text)}${card.fallback ? '' : '<span class="cursor"></span>'}</div></div></div>`).join('')
+  host.innerHTML = state.messages.map((m) => messageHtml(m, ddBound)).join('') + streamHtml
   host.querySelectorAll('[data-op]').forEach((el) => {
     el.onclick = () => void doCardAction(el.dataset.msg, el.dataset.op, el)
   })
@@ -1811,6 +2059,7 @@ function composerHtml(place) {
   const skillChips = state.skills.length > 0 ? `
     <div class="iaw-chips">${state.skills.slice(0, 4).map((skill) => `<span class="iaw-chip2" data-skill="${esc(skill.name)}" title="${esc(skill.summary ?? '')}">⚡ ${esc(skill.name)}</span>`).join('')}
     <span style="font-size:10px;color:var(--text-tertiary)">输入 /技能名 直调</span></div>` : ''
+  const ddReady = Boolean(state.ddStatus?.connector?.configured)
   return `
     <div class="iaw-composer">
       ${quick}
@@ -1819,7 +2068,8 @@ function composerHtml(place) {
         <textarea id="iawComposerInput" rows="2" placeholder="发消息 / @数字同事 下任务 / /技能名 直调…（Ctrl+Enter 发送）"></textarea>
         <div class="tools">
           ${modelSwitch}
-          <span class="iaw-chip2 ${state.ddSync && bound ? 'on' : ''}" id="iawDdToggle" title="${bound ? '本条消息同步钉钉群' : '绑定钉钉后可用'}">⇄ 钉钉</span>
+          <span class="iaw-chip2 ${state.ddSync && bound ? 'on' : ''}" id="iawDdToggle" title="${bound ? '本条消息同步钉钉群（开启后每 60s 自动拉取群新消息）' : '绑定钉钉后可用'}">⇄ 钉钉</span>
+          ${ddReady ? `<span class="iaw-chip2" id="iawDdPull" title="从钉钉群拉取最新消息到当前频道">⇣ 拉取</span>` : ''}
           <span class="spacer"></span>
           <button class="iaw-send" id="iawComposerSend" title="发送 (Ctrl+Enter)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
         </div>
@@ -1862,8 +2112,18 @@ function wireComposer(host) {
       if (!state.ddStatus?.bound) { void showBind(); return }
       state.ddSync = !state.ddSync
       localStorage.setItem('panel_ddsync', state.ddSync ? '1' : '0')
+      scheduleDdPull()
       renderView()
       renderAgentRail()
+      if (state.ddSync) void pullDingtalkMessages(false)
+    }
+  }
+  const ddPull = host.querySelector('#iawDdPull')
+  if (ddPull) {
+    ddPull.onclick = async () => {
+      ddPull.style.opacity = '0.5'
+      await pullDingtalkMessages(true)
+      ddPull.style.opacity = ''
     }
   }
   const modelSel = host.querySelector('#iawChatModel')
@@ -1931,6 +2191,12 @@ async function runSkillInvoke(skill, message, rawText) {
   }
 }
 
+/** 当前文本是否点名了部门名册中的数字同事（@触发；全名匹配，与后端 dispatchAgentMentions 同口径）。 */
+function mentionsRosterAgent(text) {
+  const agents = state.overview?.dept?.agents ?? []
+  return agents.some((agent) => text.includes(`@${agent.name}`))
+}
+
 async function sendMessage(input) {
   const text = input.value.trim()
   if (!text || !state.channelId) return
@@ -1946,15 +2212,159 @@ async function sendMessage(input) {
     const result = await api.post(`/api/panel/${state.dept}/messages`, {
       channelId: state.channelId, text, ddSync: state.ddSync && Boolean(state.ddStatus?.bound),
       ...(state.chatModel ? { model: state.chatModel } : {}),
+      // 点名数字同事时由前端流式端点驱动应答（SSE 增量卡），服务端跳过隐式派发防双跑
+      ...(mentionsRosterAgent(text) ? { streamAgent: true } : {}),
     })
     clearDraft()
     state.messages.push(result.message)
     renderConversation($id('iawMsgs'))
+    renderConversation($id('iawRoomsMsgs'))
     void refreshOverview()
+    if (mentionsRosterAgent(text)) void streamAgentReplies(result.message.id)
   } catch (error) {
+    if (error?.code === 'DEMO_READONLY') {
+      void toast('演示数据只读：登录后即可发消息', 'error')
+      showLoginModal()
+      return
+    }
     input.value = text
     saveDraft(input)
     void toast(error.message, 'error')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent 流式应答（2026-09-11 用户需求：@数字同事 → SSE 增量卡片渲染回复结果）
+// POST /api/panel/:dept/agent-stream（fetch 流读取；SSE 帧经服务端流式转发模型输出）。
+// 服务端在应答完成后照常落库 + 广播 panel.message.created → 全员可见；本端流式卡是瞬时层。
+// ---------------------------------------------------------------------------
+
+/** 流式卡瞬时状态（内存态，不进 state.messages——落库后由持久消息替代）。 */
+const streamCards = new Map()
+
+function renderStreamCards() {
+  renderConversation($id('iawMsgs'))
+  renderConversation($id('iawRoomsMsgs'))
+}
+
+/** 点名应答流：逐事件更新流式卡；done 后移除（持久消息经 SSE/轮询到达）。 */
+async function streamAgentReplies(messageId) {
+  const remote = Boolean(state.remoteHub)
+  const streamBase = remote ? `${basePath()}/rqcard/proxy` : basePath()
+  const headers = { 'content-type': 'application/json', ...(session.token ? { authorization: `Bearer ${session.token}` } : {}) }
+  if (remote && session.token) headers['x-rqcard-call'] = '1'
+  let response
+  try {
+    response = await fetch(`${streamBase}/api/panel/${state.dept}/agent-stream`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ messageId, ...(state.chatModel ? { model: state.chatModel } : {}) }),
+    })
+  } catch {
+    void toast('流式应答通道连接失败——应答将以普通消息形式到达', 'error')
+    return
+  }
+  if (!response.ok || !response.body) {
+    // 端点不可用/权限失败：服务端隐式派发已跳过，回落拉一次消息兜底（无流式动画，结果仍可达）
+    void refreshView()
+    return
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  for (;;) {
+    let chunk
+    try {
+      chunk = await reader.read()
+    } catch { break }
+    if (chunk.done) break
+    buffer += decoder.decode(chunk.value, { stream: true })
+    const frames = buffer.split('\n\n')
+    buffer = frames.pop() ?? ''
+    for (const frame of frames) {
+      const line = frame.split('\n').find((l) => l.startsWith('data: '))
+      if (!line) continue
+      let event
+      try { event = JSON.parse(line.slice(6)) } catch { continue }
+      handleStreamEvent(event)
+    }
+  }
+  // 兜底清场：通道结束仍有残留卡（如 done 事件丢失）→ 全部移除并刷新
+  if (streamCards.size > 0) {
+    streamCards.clear()
+    renderStreamCards()
+    void refreshView()
+  }
+}
+
+function handleStreamEvent(event) {
+  if (!event || typeof event !== 'object') return
+  if (event.type === 'start') {
+    streamCards.set(event.agent, { name: event.agent, icon: event.icon ?? '🤖', text: '', model: '' })
+    renderStreamCards()
+    return
+  }
+  if (event.type === 'delta') {
+    const card = streamCards.get(event.agent)
+    if (!card) return
+    card.text += event.text ?? ''
+    card.model = event.model ?? card.model
+    renderStreamCards()
+    return
+  }
+  if (event.type === 'fallback') {
+    streamCards.set(event.agent ?? '?', { name: event.agent ?? '?', icon: '🤖', text: event.reason ?? '暂不能应答', fallback: true })
+    renderStreamCards()
+    return
+  }
+  if (event.type === 'done') {
+    streamCards.delete(event.agent)
+    renderStreamCards()
+    return
+  }
+  if (event.type === 'end') {
+    if (streamCards.size > 0) { streamCards.clear(); renderStreamCards() }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 钉钉入向拉取（dws CLI 桥，2026-09-11 用户需求：渠道消息往来联通）
+// 手动「⇄ 拉取」按钮 + ddSync 开启时每 60s 自动拉取；新消息落当前频道（去重后）。
+// ---------------------------------------------------------------------------
+
+async function pullDingtalkMessages(manual) {
+  if (!state.ddStatus?.connector?.configured) {
+    if (manual) void toast('钉钉未配置：请先在钉钉绑定弹窗中安装/配置 dws CLI', 'error')
+    return
+  }
+  if (!state.channelId) {
+    if (manual) void toast('请先选择协作频道', 'error')
+    return
+  }
+  try {
+    const result = await api.post('/api/panel/ddws/pull', { channelId: state.channelId, limit: 20 }, { timeoutMs: 45_000 })
+    if (result.error) {
+      if (manual) void toast(result.error, 'error')
+      return
+    }
+    if (result.inserted > 0) {
+      await loadViewData()
+      renderConversation($id('iawMsgs'))
+      renderConversation($id('iawRoomsMsgs'))
+      void refreshOverview()
+      void toast(`已从钉钉拉取 ${result.inserted} 条新消息`)
+    } else if (manual) {
+      void toast('钉钉暂无新消息')
+    }
+  } catch (error) {
+    if (manual) void toast(error.message, 'error')
+  }
+}
+
+function scheduleDdPull() {
+  if (state.ddPullTimer) { window.clearInterval(state.ddPullTimer); state.ddPullTimer = null }
+  if (state.ddSync && state.ddStatus?.connector?.configured && state.channelId) {
+    state.ddPullTimer = window.setInterval(() => void pullDingtalkMessages(false), 60_000)
   }
 }
 
@@ -2036,7 +2446,7 @@ async function openCmdk(prefill = '') {
 function showHelp() {
   showModal('📖 帮助与快捷键', `
     <p class="note" style="margin-top:0">行业 AI 工作台（IAW）——以「一图四清单」为知识骨架，模型渠道 / 数据驱动 / 业务事务流三大原则。</p>
-    <div class="step"><div class="no">1</div><div><div class="st-t">五空间导航</div><div class="st-d">图谱（场景罗盘/驾驶舱）· 执行（任务/收件箱）· 能力（模型渠道/四清单）· 数据（数据要素）· 协作（频道/同事/成员/通知）。</div></div></div>
+    <div class="step"><div class="no">1</div><div><div class="st-t">五空间导航（协作首位）</div><div class="st-d">协作（频道/同事/成员/通知）· 图谱（场景罗盘/主线贯通/场景对比/驾驶舱/路线图）· 执行（任务/收件箱）· 能力（模型渠道/四清单）· 数据（数据要素）。协作空间全屏即会话，右侧协作栏自动收起。</div></div></div>
     <div class="step"><div class="no">2</div><div><div class="st-t">场景详情</div><div class="st-d">罗盘中点击场景卡打开抽屉：概览 / 四要素 / 痛点 / 事务流 / 协作；可派数字同事诊断、同步钉钉。</div></div></div>
     <div class="step"><div class="no">3</div><div><div class="st-t">人机协作门禁</div><div class="st-d">数字同事的产出停在「待审」，人工确认后才进入下游；协作栏里的操作卡可一键确认。</div></div></div>
     <div class="step"><div class="no">⌘</div><div><div class="st-t">快捷键</div><div class="st-d">Ctrl/⌘+K 全局搜索 · Ctrl/⌘+Enter 发送消息 · Esc 关闭抽屉/弹层。</div></div></div>`)

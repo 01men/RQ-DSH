@@ -7,7 +7,8 @@
  * 面板支持 CLI 调用-消息交互。设计边界：
  *   - 本桥零凭证：钉钉侧授权态归 dws CLI 自身（用户已在 dsh/终端完成 dws login）；
  *   - plugin-dingtalk-bridge 在场（全量形态）→ 路由/事件全归桥，本模块不注册不订阅；
- *   - 发送失败如实回传（stdout/stderr 尾部），绝不造假成功；入向（钉钉→面板）不在本期范围。
+ *   - 发送失败如实回传（stdout/stderr 尾部），绝不造假成功；
+ *   - 入向（钉钉→面板）：dws chat +chat-messages 拉取绑定群最新消息（按 messageId 幂等去重落库）。
  */
 import { spawn } from 'node:child_process'
 import type { Context } from '@deepseek-ai/cordis'
@@ -172,5 +173,45 @@ export class DwsCli {
       if (error instanceof SyntaxError) { /* 非 JSON 输出（旧版 CLI）→ 以退出码为准，视为成功 */ } else { throw error }
     }
     return { group: target, ...(version ? { version } : {}) }
+  }
+
+  /**
+   * 入向拉取：dws chat +chat-messages 读绑定群最新消息（默认当前时间向前 --limit 条）。
+   * 返回归一化消息（createTime 按 dws 输出的本地时区解析为 ISO）；失败抛错，绝不静默。
+   */
+  async pullLatestMessages(limit = 20, group?: string): Promise<Array<{ messageId: string; sender: string; text: string; createdAt: string }>> {
+    const { installed } = await this.probe()
+    if (!installed) throw new Error(`dws CLI 未安装，无法拉取。${INSTALL_HINT}`)
+    const target = group?.trim() || readBinding(this.ctx)?.group
+    if (!target) throw new Error('未绑定钉钉群：请先在面板「钉钉」绑定目标群')
+    const capped = Math.min(Math.max(Math.floor(limit) || 20, 1), 50)
+    const result = await exec('dws', ['chat', '+chat-messages', '--group', target, '--limit', String(capped), '--no-reactions', '--format', 'json'], SPAWN_TIMEOUT_MS)
+    if (!result.ok) {
+      const tail = (result.stderr || result.stdout).trim().split(/\r?\n/).slice(-4).join('；')
+      throw new Error(`dws 拉取失败：${tail || 'dws 命令退出码非 0（请检查 dws login 授权态与群名）'}`)
+    }
+    let parsed: {
+      ok?: boolean
+      error?: { message?: string } | string
+      messages?: Array<{ messageId?: string; sender?: string; text?: string; createTime?: string }>
+    }
+    try {
+      parsed = JSON.parse(result.stdout) as typeof parsed
+    } catch {
+      throw new Error('dws 拉取失败：CLI 返回了无法解析的输出（请检查 dws 版本 ≥1.0）')
+    }
+    if (parsed && parsed.ok === false) {
+      const reason = typeof parsed.error === 'string' ? parsed.error : parsed.error?.message
+      throw new Error(`dws 拉取失败：${reason ?? 'CLI 返回 ok:false'}`)
+    }
+    return (parsed.messages ?? [])
+      .filter((m) => m.messageId && (m.text ?? '').trim())
+      .map((m) => ({
+        messageId: String(m.messageId),
+        sender: String(m.sender ?? '钉钉成员'),
+        text: String(m.text ?? '').trim(),
+        // dws createTime 为 "YYYY-MM-DD HH:mm:ss" 本地时区形态 → 按本地时区解析
+        createdAt: new Date(String(m.createTime ?? '').replace(' ', 'T')).toISOString(),
+      }))
   }
 }

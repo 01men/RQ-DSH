@@ -41,11 +41,14 @@
     - id: ops-authn
       name: '@ybkk/gate-01/packages/plugin-authn/dist/index.js'
     # 部门面板（01门 主交付面）：/gate01/panel/ 静态 + /api/panel/* REST + 演示看板（只读）。
-    # demoAuth 仅在此声明：安装形态未连宿主时可只读预览演示数据，写动词一律 403
+    # demoAuth 仅在此声明：安装形态未连宿主时可只读预览演示数据，写动词一律 403。
+    # landingRedirect 仅在此声明：装态装配无控制台，/gate01/ 根着陆 302 到面板
+    # （杜绝 SPA 兜底把缺资源的壳页发给浏览器 → module MIME 白屏，2026-09-11 用户实测）
     - id: ops-panel-core
       name: '@ybkk/gate-01/packages/plugin-panel-core/dist/index.js'
       config:
         demoAuth: true
+        landingRedirect: true
     # 单进程单入口：把数据面挂进 dsh webServer（/gate01 前缀）
     - id: ops-dsh-bridge
       name: '@ybkk/gate-01/packages/plugin-dsh-bridge/dist/index.js'

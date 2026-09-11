@@ -460,10 +460,56 @@ function apply(ctx, config = {}) {
       text: input.text.trim(),
       ddSync: input.ddSync === true,
       ...input.uniqueKey ? { uniqueKey: input.uniqueKey } : {},
-      ...requestedModel ? { modelOverride: requestedModel } : {}
+      ...requestedModel ? { modelOverride: requestedModel } : {},
+      // streamAgent（2026-09-11 流式应答卡）：@数字同事 由前端流式端点驱动应答，跳过隐式派发防双跑；
+      // 流式端点不可用时前端回落拉取，应答缺失可由用户重发触发（诚实降级，不假装有人在打字）
+      ...input.streamAgent === true ? { skipAgentDispatch: true } : {}
     });
     return { message };
   });
+  http.register("POST", "/api/panel/:dept/agent-stream", async (exchange) => {
+    if (!requirePermission(exchange, "panel.write")) return;
+    const res = exchange.res;
+    const sse = (payload) => {
+      try {
+        res.write(`data: ${JSON.stringify(payload)}
+
+`);
+      } catch {
+      }
+    };
+    try {
+      const dept = deptOf(exchange);
+      const input = body(exchange);
+      const message = input.messageId ? panel.messages().get(input.messageId) : void 0;
+      if (!message || message.dept !== dept.id || message.senderType !== "human") {
+        exchange.fail(400, "BAD_REQUEST", "\u6D88\u606F\u4E0D\u5B58\u5728\u6216\u4E0D\u5C5E\u4E8E\u8BE5\u90E8\u95E8");
+        return;
+      }
+      if (res.headersSent) return;
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      const mentioned = dept.agents.filter((agent) => message.text.includes(`@${agent.name}`));
+      if (mentioned.length === 0) {
+        sse({ type: "end", note: "\u6D88\u606F\u672A\u70B9\u540D\u4EFB\u4F55\u6570\u5B57\u540C\u4E8B" });
+        res.end();
+        return;
+      }
+      const requestedModel = input.model?.trim() || void 0;
+      for (const agentCard of mentioned) {
+        await panel.streamAgentReply(dept, agentCard, message, requestedModel, sse);
+      }
+      sse({ type: "end" });
+      res.end();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (res.headersSent) {
+        sse({ type: "end", error: message });
+        res.end();
+      } else {
+        exchange.fail(400, "BAD_REQUEST", message);
+      }
+    }
+  }, { access: "guarded", permission: "panel.write" });
   guarded("POST", "/api/panel/channels/:id/read", "panel.read", (exchange) => {
     const info = caller(exchange);
     if (!info.userId) throw new Error("\u4EC5\u5E73\u53F0\u8D26\u53F7\u53EF\u63A8\u8FDB\u5DF2\u8BFB\u6E38\u6807");
@@ -886,6 +932,38 @@ function apply(ctx, config = {}) {
         return { ok: false, error: error instanceof Error ? error.message : String(error) };
       }
     });
+    guarded("POST", "/api/panel/ddws/pull", "panel.write", async (exchange) => {
+      const dept = deptOf(exchange);
+      const input = body(exchange);
+      const channelId = input.channelId || panel.channels().find((item) => item.dept === dept.id).at(0)?.id;
+      if (!channelId) throw new Error("\u90E8\u95E8\u6682\u65E0\u9891\u9053\uFF0C\u8BF7\u5148\u521B\u5EFA");
+      const channel = panel.channels().get(channelId);
+      if (!channel || channel.dept !== dept.id) throw new Error(`\u9891\u9053\u4E0D\u5B58\u5728\u6216\u4E0D\u5C5E\u4E8E\u8BE5\u90E8\u95E8\uFF1A${channelId}`);
+      const info = caller(exchange);
+      try {
+        const incoming = await dws.pullLatestMessages(Math.floor(Number(input.limit) || 20));
+        let inserted = 0;
+        for (const item of incoming) {
+          const uniqueKey = `dws:${item.messageId}`;
+          if (panel.messages().findOne((m) => m.channelId === channelId && m.uniqueKey === uniqueKey)) continue;
+          await panel.sendMessage({
+            dept: dept.id,
+            channelId,
+            senderType: "human",
+            senderId: info.userId,
+            senderName: `${item.sender} \xB7 \u9489\u9489`,
+            text: item.text,
+            ddSync: false,
+            sceneCode: void 0,
+            uniqueKey
+          });
+          inserted += 1;
+        }
+        return { ok: true, inserted, fetched: incoming.length, group: channel.name };
+      } catch (error) {
+        return { ok: false, inserted: 0, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
     ctx.platformBus.on(PlatformEvents.PanelMessageCreated, (payload) => {
       const data = payload ?? {};
       if (!data.messageId || data.ddSync !== "pending") return;
@@ -946,6 +1024,11 @@ ${initialPassword}
   }
   const publicDir = join(dirname(fileURLToPath(import.meta.url)), "..", "public");
   if (existsSync(publicDir)) {
+    if (config.landingRedirect) {
+      http.register("GET", "/", (exchange) => {
+        exchange.res.writeHead(302, { location: `${http.externalBase}/panel/` }).end();
+      });
+    }
     http.register("GET", "/panel", (exchange) => {
       if (exchange.path.endsWith("/")) {
         exchange.file(join(publicDir, "index.html"));

@@ -4361,10 +4361,10 @@ try {
   check('面板模型面接线（composer 模型切换 #iawChatModel + 模型登记表单 showModelForm + 回包模型徽标）',
     panelApp.includes('#iawChatModel') && panelApp.includes('showModelForm') && panelApp.includes('🧠'))
   // C1-1 信息架构收敛（进入即对话 + 看板/设置收二级入口）+ C1-2 技能直调接线（静态面）
-  check('IAW 五空间信息架构（2026-09-11 改版）：默认进入场景罗盘 + #/board 深链吸收进度量驾驶舱 + 旧 view-tabs 不回流',
-    panelApp.includes("space: 'map'") && panelApp.includes("nav: 'compass'") && panelApp.includes("'#/board'")
+  check('IAW 五空间信息架构（协作首位 2026-09-11 用户裁决）：默认进入协作频道 + #/board 深链吸收进度量驾驶舱 + 旧 view-tabs 不回流',
+    panelApp.includes("space: 'collab'") && panelApp.includes("nav: 'rooms'") && panelApp.includes("'#/board'")
     && !panelApp.includes('view-tab'),
-    JSON.stringify({ map: panelApp.includes("space: 'map'"), compass: panelApp.includes("nav: 'compass'"), board: panelApp.includes("'#/board'"), legacy: panelApp.includes('view-tab') }))
+    JSON.stringify({ collab: panelApp.includes("space: 'collab'"), rooms: panelApp.includes("nav: 'rooms'"), board: panelApp.includes("'#/board'"), legacy: panelApp.includes('view-tab') }))
   check('C1-2 前端：技能直调接线（/dept/skills 清单 + 斜杠解析 + 执行卡四态渲染 + 重试回填 + ⌘K 技能源）',
     panelApp.includes('/skills`' ) && panelApp.includes('parseSkillCommand') && panelApp.includes('skill-exec')
     && panelApp.includes('data-retry') && panelApp.includes("group: '技能'"),
@@ -4524,6 +4524,25 @@ try {
       JSON.stringify({ industry: overview.data?.industry, widgets: overview.data?.widgets?.length }))
     const overviewNoAuth = await api('GET', '/api/panel/mfg/overview')
     check('面板：未认证访问被拒（401）', overviewNoAuth.status === 401)
+
+    // -- 面板自持登录面（2026-09-11 用户实测「宿主已登录态无法完成面板授权」）----
+    // /api/panel/auth/* 进入 console 公开白名单后，全量形态同样可经面板命名空间直登
+    // （同一 authn 后端、同一账号体系；宿主已登录无需登出）。
+    const panelDirectLogin = await api('POST', '/api/panel/auth/login', { body: { username: 'admin', password: 'Ybk@2026' } })
+    check('面板：自持登录面直登（console 白名单放行，同一 authn 后端）',
+      panelDirectLogin.ok && Boolean(panelDirectLogin.data?.token) && panelDirectLogin.data.user.permissions.includes('*'),
+      JSON.stringify(panelDirectLogin.error ?? { user: panelDirectLogin.data?.user?.displayName }))
+    const panelDirectBad = await api('POST', '/api/panel/auth/login', { body: { username: 'admin', password: 'wrong' } })
+    check('面板：自持登录面错误口令 401（白名单不放行鉴权语义）', panelDirectBad.status === 401)
+
+    // -- Agent 流式应答端点（2026-09-11：@数字同事 → SSE 增量卡片）--------------
+    // 声明面：routeMatrix 枚举到（RBAC 断言网覆盖）；权限面：无令牌 401（非 500/非静默）。
+    const streamMatrix = await api('GET', '/api/platform/route-matrix', { token: panelAdmin })
+    check('面板：agent-stream 端点进 RBAC 矩阵（guarded + panel.write）',
+      streamMatrix.ok && streamMatrix.data.guarded.some((route) => route.method === 'POST' && route.path === '/api/panel/:dept/agent-stream' && route.permission === 'panel.write'),
+      JSON.stringify(streamMatrix.data?.guarded?.filter((route) => route.path.includes('agent-stream'))))
+    const streamNoAuth = await rawReq('POST', '/api/panel/mfg/agent-stream', { headers: { 'content-type': 'application/json' }, body: '{"messageId":"x"}' })
+    check('面板：agent-stream 无令牌 401（流式通道不逃出鉴权面）', streamNoAuth.status === 401, `status=${streamNoAuth.status}`)
 
     // -- 消息闭环：发消息 / 卡片动作走纯平台链（task.create + 幂等） ----------------
     const channels = await api('GET', '/api/panel/mfg/channels', { token: panelAdmin })
@@ -5613,12 +5632,15 @@ try {
             // plan-gate01 决策 1：场景 B（本机初始化令牌落默认键）随形态 B 下线退役——
             // 写令牌统一经远端登录代理通道（作用域键），默认键只由票据兑换/直登通道写入。
 
-            // 场景 C（链接形态回归：尾斜杠在，302 不再吃掉 ?next 与 #/login）
+            // 场景 C（面板自持登录面，2026-09-11 用户实测「宿主已登录态无法完成面板授权」）：
+            // /api/panel/auth/login 进入 console 公开白名单后，向导本机卡的登录面探针（空 body POST）
+            // 在全量形态同样命中 400=可登录 → 本卡直接提供本机登录表单（账号密码，登录在面板完成），
+            // 不再强制跳控制台；「宿主已登录却要登出才能进面板」的死路自此关闭。
             await wizard.start({ base: '/gate01' })
-            await waitForDom(() => Boolean(document.querySelector('#wzLocalBody a[href]')))
-            const wizardLoginHref = document.querySelector('#wzLocalBody a[href]').getAttribute('href') ?? ''
-            check('向导DOM：向导「在本机控制台登录」链接带尾斜杠 + next 回跳 + #/login',
-              wizardLoginHref.startsWith('/gate01/?next=') && wizardLoginHref.includes('#/login'), wizardLoginHref)
+            await waitForDom(() => Boolean(document.querySelector('#wzLocalGo')))
+            check('向导DOM：本机登录面直连（#wzLocalGo 表单在位，面板自持登录不再依赖控制台跳转）',
+              Boolean(document.querySelector('#wzLocalUser')) && Boolean(document.querySelector('#wzLocalPass')),
+              document.querySelector('#wzLocalBody')?.textContent?.slice(0, 80))
             panelApi.session.clear()
             panelApp.start({ base: '/gate01' })
             const guideHref = document.querySelector('.login-guide a')?.getAttribute('href') ?? ''
