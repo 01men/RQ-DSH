@@ -22,6 +22,7 @@ const INITIAL_VIEW: RqFeedbackView = Object.freeze({
 
 /** 同源 POST；任何失败折叠为 ok:false，绝不 reject 到调用方。 */
 async function postFeedback(body: {
+  resource: string
   messageId: string
   score: FeedbackScore
   note?: string
@@ -81,7 +82,14 @@ export class RqFeedbackController {
     if (current?.score === score) return Promise.resolve()
     this.commit(messageId, score)
     // 上报与 UI 解耦：结果只影响 console 留痕，不回滚乐观态（失败静默语义）。
-    return postFeedback({ messageId, score, ...(note === undefined ? {} : { note }) })
+    // resource 为 usage 端点必填（契约缺口修复 2026-09-11：此前只发 messageId 会被 400 拒收，
+    // 「失败静默」掩盖了整条反馈链从未落账）。资源口径=会话消息，回传会话侧归属。
+    return postFeedback({
+      resource: `chat:message:${messageId}`,
+      messageId,
+      score,
+      ...(note === undefined ? {} : { note }),
+    })
       .then((result) => {
         if (!result.ok) {
           // 静默降级：端点未上线（404）/网络失败都落在这里，不向会话区报错。

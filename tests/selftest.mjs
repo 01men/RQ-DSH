@@ -4338,7 +4338,7 @@ try {
     panelBare.status === 302 && panelBare.headers.location === '/panel/',
     `status=${panelBare.status} location=${panelBare.headers.location}`)
   const panelSlash = await rawReq('GET', '/panel/')
-  check('/panel/ 面板 SPA 正常伺服（归一目标可达）', panelSlash.status === 200 && panelSlash.body.includes('部门 Agent 工作台'))
+  check('/panel/ 面板 SPA 正常伺服（归一目标可达）', panelSlash.status === 200 && panelSlash.body.includes('行业 AI 工作台'))
   // 落地分诊纯函数随包单测（landing.test.mjs：五内置角色决议/通配展开/裸落地/回跳白名单）
   const landingTest = spawn(process.execPath, ['packages/plugin-console/public/js/landing.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => landingTest.on('close', resolve))
@@ -4358,13 +4358,13 @@ try {
   const panelApp = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'app.js'), 'utf8')
   check('面板侧切换接线（管理控制台 data-landing 偏好 + 401 引导带 ?next= 回面板）',
     panelApp.includes('data-landing') && panelApp.includes('next='))
-  check('面板模型面接线（composer 模型切换 #chatModel + 模型配置界面 showModels + 回包模型徽标）',
-    panelApp.includes('#chatModel') && panelApp.includes('showModels') && panelApp.includes("role model"))
+  check('面板模型面接线（composer 模型切换 #iawChatModel + 模型登记表单 showModelForm + 回包模型徽标）',
+    panelApp.includes('#iawChatModel') && panelApp.includes('showModelForm') && panelApp.includes('🧠'))
   // C1-1 信息架构收敛（进入即对话 + 看板/设置收二级入口）+ C1-2 技能直调接线（静态面）
-  check('C1-1 前端：进入即对话（boot 固定落 chat Tab）+ 战略看板/设置收「更多」二级入口（view-tabs 已拆除）',
-    panelApp.includes(`tab: 'chat'`) && panelApp.includes('moreMenu') && panelApp.includes("data-m=\"board\"")
+  check('IAW 五空间信息架构（2026-09-11 改版）：默认进入场景罗盘 + #/board 深链吸收进度量驾驶舱 + 旧 view-tabs 不回流',
+    panelApp.includes("space: 'map'") && panelApp.includes("nav: 'compass'") && panelApp.includes("'#/board'")
     && !panelApp.includes('view-tab'),
-    JSON.stringify({ chat: panelApp.includes(`tab: 'chat'`), more: panelApp.includes('moreMenu'), board: panelApp.includes('data-m="board"'), legacy: panelApp.includes('view-tab') }))
+    JSON.stringify({ map: panelApp.includes("space: 'map'"), compass: panelApp.includes("nav: 'compass'"), board: panelApp.includes("'#/board'"), legacy: panelApp.includes('view-tab') }))
   check('C1-2 前端：技能直调接线（/dept/skills 清单 + 斜杠解析 + 执行卡四态渲染 + 重试回填 + ⌘K 技能源）',
     panelApp.includes('/skills`' ) && panelApp.includes('parseSkillCommand') && panelApp.includes('skill-exec')
     && panelApp.includes('data-retry') && panelApp.includes("group: '技能'"),
@@ -4558,21 +4558,21 @@ try {
     check('面板：QB01 场景图谱下发（一图四清单全字段）',
       graph.ok && qb01SceneCount >= 24 && graph.data.pack.activities.mfg.every((scene) => scene.tools.length > 0 && scene.models.length > 0 && scene.data.length > 0 && scene.talent.length > 0),
       `scenes=${qb01SceneCount}`)
-    const graphLocked = await api('GET', '/api/panel/scenegraph?industry=JQR', { token: panelAdmin })
+    const graphLocked = await api('GET', '/api/panel/scenegraph?industry=GCJX', { token: panelAdmin })
     check('面板：未装载图谱 honest 400（不冒充数据）', !graphLocked.ok && /未装载/.test(graphLocked.error.message))
 
     // -- 行业三态 + 激活审批链（申请 → 审批（高风险二次确认）→ 激活生效） -------------
     const industries = await api('GET', '/api/panel/industries', { token: panelAdmin })
-    check('面板：行业三态（QB01/GCJX 已激活，JQR/NEV/PCB 待授权）',
+    check('面板：行业三态（QB01/YB01/JB01 已激活，其余 11 行业待授权）',
       industries.ok
-      && industries.data.industries.filter((ind) => ind.state === 'active').map((ind) => ind.code).sort().join(',') === 'GCJX,QB01'
-      && industries.data.industries.filter((ind) => ind.state === 'locked').length === 3,
+      && industries.data.industries.filter((ind) => ind.state === 'active').map((ind) => ind.code).sort().join(',') === 'JB01,QB01,YB01'
+      && industries.data.industries.filter((ind) => ind.state === 'locked').length === 11,
       JSON.stringify(industries.data?.industries?.map((ind) => `${ind.code}:${ind.state}`)))
-    const actReq = await api('POST', '/api/panel/industries/NEV/activate-requests', { token: panelAdmin })
+    const actReq = await api('POST', '/api/panel/industries/SH01/activate-requests', { token: panelAdmin })
     check('面板：激活申请进入审批中心（industry.activation · high）',
       actReq.ok && actReq.data.approval.kind === 'industry.activation' && actReq.data.approval.riskLevel === 'high',
       JSON.stringify(actReq.error ?? actReq.data?.approval?.id))
-    const actPending = (await api('GET', '/api/panel/industries', { token: panelAdmin })).data.industries.find((ind) => ind.code === 'NEV')
+    const actPending = (await api('GET', '/api/panel/industries', { token: panelAdmin })).data.industries.find((ind) => ind.code === 'SH01')
     check('面板：申请后行业显示审批中（pending 三态）', actPending.state === 'pending')
     const decideNoConfirm = await api('POST', `/api/approvals/${actReq.data.approval.id}/decide`, { token: panelAdmin, body: { decision: 'approve' } })
     check('面板：高风险审批未二次确认被拒（fail-closed）', !decideNoConfirm.ok)
@@ -4580,8 +4580,8 @@ try {
     check('面板：审批通过 → 激活执行器生效（active + grantCapabilities）',
       decideOk.ok && decideOk.data.status === 'executed', JSON.stringify(decideOk.data?.execution ?? decideOk.error))
     const industriesAfter = await api('GET', '/api/panel/industries', { token: panelAdmin })
-    check('面板：激活后 NEV 三态转 active', industriesAfter.data.industries.find((ind) => ind.code === 'NEV').state === 'active')
-    const dupActivate = await api('POST', '/api/panel/industries/NEV/activate-requests', { token: panelAdmin })
+    check('面板：激活后 SH01 三态转 active', industriesAfter.data.industries.find((ind) => ind.code === 'SH01').state === 'active')
+    const dupActivate = await api('POST', '/api/panel/industries/SH01/activate-requests', { token: panelAdmin })
     check('面板：重复激活申请被拒（已是激活态）', !dupActivate.ok && /已是激活态/.test(dupActivate.error.message))
 
     // -- panelAgentRuntime：诚实降级 + 真实模型调用 + panel:* 计量（D1 键格式） -------
@@ -5088,14 +5088,14 @@ try {
       JSON.stringify({ reconcileOk: reconcile.ok, alertSends: ddSends.filter((send) => send.chatId === 'cid-alerts').length, total: ddSends.length, before: sendsBeforeAlert }))
 
     // 审批推送
-    const pcbReq = await api('POST', '/api/panel/industries/PCB/activate-requests', { token: admin })
+    const pcbReq = await api('POST', '/api/panel/industries/SJ02/activate-requests', { token: admin })
     const approvalPush = await api('POST', `/api/dingtalk/approvals/${pcbReq.data.approval.id}/push`, { token: admin })
     check('桥接：审批单推送钉钉', approvalPush.ok && approvalPush.data.delivered === true, JSON.stringify(approvalPush.data ?? approvalPush.error))
 
     // QA 2026-09-08 BUG-A-02（T-03）回归：失败投递不得毒化去重键——同键重推必须真实外呼。
     // 旧行为：查重不看 status，一次 500 后该审批永远「已投递」，重推端点假成功零外呼。
-    // 用全新 JQR 审批单（此前从未推送过，无 sent 记录干扰），先失败后重推。
-    const retryReq = await api('POST', '/api/panel/industries/JQR/activate-requests', { token: admin })
+    // 用全新 QC01 审批单（此前从未推送过，无 sent 记录干扰），先失败后重推。
+    const retryReq = await api('POST', '/api/panel/industries/QC01/activate-requests', { token: admin })
     const retryApprovalId = retryReq.data.approval.id
     const mfgSendsBeforeRetry = ddSends.filter((send) => send.chatId === 'cid-mfg-001').length
     failNextMfgSend = true
@@ -5107,7 +5107,7 @@ try {
     check('桥接：失败投递不毒化去重键（同键重推真实外呼并成功，QA BUG-A-02/T-03 回归）',
       pushRetry.ok && pushRetry.data.delivered === true && mfgSendsAfterRetry === mfgSendsBeforeRetry + 2,
       JSON.stringify({ ok: pushRetry.ok, before: mfgSendsBeforeRetry, after: mfgSendsAfterRetry, error: pushRetry.error }))
-    // 收尾：JQR 审批单决定通过，不留 pending 残留影响其他段
+    // 收尾：QC01 审批单决定通过，不留 pending 残留影响其他段
     await api('POST', `/api/approvals/${retryApprovalId}/decide`, { token: admin, body: { decision: 'approve', opinion: '投递回归自测收尾', confirmed: true } })
 
     // 回决写回：staffId 反查 fail-closed 三连
@@ -5120,8 +5120,8 @@ try {
     const cbOk = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'selftest-staff-001', approvalId: pcbReq.data.approval.id, decision: 'approve', confirmed: true, opinion: '钉钉侧回决（自测）' } })
     check('桥接：合规回决写回（staffId↔identityLinks 反查 + confirmed）→ 审批执行',
       cbOk.ok && cbOk.data.approval.status === 'executed', JSON.stringify(cbOk.data ?? cbOk.error))
-    const pcbAfter = (await api('GET', '/api/panel/industries', { token: admin })).data.industries.find((ind) => ind.code === 'PCB')
-    check('桥接：回决生效后 PCB 行业转 active', pcbAfter.state === 'active')
+    const pcbAfter = (await api('GET', '/api/panel/industries', { token: admin })).data.industries.find((ind) => ind.code === 'SJ02')
+    check('桥接：回决生效后 SJ02 行业转 active', pcbAfter.state === 'active')
 
     // 解绑 + 恢复 mock（不污染后续断言）
     const unbind = await api('DELETE', `/api/dingtalk/channels/${syncChannel.id}/bridge`, { token: admin })
@@ -5279,7 +5279,7 @@ try {
     const asset = await simGet('/gate01/js/app.js')
     check('/gate01/js/* 控制台静态资源按前缀命中', asset.status === 200 && String(asset.headers.get('content-type') ?? '').includes('javascript'), `status=${asset.status}`)
     const panelSpa = await simGet('/gate01/panel/')
-    check('/gate01/panel/ 面板 SPA 经前缀挂载可达（宿主 web diff=0）', panelSpa.status === 200 && (await panelSpa.text()).includes('部门 Agent 工作台'), `status=${panelSpa.status}`)
+    check('/gate01/panel/ 面板 SPA 经前缀挂载可达（宿主 web diff=0）', panelSpa.status === 200 && (await panelSpa.text()).includes('行业 AI 工作台'), `status=${panelSpa.status}`)
     const panelBareMounted = await simGet('/gate01/panel')
     check('/gate01/panel 302 → /gate01/panel/（externalBase 感知，与独立形态同语义）',
       panelBareMounted.status === 302 && panelBareMounted.headers.get('location') === '/gate01/panel/',
@@ -5710,8 +5710,8 @@ try {
       check('前端契约：boot.js 探测 /rqcard/link 且带向导头、remote 切代理作用域',
         bootJs.includes('/rqcard/link') && bootJs.includes('x-rqcard-call') && bootJs.includes('setRemoteProxy') && bootJs.includes('wizard.js'))
       const appJsSource = readFileSync('packages/plugin-panel-core/public/js/app.js', 'utf8')
-      check('前端契约：Agent 对话内嵌 dsh（iframe + 嵌套防护 + 可退回内置）',
-        appJsSource.includes('canEmbedDshChat') && appJsSource.includes('ce-frame') && appJsSource.includes('panel_chat_embed_off') && appJsSource.includes('EMBEDDED'))
+      check('前端契约：Agent 对话内嵌 dsh（协作栏 dsh 模式 iframe + 嵌套防护 + 模式记忆可退回面板会话）',
+        appJsSource.includes('canEmbedDshChat') && appJsSource.includes('EMBEDDED') && appJsSource.includes('iaw_rail_mode') && appJsSource.includes('referrerpolicy="same-origin"'))
       const wizardJs = readFileSync('packages/plugin-panel-core/public/js/wizard.js', 'utf8')
       check('前端契约：连接向导（扫描/手输连接/本机数据面探测/钉钉引导；形态 B 设口令链路已退役）',
         wizardJs.includes('link/scan') && wizardJs.includes('link/remote') && wizardJs.includes('/api/health')

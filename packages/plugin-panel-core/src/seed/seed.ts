@@ -61,7 +61,7 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
   // 其余组织/行业走「申请 → 审批（industry.activation，high）→ 激活」链路
   const rootOrg = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : undefined)
   if (rootOrg) seedActivations(ctx, rootOrg.id)
-  logger.info('面板基线：五部门骨架 + 内置行业激活（QB01/GCJX）完成')
+  logger.info('面板基线：五部门骨架 + 内置行业激活（QB01/YB01/JB01）完成')
 
   // 演示内容门控：DEMO_SEED=1（全量形态显式演示）或 autoDemo（01门 demoAuth 装态自动演示）
   if (process.env.DEMO_SEED !== '1' && !autoDemo) return
@@ -73,9 +73,10 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
  * 频道/会话/任务/知识。以「部门是否已有频道」为该部门演示内容已播标记（频道不空即跳过该
  * 部门全量演示），agents/kpis/widgets 单独按空判——重复 apply / 热重载 / 部分失败重放全部安全。
  */
-/** 内置行业激活幂等登记（QB01/GCJX 默认授权）：demoAuth 装态下 demo-org 兜底，重放安全。 */
+/** 内置行业激活幂等登记（QB01 家电 / YB01 钢铁 / JB01 工程机械 默认授权；其余 11 行业走申请审批）：
+ *  demoAuth 装态下 demo-org 兜底，重放安全。 */
 function seedActivations(ctx: Context, orgId: string): void {
-  for (const code of ['QB01', 'GCJX']) {
+  for (const code of ['QB01', 'YB01', 'JB01']) {
     if (ctx.panel.activations().findOne((item) => item.orgId === orgId && item.code === code)) continue
     ctx.panel.activations().insert({
       id: newId('act'), code, orgId, status: 'active',

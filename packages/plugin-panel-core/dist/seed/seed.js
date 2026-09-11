@@ -33,12 +33,12 @@ function seedPanel(ctx, autoDemo = false) {
   }
   const rootOrg = iam?.orgs().find((org) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : void 0);
   if (rootOrg) seedActivations(ctx, rootOrg.id);
-  logger.info("\u9762\u677F\u57FA\u7EBF\uFF1A\u4E94\u90E8\u95E8\u9AA8\u67B6 + \u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/GCJX\uFF09\u5B8C\u6210");
+  logger.info("\u9762\u677F\u57FA\u7EBF\uFF1A\u4E94\u90E8\u95E8\u9AA8\u67B6 + \u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/YB01/JB01\uFF09\u5B8C\u6210");
   if (process.env.DEMO_SEED !== "1" && !autoDemo) return;
   seedDemoContent(ctx, logger);
 }
 function seedActivations(ctx, orgId) {
-  for (const code of ["QB01", "GCJX"]) {
+  for (const code of ["QB01", "YB01", "JB01"]) {
     if (ctx.panel.activations().findOne((item) => item.orgId === orgId && item.code === code)) continue;
     ctx.panel.activations().insert({
       id: newId("act"),

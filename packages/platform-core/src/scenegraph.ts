@@ -16,8 +16,13 @@ import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 
-/** 价值标签（工信部口径五类）。 */
-export const SCENE_TAGS = ['提质', '降本', '增效', '节能', '新模式'] as const
+/**
+ * 价值标签（工信部原文口径七类 + 存量包「节能」）。
+ * 受控漂移登记（docs/handoff-f-remainder-to-main.md K 节）：原文口径为
+ * 降本/提质/增效/增收/安全/环保/新模式（PRD §2.5 严格对齐原文）；main 版白名单仅
+ * 提质/降本/增效/节能/新模式 五类，定制轨按原文扩容并保留「节能」兼容既有 qb01 包。
+ */
+export const SCENE_TAGS = ['提质', '降本', '增效', '增收', '安全', '环保', '节能', '新模式'] as const
 export type SceneTag = (typeof SCENE_TAGS)[number]
 
 /** 业务活动键（ACT 映射：研发设计 rd / 生产制造 mfg / 供应链 scm / 运维服务 svc / 数字营销 mkt / 经营管理 mgmt / 法财税 fin）。 */
@@ -50,7 +55,7 @@ export interface ScenegraphScene {
 }
 
 export interface ScenegraphPack {
-  /** 行业代码（工信部图谱编码，如 QB01 家电 / GCJX 工程机械）。 */
+  /** 行业代码（工信部图谱编码，如 QB01 家电 / JB01 工程机械）。 */
   code: string
   name: string
   icon: string
@@ -58,6 +63,9 @@ export interface ScenegraphPack {
   version: string
   /** 行业主线链条（一条主线）。 */
   chains: string
+  /** 行业环节链（可选，受控漂移登记 K 节）：原文图谱的环节构成（如 A 铁前 / B 炼铁）。
+   *  缺位时前端从场景编号第三段反推环节字母（既有 qb01 包无需改动）。 */
+  links?: Array<{ key: string; name: string }>
   /** 业务活动 → 场景清单（5 类业务活动到 N 个场景的挂载）。 */
   activities: Partial<Record<SceneActivity, ScenegraphScene[]>>
 }
@@ -98,8 +106,10 @@ export function validateScenegraph(input: unknown, source = 'scenegraph'): strin
       if (!scene?.name || typeof scene.name !== 'string') errors.push(`${at}.name 必填`)
       if (scene?.type !== '主场景' && scene?.type !== '细分场景') errors.push(`${at}.type 非法（主场景/细分场景）`)
       if (!Number.isInteger(scene?.s) || scene.s < 1 || scene.s > 5) errors.push(`${at}.s 现状评级须为 1-5 整数`)
-      if (!Array.isArray(scene?.tags) || scene.tags.length === 0 || scene.tags.some((tag) => !SCENE_TAGS.includes(tag))) {
-        errors.push(`${at}.tags 非法（应为 ${SCENE_TAGS.join('/')} 的非空子集）`)
+      // 空标签允许（受控漂移登记 K 节）：原文相当比例场景未显式标注价值标签——
+      // 如实装载、不做虚构补齐；按标签筛选的场景视图自然排除无标注场景。
+      if (!Array.isArray(scene?.tags) || scene.tags.some((tag) => !SCENE_TAGS.includes(tag))) {
+        errors.push(`${at}.tags 非法（应为 ${SCENE_TAGS.join('/')} 的子集，可为空数组）`)
       }
       if (!scene?.pain || typeof scene.pain !== 'string') errors.push(`${at}.pain 必填`)
       for (const list of ['tools', 'models', 'data', 'talent'] as const) {

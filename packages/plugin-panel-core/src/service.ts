@@ -168,13 +168,26 @@ export interface IndustryRegistryEntry {
   sub: string
 }
 
-/** 内置行业登记：QB01/GCJX 有图谱包；其余为待授权占位（robot/nev/pcb 来自原型登记）。 */
+/**
+ * 内置行业登记（2026-09-11 IAW 改版）：工信部《参考指引（2025 版）》14 个重点行业全量登记，
+ * 编码与行业场景图谱包（scenegraphs/*.json）一一对应。QB01/YB01/JB01 图谱包随平台分发；
+ * 其余行业包同样内置，激活走宿主平台授权链（审批 + usage 计量 + audit 留痕）。
+ */
 export const INDUSTRY_REGISTRY: IndustryRegistryEntry[] = [
-  { code: 'QB01', name: '家电行业', icon: '📺', sub: '整机/结构件/交互感知/电控/核心零部件 · 一图四清单' },
-  { code: 'GCJX', name: '工程机械', icon: '🚜', sub: '整机/液压/电动化/基础零部件/售后运维 · 一图四清单' },
-  { code: 'JQR', name: '机器人', icon: '🦾', sub: '零部件/本体/集成 · 场景图谱 2025 版' },
-  { code: 'NEV', name: '新能源汽车', icon: '🚗', sub: '整车/三电/智能网联 · 场景图谱 2025 版' },
-  { code: 'PCB', name: '印制板PCB', icon: '🔌', sub: '设计/制造/检测 · 场景图谱 2025 版' },
+  { code: 'YB01', name: '钢铁行业', icon: '🏭', sub: '铁前/炼铁/炼钢/轧钢 · 一图四清单 · 98 场景' },
+  { code: 'SH01', name: '石化行业', icon: '🛢️', sub: '炼制/有机化学品/高分子 · 一图四清单 · 90 场景' },
+  { code: 'JB01', name: '工程机械行业', icon: '🚜', sub: '研发设计/零部件/总装/营销服务 · 一图四清单 · 46 场景' },
+  { code: 'QC01', name: '新能源汽车行业', icon: '🚗', sub: '基础材料/三电/整车/智能网联 · 一图四清单 · 96 场景' },
+  { code: 'JB02', name: '机器人行业', icon: '🤖', sub: '核心零部件/本体/集成应用 · 一图四清单 · 75 场景' },
+  { code: 'WS01', name: '医疗装备行业', icon: '🏥', sub: '材料/部件/整机/服务 · 一图四清单 · 117 场景' },
+  { code: 'QB01', name: '家电行业', icon: '📺', sub: '整机/结构件/交互感知/电控/核心零部件 · 一图四清单 · 73 场景' },
+  { code: 'QB02', name: '制糖行业', icon: '🍬', sub: '糖料/压榨/制炼/成品流通 · 一图四清单 · 22 场景' },
+  { code: 'QB03', name: '白酒行业', icon: '🍶', sub: '制曲/酿造/储存/包装/供应链 · 一图四清单 · 44 场景' },
+  { code: 'QB04', name: '美妆日化行业', icon: '💄', sub: '产品开发/生产制造/渠道运营 · 一图四清单 · 32 场景' },
+  { code: 'SJ01', name: '锂电池行业', icon: '🔋', sub: '锂盐/主材/电芯/电池包 · 一图四清单 · 73 场景' },
+  { code: 'SJ02', name: '印制板行业', icon: '🟩', sub: '覆铜板/PCB 制造/PCBA · 一图四清单 · 43 场景' },
+  { code: 'SJ03', name: '智能移动终端行业', icon: '📱', sub: '研发设计/生产准备/组件/整机 · 一图四清单 · 61 场景' },
+  { code: 'WJ01', name: '民爆行业', icon: '⚠️', sub: '原材/组件/雷管装配/销售仓储 · 一图四清单 · 15 场景' },
 ]
 
 export const TASK_LANES = ['todo', 'doing', 'review', 'done'] as const

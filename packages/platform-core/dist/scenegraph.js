@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Service } from "@deepseek-ai/cordis";
-const SCENE_TAGS = ["\u63D0\u8D28", "\u964D\u672C", "\u589E\u6548", "\u8282\u80FD", "\u65B0\u6A21\u5F0F"];
+const SCENE_TAGS = ["\u63D0\u8D28", "\u964D\u672C", "\u589E\u6548", "\u589E\u6536", "\u5B89\u5168", "\u73AF\u4FDD", "\u8282\u80FD", "\u65B0\u6A21\u5F0F"];
 const SCENE_ACTIVITIES = ["rd", "mfg", "scm", "svc", "mkt", "mgmt", "fin"];
 const ACTIVITY_LABELS = {
   rd: "\u7814\u53D1\u8BBE\u8BA1",
@@ -48,8 +48,8 @@ function validateScenegraph(input, source = "scenegraph") {
       if (!scene?.name || typeof scene.name !== "string") errors.push(`${at}.name \u5FC5\u586B`);
       if (scene?.type !== "\u4E3B\u573A\u666F" && scene?.type !== "\u7EC6\u5206\u573A\u666F") errors.push(`${at}.type \u975E\u6CD5\uFF08\u4E3B\u573A\u666F/\u7EC6\u5206\u573A\u666F\uFF09`);
       if (!Number.isInteger(scene?.s) || scene.s < 1 || scene.s > 5) errors.push(`${at}.s \u73B0\u72B6\u8BC4\u7EA7\u987B\u4E3A 1-5 \u6574\u6570`);
-      if (!Array.isArray(scene?.tags) || scene.tags.length === 0 || scene.tags.some((tag) => !SCENE_TAGS.includes(tag))) {
-        errors.push(`${at}.tags \u975E\u6CD5\uFF08\u5E94\u4E3A ${SCENE_TAGS.join("/")} \u7684\u975E\u7A7A\u5B50\u96C6\uFF09`);
+      if (!Array.isArray(scene?.tags) || scene.tags.some((tag) => !SCENE_TAGS.includes(tag))) {
+        errors.push(`${at}.tags \u975E\u6CD5\uFF08\u5E94\u4E3A ${SCENE_TAGS.join("/")} \u7684\u5B50\u96C6\uFF0C\u53EF\u4E3A\u7A7A\u6570\u7EC4\uFF09`);
       }
       if (!scene?.pain || typeof scene.pain !== "string") errors.push(`${at}.pain \u5FC5\u586B`);
       for (const list of ["tools", "models", "data", "talent"]) {

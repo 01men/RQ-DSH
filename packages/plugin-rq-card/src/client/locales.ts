@@ -54,11 +54,11 @@ export const zh = {
   'settings.probe.fail': '不可达',
   'settings.refresh': '刷新状态',
   'settings.open.wizard': '打开连接向导',
-  'settings.open.panel': '打开01门工作台',
+  'settings.open.panel': '打开行业 AI 工作台',
   'settings.hint': '连接宿主（选择 IP）并在面板完成钉钉/账号登录；面板地址 /gate01/panel/。',
 
   // ── 会话视图 Tab「01门工作台」（M3）──
-  'view.workbench': '01门工作台',
+  'view.workbench': '行业 AI 工作台',
   'view.open.external': '在浏览器打开',
 
   // ── 未连接角标（M3，shell.overlay）──
@@ -121,10 +121,10 @@ export const en = {
   'settings.probe.fail': 'unreachable',
   'settings.refresh': 'Refresh',
   'settings.open.wizard': 'Open connect wizard',
-  'settings.open.panel': 'Open RongQi workbench',
+  'settings.open.panel': 'Open Industry AI Workbench',
   'settings.hint': 'Link a host (pick an IP) and sign in with DingTalk/account on the panel; panel lives at /gate01/panel/.',
 
-  'view.workbench': 'RongQi workbench',
+  'view.workbench': 'Industry AI Workbench',
   'view.open.external': 'Open in browser',
 
   'overlay.unlinked': 'RongQi: host not linked — click to open the wizard',

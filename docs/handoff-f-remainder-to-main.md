@@ -169,6 +169,19 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
 |---|---|---|
 | `packages/plugin-console/public/js/pages/login.js` | `?next=` 参数改为一次读取共享（`urlNextParam`），URL 清参后置 | 7f5f3ea 的 G1-a 实现：同源分支 IIFE 读完即 `replaceState` 清参，跨源分支 IIFE 再读 `location.search` 永远为空——**跨源回跳在任何场景都不生效**（本机全量栈 × 01门向导 浏览器闭环实证：修复前登录后落宿主 dashboard，修复后自动回跳本机面板 + 票据免登全链打通）。J 节 dsh-bridge softRead 同类教训：双消费者共享一次参数读取 |
 
+## M. IAW 改版漂移（2026-09-11，行业 AI 工作台前端重构配套）——请 main 评审采纳
+
+背景：定制轨前端按《行业 AI 工作台 PRD v1.0》（WorkBuddy 原型）整体重构为五空间 IAW 工作台，
+场景图谱包从 2 个（QB01/GCJX）扩容为 14 个重点行业（工信部《参考指引（2025 版）》全量编码）。
+扩容数据暴露了 scenegraph 校验器两处词表/口径与原文的偏差，属**加法式最小改动**，向后兼容
+（既有 qb01 包零改动照常通过校验）：
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `packages/platform-core/src/scenegraph.ts`（`SCENE_TAGS`） | 白名单 5 类 → 8 类（原 5 类 + 原文口径的 增收/安全/环保） | 工信部原文价值标签口径为 降本/提质/增效/增收/安全/环保/新模式（PRD §2.5「严格对齐原文」）；main 版五类缺 增收/安全/环保，而民爆（安全）、白酒（安全）等行业脱离这些标签无法如实表达。保留「节能」兼容既有 qb01 包 |
+| `packages/platform-core/src/scenegraph.ts`（`validateScenegraph` tags 校验） | 「tags 非空」放宽为「可为空数组」 | 原文相当比例场景未显式标注价值标签（实测 807 场景中 504 个无标注）——此前唯一合规做法是虚构标签，违反本项目「不造假数据」红线；放宽后按原文如实装载，按标签筛选的场景视图自然排除无标注场景 |
+| `packages/platform-core/src/scenegraph.ts`（`ScenegraphPack.links?`） | 新增**可选**字段 `links?: Array<{key,name}>`（行业环节链） | 原文图谱按行业环节组织（如钢铁 A 铁前/B 炼铁…），此前仅 `chains` 单字符串无法结构化消费；缺位时前端从场景编号第三段反推（既有 qb01 包无需改动）。校验器不对该字段做强校验 |
+
 ## 决策回执（请 main 侧填写后回传）
 
 > main 侧已回填（2026-09-10，基线 main `5977067` 重算残余差异；实施与验证记录见 main 仓库

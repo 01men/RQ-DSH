@@ -1,7 +1,13 @@
 /**
- * 部门 Agent 工作台（review-dsh-agent-panel-v2 F1-F13 落地）：
- * 顶栏（行业选择器/⌘K/钉钉状态胶囊）+ 部门 rail + 三栏（Agent 名册+频道 / 四 Tab 协作区 / widget 看板）。
- * 一切数据来自 /api/panel/* 与 /api/dingtalk/*；XSS 白名单渲染；SSE 优先 + 轮询降级（realtime.js 复用）。
+ * 行业 AI 工作台（IAW Workbench，2026-09-11 改版）：五空间信息架构
+ * （图谱 map / 执行 flow / 能力 cap / 数据 data / 协作 collab）+ 右侧常驻 Agent 协作栏
+ * + 行业主题引擎（14 行业 data-industry 令牌覆盖）+ 场景详情抽屉。
+ *
+ * 一切数据来自 /api/panel/* 与 /api/dingtalk/*；XSS 白名单渲染；SSE 优先 + 轮询降级
+ * （realtime.js 复用）；演示态/远端形态/会话过期等既有服务行为全部保留。
+ * 设计来源：WorkBuddy 原型 + 《行业 AI 工作台 PRD v1.0》（IAW-DS 设计系统）。
+ * 原则：不做假数据、不放空占位入口——未实现的能力登记在 docs/handoff-iaw-gaps-to-main.md，
+ * 界面上诚实缺席。
  */
 import { api, session, setBase as apiSetBase, ApiError } from './api.js'
 import { setBase as depsSetBase, ui as uiDep, realtime as realtimeDep } from './deps.js'
@@ -24,7 +30,6 @@ export function esc(text) {
 /**
  * 白名单渲染（治理 DoD：XSS 面）：先全量转义，再仅放行 <b> 与 mention span——
  * 服务端种子/Agent 产出的轻标记可渲染，任何其他 HTML 一律按文本显示。
- * 注意 esc 现已转义引号，放行模式同步适配 &quot;/&#39; 形态（种子用单引号 span）。
  */
 export function md(text) {
   let s = esc(text)
@@ -34,24 +39,41 @@ export function md(text) {
   s = s.replaceAll(`&lt;span class='mention'&gt;`, '<span class="mention">')
   s = s.replaceAll('&lt;span class="mention"&gt;', '<span class="mention">')
   s = s.replaceAll('&lt;/span&gt;', '</span>')
-  // 纯文本里的 @提及（无 HTML 包裹）高亮
   s = s.replace(/(^|[\s（(])@([\p{L}\p{N}·]{2,20})/gu, '$1<span class="mention">@$2</span>')
   return s
 }
 
-const stars = (n) => '★'.repeat(n) + '☆'.repeat(4 - n)
 const pad2 = (n) => String(n).padStart(2, '0')
-/** 本地时区展示（QA BUG-U-01）：此前直接切片 UTC ISO 串，中国用户全部慢 8 小时。 */
+/** 本地时区展示（QA BUG-U-01）：不直接切片 UTC ISO 串。 */
 const fmtTime = (iso) => {
   if (!iso) return ''
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
   return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`
 }
-const TAG_CLS = { 提质: 'tg-tz', 降本: 'tg-jb', 增效: 'tg-zx', 节能: 'tg-jn', 新模式: 'tg-xm' }
+/** 评级展示（PRD：四档制，五星为扩展位；>4 按真值入 title、按 4 渲染避免破格）。 */
+const stars = (n) => {
+  const v = Math.max(1, Math.min(4, Number(n) || 1))
+  return `<span class="iaw-stars" title="现状评级 ${n}/4（四档制）">${'★'.repeat(v)}<span class="off">${'★'.repeat(4 - v)}</span></span>`
+}
+const TAG_CLS = { 降本: 'iaw-pill-cost', 提质: 'iaw-pill-quality', 增效: 'iaw-pill-eff', 增收: 'iaw-pill-rev', 安全: 'iaw-pill-safety', 环保: 'iaw-pill-eco', 新模式: 'iaw-pill-new', 节能: 'iaw-pill-eff' }
+const TAG_ORDER = ['降本', '提质', '增效', '增收', '安全', '环保', '节能', '新模式']
+const tagPill = (t) => `<span class="iaw-pill ${TAG_CLS[t] ?? 'iaw-pill-neutral'}">${esc(t)}</span>`
 const LANE_LABELS = { todo: '待办', doing: '进行中', review: '待审', done: '完成' }
 const LANE_ORDER = ['todo', 'doing', 'review', 'done']
-const ART_KINDS = { report: '报告', order: '工单', quote: '报价', diagnosis: '诊断', other: '沉淀' }
+const ACT_LABELS = { rd: '研发设计', mfg: '生产制造', scm: '供应链管理', svc: '运维服务', mkt: '数字营销', mgmt: '经营管理', fin: '法财税与成本' }
+const ACT_CODE = { rd: 1, mfg: 2, scm: 5, svc: 3, mgmt: 4, mkt: 6, fin: 7 }
+const PLATFORM_LABELS = { strategy: '战略', marketing: '营销', manufacturing: '制造', rd: '研发', quality: '质量' }
+/** 行业徽标字（行业码 → 单字；顶栏/行业菜单用）。 */
+const IND_AB = { YB01: '钢', SH01: '化', JB01: '工', QC01: '车', JB02: '机', WS01: '医', QB01: '电', QB02: '糖', QB03: '酒', QB04: '妆', SJ01: '锂', SJ02: '板', SJ03: '端', WJ01: '爆', GCJX: '工' }
+const IND_COLOR = { YB01: '#FF6B1A', SH01: '#0B7A75', JB01: '#F5A800', QC01: '#1668E3', JB02: '#3B4A63', WS01: '#00857C', QB01: '#2F80ED', QB02: '#B5651D', QB03: '#B0702F', QB04: '#D9548C', SJ01: '#1E5EFF', SJ02: '#0B7A4B', SJ03: '#6C4CF1', WJ01: '#E8541E', GCJX: '#F5A800' }
+
+const $id = (id) => document.getElementById(id)
+
+function basePath() {
+  const index = location.pathname.indexOf('/panel')
+  return index > 0 ? location.pathname.slice(0, index) : ''
+}
 
 // ---------------------------------------------------------------------------
 // 状态
@@ -63,52 +85,57 @@ const state = {
   demoMode: false,
   /** 远端宿主连接（形态 C）：{ hubBase, hubMountPrefix }；null=本机/未连接。 */
   remoteHub: null,
-  /** 双轨视图：workbench=部门工作台（三栏） / board=战略看板（/panel 面自持看板）。 */
-  view: location.hash === '#/board' ? 'board' : 'workbench',
-  boardPlatform: localStorage.getItem('panel_board_platform') ?? '',
+  /** 五空间导航：space=map/flow/cap/data/collab；nav=空间内视图。#/board 深链 → cockpit。 */
+  space: 'map',
+  nav: 'compass',
   depts: [],
   dept: localStorage.getItem('panel_dept') ?? 'mfg',
   overview: null,
   industries: [],
   industry: null,
-  ddStatus: null,
-  bridges: [],
-  // C1-1 信息架构收敛：进入即对话框——boot 不再恢复上次 Tab，班组长打开面板第一眼是对话
-  tab: 'chat',
+  /** 用户显式选择行业后置真：部门总览的默认行业不再覆盖用户选择（服务端默认只作用一次）。 */
+  industryPinned: false,
+  scenegraph: null,
+  /** 罗盘状态：环节（links key）过滤 + 价值标签过滤。 */
+  thread: 'ALL',
+  tagFilter: new Set(),
   channelId: localStorage.getItem('panel_channel') ?? '',
   messages: [],
   tasks: [],
   artifacts: [],
-  scenegraph: null,
+  board: null,
+  boardPlatform: localStorage.getItem('panel_board_platform') ?? '',
+  ddStatus: null,
+  bridges: [],
   ddSync: localStorage.getItem('panel_ddsync') === '1',
   /** 模型目录（modelgw 事实源 / dsh 配置桥只读）；chatModel='' 表示跟随各 Agent 资产配置。 */
   models: [],
   modelSource: '',
   chatModel: localStorage.getItem('panel_chat_model') ?? '',
-  /** 可直调技能清单（C1-2：skillhub published 且对当前账号组织开放；空=不展示技能入口）。 */
+  /** 可直调技能清单（skillhub published 且对当前账号组织开放；空=不展示技能入口）。 */
   skills: [],
+  /** Agent 协作栏形态：panel=面板会话（默认）；dsh=内嵌 dsh 标准对话（hostBridge 在场时）。 */
+  railMode: localStorage.getItem('iaw_rail_mode') ?? 'panel',
+  /** 场景抽屉当前场景编码 + tab。 */
+  scene: null,
+  sceneTab: 0,
+  /** 通知中心事件流（stream/poll 到达的系统级动态，内存环形，最多 100 条）。 */
+  notices: [],
   stream: null,
   streamDept: '',
-  /** 实时通道健康（QA BUG-U-02）：downgraded=轮询降级态；lastRealtimeAt=最后收到数据时刻；
-   *  stale=轮询连续失败（数据可能过期）——徽标必须如实反映，不许断网仍标 LIVE。 */
+  /** 实时通道健康：downgraded=轮询降级态；stale=轮询连续失败（数据可能过期）。 */
   streamDowngraded: false,
   streamStale: false,
   lastRealtimeAt: 0,
 }
 
-/** 实时平台 chip 展示名（QA P2-6）：此前直接显示英文原始 id。 */
-const PLATFORM_LABELS = { strategy: '战略', marketing: '营销', manufacturing: '制造', rd: '研发', quality: '质量' }
-
-/** 嵌套防护（M3）：?embed=1（dsh「01门工作台」视图 Tab 内嵌本面板）或自身已在 iframe 中 = 嵌入形态——
- *  嵌入态不再内嵌 dsh 对话（防 iframe 递归），侧栏「Agent 对话」入口隐藏。 */
+/** 嵌套防护（M3）：?embed=1（dsh「01门工作台」视图 Tab 内嵌本面板）或自身已在 iframe 中。 */
 const EMBEDDED = new URLSearchParams(location.search).has('embed') || (() => {
   try { return window.self !== window.top } catch { return true }
 })()
 
-/** 「Agent 对话」默认内嵌 dsh 标准对话（默认 Agent 交互面，M3）：hostBridge=dsh 对话面在场；
- *  用户可用「使用内置协作会话」退回（panel_chat_embed_off），退回后 at-row 提供「改用 dsh 对话」。 */
 function canEmbedDshChat() {
-  return state.hostBridge && !EMBEDDED && localStorage.getItem('panel_chat_embed_off') !== '1'
+  return state.hostBridge && !EMBEDDED
 }
 
 async function toast(message, type) {
@@ -116,15 +143,28 @@ async function toast(message, type) {
   mod.toast(message, type)
 }
 
+/** 富通知（右侧滑入卡：标题 + 正文 + 级联色）。 */
+function richToast(title, body, type) {
+  const host = $id('iawToasts')
+  if (!host) { void toast(body || title, type === 'warn' ? 'error' : type); return }
+  const el = document.createElement('div')
+  el.className = `t ${type ?? ''}`
+  el.innerHTML = `<div class="h">${esc(title)}<span class="x">✕</span></div><div>${body}</div>`
+  el.querySelector('.x').onclick = () => el.remove()
+  host.appendChild(el)
+  while (host.children.length > 4) host.removeChild(host.firstChild)
+  setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 320) }, 5200)
+}
+
 function showModal(title, bodyHtml) {
-  const mask = document.getElementById('mask')
-  document.getElementById('modalTitle').textContent = title
-  document.getElementById('modalBody').innerHTML = bodyHtml
+  const mask = $id('mask')
+  $id('modalTitle').textContent = title
+  $id('modalBody').innerHTML = bodyHtml
   mask.classList.add('show')
 }
 
 function hideModal() {
-  document.getElementById('mask').classList.remove('show')
+  $id('mask')?.classList.remove('show')
 }
 
 // ---------------------------------------------------------------------------
@@ -141,58 +181,50 @@ export function start({ base, hostBridge = false, remoteHub = null, demoMode = f
     renderLoginGuide()
     return
   }
-  // 先落外壳骨架（数据慢/失败时页面不再是白屏），数据加载失败显式提示
+  if (location.hash === '#/board') { state.space = 'map'; state.nav = 'cockpit' }
   renderShell()
-  renderTopRight()
   window.addEventListener('hashchange', () => {
-    state.view = location.hash === '#/board' ? 'board' : 'workbench'
-    applyView()
+    if (location.hash === '#/board') { state.space = 'map'; state.nav = 'cockpit'; renderNav(); renderView() }
   })
   // 会话中途过期（QA BUG-U-05）：api.js 刷新失败即广播，此处统一切回登录引导
-  // （远端连接态会导向重连向导），不再让用户对着每次操作失败的 toast 摸不着头脑
   window.addEventListener('panel:session-expired', () => {
-    if (document.getElementById('app')?.dataset.booted) renderLoginGuide()
+    if ($id('app')?.dataset.booted) renderLoginGuide()
   })
-  // 通道健康看门狗（QA BUG-U-02）：轮询降级态下超过 95s（3 轮 + 余量）无任何数据到达，
-  // 徽标转「连接中断」并可点击重连——不许断网后仍宣称实时
+  // 通道健康看门狗（QA BUG-U-02）：轮询降级态下超过 95s 无任何数据到达 →「连接中断」
   window.setInterval(() => {
     if (!state.streamDowngraded || state.streamStale) {
-      if (!state.streamDowngraded && state.streamStale) { state.streamStale = false; renderLiveBadge() }
+      if (!state.streamDowngraded && state.streamStale) { state.streamStale = false; renderStatus() }
       return
     }
     if (state.lastRealtimeAt > 0 && Date.now() - state.lastRealtimeAt > 95_000) {
       state.streamStale = true
-      renderLiveBadge()
+      renderStatus()
     }
   }, 15_000)
   void init()
 }
 
 function renderLoginGuide() {
-  // 远端连接态（形态 C）：会话失效时回到连接向导重连/重登，而不是误导向本机控制台
+  // 远端连接态（形态 C）：会话失效时回到连接向导重连/重登
   if (state.remoteHub) {
-    document.getElementById('app').innerHTML = `
+    $id('app').innerHTML = `
       <div class="login-guide">
-        <h1>🌳 01门 · 部门 Agent 工作台</h1>
+        <h1>🌳 01门 · 行业 AI 工作台</h1>
         <p>与远端宿主（${esc(state.remoteHub.hubBase)}）的会话已失效。</p>
         <button class="btn primary" id="reopenWizard">重新连接 / 登录</button>
       </div>`
-    document.getElementById('reopenWizard').onclick = async () => {
+    $id('reopenWizard').onclick = async () => {
       const wizard = await import('./wizard.js')
       wizard.start({ base: basePath(), hostBridge: state.hostBridge })
     }
     return
   }
-  // 回跳语义：登录成功后带 next 回到面板（登录页消费一次）。next 必须传**绝对 URL**——
-  // 控制台登录页只对回环/私网绝对地址走 G1 票据签发分支（#entry_ticket= 回跳，boot.js 兑换建会话）；
-  // 同源相对路径只落裸跳转，而面板与控制台令牌存储键不同（gate01_token vs heng_ops_token），
-  // 裸跳回面板仍是无会话死循环（独立形态真机实证，2026-09-11 交互测试修复）。
-  // 尾斜杠不能省：/gate01 不带斜杠会触发 302 → /gate01/，重定向把 #/login fragment 与 next 参数一并吃掉。
-  // basePath 为空（独立形态 /panel/）时直接用根相对 /?next=——不可拼出 //?next（协议相对空 host，非法 URL 点击无效）
+  // 回跳语义：登录成功后带 next（绝对 URL）回到面板（G1 票据签发分支，boot.js 兑换建会话）；
+  // 尾斜杠不能省：/gate01 不带斜杠会触发 302，把 #fragment 与 next 参数一并吃掉。
   const here = encodeURIComponent(location.origin + location.pathname + location.search + location.hash)
-  document.getElementById('app').innerHTML = `
+  $id('app').innerHTML = `
     <div class="login-guide">
-      <h1>🌳 01门 · 部门 Agent 工作台</h1>
+      <h1>🌳 01门 · 行业 AI 工作台</h1>
       <p>当前浏览器没有有效的平台会话。<br>
       请从控制台登录后进入，或从钉钉/门户的「打开即工作台」入口点入（自动票据免登）。</p>
       <a href="${basePath()}/?next=${here}#/login"><button class="btn primary">去控制台登录</button></a>
@@ -207,41 +239,47 @@ async function init() {
         <div class="modal-b" id="modalBody"></div>
       </div>
     </div>`)
-  document.getElementById('modalX').onclick = hideModal
-  document.getElementById('mask').addEventListener('click', (event) => {
+  $id('modalX').onclick = hideModal
+  $id('mask').addEventListener('click', (event) => {
     if (event.target.id === 'mask') hideModal()
+  })
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { closeDrawer(); $id('iawIndMenu')?.classList.remove('open') }
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault()
+      void openCmdk()
+    }
   })
 
   try {
     const [deptsRes, indRes] = await Promise.all([api.get('/api/panel/depts'), api.get('/api/panel/industries')])
     state.depts = deptsRes.depts
     state.industries = indRes.industries
-    // 部门范围权限（账号组织打通）：无权限的部门不可作为当前部门
     const allowedDepts = state.depts.filter((dept) => dept.allowed !== false)
     if (!allowedDepts.some((dept) => dept.id === state.dept)) state.dept = allowedDepts[0]?.id ?? state.dept
     state.industry = state.industries.find((item) => item.state === 'active') ?? null
+    // 用户上一次显式选择的行业（会话级持久化）：仍处于激活态才恢复；
+    // 即使与默认行业相同也要钉住——否则部门总览默认值会在 switchDept 覆盖用户选择
+    const savedIndustry = localStorage.getItem('iaw_industry')
+    if (savedIndustry) {
+      const saved = state.industries.find((item) => item.code === savedIndustry && item.state === 'active')
+      if (saved) { state.industry = saved; state.industryPinned = true }
+    }
   } catch (error) {
     if (error instanceof ApiError && error.status === 401) {
       session.clear()
       renderLoginGuide()
       return
     }
-    document.getElementById('app').innerHTML = `<div class="login-guide"><h1>面板数据加载失败</h1><p>${esc(error.message)}</p></div>`
+    $id('app').innerHTML = `<div class="login-guide"><h1>面板数据加载失败</h1><p>${esc(error.message)}</p></div>`
     return
   }
 
   void refreshDingtalk()
-  renderShell()
   await refreshModels()
   await loadSkills()
-  await switchDept(state.dept, { keepTab: true })
+  await switchDept(state.dept, { keepSpace: true })
   connectStream()
-  window.addEventListener('keydown', (event) => {
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-      event.preventDefault()
-      openCmdk()
-    }
-  })
 }
 
 async function refreshDingtalk() {
@@ -262,7 +300,7 @@ async function refreshDingtalk() {
   renderTopRight()
 }
 
-/** 模型目录（GET /api/panel/models，panel.read）：失败时置空（composer 退化为「未接入模型」提示）。 */
+/** 模型目录（GET /api/panel/models）：失败时置空（协作栏退化为「未接入模型」提示）。 */
 async function refreshModels() {
   try {
     const payload = await api.get('/api/panel/models')
@@ -274,8 +312,7 @@ async function refreshModels() {
   }
 }
 
-/** 可直调技能清单（C1-2，GET /api/panel/:dept/skills）：拿不到就置空——不展示技能入口，
- *  不假装可用；直调本身的失败在执行卡里大声报（诚实降级分层：清单是便利性，直调是承诺）。 */
+/** 可直调技能清单：拿不到就置空——不展示技能入口，不假装可用。 */
 async function loadSkills() {
   try {
     state.skills = (await api.get(`/api/panel/${state.dept}/skills`)).skills ?? []
@@ -285,10 +322,9 @@ async function loadSkills() {
 }
 
 // ---------------------------------------------------------------------------
-// 实时通道（SSE 优先 + 轮询降级；复用 console realtime.js）
-// H4：stream URL 首选一次性短时 ticket（POST /api/panel/stream-ticket 换取，消费即焚），
-// 长效 access token 不再进 URL/代理日志；ticket 获取失败回落 ?token= 旧通道。
-// H2：onPollError 连续失败 ≥3 轮（约 95s）→「连接中断·点击重试」徽标；成功自愈自动恢复。
+// 实时通道（SSE 优先 + 轮询降级；复用 realtime.js）
+// stream URL 首选一次性短时 ticket（POST /api/panel/stream-ticket，消费即焚）；
+// 轮询连续失败 ≥3 轮 →「连接中断·点击重试」；成功自愈自动恢复。
 // ---------------------------------------------------------------------------
 
 const POLL_FAIL_BADGE_THRESHOLD = 3
@@ -299,17 +335,13 @@ function connectStream() {
   state.streamDept = state.dept
   state.streamDowngraded = false
   state.streamStale = false
-  state.lastRealtimeAt = Date.now() // 建流观察窗：首轮数据到达前不误报中断
-  renderLiveBadge()
-  // 远端形态（C）：数据面走本机代理——SSE 会被代理显式拒绝（代理不持流，403 触发既有降级），
-  // 轮询路径同样映射到代理（面板 REST 白名单内），请求须带向导头（/rqcard/* 免登命名空间防线）
+  state.lastRealtimeAt = Date.now()
+  renderStatus()
   const remote = Boolean(state.remoteHub)
   const streamBase = remote ? `${basePath()}/rqcard/proxy` : basePath()
   const headers = session.token ? { authorization: `Bearer ${session.token}` } : {}
   if (remote && session.token) headers['x-rqcard-call'] = '1'
   void (async () => {
-    // H4/P2-O-5：URL 不再携带长效 access token——先换 ≤60s 一次性 stream ticket（消费即焚）；
-    // 票据面不可用（旧版后端/权限缺失）回落 ?token= 旧通道
     let url = `${streamBase}/api/panel/stream?dept=${state.dept}&token=${encodeURIComponent(session.token)}`
     try {
       const ticket = await api.post('/api/panel/stream-ticket', { dept: state.dept })
@@ -320,21 +352,20 @@ function connectStream() {
       pollPath: `${streamBase}/api/panel/${state.dept}/poll`,
       pollIntervalMs: 30_000,
       headers,
-      onMessage: (data) => { renderLiveBadge(); handleRealtime(data) },
+      onMessage: (data) => { renderStatus(); handleRealtime(data) },
       onDowngrade: () => {
         state.streamDowngraded = true
-        renderLiveBadge()
+        renderStatus()
       },
-      // H2：轮询连续失败可观测（95s 看门狗只覆盖「完全无数据」，这里覆盖「有失败在身」）
       onPollError: (_error, info) => {
-        if (info.consecutiveFailures >= POLL_FAIL_BADGE_THRESHOLD) renderLiveBadge('down')
+        if (info.consecutiveFailures >= POLL_FAIL_BADGE_THRESHOLD) renderStatus('down')
       },
     })
-    renderLiveBadge()
-  })().catch(() => { /* realtime 依赖装载失败（异常环境）：静默，消息刷新退化为操作后手动拉取 */ })
+    renderStatus()
+  })().catch(() => { /* realtime 依赖装载失败：静默，消息刷新退化为操作后手动拉取 */ })
 }
 
-/** 手动重连（QA BUG-U-02）：「连接中断」徽标点击后重建通道并给 95s 观察窗。 */
+/** 手动重连：「连接中断」点击后重建通道并给观察窗。 */
 function reconnectStream() {
   if (state.stream) { try { state.stream.close() } catch { /* 已关闭 */ } }
   state.stream = null
@@ -344,16 +375,16 @@ function reconnectStream() {
 }
 
 async function handleRealtime(data) {
-  // 任何通道（SSE 事件/轮询应答）只要有数据到达就算「活着」——看门狗据此判断健康
   state.lastRealtimeAt = Date.now()
   if (state.streamStale) {
     state.streamStale = false
-    renderLiveBadge()
+    renderStatus()
   }
   if (!data || typeof data !== 'object') return
   if (data.name === 'panel.message.created' && data.payload) {
     const payload = data.payload
     if (payload.dept !== state.dept) return
+    pushNotice(`💬 ${payload.senderName ?? '有人'} 在协作频道发了新消息`)
     if (payload.channelId !== state.channelId) { void refreshOverview(); return }
     if (state.messages.some((m) => m.id === payload.messageId)) return
     try {
@@ -361,15 +392,21 @@ async function handleRealtime(data) {
       const fresh = detail.messages.filter((m) => !state.messages.some((x) => x.id === m.id))
       if (fresh.length > 0) {
         state.messages.push(...fresh)
-        renderMessages()
+        renderConversation($id('iawMsgs'))
+        renderConversation($id('iawRoomsMsgs'))
         void refreshOverview()
       }
     } catch { /* 下轮轮询兜底 */ }
     return
   }
-  if (data.name === 'panel.task.updated' || data.name === 'scenegraph.updated') {
-    if (state.tab === 'tasks') void loadTab().then(renderMain)
-    if (data.name === 'scenegraph.updated' && state.tab === 'scene') void loadTab().then(renderMain)
+  if (data.name === 'panel.task.updated' || data.name === 'scenegraph.updated' || data.name === 'panel.industry.activated') {
+    pushNotice(data.name === 'scenegraph.updated' ? '🗺 场景图谱已更新'
+      : data.name === 'panel.industry.activated' ? '✅ 行业激活已生效'
+        : '📌 任务有更新')
+    if (data.name === 'scenegraph.updated') { state.scenegraph = null }
+    await refreshOverview()
+    if (['flow', 'map', 'collab'].includes(state.space)) await loadViewData()
+    renderView()
     return
   }
   if (data.messages) {
@@ -377,94 +414,288 @@ async function handleRealtime(data) {
     const fresh = data.messages.filter((m) => m.channelId === state.channelId && !state.messages.some((x) => x.id === m.id))
     if (fresh.length > 0) {
       state.messages.push(...fresh)
-      renderMessages()
+      renderConversation($id('iawMsgs'))
+      renderConversation($id('iawRoomsMsgs'))
     }
     if (JSON.stringify(data.tasks) !== JSON.stringify(state.tasks)) {
       state.tasks = data.tasks
-      if (state.tab === 'tasks') renderMain()
+      if (state.space === 'flow' || state.nav === 'cockpit') renderView()
     }
   }
 }
 
-// ---------------------------------------------------------------------------
-// 外壳渲染
-// ---------------------------------------------------------------------------
-
-function renderShell() {
-  const activeIndustry = state.industry
-  document.getElementById('app').innerHTML = `
-    ${state.demoMode ? `
-    <div id="demoBanner" class="demo-banner">
-      <span>🧪 当前展示的是<b>内置演示数据</b>——连接宿主后自动切换为真实看板</span>
-      <button class="btn primary" id="demoOpenWizard">连接宿主</button>
-    </div>` : ''}
-    <div class="topbar">
-      <div class="logo">🌳 01门 <span class="badge">部门工作台</span></div>
-      <div class="more-sel">
-        <div class="more-btn" id="moreBtn">☰ 更多</div>
-        <div class="more-menu" id="moreMenu">
-          <div class="more-opt" data-m="board"><span>📈</span><span>战略看板<span class="sub">平台聚合视图（经理视角）</span></span></div>
-          ${session.can('panel.config.write') ? '<div class="more-opt" data-m="config"><span>⚙</span><span>面板设置<span class="sub">阵容 / 看板块 / KPI</span></span></div>' : ''}
-          <div class="more-opt" data-m="models"><span>🧠</span><span>模型管理<span class="sub">接入与连通性</span></span></div>
-        </div>
-      </div>
-      <div class="ind-sel">
-        <div class="ind-btn" id="indBtn">
-          <span>${esc(activeIndustry?.icon ?? '🏢')}</span><span>${esc(activeIndustry?.name ?? '未激活行业')}</span>
-          <span class="${activeIndustry ? 'dotok' : 'dotlock'}"></span><span style="color:#6b7280">▾</span>
-        </div>
-        <div class="ind-menu" id="indMenu"></div>
-      </div>
-      <div class="top-search" id="cmdkTrigger"><span>搜索 Agent / 技能 / 频道 / 场景 / 同事…</span><span class="kbd">⌘K</span></div>
-      <div class="top-right" id="topRight"></div>
-    </div>
-    <div class="body">
-      <div class="rail" id="rail"></div>
-      <div class="dept" id="dept"></div>
-      <div class="board" id="board" style="display:none"></div>
-    </div>`
-  document.getElementById('indBtn').onclick = (event) => { event.stopPropagation(); renderIndMenu(); document.getElementById('indMenu').classList.toggle('show') }
-  document.addEventListener('click', () => {
-    document.getElementById('indMenu')?.classList.remove('show')
-    document.getElementById('moreMenu')?.classList.remove('show')
-  })
-  // C1-1 信息架构收敛：战略看板/面板设置/模型管理收进「更多」二级入口——主界面只剩对话
-  // 与执行卡；#/board 深链保留（hash 直达看板不受影响）。
-  document.getElementById('moreBtn').onclick = (event) => { event.stopPropagation(); document.getElementById('moreMenu').classList.toggle('show') }
-  document.querySelectorAll('.more-opt').forEach((el) => {
-    el.onclick = (event) => {
-      event.stopPropagation()
-      document.getElementById('moreMenu')?.classList.remove('show')
-      if (el.dataset.m === 'board') location.hash = '#/board'
-      else if (el.dataset.m === 'config') void showConfig()
-      else if (el.dataset.m === 'models') void showModels()
-    }
-  })
-  document.getElementById('cmdkTrigger').onclick = () => openCmdk()
-  // 演示横幅按钮（renderShell 模板内，重建后重绑）：唤起连接向导
-  document.getElementById('demoOpenWizard')?.addEventListener('click', async () => {
-    const wizard = await import('./wizard.js')
-    wizard.start({ base: basePath() })
-  })
-  applyView()
+function pushNotice(text) {
+  state.notices.unshift({ at: new Date().toISOString(), text })
+  if (state.notices.length > 100) state.notices.pop()
   renderTopRight()
 }
 
+// ---------------------------------------------------------------------------
+// 外壳渲染（IAW-DS：顶栏 / 三栏 / 事务流条 / 状态栏）
+// ---------------------------------------------------------------------------
+
+const SPACE_META = {
+  map: { label: '图谱', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="9" r="2.5"/><circle cx="9" cy="18" r="2.5"/><path d="M8.3 7.4l7.3 1.2M7.2 8.2l1.3 7.4M16.4 10.9l-5.6 5.6"/></svg>' },
+  flow: { label: '执行', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="7" height="6" rx="1.5"/><rect x="14" y="14" width="7" height="6" rx="1.5"/><path d="M6.5 10v4.5a2 2 0 002 2H14"/></svg>' },
+  cap: { label: '能力', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg>' },
+  data: { label: '数据', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v12c0 1.7 3.1 3 7 3s7-1.3 7-3V6"/><path d="M5 12c0 1.7 3.1 3 7 3s7-1.3 7-3"/></svg>' },
+  collab: { label: '协作', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="9" cy="8" r="3"/><path d="M3 20a6 6 0 0112 0"/><path d="M16 5.5a3 3 0 010 5M18.5 20a6 6 0 00-3-5.2"/></svg>' },
+}
+
+function navDef() {
+  const pack = state.scenegraph?.pack
+  const sceneCount = pack ? Object.values(pack.activities).reduce((sum, list) => sum + list.length, 0) : 0
+  const toolCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.tools)).size : 0
+  const modelCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.models)).size : 0
+  const talentCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.talent)).size : 0
+  const dataCount = pack ? new Set(Object.values(pack.activities).flat().flatMap((s) => s.data)).size : 0
+  const inboxCount = state.tasks.filter((t) => t.lane !== 'done' && (t.assigneeName === session.user?.displayName || t.lane === 'review')).length
+  const unread = (state.overview?.channels ?? []).reduce((sum, c) => sum + (c.unread ?? 0), 0)
+    + state.tasks.filter((t) => t.lane === 'review').length
+  return {
+    map: [
+      ['compass', '场景罗盘', '◎', sceneCount ? String(sceneCount) : ''],
+      ['cockpit', '度量驾驶舱', '▤', ''],
+    ],
+    flow: [
+      ['flow', '全部任务', '▦', state.tasks.length ? String(state.tasks.length) : ''],
+      ['inbox', '我的收件箱', '☞', inboxCount ? String(inboxCount) : ''],
+    ],
+    cap: [
+      ['mchannels', '模型渠道', '◈', state.models.length ? String(state.models.length) : ''],
+      ['tools', '工具软件', '⚙', toolCount ? String(toolCount) : ''],
+      ['kmodels', '知识模型', '☣', modelCount ? String(modelCount) : ''],
+      ['talent', '人才技能', '❋', talentCount ? String(talentCount) : ''],
+    ],
+    data: [
+      ['elements', '数据要素', '❖', dataCount ? String(dataCount) : ''],
+    ],
+    collab: [
+      ['rooms', '协作频道', '#', (state.overview?.channels ?? []).length ? String((state.overview?.channels ?? []).length) : ''],
+      ['agents', '数字同事', '☻', (state.overview?.dept?.agents ?? []).length ? String((state.overview?.dept?.agents ?? []).length) : ''],
+      ['members', '成员', '☰', ''],
+      ['notice', '通知中心', '✦', unread ? String(unread) : ''],
+    ],
+  }
+}
+
+function renderShell() {
+  $id('app').innerHTML = `
+    ${state.demoMode ? `
+    <div id="demoBanner" class="demo-banner">
+      <span>🧪 当前展示的是<b>内置演示数据</b>——连接宿主后自动切换为真实业务面</span>
+      <button class="btn primary" id="demoOpenWizard">连接宿主</button>
+    </div>` : ''}
+    <div class="iaw-app" id="iawApp" data-industry="${esc(state.industry?.code ?? '')}">
+      <header class="iaw-topbar">
+        <div class="iaw-logo">IAW</div>
+        <div class="iaw-brand">行业 AI 工作台<small>Industry AI Workbench</small></div>
+        <div class="iaw-ind">
+          <button class="iaw-ind-btn" id="iawIndBtn">
+            <span class="iaw-ind-dot"></span><span id="iawIndName">${esc(state.industry?.name ?? '未激活行业')}</span><span class="caret">▾</span>
+          </button>
+          <div class="iaw-ind-menu" id="iawIndMenu"></div>
+        </div>
+        <div class="iaw-search" id="iawSearch" title="全局搜索（场景 / 要素 / 任务 / 频道 / 同事）">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text-tertiary);flex:none"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="iawSearchInput" placeholder="搜索场景、要素、任务，或输入命令">
+          <span class="iaw-kbd">Ctrl K</span>
+        </div>
+        <div class="iaw-top-right" id="iawTopRight"></div>
+      </header>
+      <div class="iaw-body">
+        <nav class="iaw-side">
+          <div class="iaw-seg" id="iawSeg"></div>
+          <div class="iaw-nav-group" id="iawNavGroup"></div>
+          <div class="iaw-side-foot" id="iawSideFoot"></div>
+        </nav>
+        <main class="iaw-main" id="iawMain"></main>
+        <aside class="iaw-agent" id="iawAgent"></aside>
+      </div>
+      <div class="iaw-flowbar" id="iawFlowbar"></div>
+      <div class="iaw-statusbar" id="iawStatusbar"></div>
+      <div class="iaw-toasts" id="iawToasts"></div>
+    </div>`
+  $id('demoOpenWizard')?.addEventListener('click', async () => {
+    const wizard = await import('./wizard.js')
+    wizard.start({ base: basePath() })
+  })
+  $id('iawIndBtn').onclick = (event) => { event.stopPropagation(); renderIndMenu(); $id('iawIndMenu').classList.toggle('open') }
+  document.addEventListener('click', () => $id('iawIndMenu')?.classList.remove('open'))
+  $id('iawSearchInput').addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return
+    const q = event.target.value.trim()
+    if (q) void searchJump(q)
+  })
+  $id('iawSearch').onclick = (event) => {
+    if (event.target.id !== 'iawSearchInput') void openCmdk()
+  }
+  renderSeg()
+  renderNav()
+  renderTopRight()
+  renderAgentRail()
+  renderStatus()
+}
+
+function renderSeg() {
+  const seg = $id('iawSeg')
+  if (!seg) return
+  seg.innerHTML = Object.entries(SPACE_META).map(([key, meta]) => `
+    <button class="${state.space === key ? 'on' : ''}" data-space="${key}" title="${meta.label}">${meta.icon}<span>${meta.label}</span></button>`).join('')
+  seg.querySelectorAll('button').forEach((btn) => {
+    btn.onclick = () => {
+      state.space = btn.dataset.space
+      state.nav = null
+      renderSeg()
+      renderNav()
+      void refreshView()
+    }
+  })
+}
+
+function renderNav() {
+  const group = $id('iawNavGroup')
+  if (!group) return
+  const defs = navDef()
+  if (!defs[state.space].some((n) => n[0] === state.nav)) state.nav = defs[state.space][0][0]
+  const label = { map: '图谱空间', flow: '执行空间', cap: '能力空间', data: '数据空间', collab: '协作空间' }[state.space]
+  group.innerHTML = `<div class="iaw-nav-title">${label} · ${esc(state.industry?.name ?? '未激活')}</div>` +
+    defs[state.space].map((n) => `
+      <button class="iaw-nav-item ${state.nav === n[0] ? 'on' : ''}" data-nav="${n[0]}">
+        <span class="iaw-nav-ic">${n[2]}</span><span>${n[1]}</span>${n[3] ? `<span class="cnt">${n[3]}</span>` : ''}
+      </button>`).join('')
+  group.querySelectorAll('.iaw-nav-item').forEach((el) => {
+    el.onclick = () => {
+      state.nav = el.dataset.nav
+      renderNav()
+      void refreshView()
+    }
+  })
+  renderSideFoot()
+}
+
+function renderSideFoot() {
+  const foot = $id('iawSideFoot')
+  if (!foot) return
+  const pack = state.scenegraph?.pack
+  const sceneCount = pack ? Object.values(pack.activities).reduce((sum, list) => sum + list.length, 0) : 0
+  foot.innerHTML = `
+    <div>数据源：<b>一图四清单</b>（工信部 2025 版）</div>
+    <div>场景节点 <b>${sceneCount}</b> · 渠道 <b>${state.models.length}</b> · 数字同事 <b>${(state.overview?.dept?.agents ?? []).length}</b></div>
+    ${state.overview?.org ? `<div>组织：<b>${esc(state.overview.org.name)}</b></div>` : ''}
+    <div style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap">
+      ${session.can('panel.config.write') ? '<a href="javascript:void 0" id="iawCfgLink">面板配置</a>' : ''}
+      <a href="${basePath() || '/'}" data-landing="console" title="打开01门管理控制台">管理控制台 ↗</a>
+    </div>`
+  // 显式跨工作台切换：记住去向（控制台启动分诊尊重该偏好，不再把人拽回面板）
+  foot.querySelectorAll('[data-landing]').forEach((el) => {
+    el.addEventListener('click', () => {
+      try { localStorage.setItem('gate01_landing', el.dataset.landing) } catch { /* 忽略 */ }
+    })
+  })
+  $id('iawCfgLink')?.addEventListener('click', () => void showConfig())
+}
+
+function renderTopRight() {
+  const host = $id('iawTopRight')
+  if (!host) return
+  // 渠道健康：在线模型占比 + 实时通道状态合成
+  const online = state.models.filter((model) => model.status === 'online').length
+  const healthCls = state.streamStale ? 'bad' : state.models.length === 0 ? 'off' : online === state.models.length ? 'ok' : online > 0 ? 'warn' : 'bad'
+  const healthTxt = state.models.length === 0 ? '未接入渠道' : `渠道 ${online}/${state.models.length}`
+  const waic = state.board?.waic?.chargeCents
+  const ddBound = state.ddStatus?.bound
+  const unread = (state.overview?.channels ?? []).reduce((sum, c) => sum + (c.unread ?? 0), 0)
+    + state.tasks.filter((t) => t.lane === 'review').length
+  const user = session.user ?? (state.demoMode ? { displayName: '演示访客' } : null)
+  host.innerHTML = `
+    <div class="iaw-health" title="模型渠道健康 · ${state.streamDowngraded ? '实时走 30s 轮询' : '实时通道正常'}"><span class="iaw-dot ${healthCls}"></span><span>${healthTxt}</span></div>
+    ${waic !== undefined ? `<div class="iaw-cost" title="近 7 天平台调用费用（WAIC 口径；计量面未接入时为 0）">7天 ¥ ${(waic / 100).toFixed(2)}</div>` : ''}
+    <button class="iaw-iconbtn" id="iawDdBrief" title="${ddBound ? `钉钉已绑定（${esc(ddBound.displayName ?? '')}）` : '钉钉桥接：点击绑定'}">⇄</button>
+    <button class="iaw-iconbtn" id="iawNoticeBtn" title="通知中心"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 01-3.4 0"/></svg>${unread ? `<span class="iaw-badge-n">${unread > 99 ? '99+' : unread}</span>` : ''}</button>
+    <button class="iaw-iconbtn" id="iawHelpBtn" title="帮助与快捷键"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 115 .5c0 1.5-2.5 2-2.5 3.5"/><circle cx="12" cy="17" r=".6" fill="currentColor"/></svg></button>
+    <div class="iaw-avatar" id="iawUserAvatar" title="${esc(user?.displayName ?? '?')}（点击退出登录）">${esc((user?.displayName ?? '?').slice(0, 1))}</div>`
+  $id('iawDdBrief').onclick = () => void showBind()
+  $id('iawNoticeBtn').onclick = () => { state.space = 'collab'; state.nav = 'notice'; renderSeg(); renderNav(); void refreshView() }
+  $id('iawHelpBtn').onclick = () => showHelp()
+  // 退出登录（QA P2-3）：车间共用电脑下一班不能沿用上一班身份
+  $id('iawUserAvatar').onclick = async () => {
+    if (state.demoMode) {
+      const wizard = await import('./wizard.js')
+      wizard.start({ base: basePath() })
+      return
+    }
+    if (!window.confirm(`退出当前账号（${user?.displayName ?? ''}）？`)) return
+    session.clear()
+    renderLoginGuide()
+    void toast('已退出登录')
+  }
+  renderSideFoot()
+}
+
+/** 状态栏：实时通道三态 + 环境标记 + 图谱统计。 */
+function renderStatus(kind) {
+  const bar = $id('iawStatusbar')
+  if (!bar) return
+  let live = ''
+  const down = (title) => `<span class="live" id="iawLive" title="${esc(title)}"><span class="iaw-dot bad"></span>连接中断 · 点击重试</span>`
+  if (kind === 'down') live = down('实时轮询连续失败。点击重建实时通道。')
+  else if (state.streamStale) live = down('超过 90 秒没有收到任何数据（可能断网或服务重启）。点击重建实时通道。')
+  else {
+    const health = state.stream?.health?.()
+    if (!health || health.transport === 'sse') live = '<span class="live" title="实时通道（SSE）已连接"><span class="iaw-dot ok"></span>LIVE</span>'
+    else if (health.consecutivePollFailures > 0) live = down('实时轮询连续失败。点击重建实时通道。')
+    else live = '<span class="live" title="实时通道不可用（如钉钉 webview），已按 30 秒轮询兜底"><span class="iaw-dot warn"></span>30s 轮询</span>'
+  }
+  const env = [state.demoMode ? '演示态' : '', state.remoteHub ? `远端 ${state.remoteHub.hubBase}` : '', EMBEDDED ? '嵌入形态' : ''].filter(Boolean).join(' · ')
+  bar.innerHTML = `
+    <span>${env || '01门'}</span>
+    ${live}
+    <div class="right">
+      <span>密度：${state.industry?.code ? ({ YB01: '高密', SH01: '高密', JB01: '高密', QC01: '标准', JB02: '高密', WS01: '标准', QB01: '舒适', QB02: '标准', QB03: '舒适', QB04: '舒适', SJ01: '高密', SJ02: '高密', SJ03: '标准', WJ01: '高密' }[state.industry.code] ?? '标准') : '标准'}</span>
+      <span>主题：${esc(state.industry?.name ?? '—')} ${esc(state.industry?.code ?? '')}</span>
+      <span>IAW v1.0</span>
+    </div>`
+  $id('iawLive')?.addEventListener('click', () => { reconnectStream(); void toast('正在重建实时通道…') })
+}
+
+/** 事务流条：进行中任务 + 最近动态（真实任务面，不虚构进度）。 */
+function renderFlowbar() {
+  const bar = $id('iawFlowbar')
+  if (!bar) return
+  const doing = state.tasks.filter((t) => t.lane === 'doing')
+  const review = state.tasks.filter((t) => t.lane === 'review')
+  const latest = state.tasks.filter((t) => t.lane !== 'done').sort((a, b) => String(b.createdAt ?? '').localeCompare(String(a.createdAt ?? '')))[0]
+  const total = state.tasks.length
+  const done = state.tasks.filter((t) => t.lane === 'done').length
+  const pct = total ? Math.round((done / total) * 100) : 0
+  bar.innerHTML = `
+    <div class="prog" style="width:${pct}%"></div>
+    <div class="pp"><span class="breath"></span><span>${doing.length} 个任务进行中${review.length ? ` · ${review.length} 个待审` : ''}</span></div>
+    <div class="txt">${latest ? `最近：${esc(latest.title)} · ${esc(LANE_LABELS[latest.lane] ?? latest.lane)}${latest.assigneeName ? ` · ${esc(latest.assigneeName)}` : ''}` : '暂无进行中的业务任务——在「执行空间」创建，或把场景交给数字同事'}</div>
+    <div class="right"><span id="iawFlowGates" style="cursor:pointer">${review.length ? `▲ ${review.length} 个门禁待确认` : '门禁 0'}</span></div>`
+  $id('iawFlowGates')?.addEventListener('click', () => {
+    state.space = 'collab'; state.nav = 'notice'; renderSeg(); renderNav(); void refreshView()
+  })
+}
+
+// ---------------------------------------------------------------------------
+// 行业切换 + 激活
+// ---------------------------------------------------------------------------
+
 function renderIndMenu() {
-  const menu = document.getElementById('indMenu')
-  menu.innerHTML = state.industries.map((ind) => {
-    const badge = ind.state === 'active' ? '<span class="st ok">已激活</span>'
-      : ind.state === 'pending' ? '<span class="st pending">审批中</span>'
-        : '<span class="st lock">🔒 待授权</span>'
-    const sub = ind.state === 'active' ? `${ind.code} · 场景图谱${ind.graphLoaded ? '已挂载' : '缺位（请联系管理员）'}` : ind.sub
-    return `<div class="ind-opt ${ind.state === 'active' ? 'on' : ''}" data-code="${esc(ind.code)}">
-      <span style="font-size:17px">${esc(ind.icon)}</span>
-      <span>${esc(ind.name)}<span class="sub">${esc(sub)}</span></span>${badge}</div>`
-  }).join('') + `<div style="border-top:1px solid var(--line);margin-top:6px;padding:9px 10px;font-size:11px;color:var(--txt2)">行业场景图谱包经平台内置资产/市场分发 · 切换/使用需宿主平台授权激活（usage 计量 + audit 留痕）</div>`
-  menu.querySelectorAll('.ind-opt').forEach((el) => {
+  const menu = $id('iawIndMenu')
+  menu.innerHTML = '<div class="iaw-ind-menu-label">14 个重点行业 · 一图四清单</div>' + state.industries.map((ind) => {
+    const st = ind.state === 'active' ? '<span class="st active">已激活</span>' : ind.state === 'pending' ? '<span class="st pending">审批中</span>' : '<span class="st locked">待授权</span>'
+    return `<button class="iaw-ind-item ${ind.code === state.industry?.code ? 'on' : ''}" data-code="${esc(ind.code)}">
+      <span class="badge" style="background:${IND_COLOR[ind.code] ?? 'var(--ind-500)'}">${esc(IND_AB[ind.code] ?? '·')}</span>
+      <span class="nm">${esc(ind.name)}<span style="display:block;font-size:10px;color:var(--text-tertiary)">${esc(ind.sub)}</span></span>
+      ${st}</button>`
+  }).join('') + `<div style="border-top:1px solid var(--border-subtle);margin-top:6px;padding:9px 10px;font-size:11px;color:var(--text-tertiary)">切换/使用需宿主平台授权激活（usage 计量 + audit 留痕）</div>`
+  menu.querySelectorAll('.iaw-ind-item').forEach((el) => {
     el.onclick = (event) => {
       event.stopPropagation()
-      menu.classList.remove('show')
+      menu.classList.remove('open')
       void pickIndustry(el.dataset.code)
     }
   })
@@ -475,9 +706,17 @@ async function pickIndustry(code) {
   if (!ind) return
   if (ind.state === 'active') {
     state.industry = ind
-    renderShell()
-    await switchDept(state.dept, { keepTab: true })
-    if (state.tab === 'scene') void loadTab().then(renderMain)
+    state.industryPinned = true
+    try { localStorage.setItem('iaw_industry', ind.code) } catch { /* 忽略 */ }
+    state.scenegraph = null
+    state.thread = 'ALL'
+    state.tagFilter.clear()
+    $id('iawApp')?.setAttribute('data-industry', ind.code)
+    $id('iawIndName').textContent = ind.name
+    renderIndMenu()
+    renderStatus()
+    await switchDept(state.dept, { keepSpace: true })
+    richToast('已切换行业主题', `主色 / 密度 / 动效节奏按 <b>${esc(ind.name)}</b> 覆盖，布局不变。`)
     return
   }
   if (ind.state === 'pending') {
@@ -501,8 +740,8 @@ function showActivate(ind) {
       <button class="btn" id="actCancel">取消</button>
     </div>
     <p class="note">计量说明：激活后部门面板按 resource='panel:&lt;dept&gt;.${esc(ind.code.toLowerCase())}' 计量（零费率起步，费率由平台运营配置）。</p>`)
-  document.getElementById('actCancel').onclick = hideModal
-  document.getElementById('actSubmit').onclick = async (event) => {
+  $id('actCancel').onclick = hideModal
+  $id('actSubmit').onclick = async (event) => {
     event.target.disabled = true
     try {
       await api.post(`/api/panel/industries/${ind.code}/activate-requests`)
@@ -517,440 +756,1012 @@ function showActivate(ind) {
   }
 }
 
-function renderTopRight() {
-  const host = document.getElementById('topRight')
-  if (!host) return
-  const bound = state.ddStatus?.bound
-  const viaDws = state.ddStatus?.via === 'dws-cli'
-  const pill = state.ddStatus
-    ? (bound
-        ? `<span class="pill dd-on" id="ddPill">⇄ ${viaDws ? '钉钉(dws)' : '钉钉'}：${esc(bound.displayName)} 已绑定</span>`
-        : viaDws
-          ? (state.ddStatus.installed
-            ? '<span class="pill dd-off" id="ddPill">⇄ 钉钉(dws)：CLI 已装，点击绑群</span>'
-            : '<span class="pill dd-off" id="ddPill">⇄ 钉钉(dws)：CLI 未安装，点击安装</span>')
-          : '<span class="pill dd-off" id="ddPill">⇄ 钉钉桥接：未绑定（点击绑定）</span>')
-    : '<span class="pill" id="ddPill">⇄ 钉钉桥接不可用</span>'
-  const user = session.user ?? (state.demoMode ? { displayName: '演示访客' } : null)
-  const avatarTitle = state.demoMode ? '演示访客（只读）——点击连接宿主'
-    : `${esc(user?.displayName ?? '')}（点击退出登录）`
-  host.innerHTML = `${pill}
-    <span class="pill" data-live id="livePill"><span class="dot"></span>LIVE</span>
-    <div class="avatar" id="userAvatar" title="${avatarTitle}">${esc((user?.displayName ?? '?').slice(0, 1))}</div>`
-  document.getElementById('ddPill').onclick = () => showBind()
-  // 退出登录入口（QA P2-3）：车间共用电脑下一班不能沿用上一班身份
-  document.getElementById('userAvatar').onclick = async () => {
-    if (state.demoMode) {
-      const wizard = await import('./wizard.js')
-      wizard.start({ base: basePath() })
-      return
-    }
-    if (!window.confirm(`退出当前账号（${user?.displayName ?? ''}）？`)) return
-    session.clear()
-    renderLoginGuide()
-    void toast('已退出登录')
-  }
-}
-
-/** 实时徽标三态（QA BUG-U-02 / 交接 H2 根治）：LIVE（SSE）/ 30s 轮询 / 连接中断·点击重试。
- *  缺省按 state.stream.health() 投影当前传输态（轮询有失败在身即示警，自愈即恢复）；
- *  kind='down' 为轮询连续失败直呼（onPollError 阈值）；95s 无数据看门狗置 streamStale 同样示警。 */
-function renderLiveBadge(kind) {
-  const pill = document.getElementById('livePill')
-  if (!pill) return
-  const down = (title) => {
-    pill.innerHTML = '<span class="dot" style="background:#ef4444"></span>连接中断 · 点击重试'
-    pill.title = title
-    pill.onclick = () => { reconnectStream(); void toast('正在重建实时通道…') }
-  }
-  if (kind === 'down') return down('实时轮询连续失败。点击重建实时通道。')
-  if (state.streamStale) return down('超过 90 秒没有收到任何数据（可能断网或服务重启）。点击重建实时通道。')
-  pill.onclick = null
-  const health = state.stream?.health?.()
-  if (!health || health.transport === 'sse') {
-    pill.innerHTML = '<span class="dot"></span>LIVE'
-    pill.title = '实时通道（SSE）已连接'
-  } else if (health.consecutivePollFailures > 0) {
-    down('实时轮询连续失败。点击重建实时通道。')
-  } else {
-    pill.innerHTML = '<span class="dot" style="background:#f59e0b"></span>30s 轮询'
-    pill.title = '实时通道不可用（如钉钉 webview），已按 30 秒轮询兜底'
-  }
-}
-
-function renderRail() {
-  const rail = document.getElementById('rail')
-  rail.innerHTML = state.depts.map((dept) => {
-    const locked = dept.allowed === false
-    return `<div class="rail-item ${dept.id === state.dept ? 'active' : ''}" data-dept="${esc(dept.id)}"
-      ${locked ? 'style="opacity:.45" title="部门范围受限（已绑定其他组织治理）"' : ''}>
-      <div class="ico">${locked ? '🔒' : esc(dept.icon)}</div><div class="nm">${esc(dept.label)}</div>
-    </div>`
-  }).join('') + `
-    <div class="rail-spacer"></div>
-    ${state.hostBridge && !EMBEDDED ? `<div class="rail-console" id="railChat" title="切到 AI 助手对话（默认对话入口）" style="cursor:pointer">
-      <div class="ico">💬</div><div>AI 助手<br>对话</div></div>` : ''}
-    <a class="rail-console" href="${basePath() || '/'}" title="打开01门管理控制台" style="text-decoration:none"
-      data-landing="console">
-      <div class="ico">🧩</div><div>管理<br>控制台</div></a>`
-  rail.querySelectorAll('.rail-item').forEach((el) => {
-    el.onclick = () => {
-      const dept = state.depts.find((item) => item.id === el.dataset.dept)
-      if (dept?.allowed === false) { void toast('部门范围受限：该部门已绑定其他组织治理', 'error'); return }
-      void switchDept(el.dataset.dept)
-    }
-  })
-  // 「Agent 对话」＝切到内嵌 dsh 标准对话的会话 Tab（不再整页跳出；嵌入态无此入口）
-  const railChat = rail.querySelector('#railChat')
-  if (railChat) {
-    railChat.onclick = async () => {
-      state.tab = 'chat'
-      localStorage.setItem('panel_tab', 'chat')
-      await loadTab()
-      renderMain()
-    }
-  }
-  // 显式跨工作台切换：记住去向（控制台启动分诊尊重该偏好，不再把人拽回面板）
-  rail.querySelectorAll('[data-landing]').forEach((el) => {
-    el.addEventListener('click', () => {
-      try { localStorage.setItem('gate01_landing', el.dataset.landing) } catch { /* 忽略 */ }
-    })
-  })
-}
-
-function basePath() {
-  const index = location.pathname.indexOf('/panel')
-  return index > 0 ? location.pathname.slice(0, index) : ''
-}
-
 // ---------------------------------------------------------------------------
-// 部门渲染
+// 部门切换 + 数据装载
 // ---------------------------------------------------------------------------
 
-async function switchDept(deptId, { keepTab } = {}) {
+async function switchDept(deptId, { keepSpace } = {}) {
   state.dept = deptId
   localStorage.setItem('panel_dept', deptId)
-  state.channelId = ''
   state.channelId = localStorage.getItem(`panel_channel_${deptId}`) ?? ''
-  if (!keepTab) state.tab = 'chat'
-  document.documentElement.dataset.dept = deptId
+  if (!keepSpace && !defsHasNav()) state.nav = defaultNav()
   connectStream()
   state.overview = await api.get(`/api/panel/${deptId}/overview`)
   const channels = state.overview.channels
   if (!channels.some((channel) => channel.id === state.channelId)) {
     state.channelId = channels[0]?.id ?? ''
-    if (state.channelId) localStorage.setItem(`panel_channel_${deptId}`, state.channelId)
+    if (state.channelId) localStorage.setItem(`panel_channel_${state.dept}`, state.channelId)
   }
-  renderDept()
-  await loadTab()
-  renderMain()
-}
-
-function renderDept() {
-  const dept = state.overview.dept
-  const industry = state.overview.industry
-  const host = document.getElementById('dept')
-  host.innerHTML = `
-    <div class="dept-head">
-      <div class="dept-title">${esc(dept.icon)} ${esc(dept.label)}工作台
-        <span class="tag">${esc(dept.theme)}</span>
-        <span class="tag gray">协作模式：${esc(dept.collab)}</span>
-        ${state.overview.org ? `<span class="tag gray">🏷 ${esc(state.overview.org.name)}</span>` : ''}
-        ${industry ? `<span class="tag gray">${esc(industry.name)} · 场景图谱已挂载</span>` : '<span class="tag gray">未激活行业（顶栏切换）</span>'}
-      </div>
-      <div class="dept-kpis">${state.overview.kpis.map((kpi) => `
-        <div class="kpi" title="来源：${esc(kpi.source)}"><div class="v">${esc(kpi.value)}</div><div class="k">${esc(kpi.label)}</div></div>`).join('')}
-      </div>
-      <div class="head-actions">
-        <button class="btn only-compact toggle-left" id="btnLeftDrawer" title="名册/频道（窄窗抽屉）">👥</button>
-        <button class="btn only-compact toggle-right" id="btnRightDrawer" title="部门看板（窄窗抽屉）">📊</button>
-        <button class="btn" id="btnModels" title="模型配置（与 dsh 服务共用模型目录）">🧠 模型</button>
-        ${session.can('panel.config.write') ? '<button class="btn" id="btnConfig">⚙ 面板配置</button>' : ''}
-        <button class="btn primary" id="btnNewChannel">＋ 发起协作</button>
-      </div>
-    </div>
-    <div class="cols">
-      <div class="col-left" id="colLeft"></div>
-      <div class="col-main" id="colMain"></div>
-      <div class="col-right" id="colRight"></div>
-    </div>`
-  const btnConfig = document.getElementById('btnConfig')
-  // 只读用户隐藏配置入口（QA P2-4）：有点击后提示不如按权限直接隐藏
-  if (btnConfig) btnConfig.onclick = () => showConfig()
-  document.getElementById('btnModels').onclick = () => void showModels()
-  document.getElementById('btnNewChannel').onclick = () => showNewChannel()
-  const toggle = (cls) => document.body.classList.toggle(cls)
-  document.getElementById('btnLeftDrawer').onclick = () => toggle('left-open')
-  document.getElementById('btnRightDrawer').onclick = () => toggle('right-open')
-  // rail（部门档位列）：renderDept 每次重渲染外壳后必须同步刷新——此前 renderRail 定义了
-  // 却无任何调用点，rail 永远空白（2026-09-11 交互测试发现修复）
-  renderRail()
-  renderColLeft()
-  renderColRight()
-}
-
-function renderColLeft() {
-  const host = document.getElementById('colLeft')
-  if (!host) return
-  const dept = state.overview.dept
-  const bridgeIds = new Set(state.bridges.filter((b) => b.purpose === 'channel').map((b) => b.channelId))
-  host.innerHTML = `
-    <button class="drawer-close" id="leftClose">✕ 收起名册</button>
-    <div class="col-title"><span>部门 AGENT</span><span title="阵容在面板配置中绑定 Agent 资产">＋</span></div>
-    ${dept.agents.map((agent) => {
-      const statusColor = agent.asset ? (agent.asset.status === 'online' ? '#22c55e' : '#94a3b8') : ''
-      const statusTitle = agent.asset
-        ? `Agent 资产：${agent.asset.name}（${agent.asset.status === 'online' ? '在线' : agent.asset.status}${agent.asset.model ? ` · ${agent.asset.model}` : ''}）`
-        : '未绑定 Agent 资产（面板配置中绑定后可真实调用）'
-      return `
-      <div class="agent-card" data-agent="${esc(agent.name)}" title="${esc(statusTitle)}">
-        <div class="agent-av">${esc(agent.icon)}<span class="st2 ${agent.busy ? 'busy' : ''}" ${statusColor ? `style="background:${statusColor}"` : ''}></span></div>
-        <div class="agent-info"><div class="n">${esc(agent.name)}</div><div class="d">${esc(agent.desc)}</div></div>
-      </div>`
-    }).join('') || '<div class="sys-line"><span>本部门暂无 Agent 阵容（面板配置中添加）</span></div>'}
-    <div class="col-title" style="margin-top:14px"><span>协作频道</span><span id="addChannel">＋建群</span></div>
-    ${state.overview.channels.map((channel) => `
-      <div class="chan ${channel.id === state.channelId ? 'on' : ''}" data-channel="${esc(channel.id)}">
-        <span class="h">#</span>${esc(channel.name)}
-        ${bridgeIds.has(channel.id) ? '<span class="ddic">⇄钉钉</span>' : ''}
-        ${channel.unread > 0 ? `<span class="cnt">${channel.unread > 99 ? '99+' : channel.unread}</span>` : ''}
-      </div>`).join('')}`
-  host.querySelectorAll('.agent-card').forEach((el) => {
-    el.onclick = () => atMention(el.dataset.agent)
-  })
-  host.querySelectorAll('.chan').forEach((el) => {
-    el.onclick = () => void switchChannel(el.dataset.channel)
-  })
-  const add = host.querySelector('#addChannel')
-  if (add) add.onclick = () => showNewChannel()
-  const leftClose = host.querySelector('#leftClose')
-  if (leftClose) leftClose.onclick = () => document.body.classList.remove('left-open')
-}
-
-async function switchChannel(channelId) {
-  state.channelId = channelId
-  localStorage.setItem(`panel_channel_${state.dept}`, channelId)
-  // 窄窗抽屉态下选中频道即收起（移动端姿态）
-  document.body.classList.remove('left-open')
-  renderColLeft()
-  await loadTab()
-  renderMain()
-}
-
-function renderColRight() {
-  const host = document.getElementById('colRight')
-  if (!host) return
-  host.innerHTML = `<button class="drawer-close" id="rightClose">✕ 收起看板</button>${state.overview.widgets.map(renderWidget).join('')}`
-  const rightClose = host.querySelector('#rightClose')
-  if (rightClose) rightClose.onclick = () => document.body.classList.remove('right-open')
-}
-
-function renderWidget(widget) {
-  const srcCls = widget.source.startsWith('连接器') ? 'connector' : widget.source.startsWith('手工') ? 'manual' : ''
-  const head = `<div class="wt">${esc(widget.title)} ${widget.live ? '<span class="live">● LIVE</span>' : ''}<span class="src-badge ${srcCls}" title="数据来源徽标（治理 DoD）">${esc(widget.source)}</span></div>`
-  if (widget.degraded) {
-    return `<div class="widget">${head}<div class="degraded-note">该数据源暂不可用——等待业务连接器接入。<br>面板绝不以演示数据冒充真实业务面。</div></div>`
+  if (!state.industryPinned && state.overview.industry) {
+    // 用户未显式选择行业时，以部门绑定的激活行业为默认（服务端事实源只作用一次）
+    const upper = state.overview.industry.code.toUpperCase()
+    const match = state.industries.find((ind) => ind.code === upper)
+    if (match) state.industry = match
   }
-  let inner = ''
-  if (widget.type === 'bars') {
-    inner = widget.rows.map((row) => `
-      <div class="bar-row"><div class="lb"><span>${esc(row[0])}</span><span>${esc(row[1])}%</span></div>
-      <div class="bar"><i class="${esc(row[2] ?? '')}" style="width:${Number(row[1]) || 0}%"></i></div></div>`).join('')
-  } else if (widget.type === 'funnel') {
-    inner = widget.rows.map((row) => `
-      <div class="funnel-row"><span style="width:56px">${esc(row[0])}</span>
-      <div class="fb" style="width:${Math.max(Number(row[1]) || 0, 16)}%;opacity:${(0.4 + 0.6 * (Number(row[1]) || 0) / 100).toFixed(2)}">${esc(row[2])}</div></div>`).join('')
-  } else if (widget.type === 'alerts') {
-    inner = widget.rows.map((row) => `
-      <div class="alert-item ${row[0] === 'y' ? 'warn' : ''}"><span class="ab ${esc(row[0])}">${esc(row[1])}</span><span>${esc(row[2])}</span></div>`).join('')
-  } else if (widget.type === 'todos') {
-    inner = widget.rows.map((row) => `
-      <div class="todo-item"><span>${esc(row[0])}</span>${row[1] ? `<span class="amt">${esc(row[1])}</span>` : ''}${row[2] ? `<span class="mini-btn">${esc(row[2])}</span>` : ''}</div>`).join('')
-  } else if (widget.type === 'feeds') {
-    inner = widget.rows.map((row) => `
-      <div class="feed-item">${row[0] ? `<span class="hot">${esc(row[0])}</span>` : ''}${esc(row[1])}<div class="ft">${esc(row[2])}</div></div>`).join('')
-  }
-  return `<div class="widget">${head}${inner}</div>`
+  $id('iawApp')?.setAttribute('data-industry', state.industry?.code ?? '')
+  $id('iawIndName') && ($id('iawIndName').textContent = state.industry?.name ?? '未激活行业')
+  renderTopRight()
+  renderAgentRail()
+  await refreshView()
 }
 
-// ---------------------------------------------------------------------------
-// 主区（四 Tab）
-// ---------------------------------------------------------------------------
-
-function renderMain() {
-  const host = document.getElementById('colMain')
-  if (!host) return
-  const industry = state.overview.industry
-  const embedChat = state.tab === 'chat' && canEmbedDshChat()
-  host.innerHTML = `
-    <div class="tabs">
-      <div class="tab ${state.tab === 'chat' ? 'on' : ''}" data-tab="chat">💬 ${embedChat ? 'AI 助手' : '协作会话'}<span class="mini">${embedChat ? '默认对话 · 可 /技能名 直调' : '人 × 数字同事 × 钉钉'}</span></div>
-      <div class="tab ${state.tab === 'tasks' ? 'on' : ''}" data-tab="tasks">📌 任务看板</div>
-      <div class="tab ${state.tab === 'arts' ? 'on' : ''}" data-tab="arts">📁 部门知识</div>
-      <div class="tab ${state.tab === 'scene' ? 'on' : ''}" data-tab="scene">🗺 场景图谱<span class="mini">${esc(industry?.code ?? '未激活')}</span></div>
-    </div>
-    <div id="tabBody"></div>
-    ${state.tab === 'chat' && !embedChat ? composerHtml() : ''}`
-  host.querySelectorAll('.tab').forEach((el) => {
-    el.onclick = async () => {
-      state.tab = el.dataset.tab
-      localStorage.setItem('panel_tab', state.tab)
-      await loadTab()
-      renderMain()
-    }
-  })
-  const body = host.querySelector('#tabBody')
-  if (state.tab === 'chat') {
-    if (embedChat) renderChatEmbed(body)
-    else { renderMessages(body); wireComposer(host) }
-  }
-  else if (state.tab === 'tasks') renderKanban(body)
-  else if (state.tab === 'arts') renderArtifacts(body)
-  else if (state.tab === 'scene') renderScenegraph(body)
+function defsHasNav() {
+  return navDef()[state.space]?.some((n) => n[0] === state.nav) ?? false
 }
 
-/**
- * 「Agent 对话」内嵌 dsh 标准对话（M3 双向打通的 panel 侧）：同源 iframe 挂 dsh 根 `/`。
- * 上下文携带（MVP）：dsh 深链预填能力未经核实（spike 未覆盖），以剪贴板 + 聚焦兜底——
- * 按钮把部门/行业上下文复制给用户，粘进对话；dsh 若支持预填深链再升级（诚实降级）。
- */
-function renderChatEmbed(host) {
-  const dept = state.overview.dept
-  const industry = state.overview.industry
-  const skills = state.skills.slice(0, 4)
-  host.innerHTML = `
-    <div class="chat-embed">
-      <div class="ce-bar">
-        <span class="ce-title">🤖 AI 助手对话<span class="ce-sub">默认对话入口 · 部门数字同事可 @ 点名协作</span></span>
-        <span class="ce-acts">
-          ${skills.length > 0 ? `<select class="ce-act" id="ceSkillPick" title="选一个已上架技能，转到协作会话直调（执行卡展示进度与结果）">
-            <option value="">⚡ 选技能直调…</option>
-            ${skills.map((skill) => `<option value="${esc(skill.name)}">${esc(skill.name)}</option>`).join('')}
-          </select>` : ''}
-          <button class="ce-act" id="ceHandoff" title="把当前部门/行业上下文复制到剪贴板，粘进对话即可继续">📋 携带部门上下文</button>
-          <button class="ce-act" id="ceFallback">使用内置协作会话</button>
-          <a class="ce-act" href="/" target="_blank" rel="noreferrer">在 dsh 中打开 ↗</a>
-        </span>
-      </div>
-      <iframe class="ce-frame" src="/" title="AI 助手对话" referrerpolicy="same-origin"></iframe>
-    </div>`
-  document.getElementById('ceHandoff').onclick = async () => {
-    const context = `【01门·${dept.label}】行业 ${industry?.code ?? '未激活'} · 请围绕该部门场景协作（面板：${location.origin}${basePath()}/panel/?dept=${state.dept}）`
-    try {
-      await navigator.clipboard.writeText(context)
-      void toast('上下文已复制——粘贴到对话即可让 Agent 进入该部门语境')
-    } catch {
-      void toast(context, 'info')
-    }
-  }
-  document.getElementById('ceFallback').onclick = () => {
-    localStorage.setItem('panel_chat_embed_off', '1')
-    renderMain()
-  }
-  // 技能直调入口（C1-2）：内嵌形态选技能 → 转内置协作会话并预填 /技能名（执行卡在那里渲染）
-  const skillPick = document.getElementById('ceSkillPick')
-  if (skillPick) {
-    skillPick.onchange = () => {
-      const name = skillPick.value
-      if (!name) return
-      localStorage.setItem('panel_chat_embed_off', '1')
-      renderMain()
-      insertSkill(name)
-    }
-  }
-}
-
-async function loadTab() {
+/** 装载当前视图数据（失败显式提示，不白屏）。 */
+async function loadViewData() {
   try {
-    if (state.tab === 'chat') {
-      if (!state.channelId) { state.messages = []; return }
-      const detail = await api.get(`/api/panel/${state.dept}/messages?channelId=${state.channelId}&limit=80`)
-      state.messages = detail.messages
-      await api.post(`/api/panel/channels/${state.channelId}/read`)
-    } else if (state.tab === 'tasks') {
-      state.tasks = (await api.get(`/api/panel/${state.dept}/tasks`)).tasks
-    } else if (state.tab === 'arts') {
-      state.artifacts = (await api.get(`/api/panel/${state.dept}/artifacts`)).artifacts
-    } else if (state.tab === 'scene') {
-      state.scenegraph = null
-      if (state.overview.industry) {
-        state.scenegraph = await api.get(`/api/panel/scenegraph?industry=${state.overview.industry.code.toUpperCase()}`)
-      }
+    const wantsGraph = ['compass', 'tools', 'kmodels', 'talent', 'elements'].includes(state.nav) || state.nav === 'cockpit'
+    const wantsTasks = ['flow', 'inbox'].includes(state.nav) || state.nav === 'cockpit' || state.space === 'collab'
+    const jobs = []
+    if (wantsGraph && state.industry && !state.scenegraph) {
+      jobs.push(api.get(`/api/panel/scenegraph?industry=${state.industry.code.toUpperCase()}`).then((res) => { state.scenegraph = res }).catch(() => { state.scenegraph = null }))
     }
+    if (wantsTasks) jobs.push(api.get(`/api/panel/${state.dept}/tasks`).then((res) => { state.tasks = res.tasks }).catch(() => {}))
+    if (state.nav === 'cockpit' && !state.board) {
+      const q = state.boardPlatform ? `?platform=${encodeURIComponent(state.boardPlatform)}` : ''
+      jobs.push(api.get(`/api/panel/board${q}`).then((res) => { state.board = res }).catch(() => { state.board = null }))
+    }
+    // 协作栏常驻：当前频道消息始终装载（不再只在 rooms 视图拉取——2026-09-11 E2E 发现修复）
+    if (state.channelId) {
+      jobs.push(api.get(`/api/panel/${state.dept}/messages?channelId=${state.channelId}&limit=80`).then((res) => {
+        state.messages = res.messages
+        return api.post(`/api/panel/channels/${state.channelId}/read`).catch(() => {})
+      }).catch(() => {}))
+    }
+    if (state.space === 'collab' && (state.nav === 'notice' || state.nav === 'agents')) {
+      jobs.push(api.get(`/api/panel/${state.dept}/artifacts`).then((res) => { state.artifacts = res.artifacts }).catch(() => {}))
+    }
+    await Promise.all(jobs)
   } catch (error) {
     void toast(error.message, 'error')
   }
 }
 
-// -- 会话 ------------------------------------------------------------------
+async function refreshView() {
+  await loadViewData()
+  renderView()
+}
 
-function renderMessages(host) {
-  const target = host ?? document.querySelector('#tabBody')
-  if (!target) return
-  if (!state.channelId) {
-    target.innerHTML = '<div class="msgs"><div class="empty-line">本部门还没有协作频道，点右上「＋ 发起协作」创建。</div></div>'
-    return
+async function refreshOverview() {
+  try {
+    state.overview = await api.get(`/api/panel/${state.dept}/overview`)
+    renderNav()
+    renderAgentRail()
+    renderFlowbar()
+  } catch { /* 静默 */ }
+}
+
+// ---------------------------------------------------------------------------
+// 视图路由
+// ---------------------------------------------------------------------------
+
+function defaultNav() {
+  return navDef()[state.space]?.[0]?.[0] ?? 'compass'
+}
+
+function renderView() {
+  const main = $id('iawMain')
+  if (!main) return
+  const pack = state.scenegraph?.pack
+  const views = {
+    compass: () => viewCompass(pack),
+    cockpit: () => viewCockpit(pack),
+    flow: () => viewFlow(),
+    inbox: () => viewInbox(),
+    mchannels: () => viewMChannels(),
+    tools: () => viewCapList(pack, 'tools'),
+    kmodels: () => viewCapList(pack, 'models'),
+    talent: () => viewCapList(pack, 'talent'),
+    elements: () => viewElements(pack),
+    rooms: () => viewRooms(),
+    agents: () => viewAgents(),
+    members: () => viewMembers(),
+    notice: () => viewNotice(),
   }
-  const ddBound = Boolean(state.ddStatus?.bound)
-  target.innerHTML = `<div class="msgs">${state.messages.map((m) => messageHtml(m, ddBound)).join('')}</div>`
-  const wrap = target.querySelector('.msgs')
-  wrap.scrollTop = wrap.scrollHeight
-  wrap.querySelectorAll('[data-op]').forEach((el) => {
-    el.onclick = () => void doCardAction(el.dataset.msg, el.dataset.op, el)
+  const render = views[state.nav] ?? (() => viewGenericHonest())
+  main.innerHTML = render()
+  main.scrollTop = 0
+  wireView(main)
+  renderFlowbar()
+  renderStatus()
+  renderNav()
+  renderTopRight()
+  renderCtx()
+  renderConversation($id('iawMsgs'))
+  renderConversation($id('iawRoomsMsgs'))
+}
+
+function viewGenericHonest() {
+  return `<div class="iaw-view"><div class="iaw-empty">该视图未在当前版本开放——不做空占位入口，缺失能力已登记交接清单（docs/handoff-iaw-gaps-to-main.md）。</div></div>`
+}
+
+// ---------------------------------------------------------------------------
+// 图谱空间：场景罗盘
+// ---------------------------------------------------------------------------
+
+function packScenes(pack) {
+  if (!pack) return []
+  return Object.values(pack.activities).flat()
+}
+
+function sceneLinkKey(scene, links) {
+  // 场景编号第二段即环节字母（如 YB01-AB-2-1 → AB）；多环节场景归属其全部环节
+  const seg = String(scene.code ?? '').split('-')[1] ?? ''
+  return links?.length ? links.filter((l) => seg.includes(l.key)) : [{ key: seg, name: seg }]
+}
+
+function viewCompass(pack) {
+  const ind = state.industry
+  if (!ind) return `<div class="iaw-view"><div class="iaw-empty">本组织尚未激活行业场景图谱。请通过顶栏行业选择器提交激活申请。</div></div>`
+  if (!pack) return `<div class="iaw-view"><div class="iaw-hero"><div class="iaw-hero-l"><div class="eyebrow">${esc(ind.code)} · 行业场景图谱 2025 版</div><h2>${esc(ind.name)} · 场景罗盘</h2><p>图谱包未装载（已激活但数据缺位）——请联系平台管理员检查 scenegraphs 目录，或经「行业选择器 → 激活」完成授权。</p></div></div></div>`
+
+  const links = pack.links ?? []
+  let scenes = packScenes(pack)
+  if (state.thread !== 'ALL') scenes = scenes.filter((s) => sceneLinkKey(s, links).some((l) => l.key === state.thread))
+  if (state.tagFilter.size > 0) scenes = scenes.filter((s) => s.tags.some((t) => state.tagFilter.has(t)))
+
+  const total = packScenes(pack).length
+  const started = packScenes(pack).filter((s) => s.s >= 3).length
+  const avg = total ? (packScenes(pack).reduce((sum, s) => sum + s.s, 0) / total).toFixed(2) : '—'
+  const actKeys = Object.keys(pack.activities).sort((a, b) => (ACT_CODE[a] ?? 9) - (ACT_CODE[b] ?? 9))
+
+  let h = '<div class="iaw-view">'
+  h += `<div class="iaw-hero"><div class="iaw-hero-l">
+    <div class="eyebrow">${esc(pack.code)} · 行业场景图谱 ${esc(pack.version)} 版</div>
+    <h2>${esc(pack.name)} · 场景罗盘</h2>
+    <p>1 条主线 · ${actKeys.length} 类业务活动 · ${total} 个场景 · 4 类数字化要素。环节：${esc(pack.chains)}</p></div>
+    <div class="iaw-hero-stats">
+      <div class="iaw-hstat"><div class="v">${total}</div><div class="k">场景节点</div></div>
+      <div class="iaw-hstat"><div class="v">${started}</div><div class="k">评级 ★★★+</div></div>
+      <div class="iaw-hstat"><div class="v">${avg}</div><div class="k">平均现状评级</div></div>
+    </div></div>`
+
+  // 主线（环节链）过滤
+  h += '<div class="iaw-thread"><div class="iaw-thread-node"><span class="t ' + (state.thread === 'ALL' ? 'on' : '') + '" data-thread="ALL">全部环节<small>' + total + '</small></span></div>'
+  for (const l of links) {
+    const n = packScenes(pack).filter((s) => sceneLinkKey(s, links).some((x) => x.key === l.key)).length
+    if (n === 0) continue
+    h += `<span class="iaw-thread-node"><span class="link"></span></span><div class="iaw-thread-node"><span class="t ${state.thread === l.key ? 'on' : ''}" data-thread="${esc(l.key)}">${esc(l.key)} · ${esc(l.name)}<small>${n}</small></span></div>`
+  }
+  h += '</div>'
+
+  // 过滤（价值标签 + 编码/名称检索）
+  h += '<div class="iaw-filters"><span class="lbl">价值标签</span>'
+  const presentTags = TAG_ORDER.filter((t) => packScenes(pack).some((s) => s.tags.includes(t)))
+  for (const t of presentTags) h += `<button class="iaw-chip ${state.tagFilter.has(t) ? 'on' : ''}" data-tag="${esc(t)}">${tagPill(t)}</button>`
+  h += `<span class="grow"></span><input class="iaw-ghost-input" id="iawSceneSearch" placeholder="编码 / 名称"><span class="lbl">${scenes.length} 个场景</span></div>`
+
+  // 业务活动泳道
+  h += '<div class="iaw-lanes">'
+  for (const act of actKeys) {
+    const arr = scenes.filter((s) => pack.activities[act].includes(s))
+    h += `<div class="iaw-lane"><div class="iaw-lane-h"><div class="n">${esc(ACT_LABELS[act] ?? act)}</div><div class="c">${act}</div><div class="s">${arr.length} 个场景</div></div><div class="iaw-lane-body">`
+    if (!arr.length) h += '<div class="iaw-empty" style="padding:22px 0;width:100%">该环节下暂无符合筛选条件的场景</div>'
+    for (const s of arr) {
+      h += `<button class="iaw-node ${state.scene === s.code ? 'on' : ''}" data-scene="${esc(s.code)}" data-name="${esc(s.name)}">
+        <div class="r1"><span class="code">${esc(s.code)}</span><span class="type ${s.type === '主场景' ? 'main' : ''}">${esc(s.type)}</span></div>
+        <div class="nm">${esc(s.name)}</div>
+        <div class="tags">${s.tags.map(tagPill).join('')}</div>
+        <div class="r2">${stars(s.s)}<span class="ch">▣ 要素 ${s.tools.length + s.models.length + s.data.length + s.talent.length} 项</span></div>
+      </button>`
+    }
+    h += '</div></div>'
+  }
+  h += '</div></div>'
+  return h
+}
+
+// ---------------------------------------------------------------------------
+// 图谱空间：度量驾驶舱
+// ---------------------------------------------------------------------------
+
+function donut(data, size = 150) {
+  size = size || 150
+  const r = size / 2 - 14; const cx = size / 2; const cy = size / 2
+  const tot = data.reduce((a, b) => a + b.v, 0) || 1
+  let off = -Math.PI / 2; let paths = ''
+  for (const d of data) {
+    const ang = d.v / tot * Math.PI * 2; const large = ang > Math.PI ? 1 : 0
+    const x1 = cx + r * Math.cos(off); const y1 = cy + r * Math.sin(off)
+    const x2 = cx + r * Math.cos(off + ang); const y2 = cy + r * Math.sin(off + ang)
+    paths += `<path d="M${x1} ${y1} A${r} ${r} 0 ${large} 1 ${x2} ${y2}" fill="none" stroke="${d.c}" stroke-width="12"/>`
+    off += ang
+  }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${paths}<text x="${cx}" y="${cy - 4}" text-anchor="middle" font-size="22" font-weight="500" fill="#1E2530" font-variant-numeric="tabular-nums">${tot}</text><text x="${cx}" y="${cy + 14}" text-anchor="middle" font-size="11" fill="#8D97A3">场景</text></svg>`
+}
+
+function barRows(rows) {
+  const max = Math.max(...rows.map((r) => r.v)) || 1
+  return '<div class="iaw-barrows">' + rows.map((r) =>
+    `<div class="iaw-bar-row"><span class="lb">${esc(r.k)}</span><div class="iaw-bar-track"><i style="width:${(r.v / max * 100).toFixed(1)}%;background:${r.c || 'var(--ind-500)'}"></i></div><span class="vv">${r.v}</span></div>`).join('') + '</div>'
+}
+
+const TAG_COLORS = { 降本: '#12A150', 提质: '#4F46E5', 增效: '#E8A317', 增收: '#E11D48', 安全: '#0EA5E9', 环保: '#0B7A4B', 节能: '#F59E0B', 新模式: '#7C4DFF' }
+
+function statCard(k, v, d, cls) {
+  return `<div class="iaw-mcard"><div class="k">${k}</div><div class="v">${v}</div>${d ? `<div class="d ${cls || 'neutral'}">${d}</div>` : ''}</div>`
+}
+
+function viewCockpit(pack) {
+  const ov = state.overview
+  const ind = state.industry
+  const scenes = packScenes(pack)
+  const byLane = Object.fromEntries(LANE_ORDER.map((lane) => [lane, state.tasks.filter((t) => t.lane === lane).length]))
+  const doneRate = state.tasks.length ? Math.round(byLane.done / state.tasks.length * 100) : 0
+
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>度量驾驶舱</h1><p>${esc(ind?.name ?? '')} · ${esc(ov?.dept?.label ?? '')} · 数据窗口：近 7 天</p></div><div class="spacer"></div>
+    ${(state.board?.availablePlatforms ?? []).map((pf) => `<button class="iaw-chip ${state.boardPlatform === pf ? 'on' : ''}" data-bplat="${esc(pf)}">${esc(PLATFORM_LABELS[pf] ?? pf)}</button>`).join('')}</div>`
+
+  h += '<div class="iaw-metrics-row" style="margin-bottom:16px">'
+  h += statCard('任务完成率', `${doneRate}<small>%</small>`, `${byLane.done} / ${state.tasks.length} 个任务`, doneRate >= 60 ? 'up' : 'down')
+  h += statCard('平均现状评级', pack && scenes.length ? (scenes.reduce((sum, s) => sum + s.s, 0) / scenes.length).toFixed(2) + '<small>/ 4</small>' : '—', pack ? `${scenes.length} 个场景` : '图谱未装载', 'neutral')
+  h += statCard('进行中任务', String(byLane.doing), `${byLane.review} 个待审`, byLane.review > 0 ? 'down' : 'neutral')
+  h += statCard('沉淀产物', String(state.artifacts.length), '报告 / 工单 / 诊断', 'neutral')
+  h += '</div>'
+
+  h += '<div class="iaw-sect-title">评级与价值达成<span class="line"></span><span style="font-size:12px;color:var(--text-tertiary);font-weight:400">来自行业场景图谱 · 真实分布</span></div>'
+  h += '<div class="iaw-grid-2">'
+  const buckets = [
+    { k: '★★★★ 引领', v: scenes.filter((s) => s.s >= 4).length, c: '#F59E0B' },
+    { k: '★★★ 集成', v: scenes.filter((s) => s.s === 3).length, c: '#34D399' },
+    { k: '★★ 单点', v: scenes.filter((s) => s.s === 2).length, c: '#60A5FA' },
+    { k: '★ 起步', v: scenes.filter((s) => s.s <= 1).length, c: '#94A3B8' },
+  ]
+  h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>场景现状评级分布</h3></div>${barRows(buckets)}</div>`
+  const tagCounts = TAG_ORDER.map((t) => ({ t, v: scenes.filter((s) => s.tags.includes(t)).length })).filter((x) => x.v > 0)
+  h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>价值标签达成</h3></div><div class="iaw-donut-c">${donut(tagCounts.map((x) => ({ v: x.v, c: TAG_COLORS[x.t] ?? 'var(--ind-500)' })))}
+    <div class="iaw-legend">${tagCounts.map((x) => `<div><i style="background:${TAG_COLORS[x.t]}"></i>${esc(x.t)} ${x.v}</div>`).join('')}</div></div></div>`
+  h += '</div>'
+
+  // 执行与协同
+  h += '<div class="iaw-sect-title">执行与协同<span class="line"></span></div>'
+  h += '<div class="iaw-grid-3">'
+  h += `<div style="grid-column:span 2;display:grid;grid-template-columns:repeat(2,1fr);gap:12px;align-content:start">
+    ${statCard('数字同事', String((ov?.dept?.agents ?? []).length), (ov?.dept?.agents ?? []).filter((a) => a.asset?.status === 'online').length + ' 个资产在线', 'neutral')}
+    ${statCard('协作频道', String((ov?.channels ?? []).length), (ov?.channels ?? []).reduce((sum, c) => sum + (c.unread ?? 0), 0) + ' 条未读', 'neutral')}
+    ${(ov?.kpis ?? []).slice(0, 2).map((kpi) => statCard(esc(kpi.label) + ` <span style="font-size:10px;color:var(--text-tertiary)">来源 ${esc(kpi.source)}</span>`, esc(kpi.value), '', 'neutral')).join('')}
+  </div>`
+  const alertsWidget = (ov?.widgets ?? []).find((w) => w.type === 'alerts' && !w.degraded)
+  h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>预警中心</h3></div>
+    ${alertsWidget ? alertsWidget.rows.map((row) => `<div class="iaw-alert ${row[0] === 'y' ? 'w' : 'i'}"><span>▲</span><div class="sp"><b>${esc(row[1])}</b><br>${esc(row[2])}</div></div>`).join('') : '<div class="iaw-empty" style="padding:16px">当前无预警数据源（告警 widget 未配置或已降级）</div>'}
+  </div>`
+  h += '</div>'
+
+  // 渠道效能（模型目录真实字段；TTFT/TPS 遥测 = 宿主面缺口，诚实缺席）
+  h += '<div class="iaw-sect-title">渠道效能<span class="line"></span></div>'
+  h += '<div class="iaw-panel"><table class="iaw-tbl"><thead><tr><th>渠道</th><th>厂商</th><th>状态</th><th>挂牌价</th><th>成本价</th><th>Endpoint</th><th></th></tr></thead><tbody>'
+  h += state.models.map((m) => `<tr>
+    <td class="n">${esc(m.displayName || m.slug)} <span style="font-family:var(--font-mono);font-size:10px;color:var(--text-tertiary)">${esc(m.slug)}</span></td>
+    <td>${esc(m.provider || '—')}</td>
+    <td><span class="iaw-sp" style="color:var(--${m.status === 'online' ? 'success' : 'neutral'}-600)"><span class="iaw-dot ${m.status === 'online' ? 'ok' : 'off'}"></span>${m.status === 'online' ? '在线' : '离线'}</span></td>
+    <td class="n">${esc(m.listCentsPerKTokens)} 分/千tok</td>
+    <td class="n">${esc(m.costCentsPerKTokens ?? '—')}</td>
+    <td style="font-family:var(--font-mono);font-size:10px">${esc(m.endpoint || '未配置')}</td>
+    <td>${session.can('panel.config.write') ? `<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-mtest="${esc(m.slug)}">测试</button>` : ''}</td>
+  </tr>`).join('') || '<tr><td colspan="7" style="text-align:center;color:var(--text-tertiary)">模型目录为空——在「能力空间 · 模型渠道」登记</td></tr>'
+  h += '</tbody></table>'
+  h += '<div class="iaw-alert i" style="margin-top:12px"><span>▣</span><div class="sp"><b>口径说明</b>：TTFT/TPS/可用率/采纳率等渠道遥测属宿主平台模型网关能力，当前版本未接入（已登记交接清单），面板不以演示数据冒充。</div></div>'
+  h += '</div>'
+
+  // 平台聚合面（board 端点真实下发）
+  const b = state.board
+  if (b) {
+    const funnel = b.funnel ?? {}
+    h += '<div class="iaw-sect-title">平台资产与价值漏斗<span class="line"></span></div>'
+    h += `<div class="iaw-grid-3">
+      <div class="iaw-panel"><div class="iaw-panel-h"><h3>在线资产</h3></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        ${statCard('AI 应用', String(b.assets?.appsOnline ?? 0), '', 'neutral')}
+        ${statCard('Agent 本体', String(b.assets?.agentsOnline ?? 0), '', 'neutral')}
+        ${statCard('已上架技能', String(b.assets?.skillsPublished ?? 0), '', 'neutral')}
+        ${statCard('MCP 服务中', String(b.assets?.mcpServing ?? 0), '', 'neutral')}
+      </div></div>
+      <div class="iaw-panel"><div class="iaw-panel-h"><h3>价值漏斗（7 天）</h3></div>
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <div><div style="font-size:22px;font-weight:500">${funnel.exposed ?? 0}</div><div style="font-size:11px;color:var(--text-tertiary)">曝光</div></div><span>→</span>
+          <div><div style="font-size:22px;font-weight:500">${funnel.clicked ?? 0}</div><div style="font-size:11px;color:var(--text-tertiary)">点击</div></div><span>→</span>
+          <div><div style="font-size:22px;font-weight:500">${funnel.invoked ?? 0}</div><div style="font-size:11px;color:var(--text-tertiary)">调用</div></div><span>→</span>
+          <div><div style="font-size:22px;font-weight:500">${funnel.completed ?? 0}</div><div style="font-size:11px;color:var(--text-tertiary)">完成</div></div>
+        </div>
+        <div class="iaw-alert i" style="margin-top:12px"><span>▣</span><div class="sp">${esc(b.roi?.note ?? 'ROI 估算口径见平台治理文档')}</div></div>
+      </div>
+      <div class="iaw-panel"><div class="iaw-panel-h"><h3>WAIC 口径（7 天）</h3></div>
+        ${statCard('调用次数', String(b.waic?.count ?? 0), '', 'neutral')}
+        ${statCard('平台费用', `¥${((b.waic?.chargeCents ?? 0) / 100).toFixed(2)}`, '计量面未接入时为 0', 'neutral')}
+      </div>
+    </div>`
+  }
+  h += '</div>'
+  return h
+}
+
+// ---------------------------------------------------------------------------
+// 执行空间：任务看板 / 我的收件箱
+// ---------------------------------------------------------------------------
+
+function viewFlow() {
+  const review = state.tasks.filter((t) => t.lane === 'review')
+  let h = '<div class="iaw-view">'
+  h += `<div class="iaw-page-head"><div><h1>事务流工作台</h1><p>最小执行单元是任务：待办 → 进行中 → 待审 → 完成；Agent 产出经门禁确认后落账</p></div><div class="spacer"></div>
+    ${session.can('panel.task.write') ? '<button class="iaw-btn iaw-btn-primary" id="iawNewTask">＋ 新建任务</button>' : ''}</div>`
+  if (review.length > 0) {
+    h += `<div class="iaw-gatebar"><span>▲</span><div class="sp"><b>门禁待确认</b>：${review.length} 个任务停在「待审」——Agent/同事的产出需人工复核后才能闭环。</div><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" id="iawGateJump">去处理</button></div>`
+  }
+  h += '<div class="iaw-fkanban">'
+  for (const lane of LANE_ORDER) {
+    const arr = state.tasks.filter((t) => t.lane === lane)
+    h += `<div class="iaw-fklane"><div class="iaw-fklane-h">${LANE_LABELS[lane]}<span class="cnt">${arr.length}</span></div><div class="iaw-fklane-b">`
+    for (const t of arr) {
+      h += `<div class="iaw-task" data-task="${esc(t.id)}" data-lane="${esc(t.lane)}">
+        <div class="tt">${esc(t.title)}</div>
+        <div class="tm">
+          <span class="who">${t.assigneeType === 'agent' ? '🤖' : '🧑'} ${esc(t.assigneeName ?? '未指派')}</span>
+          ${t.sceneCode ? `<span class="scene" data-scene="${esc(t.sceneCode)}">${esc(t.sceneCode)}</span>` : ''}
+          <span style="margin-left:auto;display:flex;gap:4px">
+            ${lane !== 'todo' ? `<button class="iaw-chip" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(lane) - 1]}" title="回退">←</button>` : ''}
+            ${lane !== 'done' ? `<button class="iaw-chip" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(lane) + 1]}" title="推进">→</button>` : ''}
+          </span>
+        </div></div>`
+    }
+    h += `<button class="iaw-chip" data-addlane="${lane}" style="justify-content:center">＋ 新建</button></div></div>`
+  }
+  h += '</div>'
+  h += '<div class="iaw-sect-title">事务流模板 / 甘特排程<span class="line"></span></div>'
+  h += '<div class="iaw-alert i"><span>▣</span><div class="sp"><b>多步事务流编排（模板库 / SLA / 甘特）属宿主平台事务流引擎能力</b>，当前版本以「任务四泳道」承载执行面；引擎级能力已登记交接清单（docs/handoff-iaw-gaps-to-main.md）。</div></div>'
+  h += '</div>'
+  return h
+}
+
+function viewInbox() {
+  const me = session.user?.displayName ?? ''
+  const mine = state.tasks.filter((t) => t.lane !== 'done' && (t.assigneeName === me || t.lane === 'review'))
+  const involved = state.tasks.filter((t) => t.lane === 'done' && t.assigneeName === me)
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>我的收件箱</h1><p>${esc(me || '当前用户')} · 待我处理 ${mine.length} 项</p></div></div><div class="iaw-grid-2">`
+  h += '<div class="iaw-panel"><div class="iaw-panel-h"><h3>待我处理</h3></div>'
+  h += mine.map((t) => `<div class="iaw-elem" style="margin-bottom:8px;border-left:3px solid var(--${t.lane === 'review' ? 'warning' : 'ind'}-500);border-radius:0 10px 10px 0">
+    <div class="eh">${esc(t.title)}</div>
+    <ul><li>${esc(LANE_LABELS[t.lane] ?? t.lane)} · ${t.assigneeType === 'agent' ? 'Agent 产出' : '同事指派'}${t.sceneCode ? ` · 场景 ${esc(t.sceneCode)}` : ''}</li></ul>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      ${t.lane !== 'done' ? `<button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-move="${esc(t.id)}" data-to="${LANE_ORDER[LANE_ORDER.indexOf(t.lane) + 1]}">推进到「${LANE_LABELS[LANE_ORDER[LANE_ORDER.indexOf(t.lane) + 1]]}」</button>` : ''}
+      ${t.sceneCode ? `<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-scene="${esc(t.sceneCode)}">查看场景</button>` : ''}
+    </div></div>`).join('') || '<div class="iaw-empty" style="padding:20px">暂无待处理事项——任务被指派给你或停在待审时会出现在这里</div>'
+  h += '</div>'
+  h += '<div class="iaw-panel"><div class="iaw-panel-h"><h3>我已完成</h3></div><table class="iaw-tbl"><thead><tr><th>任务</th><th>场景</th></tr></thead><tbody>'
+  h += involved.map((t) => `<tr><td class="n">${esc(t.title)}</td><td>${t.sceneCode ? `<span class="scene" data-scene="${esc(t.sceneCode)}" style="cursor:pointer;font-family:var(--font-mono);font-size:11px">${esc(t.sceneCode)}</span>` : '—'}</td></tr>`).join('') || '<tr><td colspan="2" style="text-align:center;color:var(--text-tertiary)">暂无完成记录</td></tr>'
+  h += '</tbody></table></div>'
+  h += '</div></div>'
+  return h
+}
+
+// ---------------------------------------------------------------------------
+// 能力空间：模型渠道 / 四清单
+// ---------------------------------------------------------------------------
+
+function viewMChannels() {
+  const online = state.models.filter((m) => m.status === 'online').length
+  const dshManaged = state.modelSource === 'dsh'
+  const canEdit = session.can('panel.config.write') && !dshManaged
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>模型渠道中心</h1><p>${dshManaged ? '当前为 dsh 配置托管模式（面板只读；增删改请在 dsh 侧完成）' : '模型目录是面板 Agent 调用的唯一事实源 · 调用走真实上游 · 未配置 endpoint 的模型拒绝调用'}</p></div><div class="spacer"></div>
+    ${canEdit ? '<button class="iaw-btn iaw-btn-primary" id="iawModelAdd">＋ 接入渠道</button>' : ''}</div>`
+  h += '<div class="iaw-metrics-row" style="margin-bottom:16px">'
+  h += statCard('可用渠道', `${online}<small>/ ${state.models.length}</small>`, dshManaged ? 'dsh 托管目录' : '目录与 dsh 服务共用', 'neutral')
+  h += statCard('协作栏默认', esc(state.models.find((m) => m.slug === state.chatModel)?.displayName ?? '跟随 Agent 资产'), '输入区可切换', 'neutral')
+  h += '</div>'
+  h += '<div class="iaw-grid-4">'
+  h += state.models.map((m) => `<div class="iaw-mchan ${m.status === 'online' ? '' : 'offline'}">
+    <div class="iaw-mchan-t"><span class="iaw-dot ${m.status === 'online' ? 'ok' : 'off'}"></span><span class="nm">${esc(m.displayName || m.slug)}</span><span class="iaw-pill iaw-pill-neutral">${esc(m.provider || '未登记厂商')}</span></div>
+    <div class="iaw-mchan-m">${esc(m.slug)} · ${esc(m.endpoint || '未配置 endpoint（拒绝调用）')}</div>
+    <div class="iaw-mchan-caps"><span class="iaw-pill iaw-pill-model">挂牌 ${esc(m.listCentsPerKTokens)} 分/千tok</span><span class="iaw-pill iaw-pill-neutral">成本 ${esc(m.costCentsPerKTokens ?? '—')}</span></div>
+    <div class="iaw-mchan-caps"><span class="iaw-pill ${m.status === 'online' ? 'iaw-pill-cost' : 'iaw-pill-neutral'}">${m.status === 'online' ? '在线可调用' : '离线'}</span><span class="iaw-pill iaw-pill-neutral">密钥 ${esc(m.apiKey)}</span></div>
+    <div class="iaw-mchan-f"><span>真实外呼测试</span><span style="display:flex;gap:6px">
+      ${session.can('panel.config.write') ? `<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-mtest="${esc(m.slug)}">测试</button>
+      ${canEdit ? `<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-medit="${esc(m.id)}">编辑</button><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-mdel="${esc(m.id)}">删除</button>` : ''}` : ''}
+    </span></div></div>`).join('') || '<div class="iaw-empty">模型目录为空：登记后即可在协作会话切换模型、供 Agent 真实调用。</div>'
+  h += '</div>'
+  h += '<div class="iaw-sect-title">路由规则与降级链<span class="line"></span></div>'
+  h += '<div class="iaw-alert i"><span>▣</span><div class="sp"><b>分级路由 / 成本熔断 / 三级降级链属宿主平台模型网关能力</b>（按数据分级路由、超时 5xx 自动降级、遥测 TTFT/TPS），当前版本未接入，已登记交接清单；本页提供渠道登记与真实连通测试。</div></div>'
+  h += '</div>'
+  return h
+}
+
+function capAggregate(pack, kind) {
+  const scenes = packScenes(pack)
+  const map = new Map()
+  for (const s of scenes) {
+    for (const item of (s[kind] ?? [])) {
+      if (!map.has(item)) map.set(item, [])
+      map.get(item).push(s)
+    }
+  }
+  return [...map.entries()].map(([name, arr]) => ({ name, scenes: arr })).sort((a, b) => b.scenes.length - a.scenes.length)
+}
+
+function viewCapList(pack, kind) {
+  const titles = { tools: ['工具软件清单', '感知检测工具 / 中间件 / SaaS 化工业软件', 'iaw-pill-tool'], models: ['知识模型清单', '信息模型 / 机理模型 / 规则模型 / 智能模型', 'iaw-pill-model'], talent: ['人才技能清单', '技术研发 / 应用实施 / 业务管理 / 运维服务', 'iaw-pill-skill'] }
+  const [title, sub, pill] = titles[kind]
+  const items = pack ? capAggregate(pack, kind) : []
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>${title}</h1><p>${esc(state.industry?.name ?? '')} · ${sub} · 来自场景图谱四清单</p></div></div>`
+  if (!pack) return h + '<div class="iaw-empty">行业图谱未装载，四清单不可用。</div></div>'
+  if (kind === 'talent' && state.skills.length > 0) {
+    h += '<div class="iaw-sect-title">可直调技能（skillhub 已上架）<span class="line"></span></div><div class="iaw-grid-4">'
+    h += state.skills.map((skill) => `<div class="iaw-panel"><div class="iaw-panel-h"><h3>⚡ ${esc(skill.name)}</h3><span class="iaw-pill iaw-pill-skill">v${esc(skill.version)}</span></div>
+      <div style="font-size:12px;color:var(--text-secondary);min-height:34px">${esc(skill.summary || skill.category || '')}</div>
+      <button class="iaw-btn iaw-btn-primary iaw-btn-sm" style="margin-top:8px" data-invokeskill="${esc(skill.name)}">在协作栏直调</button></div>`).join('')
+    h += '</div>'
+  }
+  h += `<div class="iaw-sect-title">图谱条目（${items.length} 项）<span class="line"></span></div><div class="iaw-grid-4">`
+  h += items.slice(0, 48).map((item) => `<div class="iaw-elem">
+    <div class="eh"><span class="d" style="background:var(--ind-500)"></span>${esc(item.name)}<span class="iaw-pill ${pill} cnt">${item.scenes.length} 场景</span></div>
+    <ul>${item.scenes.slice(0, 3).map((s) => `<li style="cursor:pointer" data-scene="${esc(s.code)}">${esc(s.code)} ${esc(s.name)}</li>`).join('')}</ul>
+    ${item.scenes.length > 3 ? `<div style="font-size:10px;color:var(--text-tertiary);margin-top:6px">等 ${item.scenes.length} 个场景</div>` : ''}
+  </div>`).join('') || '<div class="iaw-empty">图谱中暂无该类条目</div>'
+  h += '</div></div>'
+  return h
+}
+
+// ---------------------------------------------------------------------------
+// 数据空间：数据要素
+// ---------------------------------------------------------------------------
+
+function viewElements(pack) {
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>数据要素</h1><p>每个结论都必须可回溯 · 无数据时诚实显示缺口</p></div></div>`
+  if (!pack) return h + '<div class="iaw-empty">行业图谱未装载，数据要素清单不可用。</div></div>'
+  const scenes = packScenes(pack)
+  const items = capAggregate(pack, 'data')
+  const gaps = scenes.filter((s) => s.data.length < 2 || s.models.length < 2 || s.tools.length < 2 || s.talent.length < 2)
+  h += '<div class="iaw-metrics-row" style="margin-bottom:16px">'
+  h += statCard('已结构化数据要素', String(items.length), `覆盖 ${new Set(items.flatMap((i) => i.scenes.map((s) => s.code))).size} 个场景`, 'neutral')
+  h += statCard('要素缺口场景', String(gaps.length), gaps.length ? '四清单存在薄弱项，建议优先补齐' : '全部场景四清单齐备', gaps.length ? 'down' : 'up')
+  h += '</div>'
+  h += '<div class="iaw-grid-2">'
+  h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>要素资产（按关联场景数）</h3></div><table class="iaw-tbl"><thead><tr><th>数据要素</th><th>关联场景</th><th></th></tr></thead><tbody>`
+  h += items.slice(0, 14).map((item) => `<tr><td class="n">${esc(item.name)}</td><td class="n">${item.scenes.length}</td>
+    <td>${item.scenes.slice(0, 2).map((s) => `<span class="scene" data-scene="${esc(s.code)}" style="cursor:pointer;font-family:var(--font-mono);font-size:10px;color:var(--text-link)">${esc(s.code)}</span>`).join(' ')}</td></tr>`).join('')
+    || '<tr><td colspan="3" style="text-align:center;color:var(--text-tertiary)">图谱中暂无数据要素条目</td></tr>'
+  h += '</tbody></table></div>'
+  h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>要素缺口清单</h3></div>`
+  h += gaps.slice(0, 8).map((s) => `<div class="iaw-alert w"><span>▲</span><div class="sp"><b><span data-scene="${esc(s.code)}" style="cursor:pointer">${esc(s.code)} ${esc(s.name)}</span></b><br>四清单：工具 ${s.tools.length} · 模型 ${s.models.length} · 数据 ${s.data.length} · 技能 ${s.talent.length}</div></div>`).join('')
+    || '<div class="iaw-empty" style="padding:16px">无缺口</div>'
+  h += '<div class="iaw-alert i" style="margin-top:10px"><span>▣</span><div class="sp"><b>数据集接入 / 质量分 / 血缘 / 指标字典属宿主平台数据要素面</b>（resource-core），当前版本未接入，已登记交接清单。</div></div>'
+  h += '</div></div></div>'
+  return h
+}
+
+// ---------------------------------------------------------------------------
+// 协作空间：频道会话 / 数字同事 / 成员 / 通知
+// ---------------------------------------------------------------------------
+
+function viewRooms() {
+  const channels = state.overview?.channels ?? []
+  const bridgeIds = new Set(state.bridges.filter((b) => b.purpose === 'channel').map((b) => b.channelId))
+  let h = '<div class="iaw-view" style="display:flex;flex-direction:column;gap:12px;height:100%">'
+  h += `<div class="iaw-page-head" style="margin-bottom:0"><div><h1>协作频道</h1><p>人 × 数字同事 × 钉钉 · 消息即协作，产物自动沉淀</p></div><div class="spacer"></div>
+    <button class="iaw-btn iaw-btn-primary" id="iawNewChannel">＋ 发起协作</button></div>`
+  h += '<div class="iaw-chips">' + channels.map((c) => `
+    <span class="iaw-chip2 ${c.id === state.channelId ? 'on' : ''}" data-channel="${esc(c.id)}"># ${esc(c.name)}
+    ${bridgeIds.has(c.id) ? '<span title="已绑定钉钉群桥">⇄</span>' : ''}
+    ${c.unread > 0 ? `<span class="iaw-badge-n" style="position:static">${c.unread > 99 ? '99+' : c.unread}</span>` : ''}</span>`).join('') + '</div>'
+  h += `<div class="iaw-card" style="flex:1;min-height:420px;display:flex;flex-direction:column;overflow:hidden">
+    <div class="iaw-msgs" id="iawRoomsMsgs" style="flex:1"></div>
+    ${composerHtml('rooms')}
+  </div></div>`
+  return h
+}
+
+function viewAgents() {
+  const agents = state.overview?.dept?.agents ?? []
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>数字同事</h1><p>${esc(state.overview?.dept?.label ?? '')} Agent 阵容 · 绑定 Agent 资产后可真实调用（面板配置中绑定）</p></div></div><div class="iaw-grid-3">`
+  h += agents.map((agent) => `<div class="iaw-panel">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <div style="width:36px;height:36px;border-radius:10px;background:var(--ind-500);color:#fff;display:grid;place-items:center;font-size:16px">${esc(agent.icon)}</div>
+      <div><div style="font-size:14px;font-weight:500">${esc(agent.name)}</div>
+      <div style="font-size:11px;color:var(--text-tertiary)">${agent.asset ? `资产 ${esc(agent.asset.name)} · ${agent.asset.status === 'online' ? '在线' : esc(agent.asset.status)}${agent.asset.model ? ` · ${esc(agent.asset.model)}` : ''}` : '未绑定 Agent 资产'}</div></div>
+    </div>
+    <div style="font-size:12px;color:var(--text-secondary);min-height:34px">${esc(agent.desc)}</div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-atagent="${esc(agent.name)}">@ 唤起协作</button>
+    </div></div>`).join('') || '<div class="iaw-empty">本部门暂无 Agent 阵容（面板配置中添加）</div>'
+  h += '</div>'
+  h += `<div class="iaw-sect-title">执行原则<span class="line"></span></div>
+  <div class="iaw-alert i"><span>▣</span><div class="sp"><b>自治级别说明</b>：数字同事的产出在「待审」泳道落账，需人工确认后才进入下游（人机协作门禁）；跨运行时（Hermes / OpenClaw / WorkBuddy）的 A2A 协议接入属宿主平台 agent 域，已登记交接清单。</div></div>`
+  h += '</div>'
+  return h
+}
+
+function viewMembers() {
+  const members = state.overview?.members ?? []
+  const me = session.user
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>成员</h1><p>${esc(state.overview?.dept?.label ?? '')}名册 · ${members.length} 人${state.overview?.org ? ` · 组织 ${esc(state.overview.org.name)}` : ''}</p></div></div>`
+  if (me) {
+    h += `<div class="iaw-alert i"><span>▣</span><div class="sp">当前身份：<b>${esc(me.displayName ?? me.name ?? me.id)}</b>${me.roles?.length ? ` · 角色 ${me.roles.map((r) => esc(r.name ?? r)).join(' / ')}` : ''}</div></div>`
+  }
+  h += '<div class="iaw-panel"><table class="iaw-tbl"><thead><tr><th>姓名</th><th>职务</th><th>组织</th><th></th></tr></thead><tbody>'
+  h += members.map((m) => `<tr><td class="n">${esc(m.name)}</td><td>${esc(m.title ?? '—')}</td><td>${esc(m.orgName ?? '—')}</td>
+    <td><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-atagent="${esc(m.name)}">@ 唤起</button></td></tr>`).join('')
+    || '<tr><td colspan="4" style="text-align:center;color:var(--text-tertiary)">名册为空（组织目录缺失或部门未绑定组织）</td></tr>'
+  h += '</tbody></table>'
+  h += '<div class="iaw-alert i" style="margin-top:10px"><span>▣</span><div class="sp"><b>场景级授权（角色分级的 ABAC 细粒度授权）属宿主平台 iam 域能力</b>，已登记交接清单。</div></div>'
+  h += '</div></div>'
+  return h
+}
+
+function viewNotice() {
+  const review = state.tasks.filter((t) => t.lane === 'review')
+  const unreadChannels = (state.overview?.channels ?? []).filter((c) => c.unread > 0)
+  let h = `<div class="iaw-view"><div class="iaw-page-head"><div><h1>通知中心</h1><p>任务、门禁、未读、实时动态（内存保留最近 100 条）</p></div></div><div class="iaw-grid-2">`
+  h += '<div class="iaw-panel"><div class="iaw-panel-h"><h3>门禁与未读</h3></div>'
+  h += review.map((t) => `<div class="iaw-alert w"><span>▲</span><div class="sp"><b>任务待审：${esc(t.title)}</b><br>${t.assigneeType === 'agent' ? 'Agent 产出' : '同事提交'}${t.sceneCode ? ` · 场景 ${esc(t.sceneCode)}` : ''}</div>
+    <button class="iaw-btn iaw-btn-primary iaw-btn-sm" data-move="${esc(t.id)}" data-to="done">确认通过</button></div>`).join('')
+  h += unreadChannels.map((c) => `<div class="iaw-alert i"><span>💬</span><div class="sp"><b># ${esc(c.name)}</b><br>${c.unread} 条未读消息</div><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-channel="${esc(c.id)}">去查看</button></div>`).join('')
+  h += (review.length + unreadChannels.length === 0) ? '<div class="iaw-empty" style="padding:16px">暂无待办通知</div>' : ''
+  h += '</div>'
+  h += `<div class="iaw-panel"><div class="iaw-panel-h"><h3>实时动态</h3></div><div class="iaw-tl">`
+  h += state.notices.slice(0, 30).map((n) => `<div class="iaw-tl-item"><span class="tt">${esc(fmtTime(n.at))}</span> · ${esc(n.text)}</div>`).join('') || '<div class="iaw-empty" style="padding:16px">暂无动态——实时事件到达后自动出现在这里</div>'
+  h += '</div></div>'
+  h += '</div></div>'
+  return h
+}
+
+// ---------------------------------------------------------------------------
+// 视图事件绑定
+// ---------------------------------------------------------------------------
+
+function wireView(host) {
+  host.querySelectorAll('[data-atagent]').forEach((el) => {
+    el.onclick = () => atMention(el.dataset.atagent)
   })
-  // 技能执行卡「重试」（C1-2）：原样回填斜杠命令再走一次直调
-  wrap.querySelectorAll('[data-retry]').forEach((el) => {
+  host.querySelectorAll('[data-scene]').forEach((el) => {
+    el.onclick = (event) => {
+      event.stopPropagation()
+      void openScene(el.dataset.scene)
+    }
+  })
+  host.querySelectorAll('[data-thread]').forEach((el) => {
+    el.onclick = () => { state.thread = el.dataset.thread; renderView() }
+  })
+  host.querySelectorAll('[data-tag]').forEach((el) => {
+    el.onclick = () => {
+      const t = el.dataset.tag
+      if (state.tagFilter.has(t)) state.tagFilter.delete(t)
+      else state.tagFilter.add(t)
+      renderView()
+    }
+  })
+  const sceneSearch = host.querySelector('#iawSceneSearch')
+  if (sceneSearch) {
+    sceneSearch.oninput = () => {
+      const q = sceneSearch.value.trim().toLowerCase()
+      host.querySelectorAll('.iaw-node').forEach((n) => {
+        n.style.display = !q || n.dataset.code.toLowerCase().includes(q) || n.dataset.name.toLowerCase().includes(q) ? '' : 'none'
+      })
+    }
+  }
+  host.querySelectorAll('[data-bplat]').forEach((el) => {
     el.onclick = async () => {
-      const input = document.querySelector('#composerInput')
-      if (!input) { void toast('请切到协作会话后重试'); return }
-      input.value = el.dataset.retry
-      await sendMessage(input)
+      state.boardPlatform = el.dataset.bplat
+      localStorage.setItem('panel_board_platform', state.boardPlatform)
+      state.board = null
+      await refreshView()
+    }
+  })
+  host.querySelectorAll('[data-move]').forEach((el) => {
+    el.onclick = async (event) => {
+      event.stopPropagation()
+      try {
+        await api.post(`/api/panel/tasks/${el.dataset.move}/transition`, { lane: el.dataset.to })
+        await refreshView()
+        void refreshOverview()
+      } catch (error) { void toast(error.message, 'error') }
+    }
+  })
+  host.querySelectorAll('[data-addlane]').forEach((el) => {
+    el.onclick = () => showNewTask(el.dataset.addlane)
+  })
+  host.querySelectorAll('[data-task]').forEach((el) => {
+    el.onclick = (event) => {
+      if (event.target.closest('[data-move],[data-scene]')) return
+      const task = state.tasks.find((t) => t.id === el.dataset.task)
+      if (task?.sceneCode) void openScene(task.sceneCode)
+      else showNewTask(task?.lane ?? 'todo')
+    }
+  })
+  const newTask = host.querySelector('#iawNewTask')
+  if (newTask) newTask.onclick = () => showNewTask('todo')
+  const gateJump = host.querySelector('#iawGateJump')
+  if (gateJump) gateJump.onclick = () => { state.space = 'collab'; state.nav = 'notice'; renderSeg(); renderNav(); void refreshView() }
+  host.querySelectorAll('[data-mtest]').forEach((el) => {
+    el.onclick = async () => {
+      el.disabled = true
+      try {
+        // 真实外呼可能慢于默认 20s（QA BUG-U-03 超时豁免项）
+        const result = await api.post(`/api/panel/models/${encodeURIComponent(el.dataset.mtest)}/test`, {}, { timeoutMs: 60_000 })
+        richToast(result.ok ? '连通正常' : '连通失败', result.ok ? `${esc(result.model)} · 输出 ${result.outputTokens} tokens（按量计费）` : esc(result.error), result.ok ? undefined : 'danger')
+      } catch (error) {
+        void toast(error.message, 'error')
+      } finally {
+        el.disabled = false
+      }
+    }
+  })
+  const modelAdd = host.querySelector('#iawModelAdd')
+  if (modelAdd) modelAdd.onclick = () => showModelForm(null)
+  host.querySelectorAll('[data-medit]').forEach((el) => {
+    el.onclick = () => showModelForm(state.models.find((m) => m.id === el.dataset.medit) ?? null)
+  })
+  host.querySelectorAll('[data-mdel]').forEach((el) => {
+    el.onclick = async () => {
+      const model = state.models.find((item) => item.id === el.dataset.mdel)
+      if (!window.confirm(`确定从模型目录移除「${model?.slug ?? el.dataset.mdel}」？（绑定该模型的 Agent 将无法调用）`)) return
+      el.disabled = true
+      try {
+        await api.delete(`/api/panel/models/${el.dataset.mdel}`)
+        void toast('已移除模型登记')
+        await refreshModels()
+        renderView()
+      } catch (error) {
+        el.disabled = false
+        void toast(error.message, 'error')
+      }
+    }
+  })
+  host.querySelectorAll('[data-invokeskill]').forEach((el) => {
+    el.onclick = () => insertSkill(el.dataset.invokeskill)
+  })
+  const newChannel = host.querySelector('#iawNewChannel')
+  if (newChannel) newChannel.onclick = () => showNewChannel()
+  host.querySelectorAll('[data-channel]').forEach((el) => {
+    el.onclick = async () => {
+      state.channelId = el.dataset.channel
+      localStorage.setItem(`panel_channel_${state.dept}`, state.channelId)
+      state.messages = []
+      await refreshView()
+    }
+  })
+  wireComposer(host)
+}
+
+// ---------------------------------------------------------------------------
+// 场景详情抽屉（五 Tab：概览 / 四要素 / 痛点 / 事务流 / 协作）
+// ---------------------------------------------------------------------------
+
+function findSceneLocal(code) {
+  const pack = state.scenegraph?.pack
+  if (!pack) return null
+  for (const [activity, scenes] of Object.entries(pack.activities)) {
+    const hit = (scenes ?? []).find((s) => s.code === code)
+    if (hit) return { pack, activity, scene: hit }
+  }
+  return null
+}
+
+async function openScene(code) {
+  let hit = findSceneLocal(code)
+  if (!hit) {
+    // 跨行业场景（任务/消息引用了其他行业图谱的场景）：按编号前缀懒加载对应图谱包
+    const prefix = String(code).split('-')[0]?.toUpperCase()
+    if (/^[A-Z][A-Z0-9]{2,9}$/.test(prefix) && prefix !== state.industry?.code) {
+      try {
+        const res = await api.get(`/api/panel/scenegraph?industry=${prefix}`)
+        hit = (() => {
+          for (const [activity, scenes] of Object.entries(res.pack.activities)) {
+            const found = (scenes ?? []).find((s) => s.code === code)
+            if (found) return { pack: res.pack, activity, scene: found }
+          }
+          return null
+        })()
+      } catch { /* 未装载：诚实提示 */ }
+    }
+  }
+  if (!hit) { void toast(`场景 ${code} 不在已装载的行业图谱中`, 'error'); return }
+  state.scene = code
+  state.sceneTab = 0
+  renderDrawer(hit)
+  $id('iawScrim')?.classList.add('open')
+  $id('iawDrawer')?.classList.add('open')
+  renderCtx()
+  document.querySelectorAll('.iaw-node').forEach((n) => n.classList.toggle('on', n.dataset.code === code))
+}
+
+function closeDrawer() {
+  $id('iawScrim')?.classList.remove('open')
+  $id('iawDrawer')?.classList.remove('open')
+}
+
+function sceneTasks(code) {
+  return state.tasks.filter((t) => t.sceneCode === code)
+}
+
+function sceneMessages(code) {
+  return state.messages.filter((m) => m.sceneCode === code)
+}
+
+function renderDrawer(hit) {
+  const { pack, activity, scene } = hit
+  const tabs = ['概览', '四要素', '痛点分析', '事务流', '协作']
+  if (!$id('iawDrawer')) {
+    $id('iawApp').insertAdjacentHTML('beforeend', `
+      <div class="iaw-scrim" id="iawScrim"></div>
+      <div class="iaw-drawer" id="iawDrawer"></div>`)
+    $id('iawScrim').onclick = closeDrawer
+  }
+  const link = sceneLinkKey(scene, pack.links ?? []).map((l) => (l.name && l.name !== l.key) ? `${l.key} ${l.name}` : l.key).join(' · ') || '—'
+  const elemTotal = scene.tools.length + scene.models.length + scene.data.length + scene.talent.length
+
+  let body = ''
+  if (state.sceneTab === 0) {
+    body += `<div class="iaw-dl" style="margin-bottom:16px">
+      <dt>场景编号</dt><dd class="mono">${esc(scene.code)}</dd>
+      <dt>环节</dt><dd>${esc(link)}</dd>
+      <dt>业务活动</dt><dd>${esc(ACT_LABELS[activity] ?? activity)}</dd>
+      <dt>现状评级</dt><dd>${stars(scene.s)} <span style="color:var(--text-tertiary);font-size:11px">（${scene.s}/4）</span></dd>
+      <dt>转型价值</dt><dd>${scene.tags.map(tagPill).join(' ') || '<span style="color:var(--text-tertiary)">原文未标注</span>'}</dd>
+      <dt>四要素</dt><dd>▣ ${elemTotal} 项（工具 ${scene.tools.length} · 模型 ${scene.models.length} · 数据 ${scene.data.length} · 技能 ${scene.talent.length}）</dd>
+      <dt>出处</dt><dd>《参考指引（2025 版）》附件 · 场景图谱原文</dd></div>`
+    body += `<div class="iaw-sect-title" style="margin-top:4px">关联执行</div><div class="iaw-grid-3">
+      ${statCard('关联任务', String(sceneTasks(scene.code).length), '', 'neutral')}
+      ${statCard('频道讨论', String(sceneMessages(scene.code).length), '', 'neutral')}
+      ${statCard('诊断', sceneTasks(scene.code).some((t) => t.title.includes('诊断')) ? '已发起' : '未发起', '', 'neutral')}
+    </div>`
+    body += `<div class="iaw-sect-title">最近动态</div><div class="iaw-tl">`
+    const dynamics = [
+      ...sceneTasks(scene.code).map((t) => ({ at: t.createdAt, text: `任务「${t.title}」· ${LANE_LABELS[t.lane] ?? t.lane}` })),
+      ...sceneMessages(scene.code).map((m) => ({ at: m.createdAt, text: `${m.senderName}：${m.text.slice(0, 40)}` })),
+    ].sort((a, b) => String(b.at ?? '').localeCompare(String(a.at ?? '')))
+    body += dynamics.slice(0, 6).map((d) => `<div class="iaw-tl-item"><span class="tt">${esc(fmtTime(d.at))}</span> · ${esc(d.text)}</div>`).join('')
+      || '<div class="iaw-empty" style="padding:12px">暂无动态——派发诊断或创建任务后出现在这里</div>'
+    body += '</div>'
+  } else if (state.sceneTab === 1) {
+    const groups = [['工具软件', 'tools', 'var(--accent-indigo)'], ['知识模型', 'models', 'var(--accent-amber)'], ['数据要素', 'data', 'var(--accent-teal)'], ['人才技能', 'talent', 'var(--accent-violet)']]
+    body += '<div class="iaw-alert i"><span>▣</span><div class="sp">本场景四要素为指引原文条目；要素缺口将驱动改造计划与诊断建议。</div></div>'
+    for (const [label, key, color] of groups) {
+      body += `<div class="iaw-elem" style="margin-bottom:12px"><div class="eh"><span class="d" style="background:${color}"></span>${label}<span class="iaw-pill iaw-pill-neutral cnt">${scene[key].length} 项</span></div><ul>
+        ${scene[key].map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`
+    }
+  } else if (state.sceneTab === 2) {
+    body += `<div class="iaw-pain">${esc(scene.pain)}</div>`
+    body += `<div class="iaw-sect-title" style="margin-top:0">要素完备度</div><div class="iaw-grid-4">
+      ${statCard('工具软件', String(scene.tools.length), scene.tools.length < 2 ? '待补全' : '可用', scene.tools.length < 2 ? 'down' : 'up')}
+      ${statCard('知识模型', String(scene.models.length), scene.models.length < 2 ? '待补全' : '可用', scene.models.length < 2 ? 'down' : 'up')}
+      ${statCard('数据要素', String(scene.data.length), scene.data.length < 2 ? '待补全' : '可用', scene.data.length < 2 ? 'down' : 'up')}
+      ${statCard('人才技能', String(scene.talent.length), scene.talent.length < 2 ? '待补全' : '可用', scene.talent.length < 2 ? 'down' : 'up')}
+    </div>`
+    body += `<div style="margin-top:14px;display:flex;gap:8px">
+      <button class="iaw-btn iaw-btn-primary" id="iawDrDiag">🤖 派数字同事诊断</button>
+      <button class="iaw-btn iaw-btn-ghost" id="iawDrSyncDD">📤 同步钉钉群</button></div>`
+  } else if (state.sceneTab === 3) {
+    const related = sceneTasks(scene.code)
+    body += `<div class="iaw-panel" style="box-shadow:none;border:1px solid var(--border-subtle)"><div class="iaw-panel-h"><h3>该场景的执行任务</h3><div class="spacer"></div>
+      ${session.can('panel.task.write') ? `<button class="iaw-btn iaw-btn-primary iaw-btn-sm" id="iawDrNewTask">＋ 新建任务</button>` : ''}</div>`
+    body += related.map((t) => `<div class="iaw-elem" style="margin-bottom:8px"><div class="eh">${esc(t.title)}<span class="iaw-pill iaw-pill-neutral cnt">${LANE_LABELS[t.lane] ?? t.lane}</span></div>
+      <ul><li>${t.assigneeType === 'agent' ? '🤖' : '🧑'} ${esc(t.assigneeName ?? '未指派')}</li></ul></div>`).join('')
+      || '<div class="iaw-empty" style="padding:12px">暂无任务——从模板创建或交给数字同事</div>'
+    body += '</div>'
+    body += `<div class="iaw-alert i" style="margin-top:12px"><span>▣</span><div class="sp"><b>场景级事务流模板（多步编排 + SLA）属宿主平台事务流引擎能力</b>，已登记交接清单；当前以单任务承载。</div></div>`
+  } else {
+    const msgs = sceneMessages(scene.code)
+    body += `<div class="iaw-panel" style="box-shadow:none;border:1px solid var(--border-subtle)"><div class="iaw-panel-h"><h3>频道内讨论 · ${esc(scene.code)}</h3></div>`
+    body += msgs.length ? msgs.slice(-8).map((m) => `<div class="iaw-tl-item" style="padding:8px 0"><span class="tt">${esc(fmtTime(m.createdAt))}</span> · <b>${esc(m.senderName)}</b> · ${esc(m.text.slice(0, 60))}</div>`).join('')
+      : '<div class="iaw-empty" style="padding:12px">当前频道暂无该场景的讨论——在协作栏 @数字同事 并带上场景编号即可关联</div>'
+    body += `<button class="iaw-btn iaw-btn-ghost iaw-btn-sm" style="margin-top:10px" id="iawDrGotoChat">进入协作频道</button></div>`
+  }
+
+  $id('iawDrawer').innerHTML = `
+    <div class="iaw-dr-h"><div class="r1"><span class="code">${esc(scene.code)}</span>
+      <span class="iaw-pill ${scene.type === '主场景' ? 'iaw-pill-new' : 'iaw-pill-neutral'}">${esc(scene.type)}</span>
+      <div style="margin-left:auto;display:flex;gap:6px"><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" id="iawDrClose">✕</button></div></div>
+      <h2>${esc(scene.name)}</h2>
+      <div class="meta">${stars(scene.s)}${scene.tags.map(tagPill).join('')}
+      <span class="iaw-pill iaw-pill-tool">▣ 要素 ${elemTotal} 项</span></div></div>
+    <div class="iaw-dr-tabs">${tabs.map((t, i) => `<button class="${i === state.sceneTab ? 'on' : ''}" data-drtab="${i}">${t}${i === 1 ? `<span class="cnt">${elemTotal}</span>` : ''}${i === 3 ? `<span class="cnt">${sceneTasks(scene.code).length}</span>` : ''}</button>`).join('')}</div>
+    <div class="iaw-dr-body">${body}</div>
+    <div class="iaw-dr-foot">
+      ${session.can('panel.write') ? '<button class="iaw-btn iaw-btn-primary" id="iawDrDiagFoot">🤖 交给数字同事诊断</button>' : ''}
+      <button class="iaw-btn iaw-btn-ghost" id="iawDrAsk">✍ 让协作栏继续推进</button>
+    </div>`
+
+  $id('iawDrClose').onclick = closeDrawer
+  $id('iawDrawer').querySelectorAll('[data-drtab]').forEach((el) => {
+    el.onclick = () => { state.sceneTab = Number(el.dataset.drtab); renderDrawer(hit) }
+  })
+  const diag = () => void diagnoseScene(scene.code)
+  $id('iawDrDiag')?.addEventListener('click', diag)
+  $id('iawDrDiagFoot')?.addEventListener('click', diag)
+  $id('iawDrSyncDD')?.addEventListener('click', (event) => void syncSceneToDingtalk(scene.code, event.currentTarget))
+  $id('iawDrNewTask')?.addEventListener('click', () => showNewTask('todo', scene.code))
+  $id('iawDrGotoChat')?.addEventListener('click', () => {
+    closeDrawer()
+    state.space = 'collab'; state.nav = 'rooms'
+    renderSeg(); renderNav()
+    void refreshView()
+  })
+  $id('iawDrAsk')?.addEventListener('click', () => {
+    closeDrawer()
+    state.railMode = 'panel'
+    renderAgentRail()
+    const input = $id('iawComposerInput')
+    if (input) {
+      input.value = `请针对场景 ${scene.code} ${scene.name} 给出改造建议（现状 ${'★'.repeat(Math.min(4, scene.s))}，痛点：${scene.pain.slice(0, 40)}…）`
+      saveDraft(input)
+      input.focus()
     }
   })
 }
 
+/** 派数字同事诊断（真实端点：生成任务 + 频道系统行，协作栏跟进）。 */
+async function diagnoseScene(code) {
+  try {
+    await api.post(`/api/panel/${state.dept}/scenes/${code}/diagnose`)
+    closeDrawer()
+    richToast('诊断已派发', `场景 <b>${esc(code)}</b> 的诊断任务已生成，协作栏/频道内可跟进。`)
+    await refreshView()
+    void refreshOverview()
+  } catch (error) {
+    void toast(error.message, 'error')
+  }
+}
+
+/** 场景卡同步钉钉（QA BUG-G-03 前置状态检查三连：连接器/绑定/群桥）。 */
+async function syncSceneToDingtalk(code, btn) {
+  if (!state.ddStatus?.connector?.configured) {
+    void toast('钉钉桥接未配置：请联系管理员在控制台「三方集成」配置钉钉连接器', 'error')
+    return
+  }
+  if (!state.ddStatus?.bound) {
+    void toast('尚未绑定钉钉账号：请点击顶栏 ⇄ 完成扫码绑定', 'error')
+    void showBind()
+    return
+  }
+  const deptBridge = state.bridges.some((b) => b.purpose === 'channel' && (!b.dept || b.dept === state.dept))
+  if (!deptBridge) {
+    void toast('本部门尚未绑定钉钉群桥：请联系管理员绑定群后重试', 'error')
+    return
+  }
+  btn.disabled = true
+  try {
+    await api.post(`/api/panel/${state.dept}/scenes/${code}/sync-dingtalk`)
+    void toast('场景卡已请求同步至钉钉协作群')
+  } catch (error) {
+    void toast(error.message, 'error')
+  } finally {
+    btn.disabled = false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 右侧 Agent 协作栏（常驻：上下文条 + 会话 + 输入区；hostBridge 在场可切 dsh 对话）
+// ---------------------------------------------------------------------------
+
+function renderAgentRail() {
+  const rail = $id('iawAgent')
+  if (!rail) return
+  const dept = state.overview?.dept
+  const dshMode = state.railMode === 'dsh' && canEmbedDshChat()
+  rail.innerHTML = `
+    <div class="iaw-agent-h">
+      <div class="iaw-agent-ava">${dshMode ? '🤖' : '榕'}<span class="st" style="background:var(--success-500)"></span></div>
+      <div><div class="nm">${dshMode ? 'dsh 标准对话' : esc(dept?.label ?? '') + ' · 数字同事协作'}</div>
+      <div class="rl">${dshMode ? '完整 Agent 运行时 · 在新窗口打开可脱手作业' : '门禁确认 · 产物沉淀 · 钉钉同步'}</div></div>
+      ${canEmbedDshChat() ? `<button class="iaw-chip2 ${dshMode ? '' : 'on'}" id="iawRailPanel" style="margin-left:auto" title="面板会话（频道内协作）">面板</button>
+      <button class="iaw-chip2 ${dshMode ? 'on' : ''}" id="iawRailDsh" title="内嵌 dsh 标准对话">dsh</button>` : ''}
+    </div>
+    ${dshMode ? `
+      <div class="iaw-ctxbar"><span class="iaw-ctx">内嵌 dsh 对话 · <b id="iawRailBack" style="cursor:pointer;color:var(--text-link)">使用面板会话</b></span>
+      <span class="iaw-ctx">📋 <b id="iawRailCtxCopy" style="cursor:pointer;color:var(--text-link)">携带部门上下文</b></span></div>
+      <iframe style="flex:1;border:none;background:#fff" src="/" title="dsh 对话" referrerpolicy="same-origin"></iframe>
+    ` : `
+      <div class="iaw-ctxbar" id="iawCtxBar"></div>
+      <div class="iaw-msgs" id="iawMsgs"></div>
+      ${composerHtml('rail')}
+    `}`
+  if (canEmbedDshChat()) {
+    $id('iawRailPanel').onclick = () => { state.railMode = 'panel'; localStorage.setItem('iaw_rail_mode', 'panel'); renderAgentRail(); renderConversation($id('iawMsgs')) }
+    $id('iawRailDsh').onclick = () => { state.railMode = 'dsh'; localStorage.setItem('iaw_rail_mode', 'dsh'); renderAgentRail() }
+    $id('iawRailCtxCopy')?.addEventListener('click', async () => {
+      const context = `【01门·${dept?.label ?? ''}】行业 ${state.industry?.code ?? '未激活'} · 请围绕该部门场景协作（面板：${location.origin}${basePath()}/panel/?dept=${state.dept}）`
+      try {
+        await navigator.clipboard.writeText(context)
+        void toast('上下文已复制——粘贴到对话即可让 Agent 进入该部门语境')
+      } catch {
+        void toast(context, 'info')
+      }
+    })
+    $id('iawRailBack')?.addEventListener('click', () => { state.railMode = 'panel'; localStorage.setItem('iaw_rail_mode', 'panel'); renderAgentRail(); renderConversation($id('iawMsgs')) })
+  }
+  renderCtx()
+  renderConversation($id('iawMsgs'))
+}
+
+/** 上下文条：当前场景/行业/渠道/模型 语境 chips（场景详情选中后注入）。 */
+function renderCtx() {
+  const bar = $id('iawCtxBar')
+  if (!bar) return
+  const scene = state.scene ? findSceneLocal(state.scene)?.scene : null
+  const channel = (state.overview?.channels ?? []).find((c) => c.id === state.channelId)
+  const chips = scene
+    ? [`<span class="iaw-ctx">场景 <b>${esc(scene.code)}</b></span>`,
+      `<span class="iaw-ctx">评级 <b>${'★'.repeat(Math.min(4, scene.s))}</b></span>`,
+      `<span class="iaw-ctx">频道 <b># ${esc(channel?.name ?? '未选')}</b></span>`,
+      `<span class="iaw-ctx" id="iawCtxClear" style="cursor:pointer">✕ 清除场景语境</span>`]
+    : [`<span class="iaw-ctx">行业 <b>${esc(state.industry?.name ?? '未激活')}</b></span>`,
+      `<span class="iaw-ctx">部门 <b>${esc(state.overview?.dept?.label ?? '—')}</b></span>`,
+      `<span class="iaw-ctx">频道 <b># ${esc(channel?.name ?? '未选')}</b></span>`,
+      `<span class="iaw-ctx">主渠道 <b>${esc(state.models.find((m) => m.slug === state.chatModel)?.displayName ?? '跟随 Agent')}</b></span>`]
+  bar.innerHTML = chips.join('')
+  $id('iawCtxClear')?.addEventListener('click', () => {
+    state.scene = null
+    renderCtx()
+    renderView()
+  })
+}
+
+// ---------------------------------------------------------------------------
+// 会话渲染与发送（协作栏 + 频道视图共用）
+// ---------------------------------------------------------------------------
+
 function messageHtml(m, ddBound) {
-  // 技能执行卡（C1-2 本地瞬时态）：调用中转圈 / 异常阻断红卡（原因 + 重试）。
-  // 已完成态不落卡——应答消息本身（⚡ 技能名）就是结果，卡片即时移除避免双份展示。
+  // 技能执行卡（本地瞬时态）：调用中转圈 / 异常阻断红卡；成功态以应答消息呈现。
   if (m.kind === 'skill-exec') {
     if (m.state === 'blocked') {
-      return `<div class="msg"><div class="m-av" style="background:#ef4444">⚡</div>
-        <div class="m-body"><div class="m-meta">${esc(m.skillName)} <span class="role" style="color:var(--err)">执行失败</span></div>
-        <div class="m-txt"><div class="skill-exec blocked"><b>调用没有成功：</b>${esc(m.reason ?? '未知原因（可下拉查看技术详情）')}
-          ${m.raw ? `<div class="se-ops"><button class="btn" data-retry="${esc(m.raw)}">↻ 重试</button></div>` : ''}</div></div></div></div>`
+      return `<div class="iaw-msg"><div class="av" style="background:var(--danger-500)">⚡</div>
+        <div class="bd"><div class="meta">${esc(m.skillName)} <span class="role" style="color:var(--danger-600)">执行失败</span></div>
+        <div class="iaw-skill-exec blocked"><b>调用没有成功：</b>${esc(m.reason ?? '未知原因')}
+          ${m.raw ? `<div><button class="iaw-btn iaw-btn-ghost iaw-btn-sm" data-retry="${esc(m.raw)}">↻ 重试</button></div>` : ''}</div></div></div>`
     }
-    return `<div class="msg"><div class="m-av" style="background:#6366f1">⚡</div>
-      <div class="m-body"><div class="m-meta">${esc(m.skillName)} <span class="role">技能执行中</span></div>
-      <div class="m-txt"><div class="skill-exec calling"><span class="se-spin"></span> 正在执行「${esc(m.skillName)}」${esc(m.text ? `：${m.text.slice(0, 40)}` : '')}…</div></div></div></div>`
+    return `<div class="iaw-msg"><div class="av" style="background:#6366f1">⚡</div>
+      <div class="bd"><div class="meta">${esc(m.skillName)} <span class="role">技能执行中</span></div>
+      <div class="iaw-skill-exec"><span class="iaw-se-spin"></span> 正在执行「${esc(m.skillName)}」${esc(m.text ? `：${m.text.slice(0, 40)}` : '')}…</div></div></div>`
   }
-  if (m.senderType === 'system') return `<div class="sys-line"><span>⚡ ${md(m.text)}</span></div>`
+  if (m.senderType === 'system') return `<div class="iaw-sys">⚡ ${md(m.text)}</div>`
   const ddBadge = m.ddSync === 'sent'
-    ? '<div class="dd-sync">⇄ 已同步钉钉</div>'
-    : m.ddSync === 'pending' ? '<div class="dd-sync">⇄ 钉钉投递中…</div>'
-      : m.ddSync === 'failed' ? '<div class="dd-sync" style="color:var(--err)">⇄ 钉钉投递失败</div>'
+    ? '<div style="font-size:10px;color:var(--text-tertiary);margin-top:4px">⇄ 已同步钉钉</div>'
+    : m.ddSync === 'pending' ? '<div style="font-size:10px;color:var(--text-tertiary);margin-top:4px">⇄ 钉钉投递中…</div>'
+      : m.ddSync === 'failed' ? '<div style="font-size:10px;color:var(--danger-600);margin-top:4px">⇄ 钉钉投递失败</div>'
         : ''
   const card = m.card
-    ? `<div class="action-card"><div class="t">${esc(m.card.title)}</div>
-        <div class="ops">${m.card.ops.map((op) => `
-          <button data-op="${esc(op.id)}" data-msg="${esc(m.id)}"
-            class="btn ${m.card.done.includes(op.id) ? 'done' : op.style === 'dd' ? 'dd' : 'primary'}"
-            ${m.card.done.includes(op.id) ? 'disabled' : ''}>${esc(op.label)}${m.card.done.includes(op.id) ? ' ✓' : ''}</button>`).join('')}
-        </div></div>`
+    ? `<div class="card"><div class="t">${esc(m.card.title)}</div><div class="ops">${m.card.ops.map((op) => `
+        <button class="iaw-btn ${m.card.done.includes(op.id) ? 'iaw-btn-ghost' : op.style === 'dd' ? 'iaw-btn-ghost' : 'iaw-btn-primary'} iaw-btn-sm"
+          data-op="${esc(op.id)}" data-msg="${esc(m.id)}" ${m.card.done.includes(op.id) ? 'disabled' : ''}>${esc(op.label)}${m.card.done.includes(op.id) ? ' ✓' : ''}</button>`).join('')}
+      </div></div>`
     : ''
   if (m.senderType === 'human' && m.senderId && m.senderId === session.user?.id) {
-    return `<div class="msg me"><div class="m-av human" style="background:#f59e0b">我</div>
-      <div class="m-body"><div class="m-meta" style="justify-content:flex-end">${esc(m.senderName)}</div>
-      <div class="m-txt">${md(m.text)}${ddBadge}</div></div></div>`
+    return `<div class="iaw-msg u"><div class="av" style="background:var(--warning-500)">我</div>
+      <div class="bd"><div class="meta" style="justify-content:flex-end">${esc(m.senderName)}</div><div>${md(m.text)}</div>${ddBadge}</div></div>`
   }
   if (m.senderType === 'agent') {
-    return `<div class="msg"><div class="m-av agent">${esc(m.senderIcon ?? '🤖')}</div>
-      <div class="m-body"><div class="m-meta">${esc(m.senderName)} <span class="role">Agent</span>${m.model ? `<span class="role model" title="本次回包使用的模型（可在输入区切换）">🧠 ${esc(m.model)}</span>` : ''}</div>
-      <div class="m-txt">${md(m.text)}${card}${ddBadge}</div></div></div>`
+    return `<div class="iaw-msg a"><div class="av">${esc(m.senderIcon ?? '🤖')}</div>
+      <div class="bd"><div class="meta">${esc(m.senderName)} <span class="role">Agent</span>${m.model ? `<span class="role">🧠 ${esc(m.model)}</span>` : ''}</div>
+      <div>${md(m.text)}</div>${card}${ddBadge}</div></div>`
   }
   const fromDd = m.ddSync === 'origin'
-  return `<div class="msg"><div class="m-av ${fromDd ? 'fromdd' : 'human'}">${esc((m.senderName ?? '?').slice(0, 1))}</div>
-    <div class="m-body"><div class="m-meta">${esc(m.senderName)}${fromDd ? '<span class="dd-tag">● 来自钉钉</span>' : ''}</div>
-    <div class="m-txt">${md(m.text)}${card}${ddBadge}</div></div></div>`
+  return `<div class="iaw-msg"><div class="av" style="background:var(--neutral-500)">${esc((m.senderName ?? '?').slice(0, 1))}</div>
+    <div class="bd"><div class="meta">${esc(m.senderName)}${fromDd ? '<span class="role">● 来自钉钉</span>' : ''}</div>
+    <div>${md(m.text)}</div>${card}${ddBadge}</div></div>`
+}
+
+function renderConversation(host) {
+  if (!host) return
+  const ddBound = Boolean(state.ddStatus?.bound)
+  if (!state.channelId) {
+    host.innerHTML = '<div class="iaw-empty">本部门还没有协作频道——在「协作空间 · 协作频道」发起。</div>'
+    return
+  }
+  host.innerHTML = state.messages.map((m) => messageHtml(m, ddBound)).join('')
+  host.querySelectorAll('[data-op]').forEach((el) => {
+    el.onclick = () => void doCardAction(el.dataset.msg, el.dataset.op, el)
+  })
+  host.querySelectorAll('[data-retry]').forEach((el) => {
+    el.onclick = () => {
+      const input = $id('iawComposerInput')
+      if (!input) { void toast('请切到协作会话后重试'); return }
+      input.value = el.dataset.retry
+      void sendMessage(input)
+    }
+  })
+  host.querySelectorAll('[data-scene]').forEach((el) => {
+    el.onclick = () => void openScene(el.dataset.scene)
+  })
+  host.scrollTop = host.scrollHeight
 }
 
 async function doCardAction(messageId, opId, btn) {
@@ -959,135 +1770,131 @@ async function doCardAction(messageId, opId, btn) {
     const result = await api.post(`/api/panel/messages/${messageId}/card-action`, { opId })
     const message = state.messages.find((m) => m.id === messageId)
     if (message?.card) message.card = result.message.card
-    renderMessages()
+    renderConversation($id('iawMsgs'))
+    renderConversation(document.querySelector('#iawRoomsMsgs'))
     void toast(result.result)
-    if (state.tab === 'tasks') void loadTab()
+    if (state.space === 'flow') void refreshView()
   } catch (error) {
     btn.disabled = false
     void toast(error.message, 'error')
   }
 }
 
-// -- 输入区 ------------------------------------------------------------------
-
-/** 输入草稿（QA BUG-U-07）：按 部门:频道 落 localStorage——任何 Tab 切换/频道切换/
- *  整页刷新都不许弄丢正在输入的交接班记录。 */
+/** 输入草稿：按 部门:频道 落 localStorage——任何切换/刷新都不丢正在输入的内容。 */
 function draftKey() {
   return `panel_draft:${state.dept}:${state.channelId}`
 }
-
 function saveDraft(input) {
   try { localStorage.setItem(draftKey(), input.value) } catch { /* 存储满/隐私模式忽略 */ }
 }
-
 function clearDraft() {
   try { localStorage.removeItem(draftKey()) } catch { /* 忽略 */ }
 }
 
-function composerHtml() {
-  const dept = state.overview.dept
+function composerHtml(place) {
+  const dept = state.overview?.dept
+  if (!dept) return ''
   const bound = Boolean(state.ddStatus?.bound)
-  const members = (state.overview.members ?? []).slice(0, 6)
-  // 对话框模型切换：在线模型下拉（默认跟随 Agent 资产配置）；目录为空/全离线时给诚实提示
   const onlineModels = state.models.filter((model) => model.status === 'online')
   const modelSwitch = onlineModels.length > 0
-    ? `<select id="chatModel" class="model-sel" title="本次会话使用的模型（默认跟随 Agent 资产配置；目录与 dsh 服务共用）">
+    ? `<select id="iawChatModel" class="iaw-model-sel" title="本次会话使用的模型（默认跟随 Agent 资产配置）">
         <option value="">🧠 跟随 Agent</option>
         ${onlineModels.map((model) => `<option value="${esc(model.slug)}" ${state.chatModel === model.slug ? 'selected' : ''}>${esc(model.displayName || model.slug)}</option>`).join('')}
       </select>`
-    : '<span class="model-empty" id="modelEmptyHint" title="模型目录暂无在线模型——点此登记接入（与 dsh 服务共用模型目录）">🧠 未接入模型</span>'
-  const skills = state.skills.slice(0, 6)
+    : '<span class="iaw-model-empty" id="iawModelEmptyHint" title="模型目录暂无在线模型——点击去登记">🧠 未接入模型</span>'
+  const quick = place === 'rail' ? `
+    <div class="iaw-quick">
+      <button data-quick="diag">/诊断当前场景</button>
+      <button data-quick="task">/转任务</button>
+      <button data-quick="elements">/查数据</button>
+    </div>` : ''
+  const skillChips = state.skills.length > 0 ? `
+    <div class="iaw-chips">${state.skills.slice(0, 4).map((skill) => `<span class="iaw-chip2" data-skill="${esc(skill.name)}" title="${esc(skill.summary ?? '')}">⚡ ${esc(skill.name)}</span>`).join('')}
+    <span style="font-size:10px;color:var(--text-tertiary)">输入 /技能名 直调</span></div>` : ''
   return `
-    <div class="composer">
-      <div class="at-row">
-        <span style="font-size:11px;color:var(--txt2)">@ 唤起：</span>
-        ${dept.agents.map((agent) => `<span class="at-chip ag" data-at="${esc(agent.name)}">🤖 ${esc(agent.name)}</span>`).join('')}
-        ${members.map((member) => `<span class="at-chip" data-at="${esc(member.name)}" title="${esc(member.title ?? '')}${member.orgName ? ` · ${esc(member.orgName)}` : ''}">🧑 ${esc(member.name)}</span>`).join('')}
-        ${bound ? '<span class="at-chip ddu" data-at="钉群·全员">⇄ 钉群·全员</span>'
-          : '<span class="at-chip" id="bindHint">🔗 绑定钉钉后可 @ 钉钉同事</span>'}
-        ${state.hostBridge && !EMBEDDED ? '<span class="at-chip" id="reembedHint" title="切回 AI 助手对话（默认对话入口）">🤖 改用 AI 助手</span>' : ''}
-        <span class="dd-toggle" id="ddToggle"><span class="sw ${state.ddSync && bound ? 'on' : ''} ${bound ? '' : 'disabled'}" id="ddSw"></span>钉钉同步</span>
-      </div>
-      ${skills.length > 0 ? `
-      <div class="at-row skill-row">
-        <span style="font-size:11px;color:var(--txt2)">⚡ 技能：</span>
-        ${skills.map((skill) => `<span class="at-chip sk" data-skill="${esc(skill.name)}" title="${esc(skill.summary)}（已上架 v${esc(skill.version)}）">⚡ ${esc(skill.name)}</span>`).join('')}
-        <span style="font-size:11px;color:var(--txt2)">输入 /技能名 也可直调</span>
-      </div>` : ''}
-      <div class="input-row">
-        ${modelSwitch}
-        <input id="composerInput" placeholder="发消息 / @数字同事 下任务 / /技能名 直调${bound && state.ddSync ? ' / 本条将同步钉钉群' : ''}…（Enter 发送）">
-        <button class="send" id="composerSend">发送</button>
+    <div class="iaw-composer">
+      ${quick}
+      ${skillChips}
+      <div class="box">
+        <textarea id="iawComposerInput" rows="2" placeholder="发消息 / @数字同事 下任务 / /技能名 直调…（Ctrl+Enter 发送）"></textarea>
+        <div class="tools">
+          ${modelSwitch}
+          <span class="iaw-chip2 ${state.ddSync && bound ? 'on' : ''}" id="iawDdToggle" title="${bound ? '本条消息同步钉钉群' : '绑定钉钉后可用'}">⇄ 钉钉</span>
+          <span class="spacer"></span>
+          <button class="iaw-send" id="iawComposerSend" title="发送 (Ctrl+Enter)"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg></button>
+        </div>
       </div>
     </div>`
 }
 
 function wireComposer(host) {
-  const input = host.querySelector('#composerInput')
+  if (!host) return
+  const input = host.querySelector('#iawComposerInput')
   if (!input) return
-  // 草稿恢复 + 随输入保存（QA BUG-U-07）
   try { input.value = localStorage.getItem(draftKey()) ?? '' } catch { /* 忽略 */ }
   input.oninput = () => saveDraft(input)
-  host.querySelectorAll('[data-at]').forEach((el) => {
-    el.onclick = () => atMention(el.dataset.at, input)
-  })
-  // 技能 chips（C1-2）：点击把 /技能名 填进输入框——发送时按斜杠命令直调
+  input.onkeydown = (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault()
+      void sendMessage(input)
+    }
+  }
+  host.querySelector('#iawComposerSend')?.addEventListener('click', () => void sendMessage(input))
   host.querySelectorAll('[data-skill]').forEach((el) => {
     el.onclick = () => insertSkill(el.dataset.skill, input)
   })
-  const bindHint = host.querySelector('#bindHint')
-  if (bindHint) bindHint.onclick = () => showBind()
-  const toggle = host.querySelector('#ddToggle')
-  if (toggle) {
-    toggle.onclick = () => {
-      if (!state.ddStatus?.bound) { showBind(); return }
+  host.querySelectorAll('[data-quick]').forEach((el) => {
+    el.onclick = () => {
+      const kind = el.dataset.quick
+      if (kind === 'diag') {
+        if (!state.scene) { void toast('请先在场景罗盘中选择一个场景', 'error'); return }
+        void diagnoseScene(state.scene)
+      } else if (kind === 'task') {
+        showNewTask('todo', state.scene ?? undefined)
+      } else if (kind === 'elements') {
+        state.space = 'data'; state.nav = 'elements'; renderSeg(); renderNav(); void refreshView()
+      }
+    }
+  })
+  const ddToggle = host.querySelector('#iawDdToggle')
+  if (ddToggle) {
+    ddToggle.onclick = () => {
+      if (!state.ddStatus?.bound) { void showBind(); return }
       state.ddSync = !state.ddSync
       localStorage.setItem('panel_ddsync', state.ddSync ? '1' : '0')
-      renderMain()
+      renderView()
+      renderAgentRail()
     }
   }
-  const send = () => void sendMessage(input)
-  host.querySelector('#composerSend').onclick = send
-  input.onkeydown = (event) => { if (event.key === 'Enter') send() }
-  // 模型切换：目录变化后本地记忆可能失效——以 DOM 实际选中值归一（失配时自动回到「跟随 Agent」）
-  const modelSel = host.querySelector('#chatModel')
+  const modelSel = host.querySelector('#iawChatModel')
   if (modelSel) {
     state.chatModel = modelSel.value
     modelSel.onchange = () => {
       state.chatModel = modelSel.value
       try { localStorage.setItem('panel_chat_model', state.chatModel) } catch { /* 忽略 */ }
+      renderCtx()
     }
   }
-  const modelHint = host.querySelector('#modelEmptyHint')
-  if (modelHint) modelHint.onclick = () => void showModels()
-  // 退回内置会话后的「改用 dsh 对话」：清掉关闭标记并重渲染（内嵌为默认交互面）
-  const reembedHint = host.querySelector('#reembedHint')
-  if (reembedHint) {
-    reembedHint.onclick = () => {
-      localStorage.removeItem('panel_chat_embed_off')
-      renderMain()
-    }
-  }
+  const modelHint = host.querySelector('#iawModelEmptyHint')
+  if (modelHint) modelHint.onclick = () => { state.space = 'cap'; state.nav = 'mchannels'; renderSeg(); renderNav(); void refreshView() }
 }
 
 function atMention(name, inputEl) {
-  const input = inputEl ?? document.querySelector('#composerInput')
-  if (!input) { void toast('请先切到「协作会话」再 @ 唤起'); return }
+  const input = inputEl ?? $id('iawComposerInput')
+  if (!input) { void toast('协作栏不可用'); return }
   input.value = `@${name} ${input.value}`
   saveDraft(input)
   input.focus()
 }
 
-/** 技能名填入输入框（C1-2：/技能名 斜杠形态，发送时直调）。 */
 function insertSkill(name, inputEl) {
-  const input = inputEl ?? document.querySelector('#composerInput')
-  if (!input) { void toast('请先切到「协作会话」再直调技能'); return }
+  const input = inputEl ?? $id('iawComposerInput')
+  if (!input) { void toast('协作栏不可用'); return }
   input.value = `/${name} ${input.value}`
   saveDraft(input)
   input.focus()
 }
 
-/** 斜杠命令解析：/技能名 输入 → 匹配已上架技能（名全名优先，slug 兜底）；不匹配返回 null 走普通消息。 */
 function parseSkillCommand(text) {
   const m = /^\/(.+?)(?:\s+([\s\S]*))?$/.exec(text)
   if (!m) return null
@@ -1097,18 +1904,14 @@ function parseSkillCommand(text) {
   return { skill, message: (m[2] ?? '').trim() }
 }
 
-/**
- * 技能直调 + 面板侧执行卡（C1-2 四态）：调用中（本地瞬时卡）→ 已完成（应答以数字同事消息落频道）
- * / 异常阻断（红卡原因 + 重试；服务端同时落失败系统行，全频道可见可回查）。
- * 卡片是进度示意；结果（成功应答/失败原因）都已服务端持久化，刷新不丢。
- */
+/** 技能直调（四态执行卡）：调用中（本地瞬时卡）→ 已完成（应答落频道）/ 异常阻断（红卡 + 重试）。 */
 async function runSkillInvoke(skill, message, rawText) {
   const exec = {
     id: `local-skill-${Date.now()}`, kind: 'skill-exec', state: 'calling',
     skillName: skill.name, text: message, raw: rawText, at: new Date().toISOString(),
   }
   state.messages.push(exec)
-  renderMessages()
+  renderConversation($id('iawMsgs'))
   try {
     const result = await api.post(`/api/panel/${state.dept}/skills/invoke`, {
       skill: skill.name, message, channelId: state.channelId,
@@ -1119,12 +1922,12 @@ async function runSkillInvoke(skill, message, rawText) {
       if (m && !state.messages.some((x) => x.id === m.id)) state.messages.push(m)
     }
     if (!result.ok) state.messages.push({ ...exec, state: 'blocked', reason: result.reason })
-    renderMessages()
+    renderConversation($id('iawMsgs'))
     void refreshOverview()
   } catch (error) {
     state.messages = state.messages.filter((m) => m.id !== exec.id)
     state.messages.push({ ...exec, state: 'blocked', reason: error.message })
-    renderMessages()
+    renderConversation($id('iawMsgs'))
   }
 }
 
@@ -1142,12 +1945,11 @@ async function sendMessage(input) {
   try {
     const result = await api.post(`/api/panel/${state.dept}/messages`, {
       channelId: state.channelId, text, ddSync: state.ddSync && Boolean(state.ddStatus?.bound),
-      // 对话框选中的模型（'' = 跟随 Agent 资产配置，不传 model）
       ...(state.chatModel ? { model: state.chatModel } : {}),
     })
     clearDraft()
     state.messages.push(result.message)
-    renderMessages()
+    renderConversation($id('iawMsgs'))
     void refreshOverview()
   } catch (error) {
     input.value = text
@@ -1156,81 +1958,118 @@ async function sendMessage(input) {
   }
 }
 
-async function refreshOverview() {
-  try {
-    state.overview = await api.get(`/api/panel/${state.dept}/overview`)
-    renderColLeft()
-  } catch { /* 静默 */ }
+// ---------------------------------------------------------------------------
+// 全局搜索 / ⌘K / 帮助
+// ---------------------------------------------------------------------------
+
+async function searchJump(q) {
+  const query = q.trim().toLowerCase()
+  if (!query) return
+  const pack = state.scenegraph?.pack
+  const hit = packScenes(pack).find((s) => s.code.toLowerCase().includes(query) || s.name.toLowerCase().includes(query))
+  if (hit) {
+    await openScene(hit.code)
+    richToast('已定位场景', `${esc(hit.code)} · ${esc(hit.name)}`)
+    return
+  }
+  await openCmdk(q)
 }
 
-// -- 任务看板 ------------------------------------------------------------------
+async function openCmdk(prefill = '') {
+  const mask = document.createElement('div')
+  mask.className = 'cmdk-mask'
+  mask.innerHTML = `
+    <div class="cmdk">
+      <input id="cmdkInput" placeholder="搜索 场景 / 数字同事 / 技能 / 频道 / 同事 / 任务…">
+      <div class="cmdk-list" id="cmdkList"></div>
+    </div>`
+  document.body.appendChild(mask)
+  mask.addEventListener('click', (event) => {
+    if (event.target === mask) mask.remove()
+  })
+  const input = mask.querySelector('#cmdkInput')
+  const list = mask.querySelector('#cmdkList')
+  input.value = prefill
+  input.focus()
 
-function renderKanban(host) {
-  const laneOf = (lane) => state.tasks.filter((task) => task.lane === lane)
-  host.innerHTML = `<div class="kanban">${LANE_ORDER.map((lane) => `
-    <div class="lane">
-      <div class="lane-h"><span>${LANE_LABELS[lane]}</span><span>${laneOf(lane).length}</span></div>
-      ${laneOf(lane).map((task) => `
-        <div class="task-card">
-          <div class="tt">${esc(task.title)}</div>
-          <div class="tm">
-            <span class="who">${task.assigneeType === 'agent' ? '🤖' : '🧑'} ${esc(task.assigneeName ?? '')}</span>
-            ${task.sceneCode ? `<span class="scene" data-scene="${esc(task.sceneCode)}">${esc(task.sceneCode)}</span>` : ''}
-            <span class="mv">
-              ${lane !== 'todo' ? `<button data-move="${esc(task.id)}" data-to="todo" title="移到待办">⇤</button>` : ''}
-              ${lane !== 'done' ? `<button data-move="${esc(task.id)}" data-to="${nextLane(lane)}" title="推进">→</button>` : ''}
-            </span>
-          </div>
-        </div>`).join('')}
-      <button class="lane-add" data-addlane="${lane}">＋ 新建任务</button>
-    </div>`).join('')}</div>`
-  host.querySelectorAll('[data-move]').forEach((el) => {
-    el.onclick = async () => {
-      try {
-        await api.post(`/api/panel/tasks/${el.dataset.move}/transition`, { lane: el.dataset.to })
-        await loadTab()
-        renderMain()
-      } catch (error) { void toast(error.message, 'error') }
-    }
-  })
-  host.querySelectorAll('[data-addlane]').forEach((el) => {
-    el.onclick = () => showNewTask(el.dataset.addlane)
-  })
-  host.querySelectorAll('[data-scene]').forEach((el) => {
-    el.onclick = () => {
-      state.tab = 'scene'
-      void loadTab().then(renderMain)
-    }
-  })
+  const sources = []
+  for (const scene of packScenes(state.scenegraph?.pack)) {
+    sources.push({ group: '场景', icon: '🗺', label: `${scene.code} ${scene.name}`, sub: ACT_LABELS[findSceneLocal(scene.code)?.activity ?? ''] ?? '', act: () => { mask.remove(); void openScene(scene.code) } })
+  }
+  for (const agent of (state.overview?.dept?.agents ?? [])) {
+    sources.push({ group: '数字同事', icon: agent.icon, label: agent.name, sub: agent.asset ? `资产 ${agent.asset.name}` : '未绑定资产', act: () => { mask.remove(); atMention(agent.name) } })
+  }
+  for (const skill of state.skills.slice(0, 8)) {
+    sources.push({ group: '技能', icon: '⚡', label: skill.name, sub: skill.summary || skill.category || '', act: () => { mask.remove(); insertSkill(skill.name) } })
+  }
+  for (const channel of (state.overview?.channels ?? [])) {
+    sources.push({ group: '频道', icon: '#', label: channel.name, sub: `${channel.unread ?? 0} 未读`, act: () => { mask.remove(); state.channelId = channel.id; localStorage.setItem(`panel_channel_${state.dept}`, channel.id); state.space = 'collab'; state.nav = 'rooms'; renderSeg(); renderNav(); void refreshView() } })
+  }
+  for (const task of state.tasks.filter((t) => t.lane !== 'done').slice(0, 20)) {
+    sources.push({ group: '任务', icon: '📌', label: task.title, sub: LANE_LABELS[task.lane] ?? task.lane, act: () => { mask.remove(); state.space = 'flow'; state.nav = 'flow'; renderSeg(); renderNav(); void refreshView() } })
+  }
+  for (const member of (state.overview?.members ?? [])) {
+    sources.push({ group: '同事', icon: '🧑', label: member.name, sub: member.title ?? member.orgName ?? '', act: () => { mask.remove(); atMention(member.name) } })
+  }
+  for (const model of state.models) {
+    sources.push({ group: '模型渠道', icon: '◈', label: model.displayName || model.slug, sub: model.status === 'online' ? '在线' : '离线', act: () => { mask.remove(); state.space = 'cap'; state.nav = 'mchannels'; renderSeg(); renderNav(); void refreshView() } })
+  }
+
+  const render = () => {
+    const query = input.value.trim().toLowerCase()
+    const hits = sources.filter((item) => !query || item.label.toLowerCase().includes(query) || String(item.sub).toLowerCase().includes(query)).slice(0, 40)
+    list.innerHTML = hits.length === 0 ? '<div class="cmdk-empty">无匹配结果——场景支持编码/名称，如 YB01-B-2-1</div>'
+      : [...new Set(hits.map((item) => item.group))].map((group) => `
+        <div class="cmdk-group">${group}</div>
+        ${hits.filter((item) => item.group === group).map((item) => {
+          const idx = hits.indexOf(item)
+          return `<div class="cmdk-item" data-idx="${idx}"><span>${esc(item.icon)}</span><span>${esc(item.label)}</span><span class="sub">${esc(String(item.sub))}</span></div>`
+        }).join('')}`).join('')
+    list.querySelectorAll('.cmdk-item').forEach((el) => {
+      el.onclick = () => hits[Number(el.dataset.idx)]?.act()
+    })
+  }
+  input.oninput = render
+  render()
 }
 
-function nextLane(lane) {
-  return LANE_ORDER[Math.min(LANE_ORDER.indexOf(lane) + 1, LANE_ORDER.length - 1)]
+function showHelp() {
+  showModal('📖 帮助与快捷键', `
+    <p class="note" style="margin-top:0">行业 AI 工作台（IAW）——以「一图四清单」为知识骨架，模型渠道 / 数据驱动 / 业务事务流三大原则。</p>
+    <div class="step"><div class="no">1</div><div><div class="st-t">五空间导航</div><div class="st-d">图谱（场景罗盘/驾驶舱）· 执行（任务/收件箱）· 能力（模型渠道/四清单）· 数据（数据要素）· 协作（频道/同事/成员/通知）。</div></div></div>
+    <div class="step"><div class="no">2</div><div><div class="st-t">场景详情</div><div class="st-d">罗盘中点击场景卡打开抽屉：概览 / 四要素 / 痛点 / 事务流 / 协作；可派数字同事诊断、同步钉钉。</div></div></div>
+    <div class="step"><div class="no">3</div><div><div class="st-t">人机协作门禁</div><div class="st-d">数字同事的产出停在「待审」，人工确认后才进入下游；协作栏里的操作卡可一键确认。</div></div></div>
+    <div class="step"><div class="no">⌘</div><div><div class="st-t">快捷键</div><div class="st-d">Ctrl/⌘+K 全局搜索 · Ctrl/⌘+Enter 发送消息 · Esc 关闭抽屉/弹层。</div></div></div>`)
 }
 
-function showNewTask(lane) {
-  showModal('📌 新建任务', `
+// ---------------------------------------------------------------------------
+// 弹层：新建频道 / 新建任务 / 模型表单 / 钉钉绑定 / 面板配置
+// ---------------------------------------------------------------------------
+
+function showNewChannel() {
+  showModal('＋ 发起协作（新建频道）', `
     <div style="display:flex;flex-direction:column;gap:10px">
-      <input id="taskTitle" placeholder="任务标题" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">
-      <input id="taskScene" placeholder="关联场景编号（可选，如 QB01-A-2-5）" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">
+      <input id="chanName" placeholder="频道名（如：异常快速响应群）" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">
       <div style="display:flex;gap:10px">
-        <button class="btn primary" id="taskSubmit">创建到「${LANE_LABELS[lane]}」</button>
-        <button class="btn" id="taskCancel">取消</button>
+        <button class="btn primary" id="chanSubmit">创建</button>
+        <button class="btn" id="chanCancel">取消</button>
       </div>
     </div>`)
-  document.getElementById('taskCancel').onclick = hideModal
-  document.getElementById('taskSubmit').onclick = async (event) => {
-    const title = document.getElementById('taskTitle').value.trim()
-    if (!title) { void toast('标题必填', 'error'); return }
+  $id('chanCancel').onclick = hideModal
+  $id('chanSubmit').onclick = async (event) => {
+    const name = $id('chanName').value.trim()
+    if (!name) { void toast('频道名必填', 'error'); return }
     event.target.disabled = true
     try {
-      await api.post(`/api/panel/${state.dept}/tasks`, {
-        title, lane,
-        ...(document.getElementById('taskScene').value.trim() ? { sceneCode: document.getElementById('taskScene').value.trim() } : {}),
-      })
+      const result = await api.post(`/api/panel/${state.dept}/channels`, { name })
+      state.overview.channels.push({ ...result.channel, unread: 0 })
+      state.channelId = result.channel.id
+      localStorage.setItem(`panel_channel_${state.dept}`, state.channelId)
       hideModal()
-      await loadTab()
-      renderMain()
+      renderNav()
+      state.space = 'collab'; state.nav = 'rooms'
+      renderSeg(); renderNav()
+      await refreshView()
     } catch (error) {
       event.target.disabled = false
       void toast(error.message, 'error')
@@ -1238,138 +2077,92 @@ function showNewTask(lane) {
   }
 }
 
-// -- 部门知识 ------------------------------------------------------------------
-
-function renderArtifacts(host) {
-  if (state.artifacts.length === 0) {
-    host.innerHTML = '<div class="artifacts"><div class="empty-line">暂无沉淀产出。Agent 产出物（报告/工单/报价/诊断卡）与手工登记都会沉淀在这里。</div></div>'
-    return
-  }
-  host.innerHTML = `<div class="artifacts">${state.artifacts.map((art) => `
-    <div class="art-card">
-      <div class="ah"><span class="kind">${ART_KINDS[art.kind] ?? art.kind}</span><span class="t">${esc(art.title)}</span>
-        <span class="time">${esc(fmtTime(art.createdAt))}${art.agentName ? ` · ${esc(art.agentName)}` : ''}</span></div>
-      <div class="c">${esc(art.content)}</div>
-      <div class="ao"><button data-quote="${esc(art.id)}">💬 引用到会话</button></div>
-    </div>`).join('')}</div>`
-  host.querySelectorAll('[data-quote]').forEach((el) => {
-    el.onclick = () => {
-      const art = state.artifacts.find((item) => item.id === el.dataset.quote)
-      if (!art) return
-      state.tab = 'chat'
-      void loadTab().then(() => {
-        renderMain()
-        const input = document.querySelector('#composerInput')
-        if (input) {
-          input.value = `请基于「${art.title}」继续推进：`
-          input.focus()
-        }
+function showNewTask(lane, sceneCode) {
+  showModal('📌 新建任务', `
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <input id="taskTitle" placeholder="任务标题" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">
+      <input id="taskScene" placeholder="关联场景编号（可选，如 ${esc(state.industry?.code ?? 'QB01')}-A-2-5）" value="${esc(sceneCode ?? '')}" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">
+      <div style="display:flex;gap:10px">
+        <button class="btn primary" id="taskSubmit">创建到「${LANE_LABELS[lane]}」</button>
+        <button class="btn" id="taskCancel">取消</button>
+      </div>
+    </div>`)
+  $id('taskCancel').onclick = hideModal
+  $id('taskSubmit').onclick = async (event) => {
+    const title = $id('taskTitle').value.trim()
+    if (!title) { void toast('标题必填', 'error'); return }
+    event.target.disabled = true
+    try {
+      await api.post(`/api/panel/${state.dept}/tasks`, {
+        title, lane,
+        ...($id('taskScene').value.trim() ? { sceneCode: $id('taskScene').value.trim() } : {}),
       })
+      hideModal()
+      richToast('任务已创建', `${esc(title)} → ${esc(LANE_LABELS[lane])}`)
+      await refreshView()
+      void refreshOverview()
+    } catch (error) {
+      event.target.disabled = false
+      void toast(error.message, 'error')
     }
-  })
-}
-
-// -- 场景图谱 ------------------------------------------------------------------
-
-function renderScenegraph(host) {
-  if (!state.overview.industry) {
-    host.innerHTML = '<div class="scene-wrap"><div class="empty-line">本组织尚未激活行业场景图谱。请通过顶栏行业选择器提交激活申请。</div></div>'
-    return
   }
-  if (!state.scenegraph) {
-    host.innerHTML = '<div class="scene-wrap"><div class="empty-line">场景图谱包未装载（已激活但数据缺位）——请联系平台管理员检查 scenegraphs 目录。</div></div>'
-    return
-  }
-  const { pack } = state.scenegraph
-  const dept = state.overview.dept
-  const acts = Object.entries(pack.activities).filter(([key]) => dept.acts.includes(key))
-  host.innerHTML = `<div class="scene-wrap">
-    <div class="sys-line" style="margin-top:0"><span>🗺 ${esc(pack.name)}场景图谱（${esc(pack.code)} · ${esc(pack.version)} 版）· 一图四清单 · 环节：${esc(pack.chains)}</span></div>
-    ${acts.map(([activity, scenes]) => {
-      const avg = Math.round(scenes.reduce((sum, scene) => sum + scene.s, 0) / scenes.length)
-      return `<div class="scene-act">
-        <div class="scene-act-h"><span class="an">${esc(activityLabel(activity))}</span>
-          <span class="ar">活动现状评级 ≈ ${stars(avg)}</span>
-          <span class="achain">${scenes.length} 个场景 · ${scenes.filter((scene) => scene.s <= 2).length} 个低于★★★ 建议优先改造</span></div>
-        <div class="scene-grid">${scenes.map((scene) => sceneCardHtml(scene)).join('')}</div>
-      </div>`
-    }).join('') || '<div class="empty-line">本部门在当前行业图谱中没有挂载的业务活动。</div>'}
-  </div>`
-  host.querySelectorAll('[data-diag]').forEach((el) => {
-    el.onclick = async () => {
-      el.disabled = true
-      try {
-        await api.post(`/api/panel/${state.dept}/scenes/${el.dataset.diag}/diagnose`)
-        state.tab = 'chat'
-        state.channelId = state.overview.channels[0]?.id ?? ''
-        await loadTab()
-        renderMain()
-        void toast('诊断任务已派发，请到协作会话跟进')
-      } catch (error) {
-        el.disabled = false
-        void toast(error.message, 'error')
-      }
-    }
-  })
-  host.querySelectorAll('[data-syncdd]').forEach((el) => {
-    el.onclick = async () => {
-      // 前置状态检查（QA BUG-G-03）：未配置/未绑定/无群桥三种情况都必须给明确报错，
-      // 不许「零反馈」——工人按了按钮就该知道发生了什么、下一步找谁
-      if (!state.ddStatus?.connector?.configured) {
-        void toast('钉钉桥接未配置：请联系管理员在控制台「三方集成」配置钉钉连接器', 'error')
-        return
-      }
-      if (!state.ddStatus?.bound) {
-        void toast('尚未绑定钉钉账号：请点击顶栏钉钉状态丸完成扫码绑定', 'error')
-        showBind()
-        return
-      }
-      const deptBridge = state.bridges.some((b) => b.purpose === 'channel' && (!b.dept || b.dept === state.dept))
-      if (!deptBridge) {
-        void toast('本部门尚未绑定钉钉群桥：请联系管理员在频道旁「⇄钉钉」绑定群后重试', 'error')
-        return
-      }
-      el.disabled = true
-      try {
-        await api.post(`/api/panel/${state.dept}/scenes/${el.dataset.syncdd}/sync-dingtalk`)
-        void toast('场景卡已请求同步至钉钉协作群')
-      } catch (error) {
-        void toast(error.message, 'error')
-      } finally {
-        el.disabled = false
-      }
-    }
-  })
 }
 
-function activityLabel(key) {
-  const labels = { rd: '研发设计', mfg: '生产制造', scm: '供应链管理', svc: '运维服务', mkt: '数字营销', mgmt: '经营管理', fin: '法财税与成本' }
-  return labels[key] ?? key
-}
-
-function sceneCardHtml(scene) {
-  return `<div class="scene-card">
-    <div class="sc-top"><span class="sc-code">${esc(scene.code)}</span><span class="sc-name">${esc(scene.name)}</span>
-      <span class="sc-stars">${stars(scene.s)}</span>
-      ${scene.tags.map((tag) => `<span class="sc-tag ${TAG_CLS[tag] ?? ''}">${esc(tag)}</span>`).join('')}</div>
-    <div class="sc-pain"><b>痛点：</b>${esc(scene.pain)}</div>
-    <div class="sc-lists">
-      <div class="sc-list"><span class="lk">工具软件</span><span>${scene.tools.map((chip) => `<span class="chip">${esc(chip)}</span>`).join('')}</span></div>
-      <div class="sc-list"><span class="lk">知识模型</span><span>${scene.models.map((chip) => `<span class="chip">${esc(chip)}</span>`).join('')}</span></div>
-      <div class="sc-list"><span class="lk">数据要素</span><span>${scene.data.map((chip) => `<span class="chip">${esc(chip)}</span>`).join('')}</span></div>
-      <div class="sc-list"><span class="lk">人才技能</span><span>${scene.talent.map((chip) => `<span class="chip">${esc(chip)}</span>`).join('')}</span></div>
+function showModelForm(existing) {
+  showModal(existing ? `🧠 编辑模型 · ${esc(existing.slug)}` : '🧠 登记模型（OpenAI 兼容 chat/completions）', `
+    <div class="mform">
+      <label>模型 slug（唯一标识）*
+        <input id="mfSlug" value="${esc(existing?.slug ?? '')}" ${existing ? 'disabled title="slug 是登记主键，如需变更请新建登记"' : ''} placeholder="如 deepseek-chat"></label>
+      <label>显示名<input id="mfName" value="${esc(existing?.displayName ?? '')}" placeholder="缺省同 slug"></label>
+      <label>厂商<input id="mfProvider" value="${esc(existing?.provider ?? '')}" placeholder="如 deepseek / aliyun / openai"></label>
+      <label>Endpoint（OpenAI 兼容基址，必须含 /v1 路径）*<input id="mfEndpoint" value="${esc(existing?.endpoint ?? '')}" placeholder="如 https://api.deepseek.com/v1（漏 /v1 会 404）"></label>
+      <label>API Key${existing ? '（留空保持不变）' : ''}<input id="mfKey" type="password" autocomplete="new-password" placeholder="${existing ? '留空保持既有密钥' : '直填或环境变量引用（如 env:DEEPSEEK_API_KEY）'}"></label>
+      <div class="mform-grid">
+        <label>挂牌价（分/千 tokens）*<input id="mfList" type="number" min="0" step="0.1" value="${existing?.listCentsPerKTokens ?? 0}"></label>
+        <label>成本价（分/千 tokens）<input id="mfCost" type="number" min="0" step="0.1" value="${existing?.costCentsPerKTokens ?? ''}" placeholder="缺省为挂牌价一半"></label>
+      </div>
+      <label>状态<select id="mfStatus">
+        <option value="online" ${existing?.status !== 'offline' ? 'selected' : ''}>在线（可调用）</option>
+        <option value="offline" ${existing?.status === 'offline' ? 'selected' : ''}>离线（停用）</option>
+      </select></label>
     </div>
-    <div class="sc-ops">
-      <button class="btn primary" data-diag="${esc(scene.code)}">🤖 派 Agent 诊断</button>
-      <button class="btn dd" data-syncdd="${esc(scene.code)}">📤 同步钉钉群</button>
-    </div></div>`
+    <div style="display:flex;gap:10px">
+      <button class="btn primary" id="mfSave">保存</button>
+      <button class="btn" id="mfCancel">返回</button>
+    </div>
+    <p class="note">密钥支持 env: 变量名引用，回显一律脱敏；保存即生效并全程审计。保存后用「测试」真实调用一次验证连通（按量计费）。</p>`)
+  $id('mfCancel').onclick = hideModal
+  $id('mfSave').onclick = async (event) => {
+    const payload = {
+      slug: $id('mfSlug').value.trim(),
+      displayName: $id('mfName').value.trim(),
+      provider: $id('mfProvider').value.trim(),
+      endpoint: $id('mfEndpoint').value.trim(),
+      listCentsPerKTokens: Number($id('mfList').value) || 0,
+      status: $id('mfStatus').value,
+    }
+    const cost = $id('mfCost').value
+    if (cost !== '') payload.costCentsPerKTokens = Number(cost)
+    const key = $id('mfKey').value.trim()
+    if (key) payload.apiKey = key
+    if (!payload.slug) { void toast('模型 slug 必填', 'error'); return }
+    if (!payload.endpoint) { void toast('Endpoint 必填（未配置不可调用）', 'error'); return }
+    event.target.disabled = true
+    try {
+      await api.post('/api/panel/models', payload)
+      void toast(`模型 ${payload.slug} 已保存`)
+      await refreshModels()
+      hideModal()
+      renderAgentRail()
+      if (state.nav === 'mchannels' || state.nav === 'cockpit') renderView()
+    } catch (error) {
+      event.target.disabled = false
+      void toast(error.message, 'error')
+    }
+  }
 }
 
-// ---------------------------------------------------------------------------
-// 绑定向导（D2 裁决：iam 扫码绑定为事实源，无一次性绑定码）
-// ---------------------------------------------------------------------------
-
-/** dws CLI 桥模式绑定面（2026-09-11）：装态无钉钉桥时，安装 dws CLI → 绑定目标群 → 测试投递。 */
+/** dws CLI 桥模式绑定面（装态无钉钉桥时）：安装 dws CLI → 绑定目标群 → 测试投递。 */
 function showBindDws(status) {
   const steps = [
     `<div class="step ${status.installed ? 'done' : ''}"><div class="no">${status.installed ? '✓' : '1'}</div><div>
@@ -1391,11 +2184,11 @@ function showBindDws(status) {
     `<div class="step"><div class="no">3</div><div>
       <div class="st-t">测试投递</div>
       <div class="st-d">向绑定群真实发送一条测试消息（走 dws chat，失败原因如实回显）。</div>
-      <div style="margin-top:8px"><button class="btn" id="dwsTest" ${status.installed && status.bound ? '' : 'disabled title="先完成安装与绑群"'}>📤 发送测试消息</button></div></div></div>`,
+      <div style="margin-top:8px"><button class="btn" id="dwsTest" ${status.installed && status.bound ? '' : 'disabled'}>📤 发送测试消息</button></div></div></div>`,
   ]
   showModal('⇄ 钉钉连接（dws CLI 模式）', `${steps.join('')}
     <p class="note">安全边界：钉钉授权态归 dws CLI 自身（本面板零凭证）；安装/绑群/投递全程审计留痕；投递失败会落到消息同步状态与告警，绝不静默丢消息。</p>`)
-  const installBtn = document.getElementById('dwsInstall')
+  const installBtn = $id('dwsInstall')
   if (installBtn) {
     installBtn.onclick = async (event) => {
       event.target.disabled = true
@@ -1410,10 +2203,10 @@ function showBindDws(status) {
       showBindDws(state.ddStatus ?? status)
     }
   }
-  const saveBtn = document.getElementById('dwsBindSave')
+  const saveBtn = $id('dwsBindSave')
   if (saveBtn) {
     saveBtn.onclick = async (event) => {
-      const group = document.getElementById('dwsGroup').value.trim()
+      const group = $id('dwsGroup').value.trim()
       if (!group) { void toast('群名/会话 ID 必填', 'error'); return }
       event.target.disabled = true
       try {
@@ -1427,7 +2220,7 @@ function showBindDws(status) {
       }
     }
   }
-  const unbindBtn = document.getElementById('dwsUnbind')
+  const unbindBtn = $id('dwsUnbind')
   if (unbindBtn) {
     unbindBtn.onclick = async () => {
       try {
@@ -1440,7 +2233,7 @@ function showBindDws(status) {
       }
     }
   }
-  const testBtn = document.getElementById('dwsTest')
+  const testBtn = $id('dwsTest')
   if (testBtn) {
     testBtn.onclick = async (event) => {
       event.target.disabled = true
@@ -1474,10 +2267,10 @@ async function showBind() {
       ${bound ? '' : '<div style="margin-top:8px"><button class="btn dd" id="bindStart">📱 去钉钉扫码绑定</button></div>'}</div></div>
     <div class="step"><div class="no">3</div><div>
       <div class="st-t">频道群桥（管理员）</div>
-      <div class="st-d">在频道旁「⇄钉钉」处绑定钉钉群会话（openConversationId + robotCode）后，开启「钉钉同步」的消息将投递到群。</div></div></div>
+      <div class="st-d">绑定钉钉群会话后，开启「钉钉同步」的消息将投递到群。</div></div></div>
     <p class="note">安全边界：身份绑定事实源为 iam identityLinks（扫码授权）；出向投递凭证单一来源=连接器配置（本面板零凭证）；
-    高风险审批钉钉回决必须二次确认（fail-closed）；入向 Stream 在官方连接器暴露面核对前停用（R-SPIKE）。</p>`)
-  const startBtn = document.getElementById('bindStart')
+    高风险审批钉钉回决必须二次确认（fail-closed）。</p>`)
+  const startBtn = $id('bindStart')
   if (startBtn) {
     startBtn.onclick = async () => {
       try {
@@ -1497,21 +2290,18 @@ async function showBind() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// 面板配置抽屉（widget/KPI/Agent 阵容，panel.config.write）
-// ---------------------------------------------------------------------------
-
 async function showConfig() {
-  const dept = state.overview.dept
+  const dept = state.overview?.dept
+  if (!dept) return
   let orgs = null
   try {
     orgs = (await api.get('/api/panel/orgs')).orgs
   } catch { /* 无 panel.config.write 或组织面不可用：隐藏绑定区 */ }
-  showModal(`⚙ ${dept.label}面板配置`, `
+  showModal(`⚙ ${esc(dept.label)}面板配置`, `
     <p class="note" style="margin-top:0">配置需 panel.config.write 权限。修改立即生效（全程审计）。</p>
     ${orgs ? `
     <div style="margin:12px 0">
-      <div class="col-title"><span>组织绑定（账号组织打通：绑定后仅该组织子树成员可访问本部门）</span></div>
+      <div class="col-title"><span>组织绑定（绑定后仅该组织子树成员可访问本部门）</span></div>
       <div class="lic-row"><span class="lr-ic">🏷</span>
         <select id="cfgOrg" style="flex:1;border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px">
           <option value="">（不绑定——对全部 panel.read 持有者开放）</option>
@@ -1527,352 +2317,31 @@ async function showConfig() {
           <input id="agentRef${index}" value="${esc(agent.agentRef ?? '')}" placeholder="agent:资产id/slug（可空）"
             style="border:1px solid var(--line);border-radius:6px;padding:4px 8px;font-size:11px;width:180px">
         </div>`).join('')}
-      <div class="col-title" style="margin-top:12px"><span>WIDGET 来源（连接器接入前均为 mock/手工 徽标）</span></div>
-      ${dept.widgets.map((widget) => `
-        <div class="lic-row"><span class="lr-ic">📊</span><span>${esc(widget.title)}</span>
-          <span class="lr-st" style="background:var(--bg);color:var(--txt2)">${esc(widget.source)}${widget.ref ? ` · ${esc(widget.ref)}` : ''}</span></div>`).join('')}
     </div>
     <div style="display:flex;gap:10px">
       <button class="btn primary" id="cfgSave">保存配置</button>
       <button class="btn" id="cfgCancel">关闭</button>
     </div>`)
-  document.getElementById('cfgCancel').onclick = hideModal
-  document.getElementById('cfgSave').onclick = async (event) => {
+  $id('cfgCancel').onclick = hideModal
+  $id('cfgSave').onclick = async (event) => {
     event.target.disabled = true
     try {
       const agents = dept.agents.map((agent, index) => {
-        const ref = document.getElementById(`agentRef${index}`).value.trim()
+        const ref = $id(`agentRef${index}`).value.trim()
         const rest = { name: agent.name, desc: agent.desc, icon: agent.icon, ...(agent.busy ? { busy: true } : {}) }
         return ref ? { ...rest, agentRef: ref } : rest
       })
-      const orgSelect = document.getElementById('cfgOrg')
+      const orgSelect = $id('cfgOrg')
       const promises = [api.put(`/api/panel/${dept.id}/agents`, { agents })]
       if (orgSelect) promises.push(api.put(`/api/panel/${dept.id}/config`, { orgId: orgSelect.value || null }))
       const [agentsRes] = await Promise.all(promises)
       state.overview.dept.agents = agentsRes.agents
       hideModal()
       void toast('配置已保存（范围权限/阵容绑定立即生效）')
-      void refreshOverview()
+      await refreshOverview()
     } catch (error) {
       event.target.disabled = false
       void toast(error.message, 'error')
     }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 模型配置（与 dsh 服务共用 modelgw 唯一事实源；读 panel.read / 管 panel.config.write）
-// ---------------------------------------------------------------------------
-
-async function showModels() {
-  let models
-  try {
-    models = (await api.get('/api/panel/models')).models ?? []
-  } catch (error) {
-    void toast(error.message, 'error')
-    return
-  }
-  state.models = models
-  const dshManaged = state.modelSource === 'dsh'
-  const canEdit = session.can('panel.config.write') && !dshManaged
-  const rows = models.map((model) => `
-    <div class="lic-row">
-      <span class="lr-ic">🧠</span>
-      <span style="flex:1;min-width:0">
-        ${esc(model.displayName || model.slug)} <span class="mono">${esc(model.slug)}</span>
-        <span style="display:block;font-size:10px;color:var(--txt2)">${esc(model.provider)} · ${esc(model.endpoint || '（未配置 endpoint，拒绝调用）')}</span>
-        <span style="display:block;font-size:10px;color:var(--txt2)">挂牌 ${esc(model.listCentsPerKTokens)} / 成本 ${esc(model.costCentsPerKTokens)} 分/千tokens · 密钥 ${esc(model.apiKey)}</span>
-      </span>
-      <span class="st ${model.status === 'online' ? 'ok' : 'lock'}" style="margin-left:0">${model.status === 'online' ? '在线' : '离线'}</span>
-      ${canEdit ? `<span class="model-ops">
-        <button class="btn" data-mtest="${esc(model.slug)}" title="真实调用一次（走计量计费全链，失败如实回传）">测试</button>
-        <button class="btn" data-medit="${esc(model.id)}">编辑</button>
-        <button class="btn" data-mdel="${esc(model.id)}" title="从目录移除登记（计量与审计数据保留）">删除</button>
-      </span>` : ''}
-    </div>`).join('')
-    || '<div class="sys-line"><span>模型目录为空：登记后即可在协作会话切换模型、供 Agent 真实调用。</span></div>'
-  showModal('🧠 模型配置（与 dsh 服务共用模型目录）', `
-    <p class="note" style="margin-top:0">${dshManaged
-      ? '当前为 <b>dsh 配置托管模式</b>：下列模型来自 dsh 默认配置（agent-default-model 与已配置的 llm 适配器路由），面板只读；增删改请在 dsh 侧完成，本面板的 Agent 调用与连通测试直接走 dsh 模型通道。'
-      : '模型目录（modelgw）是平台服务唯一的模型事实源：此处登记的模型 = 协作会话对话框可切换的模型 = 面板 Agent 实际调用的模型，与 dsh 本身服务保持一致。调用走真实上游（OpenAI 兼容 chat/completions），未配置 endpoint 的模型拒绝调用、绝不造假回复。'}</p>
-    <div style="margin:12px 0">${rows}</div>
-    ${canEdit ? `<div style="display:flex;gap:10px">
-      <button class="btn primary" id="modelAdd">＋ 登记模型</button>
-      <button class="btn" id="modelClose">关闭</button>
-    </div>` : '<p class="note">登记/修改模型需 panel.config.write 权限。</p>'}`)
-  const closeBtn = document.getElementById('modelClose')
-  if (closeBtn) closeBtn.onclick = hideModal
-  const addBtn = document.getElementById('modelAdd')
-  if (addBtn) addBtn.onclick = () => showModelForm(null)
-  document.querySelectorAll('[data-mtest]').forEach((el) => {
-    el.onclick = async () => {
-      el.disabled = true
-      try {
-        // 真实外呼可能慢于默认 20s（QA BUG-U-03 超时豁免项）
-        const result = await api.post(`/api/panel/models/${encodeURIComponent(el.dataset.mtest)}/test`, {}, { timeoutMs: 60_000 })
-        void toast(result.ok ? `✓ ${result.model} 连通正常（输出 ${result.outputTokens} tokens）` : `✗ 连通失败：${result.error}`, result.ok ? undefined : 'error')
-      } catch (error) {
-        void toast(error.message, 'error')
-      } finally {
-        el.disabled = false
-      }
-    }
-  })
-  document.querySelectorAll('[data-medit]').forEach((el) => {
-    el.onclick = () => showModelForm(models.find((model) => model.id === el.dataset.medit) ?? null)
-  })
-  document.querySelectorAll('[data-mdel]').forEach((el) => {
-    el.onclick = async () => {
-      const model = models.find((item) => item.id === el.dataset.mdel)
-      if (!window.confirm(`确定从模型目录移除「${model?.slug ?? el.dataset.mdel}」？（绑定该模型的 Agent 将无法调用）`)) return
-      el.disabled = true
-      try {
-        await api.delete(`/api/panel/models/${el.dataset.mdel}`)
-        void toast('已移除模型登记')
-        void showModels()
-        void refreshModels().then(() => { if (state.tab === 'chat') renderMain() })
-      } catch (error) {
-        el.disabled = false
-        void toast(error.message, 'error')
-      }
-    }
-  })
-}
-
-function showModelForm(existing) {
-  showModal(existing ? `🧠 编辑模型 · ${esc(existing.slug)}` : '🧠 登记模型（OpenAI 兼容 chat/completions）', `
-    <div class="mform">
-      <label>模型 slug（唯一标识；Agent 资产 model 属性与对话框切换均使用它）*
-        <input id="mfSlug" value="${esc(existing?.slug ?? '')}" ${existing ? 'disabled title="slug 是登记主键，如需变更请新建登记"' : ''} placeholder="如 deepseek-chat"></label>
-      <label>显示名<input id="mfName" value="${esc(existing?.displayName ?? '')}" placeholder="缺省同 slug"></label>
-      <label>厂商<input id="mfProvider" value="${esc(existing?.provider ?? '')}" placeholder="如 deepseek / aliyun / openai"></label>
-      <label>Endpoint（OpenAI 兼容基址，必须含 /v1 路径）*<input id="mfEndpoint" value="${esc(existing?.endpoint ?? '')}" placeholder="如 https://api.deepseek.com/v1（漏 /v1 会 404）"></label>
-      <label>API Key${existing ? '（留空保持不变）' : ''}<input id="mfKey" type="password" autocomplete="new-password" placeholder="${existing ? '留空保持既有密钥' : '直填或环境变量引用（如 env:DEEPSEEK_API_KEY）'}"></label>
-      <div class="mform-grid">
-        <label>挂牌价（分/千 tokens）*<input id="mfList" type="number" min="0" step="0.1" value="${existing?.listCentsPerKTokens ?? 0}"></label>
-        <label>成本价（分/千 tokens）<input id="mfCost" type="number" min="0" step="0.1" value="${existing?.costCentsPerKTokens ?? ''}" placeholder="缺省为挂牌价一半"></label>
-      </div>
-      <label>状态<select id="mfStatus">
-        <option value="online" ${existing?.status !== 'offline' ? 'selected' : ''}>在线（可调用）</option>
-        <option value="offline" ${existing?.status === 'offline' ? 'selected' : ''}>离线（停用）</option>
-      </select></label>
-    </div>
-    <div style="display:flex;gap:10px">
-      <button class="btn primary" id="mfSave">保存</button>
-      <button class="btn" id="mfCancel">返回列表</button>
-    </div>
-    <p class="note">密钥支持 env: 变量名引用（调用时读取进程环境变量），回显一律脱敏；保存即生效并全程审计。保存后可用列表中「测试」真实调用一次验证连通（按量计费）。</p>`)
-  document.getElementById('mfCancel').onclick = () => void showModels()
-  document.getElementById('mfSave').onclick = async (event) => {
-    const payload = {
-      slug: document.getElementById('mfSlug').value.trim(),
-      displayName: document.getElementById('mfName').value.trim(),
-      provider: document.getElementById('mfProvider').value.trim(),
-      endpoint: document.getElementById('mfEndpoint').value.trim(),
-      listCentsPerKTokens: Number(document.getElementById('mfList').value) || 0,
-      status: document.getElementById('mfStatus').value,
-    }
-    const cost = document.getElementById('mfCost').value
-    if (cost !== '') payload.costCentsPerKTokens = Number(cost)
-    const key = document.getElementById('mfKey').value.trim()
-    if (key) payload.apiKey = key
-    if (!payload.slug) { void toast('模型 slug 必填', 'error'); return }
-    if (!payload.endpoint) { void toast('Endpoint 必填（未配置不可调用）', 'error'); return }
-    event.target.disabled = true
-    try {
-      await api.post('/api/panel/models', payload)
-      void toast(`模型 ${payload.slug} 已保存`)
-      await refreshModels()
-      if (state.tab === 'chat') renderMain()
-      void showModels()
-    } catch (error) {
-      event.target.disabled = false
-      void toast(error.message, 'error')
-    }
-  }
-}
-
-function showNewChannel() {
-  showModal('＋ 发起协作（新建频道）', `
-    <div style="display:flex;flex-direction:column;gap:10px">
-      <input id="chanName" placeholder="频道名（如：异常快速响应群）" style="border:1px solid var(--line);border-radius:8px;padding:9px 12px;font-size:13px">
-      <div style="display:flex;gap:10px">
-        <button class="btn primary" id="chanSubmit">创建</button>
-        <button class="btn" id="chanCancel">取消</button>
-      </div>
-    </div>`)
-  document.getElementById('chanCancel').onclick = hideModal
-  document.getElementById('chanSubmit').onclick = async (event) => {
-    const name = document.getElementById('chanName').value.trim()
-    if (!name) { void toast('频道名必填', 'error'); return }
-    event.target.disabled = true
-    try {
-      const result = await api.post(`/api/panel/${state.dept}/channels`, { name })
-      state.overview.channels.push({ ...result.channel, unread: 0 })
-      state.channelId = result.channel.id
-      localStorage.setItem(`panel_channel_${state.dept}`, state.channelId)
-      hideModal()
-      renderColLeft()
-      state.tab = 'chat'
-      await loadTab()
-      renderMain()
-    } catch (error) {
-      event.target.disabled = false
-      void toast(error.message, 'error')
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// ⌘K（动态源：Agent / 频道 / 场景 / 同事）
-// ---------------------------------------------------------------------------
-
-async function openCmdk() {
-  const mask = document.createElement('div')
-  mask.className = 'cmdk-mask'
-  mask.innerHTML = `
-    <div class="cmdk">
-      <input id="cmdkInput" placeholder="搜索 Agent / 技能 / 频道 / 场景 / 同事…">
-      <div class="cmdk-list" id="cmdkList"></div>
-    </div>`
-  document.body.appendChild(mask)
-  mask.addEventListener('click', (event) => {
-    if (event.target === mask) mask.remove()
-  })
-  const input = mask.querySelector('#cmdkInput')
-  const list = mask.querySelector('#cmdkList')
-  input.focus()
-
-  const sources = []
-  for (const dept of state.depts) {
-    for (const agent of dept.agents) sources.push({ group: 'Agent', icon: agent.icon, label: agent.name, sub: dept.label, act: () => { mask.remove(); void switchDept(dept.id); atMention(agent.name) } })
-  }
-  for (const dept of state.depts) {
-    for (const channel of state.overview?.dept?.id === dept.id ? state.overview.channels : []) {
-      sources.push({ group: '频道', icon: '#', label: channel.name, sub: dept.label, act: () => { mask.remove(); void switchDept(dept.id).then(() => switchChannel(channel.id)) } })
-    }
-  }
-  // 技能源（C1-2）：选中即回协作会话并把 /技能名 填进输入框
-  for (const skill of state.skills.slice(0, 8)) {
-    sources.push({ group: '技能', icon: '⚡', label: skill.name, sub: skill.summary || skill.category, act: () => { mask.remove(); state.tab = 'chat'; localStorage.setItem('panel_tab', 'chat'); insertSkill(skill.name) } })
-  }
-  try {
-    const graph = state.industry ? await api.get(`/api/panel/scenegraph?industry=${state.industry.code.toUpperCase()}`) : null
-    if (graph) {
-      for (const [activity, scenes] of Object.entries(graph.pack.activities)) {
-        for (const scene of scenes) {
-          sources.push({ group: '场景', icon: '🗺', label: `${scene.code} ${scene.name}`, sub: activityLabel(activity), act: () => { mask.remove(); state.tab = 'scene'; void loadTab().then(renderMain) } })
-        }
-      }
-    }
-  } catch { /* 图谱不可用时跳过场景源 */ }
-  let colleagues = []
-  // 同事源：部门名册（账号组织打通，随总览下发、无额外权限要求）优先，roster 接口兜底
-  colleagues = (state.overview?.members ?? []).map((member) => ({ group: '同事', icon: '🧑', label: member.name, sub: member.title ?? member.orgName ?? '', act: () => { mask.remove(); atMention(member.name) } }))
-  if (colleagues.length === 0) {
-    try {
-      const roster = await api.get('/api/iam/roster')
-      colleagues = roster.users.slice(0, 200).map((user) => ({ group: '同事', icon: '🧑', label: user.displayName ?? user.name ?? user.id, sub: user.orgName ?? '', act: () => { mask.remove(); atMention(String(user.displayName ?? user.name ?? '')) } }))
-    } catch { /* 无 iam.roster.read 权限且部门名册为空时诚实略过 */ }
-  }
-  sources.push(...colleagues)
-
-  const render = () => {
-    const query = input.value.trim().toLowerCase()
-    const hits = sources.filter((item) => !query || item.label.toLowerCase().includes(query) || item.sub.toLowerCase().includes(query)).slice(0, 40)
-    list.innerHTML = hits.length === 0 ? '<div class="cmdk-empty">无匹配结果</div>'
-      : [...new Set(hits.map((item) => item.group))].map((group) => `
-        <div class="cmdk-group">${group}</div>
-        ${hits.filter((item) => item.group === group).map((item, index) => `
-          <div class="cmdk-item" data-idx="${hits.indexOf(hits.filter((x) => x.group === group)[index])}">
-            <span>${esc(item.icon)}</span><span>${esc(item.label)}</span><span class="sub">${esc(item.sub)}</span>
-          </div>`).join('')}`).join('')
-    list.querySelectorAll('.cmdk-item').forEach((el) => {
-      el.onclick = () => hits[Number(el.dataset.idx)]?.act()
-    })
-  }
-  input.oninput = render
-  render()
-}
-
-// ---------------------------------------------------------------------------
-// 战略看板视图（双轨：/panel 面自持看板，数据面 /api/panel/board 一套端点下发）
-// ---------------------------------------------------------------------------
-
-/** 顶栏视图切换：工作台（rail+dept 三栏）与战略看板互斥显隐；看板首次进入才拉数据。 */
-function applyView() {
-  const rail = document.getElementById('rail')
-  const dept = document.getElementById('dept')
-  const board = document.getElementById('board')
-  if (!rail || !dept || !board) return
-  const isBoard = state.view === 'board'
-  rail.style.display = isBoard ? 'none' : ''
-  dept.style.display = isBoard ? 'none' : ''
-  board.style.display = isBoard ? '' : 'none'
-  if (isBoard) void renderBoardView()
-}
-
-/** 战略看板：聚合面（资产/漏斗/趋势/WAIC/ROI）+ 卡片包面（角色×平台下发，上限 6 张）。 */
-async function renderBoardView() {
-  const host = document.getElementById('board')
-  if (!host) return
-  const stamp = `${state.boardPlatform}|${state.view}`
-  if (host.dataset.loaded === stamp) return
-  host.innerHTML = '<div class="board-loading">看板加载中…</div>'
-  try {
-    const q = state.boardPlatform ? `?platform=${encodeURIComponent(state.boardPlatform)}` : ''
-    const b = await api.get(`/api/panel/board${q}`)
-    host.dataset.loaded = stamp
-    const platforms = b.availablePlatforms ?? []
-    const funnel = b.funnel ?? {}
-    const days = b.byDay ?? []
-    const maxDay = Math.max(1, ...days.map((d) => d.count))
-    const cards = (b.cards ?? []).map((card) => (
-      `<a class="board-card" target="_blank" rel="noopener" href="${basePath() || ''}/${esc(card.href)}">` +
-      `<span class="bc-badge">${esc(card.badge)}</span>` +
-      `<div class="bc-title">${esc(card.title)}</div>` +
-      `<div class="bc-desc">${esc(card.description)}</div></a>`
-    )).join('')
-    host.innerHTML = `
-      <div class="board-head">
-        <div class="board-title">📈 战略看板<span class="tag">${esc(b.platform ?? '')}${b.label ? ' · ' + esc(b.label) : ''}</span></div>
-        <div class="board-plat">${platforms.map((pf) => `<span class="plat-chip${pf === b.platform ? ' active' : ''}" data-p="${esc(pf)}">${esc(PLATFORM_LABELS[pf] ?? pf)}</span>`).join('')}</div>
-        <span class="board-stamp">更新于 ${esc(fmtTime(b.generatedAt))} · 近 ${esc(String(b.windowDays ?? 7))} 天</span>
-      </div>
-      <div class="board-grid">
-        <div class="board-blk"><h3>在线资产</h3><div class="board-row">
-          <div class="kpi"><div class="v">${b.assets?.appsOnline ?? 0}</div><div class="k">AI 应用</div></div>
-          <div class="kpi"><div class="v">${b.assets?.agentsOnline ?? 0}</div><div class="k">Agent 本体</div></div>
-          <div class="kpi"><div class="v">${b.assets?.skillsPublished ?? 0}</div><div class="k">已上架技能</div></div>
-          <div class="kpi"><div class="v">${b.assets?.mcpServing ?? 0}</div><div class="k">MCP 服务中</div></div>
-        </div></div>
-        <div class="board-blk"><h3>价值漏斗（曝光 → 点击 → 调用 → 完成）</h3><div class="board-funnel">
-          <div class="fn-step"><div class="v">${funnel.exposed ?? 0}</div><div class="k">曝光</div></div><span class="fn-arr">→</span>
-          <div class="fn-step"><div class="v">${funnel.clicked ?? 0}</div><div class="k">点击</div></div><span class="fn-arr">→</span>
-          <div class="fn-step"><div class="v">${funnel.invoked ?? 0}</div><div class="k">调用</div></div><span class="fn-arr">→</span>
-          <div class="fn-step"><div class="v">${funnel.completed ?? 0}</div><div class="k">完成</div></div>
-        </div></div>
-        <div class="board-blk"><h3>调用量趋势（近 7 天）</h3><div class="board-days">${days.map((d) => `<div class="day" style="height:${Math.round((d.count / maxDay) * 64) + 4}px" title="${esc(d.day)}：${d.count} 次"><i></i></div>`).join('') || '<span class="dim">暂无数据</span>'}</div></div>
-        <div class="board-blk"><h3>WAIC 口径（近 7 天）</h3><div class="board-row">
-          <div class="kpi"><div class="v">${b.waic?.count ?? 0}</div><div class="k">调用次数</div></div>
-          <div class="kpi"><div class="v">¥${(((b.waic?.chargeCents ?? 0)) / 100).toFixed(2)}</div><div class="k">平台费用</div></div>
-        </div></div>
-        <div class="board-blk"><h3>ROI 用工成本估算（WP-14）</h3><div class="board-row">
-          <div class="kpi"><div class="v">${b.roi?.estimatedHoursSaved ?? 0}h</div><div class="k">替代工时（估）</div></div>
-          <div class="kpi"><div class="v">¥${((b.roi?.estimatedLaborCostCents ?? 0) / 100).toFixed(0)}</div><div class="k">人力成本（估）</div></div>
-          <div class="kpi"><div class="v">¥${((b.roi?.platformChargeCents ?? 0) / 100).toFixed(2)}</div><div class="k">平台费用</div></div>
-        </div><p class="board-note">${esc(b.roi?.note ?? '')}</p></div>
-        <div class="board-blk"><h3>部门快捷入口（上限 6 张）</h3><div class="board-cards">${cards || '<span class="dim">当前平台暂无卡片</span>'}</div></div>
-      </div>`
-    host.querySelectorAll('.plat-chip').forEach((chip) => {
-      chip.onclick = () => {
-        state.boardPlatform = chip.dataset.p ?? ''
-        localStorage.setItem('panel_board_platform', state.boardPlatform)
-        host.dataset.loaded = ''
-        void renderBoardView()
-      }
-    })
-  } catch (error) {
-    host.innerHTML = `<div class="board-loading">看板加载失败：${esc(String(error?.message ?? error))}</div>`
   }
 }

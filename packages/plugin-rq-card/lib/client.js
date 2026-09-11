@@ -1,4 +1,4 @@
-/* rq-card-build-id: 6344415781241c86 */
+/* rq-card-build-id: 8851bb90c19f7ed8 */
 (function () {
   var PLUGIN_ID = "@ybkk/plugin-rq-card";
   var DIAG = window.__RQ_CARD_DIAG__ = window.__RQ_CARD_DIAG__ || { installed: false, attempts: [] };
@@ -146,7 +146,12 @@ var RqFeedbackController = class {
     const current = this.view.items.get(messageId);
     if (current?.score === score) return Promise.resolve();
     this.commit(messageId, score);
-    return postFeedback({ messageId, score, ...note === void 0 ? {} : { note } }).then((result) => {
+    return postFeedback({
+      resource: `chat:message:${messageId}`,
+      messageId,
+      score,
+      ...note === void 0 ? {} : { note }
+    }).then((result) => {
       if (!result.ok) {
         console.debug("[rq-card] feedback not recorded:", result.error.message);
       }
@@ -453,10 +458,10 @@ var zh = {
   "settings.probe.fail": "\u4E0D\u53EF\u8FBE",
   "settings.refresh": "\u5237\u65B0\u72B6\u6001",
   "settings.open.wizard": "\u6253\u5F00\u8FDE\u63A5\u5411\u5BFC",
-  "settings.open.panel": "\u6253\u5F0001\u95E8\u5DE5\u4F5C\u53F0",
+  "settings.open.panel": "\u6253\u5F00\u884C\u4E1A AI \u5DE5\u4F5C\u53F0",
   "settings.hint": "\u8FDE\u63A5\u5BBF\u4E3B\uFF08\u9009\u62E9 IP\uFF09\u5E76\u5728\u9762\u677F\u5B8C\u6210\u9489\u9489/\u8D26\u53F7\u767B\u5F55\uFF1B\u9762\u677F\u5730\u5740 /gate01/panel/\u3002",
   // ── 会话视图 Tab「01门工作台」（M3）──
-  "view.workbench": "01\u95E8\u5DE5\u4F5C\u53F0",
+  "view.workbench": "\u884C\u4E1A AI \u5DE5\u4F5C\u53F0",
   "view.open.external": "\u5728\u6D4F\u89C8\u5668\u6253\u5F00",
   // ── 未连接角标（M3，shell.overlay）──
   "overlay.unlinked": "01\u95E8\uFF1A\u672A\u8FDE\u63A5\u5BBF\u4E3B\uFF0C\u70B9\u51FB\u6253\u5F00\u5411\u5BFC"
@@ -499,9 +504,9 @@ var en = {
   "settings.probe.fail": "unreachable",
   "settings.refresh": "Refresh",
   "settings.open.wizard": "Open connect wizard",
-  "settings.open.panel": "Open RongQi workbench",
+  "settings.open.panel": "Open Industry AI Workbench",
   "settings.hint": "Link a host (pick an IP) and sign in with DingTalk/account on the panel; panel lives at /gate01/panel/.",
-  "view.workbench": "RongQi workbench",
+  "view.workbench": "Industry AI Workbench",
   "view.open.external": "Open in browser",
   "overlay.unlinked": "RongQi: host not linked \u2014 click to open the wizard"
 };
