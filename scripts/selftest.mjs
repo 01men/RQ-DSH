@@ -3780,7 +3780,7 @@ try {
 
   // -- OPT-P1-02 冒充面封死（能力令牌替代旧布尔旁路） ---------------------------------
   const smuggleResp = await api('POST', '/api/tools/execute', { token: connDevLogin.data.token, body: { name: 'connector_execute', args: { actionId: 'hackernews.do_the_thing', input: { work: 1 }, viaApprovalExecutor: true, approvalCapability: { token: 'forged-by-attacker', actionId: 'hackernews.do_the_thing', callerId: 'attacker', expiresAt: Date.now() + 60_000 } } } })
-  const smuggleValue = (smuggleResp.data?.value ?? smuggleResp.data) as { status?: string; approvalId?: string }
+  const smuggleValue = smuggleResp.data?.value ?? smuggleResp.data ?? {}
   check('P1-02 工具桥走私旧布尔/伪造能力令牌 → 仍强制开单（fail-closed）', smuggleValue?.status === 'approval_required' && Boolean(smuggleValue.approvalId), JSON.stringify(smuggleValue ?? {}).slice(0, 240))
   let booleanBypassHits = 0
   const scanBypass = (dir) => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const filePath = join(dir, entry.name); if (entry.isDirectory()) { if (entry.name !== 'node_modules') scanBypass(filePath) } else if (filePath.endsWith('.ts') && readFileSync(filePath, 'utf8').includes('viaApprovalExecutor')) booleanBypassHits++ } }
@@ -4133,6 +4133,10 @@ try {
   const contractLintRepo = spawn(process.execPath, ['scripts/lint-manifests.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => contractLintRepo.on('close', resolve))
   check('契约比对真仓零红（路由/工具/权限双向一致，lint:manifests 通道）', contractLintRepo.exitCode === 0, `exit=${contractLintRepo.exitCode}`)
+  // connect 工具远程代理契约化自证（OPT-P1-03：扩展点挂载/转发失败 fail-closed/注销还原）
+  const connectProxyTest = spawn(process.execPath, ['packages/plugin-connect/src/proxy.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => connectProxyTest.on('close', resolve))
+  check('connect 远程代理契约化随包单测全绿（node --test）', connectProxyTest.exitCode === 0, `exit=${connectProxyTest.exitCode}`)
   // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
   const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
   check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',

@@ -65,17 +65,22 @@ export interface ToolExecutionResultLite {
 
 export type ToolGuardLite = (input: { name: string; arguments: unknown }) => string | undefined
 
+/** 注册级拦截器（OPT-P1-03 正式扩展点）：所有 register 调用先过拦截链，返回（可替换的）定义。 */
+export type ToolInterceptor = (definition: ToolDefinitionLite) => ToolDefinitionLite
+
 export class ToolRuntimeLite extends Service {
   static readonly provide = 'tools'
 
   private definitions = new Map<string, ToolDefinitionLite>()
   private guards: ToolGuardLite[] = []
+  private interceptors: ToolInterceptor[] = []
 
   constructor(ctx: Context) {
     super(ctx, 'tools')
   }
 
   register(definition: ToolDefinitionLite): () => void {
+    for (const fn of this.interceptors) definition = fn(definition)
     const { name, output } = definition
     if (typeof name !== 'string' || !name) throw new TypeError(`[tools] 工具名必须是非空字符串`)
     if (output === undefined || typeof output !== 'object' || typeof output.render !== 'function') {
@@ -98,6 +103,35 @@ export class ToolRuntimeLite extends Service {
     return () => {
       const index = this.guards.indexOf(guard)
       if (index >= 0) this.guards.splice(index, 1)
+    }
+  }
+
+  /**
+   * 注册级拦截器（OPT-P1-03 正式扩展点）：此后所有 register 先经拦截链再入表。
+   * 供 connect 远程转发等横切能力挂在契约上，取代原型猴补丁。返回注销函数。
+   */
+  intercept(fn: ToolInterceptor): () => void {
+    if (typeof fn !== 'function') throw new TypeError('[tools] intercept 的拦截器必须是函数')
+    this.interceptors.push(fn)
+    return () => {
+      const index = this.interceptors.indexOf(fn)
+      if (index >= 0) this.interceptors.splice(index, 1)
+    }
+  }
+
+  /**
+   * 已注册工具的执行体包扎（OPT-P1-03 正式扩展点）：用 wrap 替换当前 execute，
+   * wrap 收到原执行体、返回新执行体。返回还原函数（按包扎时的现场逆向恢复）。
+   * 工具不存在抛 TypeError（不静默）。
+   */
+  decorate(name: string, wrap: (execute: ToolDefinitionLite['execute']) => ToolDefinitionLite['execute']): () => void {
+    const definition = this.definitions.get(name)
+    if (!definition) throw new Error(`[tools] decorate 目标工具不存在：${name}`)
+    if (typeof wrap !== 'function') throw new TypeError(`[tools] decorate 的 wrap 必须是函数（工具 ${name}）`)
+    const previous = definition.execute
+    definition.execute = wrap(previous)
+    return () => {
+      definition.execute = previous
     }
   }
 
