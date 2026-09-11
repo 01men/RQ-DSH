@@ -39,6 +39,7 @@ export const PlatformEvents = {
   McpUnhealthy: 'mcp.unhealthy',
   McpInvoked: 'mcp.invoked',
   // 连接器纳管（open-connector 融合；前缀已在本文件预留清单）
+  ConnectorOddExit: 'connector.odd_exit',
   ConnectorPolicyMirrorFailed: 'connector.policy_mirror_failed',
   ConnectorPolicySnapshotDrifted: 'connector.policy_snapshot_drifted',
   ConnectorGatewayChanged: 'connector.gateway.changed',

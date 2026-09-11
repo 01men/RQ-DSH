@@ -160,6 +160,7 @@ const PLUGINS = [
       ['connector.invoked', 'emit', '连接器调用（审计透传 actChain+runId；成本归集 connector:*）'],
       ['connector.permgroup.changed', 'emit', '权限组变更（oct_ 令牌镜像联动）'],
       ['connector.policy_mirror_failed', 'emit', 'OPT-P1-05：令牌策略镜像失败（吊销旧令牌 + 组级 fail-closed 直至恢复）'],
+      ['connector.odd_exit', 'emit', 'OPT-P2-01：权限组 ODD 离域（provider 白名单/排除 action/目录新鲜度/时间窗，落审计）'],
       ['connector.policy_snapshot_drifted', 'emit', 'OPT-P1-05：授权后策略快照漂移（执行侧拒绝按旧快照执行）'],
     ],
     api: [
@@ -168,7 +169,7 @@ const PLUGINS = [
       'GET /api/connector/connections · POST /api/connector/connections/oauth|api-key|no-auth · DELETE /api/connector/connections/:id · GET /api/connector/connections/oauth/:id/status · POST /api/connector/connections/refresh（凭据批量刷新）',
       'POST /api/connector/connections/:id/offline · POST /api/connector/connections/:id/online（连接上下线闸：下线后 invoke 立拒）',
       'POST /api/connector/execute（六步链：RBAC→权限组→审批→限流→oct_ 令牌→数据面）',
-      'GET/POST /api/connector/perm-groups · PATCH/DELETE /api/connector/perm-groups/:id · POST /api/connector/perm-groups/:id/impact',
+      'GET/POST /api/connector/perm-groups · PATCH/DELETE /api/connector/perm-groups/:id · POST /api/connector/perm-groups/:id/impact（组可携 odd 块：allowedServices/excludedActions/dataFreshnessMinutes/activeHours，OPT-P2-01）',
       'GET /api/connector/runs · POST /api/connector/reconcile · GET /api/connector/tokens',
     ],
     tools: ['connector_catalog_search', 'connector_connection_list', 'connector_execute', 'connector_perm_group_list', 'connector_run_list'],

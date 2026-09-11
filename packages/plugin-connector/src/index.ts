@@ -17,6 +17,7 @@ import { PlatformEvents, newId, sha256Hex, scanSensitiveKeys, type Collection, t
 import { OcClient, OC_VERSION_PIN, type OcConnectionSummary, type OcRunLog, type OcTokenPolicy } from './client.ts'
 import { OcError } from './errors.ts'
 import { heuristicRiskLevel, rankOf, type RiskLevel } from './risk.ts'
+import { inOdd, normalizeOdd, type OddDeclaration } from './odd.ts'
 import * as connectorTools from './tools.ts'
 
 // ---------------------------------------------------------------------------
@@ -92,6 +93,8 @@ export interface ConnectorPermGroupRecord extends RecordBase {
   policies: Record<string, ProviderPolicy>
   subjects: Array<{ type: 'user_group' | 'agent' | 'app'; id: string; name?: string }>
   rateLimitPerMin: number
+  /** OPT-P2-01：运营设计域声明（provider 白名单/排除 action/目录新鲜度/时间窗），未声明=全域。 */
+  odd?: OddDeclaration
   /** 已废止（M0-2 billing 下线，2026-09-09）：存量行的 legacy 字段，仅兼容保留、运行时不再读取。 */
   precheckCents?: number
 }
@@ -529,6 +532,11 @@ export class ConnectorHubService extends Service {
     return this.catalogs().all()[0]
   }
 
+  /** 目录同步时点（OPT-P2-01 ODD 新鲜度判定用；同步集合读取）。 */
+  private catalogSnapshotSyncedAt(): string | undefined {
+    return this.catalogs().all()[0]?.syncedAt
+  }
+
   requireAction(actionId: string): CatalogActionRecord {
     const entry = this.catalogs().all()[0]?.actions.find((item) => item.id === actionId)
     if (!entry) {
@@ -864,6 +872,7 @@ export class ConnectorHubService extends Service {
     policies: Record<string, ProviderPolicy>
     subjects: ConnectorPermGroupRecord['subjects']
     rateLimitPerMin?: number
+    odd?: OddDeclaration
   }): ConnectorPermGroupRecord {
     if (!input.name?.trim()) throw new Error('权限组名称不能为空')
     if (this.permGroups().findOne((group) => group.name === input.name)) throw new Error(`权限组已存在：${input.name}`)
@@ -875,18 +884,20 @@ export class ConnectorHubService extends Service {
       policies: this.normalizePolicies(input.policies),
       subjects: input.subjects,
       rateLimitPerMin: Math.max(1, input.rateLimitPerMin ?? 60),
+      ...(input.odd !== undefined ? { odd: normalizeOdd(input.odd) } : {}),
       createdAt: nowIso(), updatedAt: nowIso(),
     })
     this.afterPermGroupChange(group)
     return group
   }
 
-  updatePermGroup(id: string, patch: Partial<Pick<ConnectorPermGroupRecord, 'name' | 'description' | 'policies' | 'subjects' | 'rateLimitPerMin'>>): ConnectorPermGroupRecord {
+  updatePermGroup(id: string, patch: Partial<Pick<ConnectorPermGroupRecord, 'name' | 'description' | 'policies' | 'subjects' | 'rateLimitPerMin' | 'odd'>>): ConnectorPermGroupRecord {
     const group = this.requirePermGroup(id)
     if (patch.policies) this.validatePolicies(group.orgId, patch.policies)
     const normalizedPatch: Partial<ConnectorPermGroupRecord> = {
       ...patch,
       ...(patch.policies ? { policies: this.normalizePolicies(patch.policies) } : {}),
+      ...(patch.odd !== undefined ? { odd: normalizeOdd(patch.odd) } : {}),
     }
     const updated = this.permGroups().update(id, normalizedPatch)
     this.afterPermGroupChange(updated)
@@ -1224,6 +1235,19 @@ export class ConnectorHubService extends Service {
     }
     const { group, policy, action } = verdict
     const authorizedHash = this.policySnapshot(group).snapshotHash // OPT-P1-05：授权时刻快照基线
+    // OPT-P2-01：ODD 域内判定——声明了 odd 的组，离域调用拒绝并留痕（connector.odd_exit 落审计）
+    if (group.odd) {
+      const catalogSyncedAt = this.catalogSnapshotSyncedAt()
+      const oddVerdict = inOdd(group.odd, { id: action.id, service: action.service }, { now: new Date(), catalogSyncedAt })
+      if (!oddVerdict.in) {
+        this.ctx.platformBus.emit(PlatformEvents.ConnectorOddExit, {
+          groupId: group.id, groupName: group.name, orgId: group.orgId, actionId: action.id,
+          callerId: caller.id, reasons: oddVerdict.reasons, at: nowIso(),
+        })
+        this.emitDeniedEvent(caller, params.actionId, `ODD 离域：${oddVerdict.reasons.join('；')}`, started)
+        return { ok: false, status: 'denied', error: `调用超出该权限组的运营设计域（ODD）：${oddVerdict.reasons.join('；')}`, latencyMs: Date.now() - started }
+      }
+    }
     // 组级 fail-closed（OPT-P1-05）：镜像失败期间旧授权面不可用，直至镜像成功
     if (this.mirrorFailureGroups.has(group.id)) {
       const reason = '该权限组 oct_ 令牌策略镜像失败，fail-closed 直至镜像成功（connector.policy_mirror_failed 已告警）'

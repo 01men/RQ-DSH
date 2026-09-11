@@ -7,7 +7,7 @@ endpoints:
   - GET /api/connector/connections · POST /api/connector/connections/oauth|api-key|no-auth · DELETE /api/connector/connections/:id · GET /api/connector/connections/oauth/:id/status · POST /api/connector/connections/refresh（凭据批量刷新）
   - POST /api/connector/connections/:id/offline · POST /api/connector/connections/:id/online（连接上下线闸：下线后 invoke 立拒）
   - POST /api/connector/execute（六步链：RBAC→权限组→审批→限流→oct_ 令牌→数据面）
-  - GET/POST /api/connector/perm-groups · PATCH/DELETE /api/connector/perm-groups/:id · POST /api/connector/perm-groups/:id/impact
+  - GET/POST /api/connector/perm-groups · PATCH/DELETE /api/connector/perm-groups/:id · POST /api/connector/perm-groups/:id/impact（组可携 odd 块：allowedServices/excludedActions/dataFreshnessMinutes/activeHours，OPT-P2-01）
   - GET /api/connector/runs · POST /api/connector/reconcile · GET /api/connector/tokens
 tools:
   - connector_catalog_search

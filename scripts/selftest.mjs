@@ -242,6 +242,7 @@ const ocIdemCache = new Map()   // Idempotency-Key → 完整响应体（24h 重
 const ocClientsConfigured = new Set()   // 已存 OAuth client 配置的 service
 const ocRuns = []           // 伪造/真实 run 日志（runtimeTokenId 维度对账）
 const ocCtl = {
+  failNextExec: false,        // OPT-P3-01：下一次 /v1/actions 执行回 500（网关 5xx 故障注入）
   connNotAllowedOnce: null,   // 下一次该 tokenValue 执行回 403 connection_not_allowed 后自动清除
   alwaysDenyToken: null,      // 该 tokenValue 执行恒 403 connection_not_allowed（自动恢复重试仍失败路径）
   auditPersistedNext: false,  // 下一次成功执行 meta.auditPersisted=false
@@ -453,6 +454,10 @@ const ocStub = createServer(async (req, res) => {
     const denyAlwaysMatch = ocCtl.alwaysDenyToken !== null && (ocCtl.alwaysDenyToken === '*ANY*' || ocCtl.alwaysDenyToken === bearer)
     if (denyAlwaysMatch) {
       return ocEnvelope(res, 403, { success: false, errorCode: 'connection_not_allowed' })
+    }
+    if (ocCtl.failNextExec) {
+      ocCtl.failNextExec = false
+      return ocEnvelope(res, 500, { success: false, errorCode: 'injected_gateway_error', message: 'OPT-P3-01 注入：网关 5xx' })
     }
     const executionId = `exec-${++ocSeq}`
     ocRuns.push({ id: executionId, service: actionId.split('.')[0], actionId, ok: true, runtimeTokenId: tokenId, caller: 'http', startedAt: new Date().toISOString(), latencyMs: 12 })
@@ -3913,6 +3918,30 @@ try {
     p202Sensitive.data?.status === 'denied' && String(p202Sensitive.data.error).includes('敏感命名参数'), JSON.stringify(p202Sensitive.data ?? {}).slice(0, 220))
   await api('DELETE', `/api/connector/perm-groups/${pgP202.id}`, { token: admin })
 
+  // OPT-P2-01：ODD 域内判定（排除 action → 离域拒绝 + connector.odd_exit 落审计）
+  const pgOdd = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'P2-01 ODD 观测组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: ['hackernews.fetch_item', 'hackernews.get_top_stories'], riskCap: 'write' } },
+    subjects: [{ type: 'user_group', id: isoGroup.id }],
+    rateLimitPerMin: 60,
+    odd: { allowedServices: ['hackernews'], excludedActions: ['hackernews.fetch_item'] },
+  } })).data
+  check('P2-01 ODD 块声明入库', Boolean(pgOdd.odd?.excludedActions?.length === 1), JSON.stringify(pgOdd.odd ?? {}))
+  const oddDenied = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  check('P2-01 排除清单内 action → ODD 离域拒绝', oddDenied.data?.status === 'denied' && String(oddDenied.data.error).includes('ODD'), JSON.stringify(oddDenied.data ?? {}).slice(0, 220))
+  // OPT-P1-04 起总线异步派发：审计落账为最终一致，轮询等待（FIFO 中其他监听器退避重试会延迟投递）
+  let oddTrailItems
+  const oddTrailDeadline = Date.now() + 4000
+  while (Date.now() < oddTrailDeadline) {
+    const trail = await api('GET', '/api/audit/logs?q=' + encodeURIComponent('ODD') + '&type=invoke&limit=20', { token: admin })
+    if (trail.ok && trail.data.items.length >= 1) { oddTrailItems = trail.data.items; break }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+  check('P2-01 离域事件落审计（ODD 离域可检索）', Array.isArray(oddTrailItems) && oddTrailItems.length >= 1, JSON.stringify(oddTrailItems?.slice(0, 1) ?? []).slice(0, 180))
+  const oddAllowed = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('P2-01 白名单内 action 正常执行', oddAllowed.data?.status === 'ok', JSON.stringify(oddAllowed.data ?? {}).slice(0, 160))
+  await api('DELETE', `/api/connector/perm-groups/${pgOdd.id}`, { token: admin })
+
   // -- T-16a 限流（用单点清单组保证候选组唯一，绕开多组并集下的候选顺序不确定性） --------
   await api('PATCH', `/api/connector/perm-groups/${pgIso.id}`, { token: admin, body: { rateLimitPerMin: 1 } })
   const rateLimited = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: {} } })
@@ -3936,6 +3965,56 @@ try {
   await api('POST', '/api/connector/gateway/health', { token: admin })
   const recoveredState = await api('GET', '/api/connector/gateway', { token: admin })
   check('T-19 恢复后自动回 healthy 并可继续调用', recoveredState.data.available === true, JSON.stringify(recoveredState).slice(0, 160))
+
+  // -- OPT-P3-01 故障注入回归（4 类：网关 5xx / sidecar 审计失联 / 目录漂移 / oct_ 令牌吊销） ----
+  // ①网关 5xx：注入一次 500 → 调用显式失败（不静默、可计数），随后恢复
+  ocCtl.failNextExec = true
+  const gw5xx = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('P3-01 故障① 网关 5xx → 调用显式失败（status=error 计入 error_rate）', gw5xx.data?.status === 'error', JSON.stringify(gw5xx.data ?? {}).slice(0, 200))
+  const gw5xxRecover = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('P3-01 故障① 注入解除后调用恢复', gw5xxRecover.data?.status === 'ok', JSON.stringify(gw5xxRecover.data ?? {}).slice(0, 160))
+  // ②sidecar 审计失联：数据面 auditPersisted=false → 平台补记（fail-visible 双写口径）
+  ocCtl.auditPersistedNext = true
+  const auditLost = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: { fault: 'audit-loss' } } })
+  ocCtl.auditPersistedNext = false
+  check('P3-01 故障② sidecar 审计失联 → 平台补记且向调用方透出', auditLost.data?.status === 'ok' && auditLost.data.meta.auditPersisted === false, JSON.stringify(auditLost.data?.meta ?? {}))
+  // ③目录漂移：action 被目录同步移除 → 后续调用 fail-closed 拒绝
+  ocCtl.actions = (ocCtl.actions ?? [...ocActionsDefault]).filter((action) => action.id !== 'hackernews.fetch_item')
+  await api('POST', '/api/connector/catalog/sync', { token: admin })
+  const driftDenied = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  check('P3-01 故障③ 目录漂移（action 被移除）→ 调用拒绝', driftDenied.data?.status === 'denied' && String(driftDenied.data.error).includes('不在纳管目录'), JSON.stringify(driftDenied.data ?? {}).slice(0, 200))
+  ocCtl.actions = [...(ocCtl.actions ?? [])].filter((action) => action.id !== 'hackernews.fetch_item').concat(ocActionsDefault.filter((action) => action.id === 'hackernews.fetch_item'))
+  await api('POST', '/api/connector/catalog/sync', { token: admin })
+  const driftRecover = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  check('P3-01 故障③ 目录回补后调用恢复', driftRecover.data?.status === 'ok', JSON.stringify(driftRecover.data ?? {}).slice(0, 160))
+  // ④oct_ 令牌吊销：sidecar 侧令牌被吊销 → 401 → 自动重铸恢复（obtainOctToken 重铸语义）
+  const revokedToken = [...ocTokenByValue.entries()][0]
+  if (revokedToken) {
+    ocTokenByValue.delete(revokedToken[0])
+    const afterRevoke = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+    check('P3-01 故障④ oct_ 令牌被吊销 → 自动重铸恢复调用', afterRevoke.data?.status === 'ok', JSON.stringify(afterRevoke.data ?? {}).slice(0, 200))
+  }
+
+  // -- OPT-P3-01 P95 尾延迟质量闸门（阈值键可经环境覆盖：P95_GATE_LOGIN_MS / P95_GATE_INVOKE_MS） ----
+  const P95_GATE_LOGIN_MS = Number(process.env.P95_GATE_LOGIN_MS ?? 800)
+  const P95_GATE_INVOKE_MS = Number(process.env.P95_GATE_INVOKE_MS ?? 1500)
+  const pct = (samples, p) => { const sorted = [...samples].sort((a, b) => a - b); return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1))] }
+  const loginSamples = []
+  const invokeSamples = []
+  for (let i = 0; i < 20; i++) {
+    const loginStart = Date.now()
+    await api('POST', '/api/auth/login', { body: { username: 'admin', password: 'Ybk@2026' } })
+    loginSamples.push(Date.now() - loginStart)
+    const invokeStart = Date.now()
+    await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+    invokeSamples.push(Date.now() - invokeStart)
+  }
+  const loginP95 = pct(loginSamples, 0.95)
+  const invokeP95 = pct(invokeSamples, 0.95)
+  const dist = (samples) => `P50=${pct(samples, 0.5)}ms P95=${pct(samples, 0.95)}ms max=${Math.max(...samples)}ms`
+  console.log(`  » P95 分布（n=20）：登录 ${dist(loginSamples)} ｜ connector invoke ${dist(invokeSamples)}`)
+  check(`P3-01 登录换票 P95 ≤ ${P95_GATE_LOGIN_MS}ms`, loginP95 <= P95_GATE_LOGIN_MS, `p95=${loginP95}ms`)
+  check(`P3-01 connector invoke P95 ≤ ${P95_GATE_INVOKE_MS}ms`, invokeP95 <= P95_GATE_INVOKE_MS, `p95=${invokeP95}ms`)
 
   // -- T-21 org 巡检注入不一致 -----------------------------------------------------
   const foreignConnectionSummary = (() => { return { id: 'oc-con-fake-foreign' } })()
@@ -4223,6 +4302,10 @@ try {
   const approvalTest = spawn(process.execPath, ['packages/plugin-audit/src/approval.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => approvalTest.on('close', resolve))
   check('审批卫生与补偿注册表随包单测全绿（node --test）', approvalTest.exitCode === 0, `exit=${approvalTest.exitCode}`)
+  // ODD 域内判定纯函数自证（OPT-P2-01）
+  const oddTest = spawn(process.execPath, ['packages/plugin-connector/src/odd.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => oddTest.on('close', resolve))
+  check('ODD 域内判定随包单测全绿（node --test）', oddTest.exitCode === 0, `exit=${oddTest.exitCode}`)
   // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
   const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
   check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',
