@@ -23,6 +23,7 @@ const DEMO_ORG_ID = "demo-org";
 function seedPanel(ctx, autoDemo = false) {
   const logger = ctx.logger("panel-seed");
   if (ctx.panel.deptConfigs().count() > 0) {
+    seedBuiltInActivations(ctx, logger, autoDemo);
     if (autoDemo) seedDemoContent(ctx, logger);
     return;
   }
@@ -31,11 +32,64 @@ function seedPanel(ctx, autoDemo = false) {
     const matchedOrg = iam?.orgs().findOne((org) => org.name === meta.label);
     ctx.panel.deptConfigs().insert({ id: meta.id, ...meta, agents: [], kpis: [], widgets: [], ...matchedOrg ? { orgId: matchedOrg.id } : {} });
   }
-  const rootOrg = iam?.orgs().find((org) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : void 0);
-  if (rootOrg) seedActivations(ctx, rootOrg.id);
+  seedBuiltInActivations(ctx, logger, autoDemo);
   logger.info("\u9762\u677F\u57FA\u7EBF\uFF1A\u4E94\u90E8\u95E8\u9AA8\u67B6 + \u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/YB01/JB01\uFF09\u5B8C\u6210");
   if (process.env.DEMO_SEED !== "1" && !autoDemo) return;
   seedDemoContent(ctx, logger);
+}
+function seedBuiltInActivations(ctx, logger, autoDemo) {
+  const iam = ctx.reflect.get("iam", false);
+  const findRootOrgId = () => iam?.orgs().find((org) => org.parentId === null).at(0)?.id;
+  const seedTo = (orgId) => {
+    seedActivations(ctx, orgId);
+    logger.info(`\u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\uFF08QB01/YB01/JB01\uFF09\u5DF2\u6536\u655B\u81F3\u7EC4\u7EC7 ${orgId}`);
+  };
+  const rootOrgId = findRootOrgId();
+  if (rootOrgId) {
+    seedTo(rootOrgId);
+    return;
+  }
+  if (!iam) {
+    if (!autoDemo) return;
+    let tries2 = 0;
+    const timer2 = setInterval(() => {
+      const iamNow = ctx.reflect.get("iam", false);
+      const orgId = iamNow?.orgs().find((org) => org.parentId === null).at(0)?.id;
+      if (orgId) {
+        clearInterval(timer2);
+        seedTo(orgId);
+        return;
+      }
+      if (++tries2 >= 20) {
+        clearInterval(timer2);
+        logger.info("iam 10s \u672A\u5C31\u7EEA\uFF0C\u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\u56DE\u843D demo-org\uFF08\u4E0B\u6B21\u542F\u52A8\u91CD\u8BD5\u6536\u655B\uFF09");
+        seedTo(DEMO_ORG_ID);
+      }
+    }, 500);
+    try {
+      timer2.unref?.();
+    } catch {
+    }
+    return;
+  }
+  let tries = 0;
+  const timer = setInterval(() => {
+    const orgId = findRootOrgId();
+    if (orgId) {
+      clearInterval(timer);
+      seedTo(orgId);
+      return;
+    }
+    if (++tries >= 15) {
+      clearInterval(timer);
+      logger.info("iam \u6839\u7EC4\u7EC7 15s \u672A\u5C31\u7EEA\uFF0C\u5185\u7F6E\u884C\u4E1A\u6FC0\u6D3B\u56DE\u843D demo-org\uFF08\u4E0B\u6B21\u542F\u52A8\u91CD\u8BD5\u6536\u655B\uFF09");
+      if (autoDemo) seedTo(DEMO_ORG_ID);
+    }
+  }, 1e3);
+  try {
+    timer.unref?.();
+  } catch {
+  }
 }
 function seedActivations(ctx, orgId) {
   for (const code of ["QB01", "YB01", "JB01"]) {

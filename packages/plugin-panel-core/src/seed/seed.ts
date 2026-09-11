@@ -43,6 +43,9 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
   // 幂等双入口：首启（集合空）播基线+演示；demoAuth 装态下 loader 热重载会以空 config
   // 重放 apply——先播了基线骨架、后到的 autoDemo 需要能补齐演示内容（真机 gate01-npm 实证）
   if (ctx.panel.deptConfigs().count() > 0) {
+    // 存量部署：内置行业激活仍随启动幂等收敛（升级获得新增内置行业码的默认授权），
+    // 部门骨架/演示内容不重播
+    seedBuiltInActivations(ctx, logger, autoDemo)
     if (autoDemo) seedDemoContent(ctx, logger)
     return
   }
@@ -59,13 +62,62 @@ export function seedPanel(ctx: Context, autoDemo = false): void {
   }
   // 内置图谱资产（packages/platform-core/scenegraphs/ 随平台分发）默认授权根组织；
   // 其余组织/行业走「申请 → 审批（industry.activation，high）→ 激活」链路
-  const rootOrg = iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0) ?? (autoDemo ? { id: DEMO_ORG_ID } : undefined)
-  if (rootOrg) seedActivations(ctx, rootOrg.id)
+  seedBuiltInActivations(ctx, logger, autoDemo)
   logger.info('面板基线：五部门骨架 + 内置行业激活（QB01/YB01/JB01）完成')
 
   // 演示内容门控：DEMO_SEED=1（全量形态显式演示）或 autoDemo（01门 demoAuth 装态自动演示）
   if (process.env.DEMO_SEED !== '1' && !autoDemo) return
   seedDemoContent(ctx, logger)
+}
+
+/**
+ * 内置行业激活收敛（每次启动幂等执行，2026-09-11 IAW 改版）：
+ * - 随启动收敛而非只在首启播种——存量部署升级（新增内置行业码）后重启即自动获得默认授权；
+ * - 根组织解析带延迟重试：装态下面板 seed 与 iam 基线存在启动竞态（真机 gate01-local 实证：
+ *   面板 seed 先于 iam 根组织 ~500ms，激活被误挂 demo-org 而实名用户解析到真实根组织 → 行业全落锁）；
+ * - iam 缺席（纯演示形态）才落 demo-org 兜底。
+ */
+function seedBuiltInActivations(ctx: Context, logger: { info(msg: string): void }, autoDemo: boolean): void {
+  const iam = ctx.reflect.get('iam', false) as any | undefined
+  const findRootOrgId = (): string | undefined =>
+    iam?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0)?.id
+  const seedTo = (orgId: string): void => {
+    seedActivations(ctx, orgId)
+    logger.info(`内置行业激活（QB01/YB01/JB01）已收敛至组织 ${orgId}`)
+  }
+  const rootOrgId = findRootOrgId()
+  if (rootOrgId) { seedTo(rootOrgId); return }
+  if (!iam) {
+    // dsh loader 并发装载：iam 服务可能晚于本插件发布（与本文件上方 admin 种子延迟重试同源教训，
+    // 真机 gate01-local 实证——激活被立即误挂 demo-org，实名用户解析真实根组织后行业全落锁）。
+    // demoAuth 装态轮询等待 iam（≤10s），拿到根组织即收敛；非演示形态无 iam 时维持原语义（不种）。
+    if (!autoDemo) return
+    let tries = 0
+    const timer = setInterval(() => {
+      const iamNow = ctx.reflect.get('iam', false) as any | undefined
+      const orgId = iamNow?.orgs().find((org: { parentId: string | null }) => org.parentId === null).at(0)?.id
+      if (orgId) { clearInterval(timer); seedTo(orgId); return }
+      if (++tries >= 20) {
+        clearInterval(timer)
+        logger.info('iam 10s 未就绪，内置行业激活回落 demo-org（下次启动重试收敛）')
+        seedTo(DEMO_ORG_ID)
+      }
+    }, 500)
+    try { timer.unref?.() } catch { /* 非 Node 环境忽略 */ }
+    return
+  }
+  // iam 在场但基线未就绪（启动竞态）：每秒重试最多 15s，最终 autoDemo 落 demo-org 兜底
+  let tries = 0
+  const timer = setInterval(() => {
+    const orgId = findRootOrgId()
+    if (orgId) { clearInterval(timer); seedTo(orgId); return }
+    if (++tries >= 15) {
+      clearInterval(timer)
+      logger.info('iam 根组织 15s 未就绪，内置行业激活回落 demo-org（下次启动重试收敛）')
+      if (autoDemo) seedTo(DEMO_ORG_ID)
+    }
+  }, 1_000)
+  try { timer.unref?.() } catch { /* 非 Node 环境忽略 */ }
 }
 
 /**
