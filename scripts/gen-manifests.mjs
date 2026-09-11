@@ -25,6 +25,8 @@ const PLUGINS = [
     events: [
       ['tools/change', 'emit', '工具注册变更（lite 运行时）'],
       ['scenegraph.updated', 'emit', '行业场景图谱重载完成（部门面板热刷新）'],
+      ['bus.listener_error', 'emit', '总线监听器异常（OPT-P1-04：重试后入死信，审计可查）'],
+      ['bus.dead_letter', 'emit', '总线死信入账告警（支持人工重投 retryDeadLetters）'],
     ],
     api: ['# 平台自身无业务 REST 页面；behavior 采集面如下（console 聚合面见 console 清单）',
       'POST /api/behavior/events（行为采集 write-only：公开挂载于 console 鉴权之后，行为层再校验主体，双层 fail-closed） · GET /api/behavior/events（读取：主体权限校验）'],

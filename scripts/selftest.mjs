@@ -4137,6 +4137,10 @@ try {
   const connectProxyTest = spawn(process.execPath, ['packages/plugin-connect/src/proxy.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => connectProxyTest.on('close', resolve))
   check('connect 远程代理契约化随包单测全绿（node --test）', connectProxyTest.exitCode === 0, `exit=${connectProxyTest.exitCode}`)
+  // 平台总线管道自证（OPT-P1-04：异步串行派发/异常落事件/3 次退避重试入死信/journal 重启回放/人工重投）
+  const busPipelineTest = spawn(process.execPath, ['packages/platform-core/src/bus.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => busPipelineTest.on('close', resolve))
+  check('平台总线管道随包单测全绿（node --test）', busPipelineTest.exitCode === 0, `exit=${busPipelineTest.exitCode}`)
   // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
   const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
   check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',

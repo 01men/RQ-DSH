@@ -9,6 +9,9 @@
  *   - 校验落点在本总线（独立自实现 pub/sub，不经 cordis 事件系统），
  *     配合轻量代理 ctx（plugin-ctx.ts）与 lint/静态扫描三层防线。
  */
+import { appendFileSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 
@@ -102,6 +105,9 @@ export const PlatformEvents = {
   FlowTemplateChanged: 'flow.template.changed',
   // Agent 域（IAW 交接 7-1）：A2A 跨运行时调用
   AgentA2aInvoked: 'agent.a2a.invoked',
+  // 总线自观察（OPT-P1-04）：监听器异常与死信——丢事件=丢证据，异常必须显式可查
+  BusListenerError: 'bus.listener_error',
+  BusDeadLetter: 'bus.dead_letter',
 } as const
 
 /** 平台保留命名空间：第三方插件（source=plugin:*）禁止发射。 */
@@ -115,6 +121,26 @@ const PLATFORM_RESERVED_PREFIXES = [
   'modelgw.', 'flow.', 'resource.',
 ]
 
+// -- 总线管道参数（OPT-P1-04：对齐 usage 管道水准——持久化/重试/死信/异常落审计） --------
+/** 内存 ring 容量（journal 已持久化全量，ring 仅为热缓存）。 */
+const RING_CAPACITY = 300
+/** 单监听器派发超时：超时按一次失败计，重试后仍超时入死信。 */
+const LISTENER_TIMEOUT_MS = 5_000
+/** 失败重试退避（指数）：3 次真实执行后入死信。 */
+const RETRY_BACKOFF_MS = [50, 200, 800]
+/** 派发队列越限水位：超出部分转入死信（reason=backpressure_overflow，journal 仍可回放，不丢证据）。 */
+const QUEUE_OVERFLOW_CAP = 10_000
+
+interface BusDeadLetterRecord {
+  id: string
+  eventName: string
+  payload: unknown
+  listener: string
+  error: string
+  attempts: number
+  at: string
+}
+
 export class PlatformBusService extends Service {
   static readonly provide = 'platformBus'
 
@@ -123,8 +149,76 @@ export class PlatformBusService extends Service {
   private seq = 0
   private ring: PlatformEvent[] = []
 
-  constructor(ctx: Context) {
+  // -- 管道状态（OPT-P1-04）：异步串行派发 + journal 持久化 + 死信 ----------------
+  private queue: PlatformEvent[] = []
+  private draining = false
+  private persistenceReady = false
+  private journalFile: string | undefined
+  private deadLetterFile: string | undefined
+  private deadLetterStore: BusDeadLetterRecord[] = []
+  private journalFailures = 0
+
+  constructor(ctx: Context, options: { dataDir?: string } = {}) {
     super(ctx, 'platformBus')
+    this.preparePersistence(options.dataDir)
+  }
+
+  /**
+   * 持久化准备（OPT-P1-04）：journal 追加文件 + 死信文件 + 重启回放。
+   * 数据目录来源：显式 options.dataDir 优先；否则取 opsStorage.dataDirPath（精简宿主/单测无存储 → 纯内存运行）。
+   * journal 装载最近 RING_CAPACITY 条进 ring（「重启后最近事件仍可回放」），并把 seq 续到历史最大值。
+   */
+  private preparePersistence(explicitDataDir?: string): void {
+    if (this.persistenceReady) return
+    this.persistenceReady = true
+    let dataDir = explicitDataDir
+    if (!dataDir) {
+      try {
+        dataDir = (this.ctx as { opsStorage?: { dataDirPath?: string } }).opsStorage?.dataDirPath
+      } catch {
+        dataDir = undefined // cordis 严格代理：服务未提供即抛错（嵌入/单测形态）→ 纯内存
+      }
+    }
+    if (!dataDir) return
+    this.journalFile = join(dataDir, 'bus-journal.jsonl')
+    this.deadLetterFile = join(dataDir, 'bus-dead-letters.jsonl')
+    try {
+      const lines = readFileSync(this.journalFile, 'utf8').split('\n').filter((line) => line.trim() !== '')
+      for (const line of lines.slice(-RING_CAPACITY)) {
+        try {
+          const event = JSON.parse(line) as PlatformEvent
+          this.ring.push(event)
+          if (typeof event.id === 'number' && event.id > this.seq) this.seq = event.id
+        } catch { /* 坏行跳过：journal 只追加，单行损坏不影响其余回放 */ }
+      }
+    } catch { /* 首次启动：尚无 journal */ }
+    try {
+      for (const line of readFileSync(this.deadLetterFile, 'utf8').split('\n')) {
+        if (line.trim() === '') continue
+        try { this.deadLetterStore.push(JSON.parse(line) as BusDeadLetterRecord) } catch { /* 坏行跳过 */ }
+      }
+    } catch { /* 首次启动：尚无死信 */ }
+  }
+
+  /** journal 追加（fail-open：落盘失败计数并 console 告警，不阻断派发、不递归发事件）。 */
+  private appendJournal(event: PlatformEvent): void {
+    if (!this.journalFile) return
+    try {
+      appendFileSync(this.journalFile, `${JSON.stringify(event)}\n`)
+    } catch (error) {
+      this.journalFailures++
+      if (this.journalFailures <= 3) console.error('[bus] journal 追加失败（事件仍在 ring/队列，可回放窗口受损）', error)
+    }
+  }
+
+  private appendDeadLetter(record: BusDeadLetterRecord): void {
+    this.deadLetterStore.push(record)
+    if (!this.deadLetterFile) return
+    try {
+      appendFileSync(this.deadLetterFile, `${JSON.stringify(record)}\n`)
+    } catch (error) {
+      console.error('[bus] 死信落盘失败（内存死信仍可本进程内重投）', error)
+    }
   }
 
   on(event: string, cb: BusListener): () => void {
@@ -155,27 +249,117 @@ export class PlatformBusService extends Service {
       throw new Error(`[bus] 插件命名空间事件 ${name} 必须携带来源（source: plugin:…，期望 ${pluginId}）`)
     }
     const event: PlatformEvent = { id: ++this.seq, name, payload, at: new Date().toISOString(), ...(source !== undefined ? { source } : {}) }
+    this.preparePersistence()
     this.ring.push(event)
-    if (this.ring.length > 300) this.ring.shift()
-    for (const cb of this.listeners.get(name) ?? []) {
-      try {
-        cb(payload, event)
-      } catch (error) {
-        console.error(`[bus] 监听器处理 ${name} 异常`, error)
+    if (this.ring.length > RING_CAPACITY) this.ring.shift()
+    this.appendJournal(event)
+    // OPT-P1-04：派发改异步串行——emit 同步返回事件对象（校验/记账/持久化同步完成），
+    // 监听器经队列由调度器串行消费（FIFO 保序），失败重试 → 死信 → 告警事件，见 deliver()。
+    this.queue.push(event)
+    if (this.queue.length > QUEUE_OVERFLOW_CAP) {
+      const dropped = this.queue.shift()
+      if (dropped) {
+        this.enterDeadLetter(dropped, '*', 'backpressure_overflow：派发队列越限（事件已入 journal 可回放）', 0)
       }
     }
-    for (const cb of this.wildcard) {
-      try {
-        cb(payload, event)
-      } catch (error) {
-        console.error(`[bus] 通配监听器处理 ${name} 异常`, error)
-      }
-    }
+    this.scheduleDrain()
     return event
   }
 
-  /** 最近事件（平台事件流展示用）。 */
+  /** 最近事件（平台事件流展示用；重启后由 journal 回放装载，仍是最近 RING_CAPACITY 条）。 */
   recent(limit = 50): PlatformEvent[] {
     return this.ring.slice(-limit).reverse()
   }
+
+  /** 死信清单（OPT-P1-04）：含重启前遗留（持久化于 bus-dead-letters.jsonl）。 */
+  deadLetters(): BusDeadLetterRecord[] {
+    return [...this.deadLetterStore]
+  }
+
+  /**
+   * 人工重投（OPT-P1-04）：清空死信后按原事件名全量重发（at-least-once）。
+   * ⚠ 口径与 usage 消费水位不同：总线无每监听器水位，重投会对已成功的监听器重复投递，
+   * 消费方需自行幂等（审计/投影类消费方按事件 id 去重）。重投中再失败的监听器自然重新入死信。
+   */
+  retryDeadLetters(): number {
+    const records = [...this.deadLetterStore]
+    this.deadLetterStore = []
+    if (this.deadLetterFile) {
+      try { writeFileSync(this.deadLetterFile, '', 'utf8') } catch { /* 落盘失败：内存已清，重投继续 */ }
+    }
+    for (const record of records) {
+      this.emit(record.eventName, record.payload)
+    }
+    return records.length
+  }
+
+  /** 死信入账 + 告警事件（bus.dead_letter）。 */
+  private enterDeadLetter(event: PlatformEvent, listener: string, error: string, attempts: number): void {
+    const record: BusDeadLetterRecord = {
+      id: `bdl-${randomUUID()}`, eventName: event.name, payload: event.payload,
+      listener, error, attempts, at: new Date().toISOString(),
+    }
+    this.appendDeadLetter(record)
+    // 告警事件走完整管道（可被 audit 通配订阅落审计）；其自身失败由 deliver 的 console 兜底，不递归入死信
+    this.emit(PlatformEvents.BusDeadLetter, record)
+  }
+
+  private scheduleDrain(): void {
+    if (this.draining) return
+    this.draining = true
+    queueMicrotask(() => { void this.drain() })
+  }
+
+  private async drain(): Promise<void> {
+    try {
+      while (this.queue.length > 0) {
+        const event = this.queue.shift()
+        if (!event) break
+        await this.deliver(event)
+      }
+    } finally {
+      this.draining = false
+      if (this.queue.length > 0) this.scheduleDrain()
+    }
+  }
+
+  /** 单事件派发：逐监听器隔离，超时/异常按次计失败，指数退避重试 3 次后入死信。 */
+  private async deliver(event: PlatformEvent): Promise<void> {
+    const targets: Array<{ cb: BusListener; label: string }> = []
+    for (const cb of this.listeners.get(event.name) ?? []) targets.push({ cb, label: event.name })
+    for (const cb of this.wildcard) targets.push({ cb, label: '*' })
+    for (const { cb, label } of targets) {
+      let delivered = false
+      for (let attempt = 1; attempt <= RETRY_BACKOFF_MS.length + 1 && !delivered; attempt++) {
+        try {
+          await withTimeout(Promise.resolve(cb(event.payload, event)), LISTENER_TIMEOUT_MS)
+          delivered = true
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          // 监听器异常一律显式落事件（OPT-P1-04）：审计可查，不再 console.error 了事
+          console.error(`[bus] 监听器处理 ${event.name}（${label}）第 ${attempt} 次失败`, error)
+          this.emit(PlatformEvents.BusListenerError, { event: event.name, listener: label, attempt, error: message, at: new Date().toISOString() })
+          if (attempt <= RETRY_BACKOFF_MS.length) {
+            await sleep(RETRY_BACKOFF_MS[attempt - 1])
+          } else {
+            this.enterDeadLetter(event, label, `3 次重试均失败：${message}`, attempt)
+          }
+        }
+      }
+    }
+  }
+}
+
+function withTimeout(promise: Promise<unknown>, ms: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`监听器超时（>${ms}ms）`)), ms)
+    promise.then(
+      () => { clearTimeout(timer); resolve() },
+      (error: unknown) => { clearTimeout(timer); reject(error instanceof Error ? error : new Error(String(error))) },
+    )
+  })
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
