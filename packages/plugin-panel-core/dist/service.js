@@ -307,7 +307,15 @@ class PanelService extends Service {
     const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
     const asset = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
     if (!asset) return { ok: false, reason: "\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08\u8BF7\u5728\u63A7\u5236\u53F0\u300CAgent \u672C\u4F53\u300D\u767B\u8BB0\u5E76\u5728\u6B64\u914D\u7F6E agentRef\uFF09" };
-    const model = modelOverride ?? String(asset.attrs?.model ?? "");
+    const preferred = modelOverride ?? String(asset.attrs?.model ?? "");
+    const resolved = resolvePanelModelGateway(this.ctx);
+    const catalog = resolved?.gateway.models?.().all?.() ?? [];
+    const online = catalog.filter((item) => item.status === "online");
+    let model = preferred;
+    if (!model || !catalog.some((item) => item.slug === model)) {
+      if (online.length > 0) model = online[0].slug;
+      else if (resolved?.kind === "dsh") model = "default";
+    }
     if (!model) return { ok: false, reason: "Agent \u8D44\u4EA7\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u4F1A\u8BDD\u672A\u6307\u5B9A\u6A21\u578B" };
     const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8);
     const contextText = recent.map((m) => `${m.senderName}: ${m.text}`).join("\n");
@@ -367,7 +375,7 @@ ${contextText}` : ""
           { role: "user", content: prepared.userText }
         ]
       });
-      await reply(result.content, void 0, result.model);
+      await reply(stripThink(result.content), void 0, result.model);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await fallbackToHuman(`\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${message}\uFF09\u3002`);
@@ -410,17 +418,20 @@ ${contextText}` : ""
       ];
       let content = "";
       let usedModel = "";
+      const gatedDelta = createThinkGate((text) => {
+        onEvent({ type: "delta", agent: agentCard.name, text, model: usedModel || void 0 });
+      });
       if (typeof gateway.streamEvents === "function") {
         for await (const chunk of gateway.streamEvents({
           model: prepared.model,
           messages,
           subject: trigger.senderId ? `user:${trigger.senderId}` : "panel:runtime"
         })) {
+          if (chunk.model) usedModel = chunk.model;
           if (chunk.delta) {
             content += chunk.delta;
-            onEvent({ type: "delta", agent: agentCard.name, text: chunk.delta, model: chunk.model });
+            gatedDelta(chunk.delta);
           }
-          if (chunk.model) usedModel = chunk.model;
         }
       } else {
         const result = await gateway.invoke({
@@ -431,9 +442,14 @@ ${contextText}` : ""
         });
         content = result.content;
         usedModel = result.model;
-        onEvent({ type: "delta", agent: agentCard.name, text: content, model: result.model });
+        gatedDelta(result.content);
       }
-      await this.insertAgentReply(dept, agentCard, trigger, content, void 0, usedModel || void 0);
+      const finalContent = stripThink(content);
+      if (!finalContent) {
+        await fallback("\u6A21\u578B\u53EA\u8F93\u51FA\u4E86\u601D\u8003\u8FC7\u7A0B\uFF08<think> \u672A\u95ED\u5408\u6216\u6B63\u6587\u4E3A\u7A7A\uFF09\uFF0C\u6CA1\u6709\u53EF\u5C55\u793A\u7684\u5E94\u7B54\u3002");
+        return;
+      }
+      await this.insertAgentReply(dept, agentCard, trigger, finalContent, void 0, usedModel || void 0);
       onEvent({ type: "done", agent: agentCard.name });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -484,7 +500,7 @@ ${sceneSummary}` : "",
           { role: "user", content: question }
         ]
       });
-      return { ok: true, reply: result.content, model: result.model };
+      return { ok: true, reply: stripThink(result.content), model: result.model };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return { ok: false, reason: `\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${message}\uFF09` };
@@ -573,7 +589,7 @@ ${sceneSummary}` : "",
           { role: "user", content: message || "\uFF08\u65E0\u9644\u52A0\u8F93\u5165\uFF0C\u6309\u6280\u80FD\u6307\u4EE4\u6267\u884C\uFF09" }
         ]
       });
-      return { ok: true, reply: result.content, model: result.model, skill: { name: skill.name, version: skill.version } };
+      return { ok: true, reply: stripThink(result.content), model: result.model, skill: { name: skill.name, version: skill.version } };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       return { ok: false, reason: `\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${reason}\uFF09` };
@@ -760,10 +776,43 @@ function extractMentions(text) {
   for (const match of text.matchAll(/@([\p{L}\p{N}·]{2,20})/gu)) mentions.add(match[1]);
   return [...mentions];
 }
+const THINK_BLOCK = /^\s*<think>[\s\S]*?<\/think>/;
+const THINK_OPEN_UNTERMINATED = /^\s*<think>[\s\S]*$/;
+function stripThink(text) {
+  let out = text.replace(THINK_BLOCK, "");
+  if (THINK_OPEN_UNTERMINATED.test(out)) out = "";
+  return out.trimStart();
+}
+function createThinkGate(emit) {
+  let hold = "";
+  let passed = false;
+  return (text) => {
+    if (passed) {
+      emit(text);
+      return;
+    }
+    hold += text;
+    if (hold.trimStart().startsWith("<think>")) {
+      const close = hold.indexOf("</think>");
+      if (close === -1) return;
+      passed = true;
+      const rest = hold.slice(close + "</think>".length);
+      hold = "";
+      if (rest) emit(rest);
+      return;
+    }
+    passed = true;
+    const all = hold;
+    hold = "";
+    emit(all);
+  };
+}
 export {
   INDUSTRY_REGISTRY,
   LANE_LABELS,
   PanelService,
   TASK_LANES,
-  extractMentions
+  createThinkGate,
+  extractMentions,
+  stripThink
 };

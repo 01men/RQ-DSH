@@ -526,8 +526,19 @@ export class PanelService extends Service {
     const ref = agentCard.agentRef?.replace(/^agent:/, '') ?? ''
     const asset = ref ? this.soft('resourceCore')?.list('agent').find((item) => item.id === ref || item.slug === ref || item.name === ref) : undefined
     if (!asset) return { ok: false, reason: '未绑定 Agent 资产（请在控制台「Agent 本体」登记并在此配置 agentRef）' }
-    // 模型取向：对话框显式切换的模型优先，未指定则跟随 Agent 资产的 model 属性
-    const model = modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
+    // 模型取向（2026-09-11 放宽）：对话框显式切换 > Agent 资产 model 属性 > 目录首个在线模型。
+    // 放宽动因：资产 schema 的模型枚举（deepseek 系）与实际可用目录（MiniMax / dsh 桥 provider:model）
+    // 常常对不上——原逻辑直接判「未配置模型」转人工，@数字同事 永远无回复。回落不会造假：
+    // 回包按实际使用的模型标注（model 字段 + 前端 🧠 徽标），目录为空时保持原诚实拒绝。
+    const preferred = modelOverride ?? String((asset.attrs as Record<string, unknown> | undefined)?.model ?? '')
+    const resolved = resolvePanelModelGateway(this.ctx)
+    const catalog = resolved?.gateway.models?.().all?.() ?? []
+    const online = catalog.filter((item: { status: string }) => item.status === 'online')
+    let model = preferred
+    if (!model || !catalog.some((item: { slug: string }) => item.slug === model)) {
+      if (online.length > 0) model = online[0]!.slug
+      else if (resolved?.kind === 'dsh') model = 'default' // dsh 桥惰性目录：default 跟随 dsh 配置解析
+    }
     if (!model) return { ok: false, reason: 'Agent 资产未配置模型（model 属性为空），且本次会话未指定模型' }
     // 组装频道上下文（最近 8 条）+ 部门场景图谱摘要
     const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8)
@@ -583,7 +594,7 @@ export class PanelService extends Service {
           { role: 'user', content: prepared.userText },
         ],
       })
-      await reply(result.content, undefined, result.model)
+      await reply(stripThink(result.content), undefined, result.model)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await fallbackToHuman(`模型网关调用失败（${message}）。`)
@@ -631,17 +642,20 @@ export class PanelService extends Service {
       ]
       let content = ''
       let usedModel = ''
+      const gatedDelta = createThinkGate((text) => {
+        onEvent({ type: 'delta', agent: agentCard.name, text, model: usedModel || undefined })
+      })
       if (typeof gateway.streamEvents === 'function') {
         for await (const chunk of gateway.streamEvents({
           model: prepared.model,
           messages,
           subject: trigger.senderId ? `user:${trigger.senderId}` : 'panel:runtime',
         })) {
+          if (chunk.model) usedModel = chunk.model
           if (chunk.delta) {
             content += chunk.delta
-            onEvent({ type: 'delta', agent: agentCard.name, text: chunk.delta, model: chunk.model })
+            gatedDelta(chunk.delta)
           }
-          if (chunk.model) usedModel = chunk.model
         }
       } else {
         // modelgw 单轮形态：整段作为单个 delta（不造假流式动画，通道能力如实呈现）
@@ -653,9 +667,14 @@ export class PanelService extends Service {
         })
         content = result.content
         usedModel = result.model
-        onEvent({ type: 'delta', agent: agentCard.name, text: content, model: result.model })
+        gatedDelta(result.content)
       }
-      await this.insertAgentReply(dept, agentCard, trigger, content, undefined, usedModel || undefined)
+      const finalContent = stripThink(content)
+      if (!finalContent) {
+        await fallback('模型只输出了思考过程（<think> 未闭合或正文为空），没有可展示的应答。')
+        return
+      }
+      await this.insertAgentReply(dept, agentCard, trigger, finalContent, undefined, usedModel || undefined)
       onEvent({ type: 'done', agent: agentCard.name })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
@@ -710,7 +729,7 @@ export class PanelService extends Service {
           { role: 'user', content: question },
         ],
       })
-      return { ok: true, reply: result.content, model: result.model }
+      return { ok: true, reply: stripThink(result.content), model: result.model }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return { ok: false, reason: `模型网关调用失败（${message}）` }
@@ -809,7 +828,7 @@ export class PanelService extends Service {
           { role: 'user', content: message || '（无附加输入，按技能指令执行）' },
         ],
       })
-      return { ok: true, reply: result.content, model: result.model, skill: { name: skill.name, version: skill.version } }
+      return { ok: true, reply: stripThink(result.content), model: result.model, skill: { name: skill.name, version: skill.version } }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       return { ok: false, reason: `模型网关调用失败（${reason}）` }
@@ -985,4 +1004,41 @@ export function extractMentions(text: string): string[] {
   const mentions = new Set<string>()
   for (const match of text.matchAll(/@([\p{L}\p{N}·]{2,20})/gu)) mentions.add(match[1]!)
   return [...mentions]
+}
+
+/**
+ * 推理模型 <think> 块剥离（2026-09-11 E2E 实测）：MiniMax-M3 等推理模型把思考过程以
+ * <think>…</think> 形式混在正文里输出——思考过程不是给频道读者看的内容，落库/展示只保留
+ * 正文。只处理开头的思考块（模型惯例位置）；未闭合（思考未结束即截断）视为无正文。
+ */
+const THINK_BLOCK = /^\s*<think>[\s\S]*?<\/think>/
+const THINK_OPEN_UNTERMINATED = /^\s*<think>[\s\S]*$/
+
+export function stripThink(text: string): string {
+  let out = text.replace(THINK_BLOCK, '')
+  if (THINK_OPEN_UNTERMINATED.test(out)) out = ''
+  return out.trimStart()
+}
+
+/** 流式增量的 think 屏蔽门：思考块闭合前按住不发，闭合后放行其后内容（单 delta 形态同样适用）。 */
+export function createThinkGate(emit: (text: string) => void): (text: string) => void {
+  let hold = ''
+  let passed = false
+  return (text) => {
+    if (passed) { emit(text); return }
+    hold += text
+    if (hold.trimStart().startsWith('<think>')) {
+      const close = hold.indexOf('</think>')
+      if (close === -1) return // 思考未结束，继续按住
+      passed = true
+      const rest = hold.slice(close + '</think>'.length)
+      hold = ''
+      if (rest) emit(rest)
+      return
+    }
+    passed = true
+    const all = hold
+    hold = ''
+    emit(all)
+  }
 }

@@ -162,6 +162,9 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
   场景卡片死代码拆除；approvals.js 定制审批 kind 映射保留（豁免登记，定制面板域配套）。
 - **收敛检查**：宿主面源码对 7f5f3ea 锚点零残余（仅存 I 豁免产品身份值 + approvals.js kind 映射 +
   01门 装机面 dist/）。
+- **闭环补充（2026-09-11）**：M/N/P 反馈已由 main 第二批采纳（回执见 main 仓库
+  `docs/handoff-f-remainder-adoption-20260911.md`，决策表见下方追加行）；O 节定制面 main 不消费。
+  定制侧按 Phase 3 闭环规则 merge 吸收。
 
 ## L. G1-a 宿主半缺陷修复（2026-09-10 晚，真机闭环实证）——请 main 采纳
 
@@ -209,6 +212,38 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
    `/gate01/` 302 到 `/gate01/panel/`，杜绝「无 console 装配下 SPA 兜底把缺资源壳页发给浏览器 →
    module MIME 白屏」。全量形态不声明，根路径着陆归 console（行为不变）。
 
+## P. 宿主已登录态 G1 扫码回跳死洞（2026-09-11，用户真机实测实证）——请 main 采纳
+
+背景：N 节修复解决了宿主已登录态的**账号密码**路径（面板自持登录面白名单），但**钉钉扫码**
+通道（必须借助宿主登录页完成扫码）仍带一个结构性死洞：宿主控制台已登录时扫码授权永远无法
+闭环——打开宿主登录页只看到控制台工作台，不签票、不回跳；只有先登出宿主才能走通。
+
+根因（定制侧逐行定位）：
+
+- `?next=` 消费 + 跨源自助签票 + `#entry_ticket=` 回跳的**全部逻辑只存在于登录页**
+  （`login.js` renderLogin 内 :141-190 `finishLogin` 出口）；SSO 回调脚本消费的
+  `heng_ops_next_cross`（`src/index.ts` :432-435）也只有登录页的 `startDingOauth` 会写入。
+- 而控制台路由**只在无会话时渲染登录页**（`app.js` navigate :98-107：`session.token`
+  在场即直接渲染控制台外壳）。宿主已登录时打开 `宿主/?next=<面板地址>#/login`：
+  next 参数被静默丢弃 → 不签票、不回跳 → 用户落在宿主工作台；向导侧「我已完成扫码」
+  诚实降级报错（跨源隔离，本机侧无从校验）。
+- 这正是同源形态早已认知的死循环（panel boot.js `consoleSessionPassthrough` 注释原文点名
+  「next 被已登录态忽略」）——同源用面板直通兜住了，**跨源/扫码通道没有对应处理**。
+
+建议修法（一处集中改动）：把 next 消费逻辑从登录页提升到启动链——`app.js` boot/navigate 在
+「已有会话 + `?next=`（或 `heng_ops_next_cross`）在场且可解析」时，执行与 `finishLogin`
+相同的出口：跨源白名单目的地 → `POST /api/auth/entry-tickets/self` 签票 →
+`location.assign(next#entry_ticket=…)`；同源目的地 → 直接 `location.assign(next)`。
+落地后扫码通道在已登录态变为「打开宿主页 → 立即带票弹回面板」的静默授权；
+未登录态与既有登录页行为不变。
+
+| 文件 | 改动 | 说明 |
+|---|---|---|
+| `packages/plugin-console/public/js/app.js` | 启动链（boot 或 navigate 入口）增加「已登录态 next 消费」：会话在场且 `?next=`/`heng_ops_next_cross` 可解析时按 login.js `finishLogin` 同规则出口（跨源签自助票带 fragment 回跳 / 同源直接跳转），随后照常渲染 | 修复宿主已登录态扫码回跳死洞。建议顺带把 next 解析/白名单逻辑（`sanitizeNext`/`sanitizeCrossOriginNext` 消费侧）抽为 login.js 与 app.js 共享的模块，避免 L 节「双消费者各自读取」教训重演 |
+
+过渡期口径（定制侧已知情，待 main 采纳后失效）：远端向导改用账号密码登录（代理全闭环，
+不依赖宿主浏览器会话）；钉钉扫码在宿主已登录态不可用，须先登出宿主再扫。
+
 ## 决策回执（请 main 侧填写后回传）
 
 > main 侧已回填（2026-09-10，基线 main `5977067` 重算残余差异；实施与验证记录见 main 仓库
@@ -230,6 +265,10 @@ selftest 装机段已同步适配（前缀解析/双 scope 正则/防泄露探�
 | I 01门改名装配漂移 | ❌ 不采纳（豁免登记） | 产品身份值必须跟随**各自**根包名——main 保持 `dsh-enterprise-ops` / `@dsh-ops` / `/rq`，定制侧保留 `@01men/gate-01` / `/gate01`；此域属「产品身份固有分叉」，请定制侧在收敛检查按豁免登记（不可拆除，拆除即版本定位/自更新根目录错乱） |
 | J 01门 Phase 3 追加漂移（dsh-bridge inject 收缩 / rq-card 内联 / files 闭包） | ◑ 部分采纳 | **dsh-bridge inject 8→3 + softRead 防御式软读：采纳**（main 全量装配行为不变；抗缺提供者装配属宿主面健壮性，真机已实证）。rq-card tool.ts 内联 / exports / 根 files 闭包：不回流（rq-card 包内装机面，main 不涉） |
 | K http.ts file() headersSent 守卫（宿主崩溃级缺陷） | ✅ 采纳（本批最先落地） | 幂等守卫两处（writeHead 前 + catch 分支）原样回流 |
+| M IAW 改版 scenegraph 漂移（2026-09-11） | ✅ 采纳 | `7f5f3ea` 后新批：SCENE_TAGS 5→8（原文 增收/安全/环保 入表，节能兼容保留）、tags 可为空数组、`links?` 可选环节链（校验器不强校验）——与定制侧同形加法，既有 qb01/gcjx 零改动过 lint。selftest 新增「场景图谱校验器（F 清单 M 节）」5 断言；实施回执见 main 仓库 `docs/handoff-f-remainder-adoption-20260911.md` |
+| N 装态可用性修复（2026-09-11 下午） | ✅ 采纳 | N-1 PUBLIC_PATHS +`/api/panel/auth/login|refresh` **先行登记**（main 侧 panel 自持登录面路由尚未随 IAW 前端合入，无路由命中=零行为变化，merge 后即闭环）；N-2 dsh-bridge entryTickets 请求期惰性解析（`entryTicketsAt()`）原样回流——注册面不再早退于 entryTickets 缺席，就绪前兑换得到明确错误 |
+| O IAW 协作首位改版（2026-09-11 下午） | ❌ 不消费（定制面自研） | 五空间序/三视图/agent-stream/ddws pull/landingRedirect 属定制面板域，main 不消费；O.3/O.4/O.5 随面板域专项另行评估（与 C 节 dashboard 卡片区块同口径） |
+| P 宿主已登录态 G1 扫码回跳死洞（2026-09-11） | ✅ 采纳 | 按建议修法 + 抽共享模块：新增 `public/js/next-redirect.js`（`consumeNextSources()` 一次读取 + `exitWithNext()` 跨源自助票/同源直跳，白名单事实源仍在 landing.js 纯函数）；login.js 改走共享面（语义不变），app.js boot 在落地分诊前消费（已登录态静默授权，未登录态行为不变）。随包单测 next-redirect.test.mjs 7 例入 node --test 通道；**P 节过渡期口径自本回执起失效**（宿主已登录态扫码通道已闭环） |
 
 未采纳项由定制侧在下一个同步周期内拆除（北极星 diff 相应归零）；**I 域例外：按豁免登记处理**
 （产品身份值，拆除即错乱）。
