@@ -2,7 +2,7 @@
  * @dsh-ops/plugin-authn —— 统一认证中心。
  *
  * 双轨身份：人（SSO/密码）与机器（Client Credentials）共用一套 Principal 体系。
- * 令牌：HMAC 签名的短期访问令牌（默认 2h，可刷新），支持吊销与密钥轮换。
+ * 令牌：HMAC 签名的短期访问令牌（默认 30min，可刷新），支持吊销与密钥轮换。
  * 令牌链（on-behalf-of）：用户 → 应用 → Agent → MCP，act 链在令牌中叠加，审计可还原。
  */
 import { createHmac, randomUUID } from 'node:crypto'

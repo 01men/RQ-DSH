@@ -3,6 +3,12 @@
   "version": "1.1.0",
   "private": true,
   "type": "module",
+  "description": "【已下线封存，未加载】钱包/复式分账功能面于 M0-2（2026-09-09）整体退出运行时；OPT-P0-02（2026-09-12）迁出 packages/ 工作区归档于此，不参与构建与加载。",
+  "dshOps": {
+    "status": "archived",
+    "archivedAt": "2026-09-09",
+    "reason": "M0-2 billing 下线；存量流水经 scripts/billing-archive-export.mjs 导出 CSV 只读封存 90 天（docs/billing-archive-register.md）"
+  },
   "exports": {
     ".": "./src/index.ts",
     "./*": "./src/*"

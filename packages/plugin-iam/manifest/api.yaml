@@ -4,17 +4,18 @@ base: /api
 endpoints:
   - GET/POST /api/iam/orgs · GET /api/iam/orgs/tree · PATCH /api/iam/orgs/:id · DELETE /api/iam/orgs/:id（body {cascade:true} 一键级联删除子树，直属账号上移到上级组织）
   - GET/POST /api/iam/users · PATCH /api/iam/users/:id · POST /api/iam/users/import
-  - POST /api/iam/users/:id/activate|freeze|unfreeze|deactivate|reset-password
-  - POST/DELETE /api/iam/users/:id/bindings[/:provider]
-  - GET /api/iam/roles · GET /api/iam/permissions · POST/PATCH /api/iam/roles/:id
-  - GET/POST/PATCH/DELETE /api/iam/groups
-  - GET/PUT /api/iam/connectors/:provider · POST .../test · POST .../sync
+  - PATCH /api/iam/users/:id（status 冻结/恢复即走此处） · POST /api/iam/users/:id/reset-password
+  - POST /api/iam/users/:id/bindings · DELETE /api/iam/users/:id/bindings/:provider（三方身份绑定）
+  - GET /api/iam/roles · GET /api/iam/permissions · POST /api/iam/roles · PATCH /api/iam/roles/:id
+  - GET/POST /api/iam/groups · PATCH/DELETE /api/iam/groups/:id · POST /api/iam/groups/refresh-snapshots
+  - GET/POST /api/iam/connectors · PUT /api/iam/connectors/:provider · POST /api/iam/connectors/:provider/test · POST /api/iam/connectors/:provider/sync · POST /api/iam/connectors/auto-sync · DELETE /api/iam/connectors/:provider
   - GET /api/iam/conflicts · POST /api/iam/conflicts/:id/resolve
-  - # v1.1（融合 auth-identity）：IdentityProviderAdapter + 身份链接事实源
-  - identityLinks 集合（provider+providerUserId 引擎级唯一）；bindThirdParty 走链接层
+  - GET /api/iam/roster · GET/POST /api/iam/tenants（名册/租户，console 聚合面）
+  - # v1.1（融合 auth-identity）：IdentityProviderAdapter + 身份链接事实源；identityLinks 集合（provider+providerUserId 引擎级唯一）；bindThirdParty 走链接层
 tools:
   - iam_org_tree
   - iam_org_create
+  - iam_org_update
   - iam_user_list
   - iam_user_create
   - iam_user_reset_password

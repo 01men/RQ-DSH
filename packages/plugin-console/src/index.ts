@@ -2023,7 +2023,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
   })
 
   guarded('POST', '/api/connector/perm-groups', 'connector.permgroup.write', async (exchange) => {
-    const input = body<{ name: string; description?: string; orgId: string; policies: Record<string, { allowedActions: '*' | string[]; riskCap?: 'read' | 'write' | 'admin'; connections?: string[]; constraints?: { readOnly?: boolean; denyParams?: string[] } }>; subjects: Array<{ type: 'user_group' | 'agent' | 'app'; id: string; name?: string }>; rateLimitPerMin?: number; precheckCents?: number }>(exchange)
+    const input = body<{ name: string; description?: string; orgId: string; policies: Record<string, { allowedActions: '*' | string[]; riskCap?: 'read' | 'write' | 'admin'; connections?: string[]; constraints?: { readOnly?: boolean; denyParams?: string[] } }>; subjects: Array<{ type: 'user_group' | 'agent' | 'app'; id: string; name?: string }>; rateLimitPerMin?: number }>(exchange)
     const createdGroup = await runWithOcErrors(exchange, () => ctx.connectorHub.createPermGroup({
       name: input.name,
       description: input.description,
@@ -2031,7 +2031,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
       policies: input.policies,
       subjects: input.subjects,
       rateLimitPerMin: input.rateLimitPerMin,
-      precheckCents: input.precheckCents,
+      // precheckCents 入参已废止（M0-2 billing 下线，OPT-P0-02）：legacy 记录字段运行时不读，新写请求不再透传
     }))
     if (!createdGroup) return // 错误响应已由处理器写出（如 invalid_alias_prefix 400）
     const group = createdGroup as Awaited<ReturnType<typeof ctx.connectorHub.createPermGroup>>

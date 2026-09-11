@@ -4117,6 +4117,13 @@ try {
   const nextRedirectTest = spawn(process.execPath, ['packages/plugin-console/public/js/next-redirect.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => nextRedirectTest.on('close', resolve))
   check('登录回跳共享面随包单测全绿（node --test）', nextRedirectTest.exitCode === 0, `exit=${nextRedirectTest.exitCode}`)
+  // 契约↔实现双向一致性（OPT-P0-01，2026-09-12）：引擎构造性红/绿测试 + 真仓零红闸门
+  const contractLintTest = spawn(process.execPath, ['scripts/contract-lint.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => contractLintTest.on('close', resolve))
+  check('契约 lint 引擎构造性红/绿测试全绿（node --test）', contractLintTest.exitCode === 0, `exit=${contractLintTest.exitCode}`)
+  const contractLintRepo = spawn(process.execPath, ['scripts/lint-manifests.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => contractLintRepo.on('close', resolve))
+  check('契约比对真仓零红（路由/工具/权限双向一致，lint:manifests 通道）', contractLintRepo.exitCode === 0, `exit=${contractLintRepo.exitCode}`)
   // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
   const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
   check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',

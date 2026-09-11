@@ -1065,7 +1065,7 @@ export class ConnectorHubService extends Service {
     return { ok: true, policy }
   }
 
-  /** 七步链第③⑤步合一：主流程外的独立校验入口（tools/REST 共用）。 */
+  /** 授权校验独立入口（tools/REST 共用；原"七步链第③⑤步合一"口径随 billing 下线废止，OPT-P0-02）。 */
   authorize(caller: InvokeCaller, actionId: string, input: Record<string, unknown>, groups?: ConnectorPermGroupRecord[]): { ok: true; group: ConnectorPermGroupRecord; policy: ProviderPolicy; action: CatalogActionRecord } | { ok: false; reason: string } {
     const action = (() => {
       try {
@@ -1087,7 +1087,7 @@ export class ConnectorHubService extends Service {
       .map((verdict) => verdict.reason)[0] ?? `action ${actionId} 不在任何命中组的授权范围` }
   }
 
-  // -- invoke 网关（#5，七步链） ------------------------------------------------
+  // -- invoke 网关（#5，六步链） ------------------------------------------------
 
   async invokeAction(caller: InvokeCaller, params: {
     actionId: string

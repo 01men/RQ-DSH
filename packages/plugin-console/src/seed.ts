@@ -594,7 +594,7 @@ function seedConnectorDemo(ctx: Context): void {
         policies: { hackernews: { allowedActions: ['hackernews.*'], riskCap: 'read', constraints: { readOnly: true } } },
         subjects: [...(everyoneGroup ? [{ type: 'user_group' as const, id: everyoneGroup.id, name: everyoneGroup.name }] : [])],
         rateLimitPerMin: 60,
-        precheckCents: 0,
+        // precheckCents 种子写入已废止（M0-2 billing 下线，OPT-P0-02）：legacy 字段运行时不读
       })
     } catch { /* 种子非关键路径：缺组织/成员时静默跳过 */ }
   }

@@ -1,0 +1,7 @@
+# 权限点声明（注册进统一 RBAC，控制台/CLI/工具共用）
+# OPT-P0-01（2026-09-12）：先落权限声明面；api/events/ui 四面由 OPT-P2-04 补齐。
+plugin: dsh-plugin-usage
+points:
+  - usage.read
+  - usage.write
+  - usage.admin

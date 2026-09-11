@@ -6,8 +6,10 @@ endpoints:
   - POST /api/apps/:id/transition（发布/下架为 L4 审批）
   - POST /api/apps/:id/metrics-report（应用指标主动上报：PV/UV/DAU/会话/留存，可 --date 补录）
   - POST /api/apps/:id/entry-ticket（平台授权直达：一次性入场票据，#entry_ticket 打开应用）
-  - GET /api/apps/:id（含 topology/cost/impact）
-  - 平台侧自动折算：entry-ticket 兑换 / OIDC 发码 → DAU；浏览器 beacon → PV/UV（端点经 console 聚合暴露）
+  - GET /api/apps/:id（含 topology/cost/impact） · DELETE /api/apps/:id（下架移除）
+  - POST /api/apps/:id/sso-client · PATCH /api/apps/:id/sso-client · POST /api/apps/:id/sso-client/rotate（应用 SSO 客户端治理） · POST /api/apps/:id/onboarding-prompt（接入提示词重生成）
+  - GET /api/apps/developer-options（开发者接入选项）
+  - # 平台侧自动折算：entry-ticket 兑换 / OIDC 发码 → DAU；浏览器 beacon → PV/UV（端点经 console 聚合暴露）
 tools:
   - app_list
   - app_topology

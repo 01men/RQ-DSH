@@ -9,6 +9,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseYaml } from '../packages/platform-core/src/yaml.ts'
 import { validateScenegraph } from '../packages/platform-core/src/scenegraph.ts'
+import { runContractLint } from './contract-lint.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const packagesDir = join(root, 'packages')
@@ -75,4 +76,15 @@ for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
 }
 
 console.log(`\n清单校验：${total - failed}/${total} 通过；场景图谱：${sgTotal - sgFailed}/${sgTotal} 通过`)
-process.exit(failed + sgFailed > 0 ? 1 : 0)
+
+// -- 契约↔实现双向一致性（OPT-P0-01，2026-09-12）：代码注册面 ↔ 清单声明面双向比对 --
+const contract = await runContractLint(root)
+const exemptCount = contract.diffs.filter((d) => d.severity === 'exempt').length
+console.log(`契约比对：路由 代码${contract.stats.codeRoutes}/清单${contract.stats.manifestRoutes} · 工具 代码${contract.stats.codeTools}/清单${contract.stats.manifestTools} · 差异 ${contract.diffs.filter((d) => d.severity === 'red').length} 红 ${contract.diffs.filter((d) => d.severity === 'warn').length} 警${exemptCount > 0 ? ` · ${exemptCount} 豁免（见 scripts/contract-lint.exemptions.json）` : ''}`)
+for (const diff of contract.diffs) {
+  const mark = diff.severity === 'red' ? '✘' : '⚠'
+  ;(diff.severity === 'red' ? console.error : console.log)(`  ${mark} [${diff.kind}] ${diff.message}`)
+}
+if (!contract.ok) console.error('契约比对存在红项：实现与清单漂移，拒绝放行')
+
+process.exit(failed + sgFailed > 0 || !contract.ok ? 1 : 0)
