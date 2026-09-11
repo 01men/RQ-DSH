@@ -8,7 +8,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import { PlatformEvents, newId, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
+import { PlatformEvents, newId, scanSensitiveKeys, maskSensitivePayload, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
 import * as auditTools from './tools.ts'
 
 // ---------------------------------------------------------------------------
@@ -122,6 +122,34 @@ export interface ApprovalRecord extends RecordBase {
 export type ApprovalExecutor = (payload: Record<string, unknown>, approverId: string) => Promise<unknown>
 
 // ---------------------------------------------------------------------------
+// 审批负载卫生与独立规则源（OPT-P2-02，2026-09-12）
+// ---------------------------------------------------------------------------
+
+/**
+ * 独立最小化规则源（OPT-P2-02）：审批执行约束独立于主授权判定。
+ * ⚠ 共享故障域声明：同进程同权限同代码——本表不构成密码学级"独立保护"，
+ *   只是把二次确认/敏感面口径从执行器实现抽出为可评审、可 diff 的静态工件
+ *   （完整声明见 docs/shared-failure-domain-declaration.md）。
+ */
+export interface ApprovalKindRule {
+  /** 高风险通过是否必须显式二次确认（缺省沿用 riskLevel==='high' 的既有口径）。 */
+  requiresConfirmed?: boolean
+  /** 敏感入参面：mask=掩码后入库；reject=直接拒绝开单（适用于执行需要原文的 kind）。 */
+  sensitiveInputPolicy: 'mask' | 'reject'
+}
+
+const APPROVAL_KIND_RULES: Record<string, ApprovalKindRule> = {
+  // 连接器 admin 续调需要原文 input 执行——敏感入参不能掩码（会以 *** 下发数据面），只能拒绝开单
+  'connector.action.admin': { sensitiveInputPolicy: 'reject' },
+  'connector.connect': { sensitiveInputPolicy: 'mask' },
+  'connector.offline': { sensitiveInputPolicy: 'mask' },
+}
+
+export function approvalKindRule(kind: string): ApprovalKindRule {
+  return { sensitiveInputPolicy: 'mask', ...APPROVAL_KIND_RULES[kind] }
+}
+
+// ---------------------------------------------------------------------------
 // 服务
 // ---------------------------------------------------------------------------
 
@@ -129,6 +157,8 @@ export class AuditService extends Service {
   static readonly provide = 'audit'
 
   private executors = new Map<string, ApprovalExecutor>()
+  /** 补偿注册表（OPT-P2-02）：kind → 不可逆动作失败后的补偿编排。 */
+  private compensations = new Map<string, (payload: Record<string, unknown>, error: Error) => Promise<unknown>>()
   private deniedCounter = new Map<string, number[]>()
 
   constructor(ctx: Context) {
@@ -544,6 +574,15 @@ export class AuditService extends Service {
     return () => this.executors.delete(kind)
   }
 
+  /**
+   * 注册补偿器（OPT-P2-02）：不可逆动作的执行器失败时按注册表编排补偿并回写审批单。
+   * 补偿器收到（payload, 原错误）；返回值进入 execution.result 留痕。
+   */
+  registerCompensation(kind: string, compensation: (payload: Record<string, unknown>, error: Error) => Promise<unknown>): () => void {
+    this.compensations.set(kind, compensation)
+    return () => this.compensations.delete(kind)
+  }
+
   createApproval(input: {
     kind: string
     title: string
@@ -552,9 +591,17 @@ export class AuditService extends Service {
     requesterName: string
     riskLevel?: 'high' | 'medium' | 'low'
   }): ApprovalRecord {
+    // OPT-P2-02：入审批存储前的敏感面处置——reject 类 kind 直接拒绝开单；其余深度掩码后入库
+    const rule = approvalKindRule(input.kind)
+    const sensitivePaths = scanSensitiveKeys(input.payload)
+    if (rule.sensitiveInputPolicy === 'reject' && sensitivePaths.length > 0) {
+      throw new Error(`审批拒绝：该类审批以原文入参执行，检出敏感命名入参（${sensitivePaths.join('、')}）。敏感值不得进入审批存储，请调整入参后重试（OPT-P2-02）`)
+    }
+    const { masked, maskedKeys } = maskSensitivePayload(input.payload)
     const record = this.approvals().insert({
       id: newId('apr'),
       ...input,
+      ...(maskedKeys.length > 0 ? { payload: { ...(masked as Record<string, unknown>), maskedKeys } } : {}),
       status: 'pending',
       createdAt: new Date().toISOString(),
     })
@@ -603,8 +650,27 @@ export class AuditService extends Service {
         const result = await executor(approval.payload, approverId)
         execution = { result: JSON.stringify(result ?? { ok: true }).slice(0, 500), at: new Date().toISOString() }
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        execution = { result: '执行失败', error: message, at: new Date().toISOString() }
+        const err = error instanceof Error ? error : new Error(String(error))
+        execution = { result: '执行失败', error: err.message, at: new Date().toISOString() }
+        // OPT-P2-02：executor 失败不再只有 approval.execution.error——按注册表编排补偿并回写
+        const compensation = this.compensations.get(approval.kind)
+        if (compensation) {
+          try {
+            const compResult = await compensation(approval.payload, err)
+            execution = {
+              result: `执行失败，已完成补偿：${JSON.stringify(compResult ?? { ok: true }).slice(0, 200)}`,
+              error: err.message, at: new Date().toISOString(),
+            }
+          } catch (compError) {
+            const compMessage = compError instanceof Error ? compError.message : String(compError)
+            execution = { result: '执行失败且补偿失败（需人工介入）', error: `${err.message}；补偿失败：${compMessage}`, at: new Date().toISOString() }
+          }
+          this.record({
+            type: 'change', actorType: 'machine', actorId: 'approval-engine', actorName: '审批引擎',
+            action: 'approval.compensated', resourceType: 'approval', resourceId: id, resourceName: approval.title,
+            result: 'ok', detail: `执行器失败已按注册表编排补偿（kind=${approval.kind}，审批单 ${id}）`,
+          })
+        }
       }
     } else {
       execution = { result: '（无注册执行器，仅记录审批结果）', at: new Date().toISOString() }

@@ -2812,6 +2812,15 @@ try {
 
   const updApplyNoReason = await api('POST', '/api/update/apply', { token: admin, body: {} })
   check('正式升级缺少原因被拒（400）', updApplyNoReason.status === 400)
+  // OPT-P2-03：pin 强制 + 回滚面（均在触碰 git 前即拒绝，测试零副作用、零外网依赖）
+  const updNoPin = await api('POST', '/api/update/apply', { token: admin, body: { reason: '未带 pin 的裸拉尝试' } })
+  const updNoPinMsg = String(updNoPin.error?.message ?? JSON.stringify(updNoPin.error ?? updNoPin.data ?? {}))
+  check('P2-03 正式升级缺 pin 被拒（禁止裸拉最新）', updNoPin.status === 400 && /pin/i.test(updNoPinMsg), updNoPinMsg.slice(0, 160))
+  const updRollbackNoSnap = await api('POST', '/api/update/rollback', { token: admin, body: { reason: '无快照回滚演练' } })
+  const updRollbackMsg = String(updRollbackNoSnap.error?.message ?? JSON.stringify(updRollbackNoSnap.error ?? updRollbackNoSnap.data ?? {}))
+  check('P2-03 无可回滚快照被拒（本进程未执行过 apply）', updRollbackNoSnap.status === 400 && /快照/.test(updRollbackMsg), updRollbackMsg.slice(0, 160))
+  const updDryPin = await api('POST', '/api/update/apply', { token: admin, body: { dryRun: true } })
+  check('P2-03 dryRun 透出 pin/签名策略口径', updDryPin.ok && updDryPin.data.requireSignedCommits === false && String(updDryPin.data.pin).includes('pin'), JSON.stringify(updDryPin.data ?? {}).slice(0, 220))
 
   const updDismiss = await api('POST', '/api/update/settings', { token: admin, body: { dismissedVersion: '9.9.9' } })
   check('忽略指定版本（横幅静默）', updDismiss.ok && updDismiss.data.dismissed === true)
@@ -3892,6 +3901,18 @@ try {
   // 观测组退场：删除组（连带吊销令牌），恢复 isoGroup 单点清单组口径，不污染后续用例
   await api('DELETE', `/api/connector/perm-groups/${pgP105.id}`, { token: admin })
 
+  // OPT-P2-02：敏感命名入参不入审批存储（admin 审批通道 fail-closed）
+  const pgP202 = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'P2-02 敏感面观测组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: ['hackernews.do_the_thing'], riskCap: 'admin' } },
+    subjects: [{ type: 'user_group', id: isoGroup.id }],
+    rateLimitPerMin: 60,
+  } })).data
+  const p202Sensitive = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.do_the_thing', input: { password: 'plain-secret' } } })
+  check('P2-02 admin 调用携敏感命名入参 → 拒绝开单（敏感值不入审批存储）',
+    p202Sensitive.data?.status === 'denied' && String(p202Sensitive.data.error).includes('敏感命名参数'), JSON.stringify(p202Sensitive.data ?? {}).slice(0, 220))
+  await api('DELETE', `/api/connector/perm-groups/${pgP202.id}`, { token: admin })
+
   // -- T-16a 限流（用单点清单组保证候选组唯一，绕开多组并集下的候选顺序不确定性） --------
   await api('PATCH', `/api/connector/perm-groups/${pgIso.id}`, { token: admin, body: { rateLimitPerMin: 1 } })
   const rateLimited = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: {} } })
@@ -4198,6 +4219,10 @@ try {
   const toolsLiteTest = spawn(process.execPath, ['packages/platform-core/src/tools-lite.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => toolsLiteTest.on('close', resolve))
   check('工具注册契约随包单测全绿（node --test）', toolsLiteTest.exitCode === 0, `exit=${toolsLiteTest.exitCode}`)
+  // 审批卫生与规则源自证（OPT-P2-02：敏感面掩码/拒绝 + 补偿注册表编排）
+  const approvalTest = spawn(process.execPath, ['packages/plugin-audit/src/approval.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => approvalTest.on('close', resolve))
+  check('审批卫生与补偿注册表随包单测全绿（node --test）', approvalTest.exitCode === 0, `exit=${approvalTest.exitCode}`)
   // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
   const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
   check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',

@@ -13,7 +13,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
-import { PlatformEvents, newId, sha256Hex, type Collection, type RecordBase, type ToolPrincipal } from '../../platform-core/src/index.ts'
+import { PlatformEvents, newId, sha256Hex, scanSensitiveKeys, type Collection, type RecordBase, type ToolPrincipal } from '../../platform-core/src/index.ts'
 import { OcClient, OC_VERSION_PIN, type OcConnectionSummary, type OcRunLog, type OcTokenPolicy } from './client.ts'
 import { OcError } from './errors.ts'
 import { heuristicRiskLevel, rankOf, type RiskLevel } from './risk.ts'
@@ -1249,6 +1249,14 @@ export class ConnectorHubService extends Service {
     // 能力令牌（OPT-P1-02）续调。无令牌/伪造/过期/错配 → 一律开单（fail-closed）。
     // 相同（action+组+主体+输入哈希）的 pending 单直接复用，不重复开单。
     if (action.riskLevel === 'admin' && !approvalCapabilityVault.consume(params.approvalCapability, action.id, caller)) {
+      // OPT-P2-02：敏感命名入参不入审批存储——admin 审批以原文 input 执行，掩码会以 *** 下发数据面，
+      // 故携带敏感键的调用直接拒绝（fail-closed），提示调整入参。
+      const sensitivePaths = scanSensitiveKeys(input)
+      if (sensitivePaths.length > 0) {
+        const reason = `入参携带敏感命名参数（${sensitivePaths.join('、')}）：admin 审批通道禁止敏感值入审批存储，请调整入参后重试（OPT-P2-02）`
+        this.emitDeniedEvent(caller, params.actionId, reason, started)
+        return { ok: false, status: 'denied', error: reason, latencyMs: Date.now() - started }
+      }
       const reused = this.dedupeAdminApproval(group, action, caller, input)
       if (reused) {
         return { ok: false, status: 'approval_required', approvalId: reused.id, actionId: action.id, message: `已有待审的高危调用单：${reused.id}（批准后自动完成调用）` }

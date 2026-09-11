@@ -344,11 +344,13 @@ const PLUGINS = [
     events: [
       ['platform.update.available', 'emit', '发现上游新版本（audit 订阅留痕）'],
       ['platform.update.applied', 'emit', '一键升级执行完成'],
+      ['platform.update.rolled_back', 'emit', '升级回滚完成（OPT-P2-03，reset 到升级前 HEAD）'],
     ],
     api: [
       'GET /api/update/status（全部登录用户：顶栏更新横幅）',
       'POST /api/update/check（platform.update.read，60s 冷却）',
-      'POST /api/update/settings · POST /api/update/apply（platform.update.apply，apply 支持 dry-run）',
+      'POST /api/update/settings · POST /api/update/apply（platform.update.apply；apply 支持 dry-run，正式执行必须 pin=tag/commit + verify-commit 签名核验，OPT-P2-03）',
+      'POST /api/update/rollback（platform.update.apply；reset 到最近一次 apply 的升级前 HEAD + npm install，OPT-P2-03）',
     ],
     tools: ['update_status', 'update_check', 'update_apply'],
     ui: { routes: ['顶栏更新徽标 + 更新抽屉（无独立页面）'], menus: [] },

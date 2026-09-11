@@ -82,6 +82,7 @@ export const PlatformEvents = {
   ConnectClientDisabled: 'connect.client.disabled',
   UpdateAvailable: 'platform.update.available',
   UpdateApplied: 'platform.update.applied',
+  UpdateRolledBack: 'platform.update.rolled_back',
   // 前端行为埋点（WP-03/D3）：独立于 usage 计量管道，audit/看板订阅
   BehaviorRecorded: 'behavior.recorded',
   // 部门面板（plugin-panel-core）：消息/任务/行业激活 + 场景图谱热刷新（review-dsh-agent-panel-v2）
