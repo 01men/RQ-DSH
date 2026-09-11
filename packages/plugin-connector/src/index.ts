@@ -142,6 +142,45 @@ function nowIso(): string {
 // 服务
 // ---------------------------------------------------------------------------
 
+/**
+ * 审批执行能力令牌（OPT-P1-02）：admin 高危续调的唯一合法凭证，取代原"仅内部审批执行器可置位"
+ * 的普通布尔（纯约定式防护——任何拿到 ctx.connectorHub 的进程内插件都能自置真值跳过审批，
+ * 等于可冒充审批执行器；审计核验 #9 升级项）。
+ * 不可伪造三要素：128 位随机 token（不可猜）+ 一次性（消费即焚）+ 绑定校验（action+主体，30s TTL）。
+ * 铸造收敛在类内执行器闭包经模块级金库（approvalCapabilityVault，闭包持有不导出），REST/工具面类型与运行时双重不可达；
+ * 伪造/过期/错配一律按无令牌处理 → 走审批开单路径（fail-closed）。
+ */
+export interface ApprovalExecutionCapability {
+  token: string
+  actionId: string
+  callerId: string
+  expiresAt: number
+}
+
+/**
+ * 能力令牌金库（OPT-P1-02）：模块级闭包持有台账——不导出、不挂类，进程内其他模块不可达
+ * （比 #私有字段更稳：cordis traceable 代理会让 this 品牌检查失败，而模块边界与代理无感）。
+ * 铸造只在类内 bindAdminActionExecutor 执行器闭包发生；消费一次性即焚 + 绑定校验（30s TTL）。
+ */
+const approvalCapabilityVault = (() => {
+  const tokens = new Map<string, { actionId: string; callerId: string; expiresAt: number }>()
+  return {
+    mint(actionId: string, caller: InvokeCaller): ApprovalExecutionCapability {
+      const token = crypto.randomUUID()
+      const expiresAt = Date.now() + 30_000
+      tokens.set(token, { actionId, callerId: caller.id, expiresAt })
+      return { token, actionId, callerId: caller.id, expiresAt }
+    },
+    consume(capability: ApprovalExecutionCapability | undefined, actionId: string, caller: InvokeCaller): boolean {
+      if (!capability || typeof capability.token !== 'string' || capability.token === '') return false
+      const record = tokens.get(capability.token)
+      if (!record) return false
+      tokens.delete(capability.token)
+      return record.actionId === actionId && record.callerId === caller.id && record.expiresAt > Date.now()
+    },
+  }
+})()
+
 export class ConnectorHubService extends Service {
   static readonly provide = 'connectorHub'
 
@@ -1087,6 +1126,36 @@ export class ConnectorHubService extends Service {
       .map((verdict) => verdict.reason)[0] ?? `action ${actionId} 不在任何命中组的授权范围` }
   }
 
+  // -- 审批执行能力令牌（OPT-P1-02） -------------------------------------------
+
+  /**
+   * admin 高危审批执行器注册（OPT-P1-02）：执行器闭包经本方法定义在类内，
+   * 能力令牌铸造（approvalCapabilityVault.mint，模块闭包持有）仅在批准后的续调瞬间发生——
+   * 外部插件即便持有 ctx.connectorHub 也无法铸造或猜测令牌；返回值沿用 registerExecutor 的注销函数。
+   */
+  bindAdminActionExecutor(audit: {
+    registerExecutor: (kind: string, executor: (payload: Record<string, unknown>, approverId: string) => Promise<unknown>) => () => void
+  }): () => void {
+    return audit.registerExecutor('connector.action.admin', async (payload) => {
+      const callerPayload = (payload['caller'] ?? {}) as { type?: InvokeCaller['type']; id?: string; name?: string; actChain?: InvokeCaller['actChain'] }
+      const caller: InvokeCaller = {
+        type: callerPayload.type ?? 'user',
+        id: callerPayload.id ?? '',
+        name: callerPayload.name ?? '',
+        ...(callerPayload.actChain?.length ? { actChain: callerPayload.actChain } : {}),
+      }
+      const actionId = String(payload['actionId'])
+      const result = await this.invokeAction(caller, {
+        actionId,
+        input: (payload['input'] ?? {}) as Record<string, unknown>,
+        ...(typeof payload['alias'] === 'string' && payload['alias'] ? { alias: payload['alias'] } : {}),
+        approvalCapability: approvalCapabilityVault.mint(actionId, caller),
+      })
+      if (!result.ok) throw new Error(result.status === 'approval_required' ? '递归审批异常：不应再次生成审批单' : result.error)
+      return { runId: result.runId, status: result.status, latencyMs: result.latencyMs }
+    })
+  }
+
   // -- invoke 网关（#5，六步链） ------------------------------------------------
 
   async invokeAction(caller: InvokeCaller, params: {
@@ -1094,8 +1163,8 @@ export class ConnectorHubService extends Service {
     input?: Record<string, unknown>
     alias?: string
     dryRun?: boolean
-    /** 仅内部审批执行器可置位（REST/工具面不暴露）：审批通过后的续调通道。 */
-    viaApprovalExecutor?: boolean
+    /** 审批执行能力令牌（OPT-P1-02）：仅类内部执行器闭包可铸造；REST/工具面不可达，伪造即 fail-closed。 */
+    approvalCapability?: ApprovalExecutionCapability
   }): Promise<InvokeOutcome> {
     const started = Date.now()
     const input = params.input ?? {}
@@ -1122,9 +1191,10 @@ export class ConnectorHubService extends Service {
       }
     }
 
-    // ④ 高危审批门禁：admin 级必须走 connector.action.admin 审批，approve 后 executor 同步执行。
+    // ④ 高危审批门禁：admin 级必须走 connector.action.admin 审批，approve 后执行器持一次性
+    // 能力令牌（OPT-P1-02）续调。无令牌/伪造/过期/错配 → 一律开单（fail-closed）。
     // 相同（action+组+主体+输入哈希）的 pending 单直接复用，不重复开单。
-    if (action.riskLevel === 'admin' && !params.viaApprovalExecutor) {
+    if (action.riskLevel === 'admin' && !approvalCapabilityVault.consume(params.approvalCapability, action.id, caller)) {
       const reused = this.dedupeAdminApproval(group, action, caller, input)
       if (reused) {
         return { ok: false, status: 'approval_required', approvalId: reused.id, actionId: action.id, message: `已有待审的高危调用单：${reused.id}（批准后自动完成调用）` }
@@ -1519,21 +1589,8 @@ export function apply(ctx: Context) {
     // 两段式设计（journal 决策②）：凭证绝不入审批负载——通过即登记，实际创建由发起人携 approvalId 完成
     return { acknowledged: true, note: '审批通过：发起人现在可以提交实际连接凭证（POST /api/connector/connections/* 带 approvalId）', provider: payload['provider'] ?? '' }
   }))
-  ctx.effect(() => ctx.audit.registerExecutor('connector.action.admin', async (payload) => {
-    const callerPayload = (payload['caller'] ?? {}) as { type?: InvokeCaller['type']; id?: string; name?: string; actChain?: InvokeCaller['actChain'] }
-    const result = await hub.invokeAction({
-      type: callerPayload.type ?? 'user',
-      id: callerPayload.id ?? '',
-      name: callerPayload.name ?? '',
-      ...(callerPayload.actChain?.length ? { actChain: callerPayload.actChain } : {}),
-    }, {
-      actionId: String(payload['actionId']),
-      input: (payload['input'] ?? {}) as Record<string, unknown>,
-      ...(typeof payload['alias'] === 'string' && payload['alias'] ? { alias: payload['alias'] } : {}),
-      viaApprovalExecutor: true,
-    })
-    if (!result.ok) throw new Error(result.status === 'approval_required' ? '递归审批异常：不应再次生成审批单' : result.error)
-    return { runId: result.runId, status: result.status, latencyMs: result.latencyMs }
-  }))
+  // admin 高危审批执行器（OPT-P1-02）：注册收敛进类内部 bindAdminActionExecutor，
+  // 能力令牌铸造 #私有化——外部插件不可达（原布尔旁路参数已删除，全仓 grep 0 命中为验收口径）
+  ctx.effect(() => hub.bindAdminActionExecutor(ctx.audit))
   ctx.plugin(connectorTools)
 }

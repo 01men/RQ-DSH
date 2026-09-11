@@ -3778,6 +3778,15 @@ try {
   const afterCalls = ocCalls.filter((call) => call.actionId === 'hackernews.do_the_thing').length
   check('executor 真实下发一次数据面调用', afterCalls === beforeCalls + 1, `before=${beforeCalls} after=${afterCalls}`)
 
+  // -- OPT-P1-02 冒充面封死（能力令牌替代旧布尔旁路） ---------------------------------
+  const smuggleResp = await api('POST', '/api/tools/execute', { token: connDevLogin.data.token, body: { name: 'connector_execute', args: { actionId: 'hackernews.do_the_thing', input: { work: 1 }, viaApprovalExecutor: true, approvalCapability: { token: 'forged-by-attacker', actionId: 'hackernews.do_the_thing', callerId: 'attacker', expiresAt: Date.now() + 60_000 } } } })
+  const smuggleValue = (smuggleResp.data?.value ?? smuggleResp.data) as { status?: string; approvalId?: string }
+  check('P1-02 工具桥走私旧布尔/伪造能力令牌 → 仍强制开单（fail-closed）', smuggleValue?.status === 'approval_required' && Boolean(smuggleValue.approvalId), JSON.stringify(smuggleValue ?? {}).slice(0, 240))
+  let booleanBypassHits = 0
+  const scanBypass = (dir) => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const filePath = join(dir, entry.name); if (entry.isDirectory()) { if (entry.name !== 'node_modules') scanBypass(filePath) } else if (filePath.endsWith('.ts') && readFileSync(filePath, 'utf8').includes('viaApprovalExecutor')) booleanBypassHits++ } }
+  scanBypass('packages'); scanBypass('src')
+  check('P1-02 旧布尔旁路全仓 0 命中（能力令牌替代，验收 grep 口径）', booleanBypassHits === 0, `hits=${booleanBypassHits}`)
+
   // -- connector.connect 两段式审批门禁（T-18，凭证不入审批负载） -------------------
   const gatedConnectReq = await api('POST', '/api/connector/connections/api-key', { token: admin, body: { orgId: connOrg, provider: 'github', aliasSuffix: 'gated-pat', values: { apiKey: 'client-supersecret-oauth-xyz' }, requireApproval: true } })
   check('T-18 requireApproval → 仅生成审批单（凭证不落任何集合）', gatedConnectReq.data?.approvalRequired === true && Boolean(gatedConnectReq.data.approvalId), JSON.stringify(gatedConnectReq).slice(0, 200))
