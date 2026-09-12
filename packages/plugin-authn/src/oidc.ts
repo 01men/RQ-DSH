@@ -235,6 +235,13 @@ export class OidcService extends Service {
 
   // -- 客户端生命周期 -------------------------------------------------------
 
+  /** 对外脱敏（QA SEC-02）：clientSecretHash 为凭证哈希，客户端列表/详情响应一律不外发（对齐 principals 的脱敏口径）；内部校验仍走 clients()/clientByClientId() 原始记录。 */
+  private publicClient<C extends OidcClientRecord>(client: C): Omit<C, 'clientSecretHash'> {
+    const { clientSecretHash, ...safe } = client
+    void clientSecretHash
+    return safe
+  }
+
   createClient(input: {
     name: string
     redirectUris: string[]
