@@ -170,6 +170,8 @@ export class AuditService extends Service {
   /** 补偿注册表（OPT-P2-02）：kind → 不可逆动作失败后的补偿编排。 */
   private compensations = new Map<string, (payload: Record<string, unknown>, error: Error) => Promise<unknown>>()
   private deniedCounter = new Map<string, number[]>()
+  /** REL-11 读侧加固：已发过 warning 的脏成本资源（进程内去重，防告警风暴）。 */
+  private warnedDirtyCostResources = new Set<string>()
 
   constructor(ctx: Context) {
     super(ctx, 'audit')
@@ -376,6 +378,18 @@ export class AuditService extends Service {
       const tokens = event.meters
         .filter((meter) => meter.key === 'input_tokens' || meter.key === 'output_tokens' || meter.key === 'tokens')
         .reduce((sum, meter) => sum + meter.value, 0)
+      // REL-11 读侧加固：存量脏事件（价格簿曾写入非数值费率）的 cost_cents 非有限时按 0 归集，
+      // 防 NaN 污染成本台账；同一资源只发一次 warning 告警
+      const rawCostCents = event.pricing.cost_cents
+      const safeCostCents = Number.isFinite(rawCostCents) ? rawCostCents : 0
+      if (!Number.isFinite(rawCostCents) && !this.warnedDirtyCostResources.has(event.resource)) {
+        this.warnedDirtyCostResources.add(event.resource)
+        this.fire({
+          severity: 'warning', title: '[计量] 脏事件成本按 0 归集（REL-11 加固）',
+          message: `资源 ${event.resource} 的事件 ${event.event_id} pricing.cost_cents=${String(rawCostCents)} 为非有限值，成本归集按 0 处理；请修正价格簿后按时间窗重放`,
+          resourceType: 'usage_event', resourceId: event.resource,
+        })
+      }
       this.addCost({
         date: event.occurred_at.slice(0, 10),
         ...(agentId !== undefined ? { agentId } : {}),

@@ -145,6 +145,8 @@ export class UsageService extends Service {
 
   private consumers = new Map<string, { handler: UsageConsumer; attempts: Map<string, number> }>()
   private seq = 0
+  /** REL-11 读侧加固：已发过 warning 的脏数据键（进程内去重，防告警风暴）。 */
+  private warnedDirtyKeys = new Set<string>()
   /** 事件保留天数（USAGE_RETENTION_DAYS，默认 730=2 年；0=永久保留不清理）。 */
   readonly retentionDays: number
   private retentionTimer: ReturnType<typeof setInterval> | undefined
@@ -247,8 +249,19 @@ export class UsageService extends Service {
       )
     }
     const meter = input.meters.find((item) => item.key === price.meter_key)!
-    const charge = Math.round((meter.value / price.units_per_step) * price.list_cents_per_unit)
-    const cost = Math.round((meter.value / price.units_per_step) * price.cost_cents_per_unit)
+    // REL-11 读侧加固：存量脏费率（非有限/负值/零步长）按 0 计价并发 warning（防永久投毒）；
+    // 合法数值走原值，计价结果不变。快照记录实际采用的修正值（非有限值 JSON 序列化为 null 会继续污染对账）
+    const listRate = Number.isFinite(price.list_cents_per_unit) && price.list_cents_per_unit >= 0
+      ? price.list_cents_per_unit
+      : this.warnDirtyData(`pricebook:${price.pattern}:list`, `价格簿 ${price.pattern} 的 list_cents_per_unit=${String(price.list_cents_per_unit)} 为非法数值，本次计价按 0 处理；请尽快修正价格簿（REL-11）`)
+    const costRate = Number.isFinite(price.cost_cents_per_unit) && price.cost_cents_per_unit >= 0
+      ? price.cost_cents_per_unit
+      : this.warnDirtyData(`pricebook:${price.pattern}:cost`, `价格簿 ${price.pattern} 的 cost_cents_per_unit=${String(price.cost_cents_per_unit)} 为非法数值，本次计价按 0 处理；请尽快修正价格簿（REL-11）`)
+    const step = Number.isFinite(price.units_per_step) && price.units_per_step > 0
+      ? price.units_per_step
+      : this.warnDirtyData(`pricebook:${price.pattern}:step`, `价格簿 ${price.pattern} 的 units_per_step=${String(price.units_per_step)} 为非法数值（须为正数），本次计价按 0 处理；请尽快修正价格簿（REL-11）`)
+    const charge = step > 0 ? Math.round((meter.value / step) * listRate) : 0
+    const cost = step > 0 ? Math.round((meter.value / step) * costRate) : 0
     const event: UsageEvent = {
       schema: USAGE_SCHEMA,
       schema_version: USAGE_SCHEMA_VERSION,
@@ -269,9 +282,10 @@ export class UsageService extends Service {
         rate: {
           pattern: price.pattern,
           meter_key: price.meter_key,
-          list_cents_per_unit: price.list_cents_per_unit,
-          cost_cents_per_unit: price.cost_cents_per_unit,
-          units_per_step: price.units_per_step,
+          // REL-11：记录实际采用的修正后费率（合法数值时与原值恒等）
+          list_cents_per_unit: listRate,
+          cost_cents_per_unit: costRate,
+          units_per_step: step,
           tax_rate: price.tax_rate,
           ...(nonbillable ? { nonbillable: true } : {}),
         },
@@ -592,6 +606,18 @@ export class UsageService extends Service {
   }
 
   upsertPrice(entry: Omit<PriceBookEntry, 'id' | 'createdAt' | 'updatedAt'>): PriceBookEntry {
+    // REL-11：写入口数值校验——此前 {"list_cents_per_unit":"abc"} 也能 200 入簿，计价产出 NaN 快照、
+    // 对账恒 mismatch 且每次发 critical 告警（存量脏数据永久投毒）。非法即抛错（guarded 统一映射 400）
+    for (const [field, value, min] of [
+      ['list_cents_per_unit', entry.list_cents_per_unit, 0],
+      ['cost_cents_per_unit', entry.cost_cents_per_unit, 0],
+      ['tax_rate', entry.tax_rate, 0],
+      ['units_per_step', entry.units_per_step, 1], // 计价除数：0 会产出 Infinity，负数会产出负金额
+    ] as Array<[string, number, number]>) {
+      if (!Number.isFinite(value) || value < min) {
+        throw new Error(`价格簿字段 ${field} 必须为有限数值且 ≥${min}，收到：${String(value)}`)
+      }
+    }
     const existing = this.priceBook().findOne((item) => item.pattern === entry.pattern)
     if (existing) return this.priceBook().update(existing.id, { ...entry })
     return this.priceBook().insert({ id: newId('rate'), ...entry })
@@ -656,7 +682,9 @@ export class UsageService extends Service {
       const rows = this.ctx.opsStorage.collection<ProjectionRow>(`usage:projection:${consumerId}`).all()
         .filter((row) => (windowFromIso ? row.window >= windowFromIso.slice(0, 10) : true))
       const count = rows.reduce((sum, row) => sum + row.count, 0)
-      const charge = rows.reduce((sum, row) => sum + row.charge_cents, 0)
+      // REL-11 读侧加固：投影集合中的存量脏行（非有限 charge_cents）按 0 计入对账，不再恒 mismatch 反复告警
+      const charge = rows.reduce((sum, row) => sum + (Number.isFinite(row.charge_cents) ? row.charge_cents
+        : this.warnDirtyData(`projection-row:${consumerId}:${row.id}`, `usage 投影 ${consumerId} 窗口 ${row.window} 的 charge_cents 非有限（存量脏数据），对账按 0 计入（REL-11）`)), 0)
       projections.push({
         consumer: consumerId,
         count,
@@ -678,11 +706,15 @@ export class UsageService extends Service {
   project(consumerId: string, event: UsageEvent): void {
     const collection = this.ctx.opsStorage.collection<ProjectionRow>(`usage:projection:${consumerId}`)
     const day = event.occurred_at.slice(0, 10)
+    // REL-11 读侧加固：存量脏事件的 charge_cents 非有限时按 0 投影（防对账口径持续失真），按事件去重告警
+    const rawCharge = event.pricing.charge_cents
+    const charge = Number.isFinite(rawCharge) ? rawCharge
+      : this.warnDirtyData(`projection:${event.event_id}`, `usage 事件 ${event.event_id} 的 pricing.charge_cents=${String(rawCharge)} 非有限（存量脏数据），本次投影按 0 计入（REL-11）`)
     const existing = collection.findOne((row) => row.window === day)
     if (existing) {
-      collection.update(existing.id, { count: existing.count + 1, charge_cents: existing.charge_cents + event.pricing.charge_cents })
+      collection.update(existing.id, { count: existing.count + 1, charge_cents: existing.charge_cents + charge })
     } else {
-      collection.insert({ id: newId('prj'), window: day, count: 1, charge_cents: event.pricing.charge_cents })
+      collection.insert({ id: newId('prj'), window: day, count: 1, charge_cents: charge })
     }
   }
 
@@ -731,6 +763,21 @@ export class UsageService extends Service {
   }
 
   // -- 内部 -----------------------------------------------------------------
+
+  /**
+   * REL-11 读侧加固：脏数据（存量非有限费率/金额）warning 告警，恒返回 0 供计价/投影回落。
+   * 同一 key（进程生命周期内）只告一次，防止每个事件重复触发告警风暴。
+   */
+  private warnDirtyData(key: string, message: string): 0 {
+    if (!this.warnedDirtyKeys.has(key)) {
+      this.warnedDirtyKeys.add(key)
+      this.ctx.platformBus.emit('audit.alert.fired', {
+        id: newId('alt'), severity: 'warning', title: 'usage 脏数据按 0 兜底（REL-11）',
+        message,
+      })
+    }
+    return 0
+  }
 
   private validate(input: UsageRecordInput): void {
     if (!input.org?.trim()) throw new Error('usage 事件 org 必填')
