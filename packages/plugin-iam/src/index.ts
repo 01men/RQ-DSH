@@ -1178,9 +1178,22 @@ export class IamService extends Service {
     return updated
   }
 
-  updateUser(id: string, patch: Partial<Pick<UserRecord, 'displayName' | 'email' | 'phone' | 'title' | 'orgId' | 'accountType' | 'primaryOrgId'>>): UserRecord {
-    this.requireUser(id)
-    if (patch.orgId && !this.orgs().get(patch.orgId)) throw new Error(`组织不存在：${patch.orgId}`)
+  updateUser(id: string, patch: Partial<Pick<UserRecord, 'displayName' | 'email' | 'phone' | 'title' | 'orgId' | 'accountType' | 'primaryOrgId'>>, actor?: UserManageActor): UserRecord {
+    // 白名单收敛（QA SEC-01）：PATCH 编辑仅接受档案类字段，与上方 TS 签名一致；
+    // status/passwordHash/passwordSalt/username/id 等字段原样落库会造成越权改状态、植入口令
+    // （账号接管），此处显式拒绝并点名被拒字段（诚实拒绝，不静默忽略）。
+    const allowedFields = ['displayName', 'email', 'phone', 'title', 'orgId', 'accountType', 'primaryOrgId']
+    const rejected = Object.keys(patch ?? {}).filter((key) => !allowedFields.includes(key))
+    if (rejected.length > 0) {
+      throw new Error(`账号编辑不接受以下字段：${rejected.join('、')}（状态请走冻结/解冻/激活/注销端点，口令请走重置口令端点，角色请走角色分配接口）`)
+    }
+    const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '修改账号')
+    if (patch.orgId) {
+      if (!this.orgs().get(patch.orgId)) throw new Error(`组织不存在：${patch.orgId}`)
+      // 迁移目标组织同样受操作者组织子树约束（防止借「改归属」把账号挪出隔离域）
+      this.assertManageScope(actor, patch.orgId, '迁移账号组织')
+    }
     if (patch.primaryOrgId && !this.orgs().get(patch.primaryOrgId)) throw new Error(`主归属组织不存在：${patch.primaryOrgId}`)
     if (patch.accountType !== undefined && !['internal', 'external', 'suspended-review'].includes(patch.accountType)) {
       throw new Error(`非法账号类型：${patch.accountType}`)
