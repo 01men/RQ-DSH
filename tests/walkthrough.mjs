@@ -1,6 +1,16 @@
 /**
  * 全员工作台核心路径走查（WP-04/A3 DoD）：jsdom + 真实前端模块 + 真实服务。
- * 断言「登录 → 工作台 → 进入任意核心功能」核心路径 ≤3 步，四区齐备，主题生效。
+ * 断言「登录 → 工作台 → 进入任意核心功能」核心路径 ≤3 步、工作台四区齐备、管理简报数据坐实。
+ *
+ * 2026-09-13 OPT-03 对齐当前产品契约（系统性测试报告问题登记表 #4）：
+ *   - 场景卡片区（#dash-scene-cards）随卡片包域**有意暂缓**（dashboard.js 头注 + 提交 7f5f3ea
+ *     「dashboard 场景卡片区随卡片包域暂缓」），此前的「场景卡片 1~6 张 / data-platform 主题 /
+ *     card.exposed 埋点」断言针对的是暂缓域，与现行实现脱节导致整段假红——本版改为断言
+ *     现行四区契约：问候 / 最近调用 / 管理简报（usage.read 持有者）/ 平台事件流；
+ *   - 对话入口卡（#dash-open-chat-main）仅挂载形态（BASE 非空）渲染（dashboard.js 同一条件模板），
+ *     本脚本 jsdom 取根路径（BASE=''）必不含该区——核心路径第 3 步改用页面真实主操作按钮
+ *     「查看 Agent」（#dash-goto-agents → #/agents）达成「一步进入核心功能」。
+ * 卡片包域回流时（交接清单 C 依赖警示解除），应同步恢复场景卡片与埋点断言。
  *
  * 用法（可重复执行）：node tests/walkthrough.mjs
  *   或指向已运行实例：WALK_BASE=http://127.0.0.1:7302 node tests/walkthrough.mjs
@@ -74,7 +84,7 @@ try {
     }
   }
 
-  // jsdom 环境（对齐 dom-smoke 范式；独立形态无 /rq 前缀，文档 URL 取根路径）
+  // jsdom 环境（对齐 dom-smoke 范式；独立形态无 /gate01 前缀，文档 URL 取根路径）
   const dom = new JSDOM('<!doctype html><html><body><div id="app"></div><div id="content"></div></body></html>', {
     url: `${BASE}/`, pretendToBeVisual: true,
   })
@@ -98,45 +108,34 @@ try {
     window.__steps = 1 // 认证 1 步
   })
 
-  await test('步骤 1：进入工作台（第 2 步）——四区齐备：问候 / 场景卡片 / 最近调用 / 对话入口', async () => {
+  await test('步骤 1：进入工作台（第 2 步）——四区齐备：问候 / 最近调用 / 管理简报 / 平台事件流', async () => {
     const { renderDashboard } = await P('pages/dashboard.js')
     const content = document.querySelector('#content')
     await renderDashboard(content, new URLSearchParams(), { rerender() {} })
-    assert(waitFor(() => document.querySelector('#dash-scene-cards .dash-scene-card')), '场景卡片区应渲染（等待卡片包下发）')
-    await waitFor(() => document.querySelectorAll('#dash-scene-cards .dash-scene-card').length > 0)
-    assert(document.querySelector('.page-title')?.textContent.includes('早') || document.querySelector('.page-title'), '问候区在位')
+    assert(await waitFor(() => document.querySelector('.page-title')), '问候区在位')
     assert(document.querySelector('#dash-recent'), '最近调用区在位')
-    assert(document.querySelector('#dash-open-chat-main'), '对话入口区在位（1 步进入对话）')
+    assert(await waitFor(() => document.querySelectorAll('.stat-card').length >= 5), `管理简报应渲染 ≥5 张统计卡（admin 持 usage.read），实际 ${document.querySelectorAll('.stat-card').length}`)
+    assert(document.querySelector('#dash-events'), '平台事件流区在位')
     window.__steps = 2
   })
 
-  await test('步骤 1 验证：卡片包 ≤6 张 + 五平台主题已生效（data-platform 属性）', async () => {
-    const cards = document.querySelectorAll('#dash-scene-cards .dash-scene-card')
-    assert(cards.length >= 1 && cards.length <= 6, `场景卡片应 1~6 张，实际 ${cards.length}`)
-    await waitFor(() => document.documentElement.dataset.platform)
-    assert(['strategy', 'marketing', 'manufacturing', 'rd', 'quality'].includes(document.documentElement.dataset.platform),
-      `data-platform 应为五平台之一，实际 ${document.documentElement.dataset.platform}`)
+  await test('步骤 1 验证：管理简报数据坐实（统计值非空 + 待办审批/事件流容器已挂载）', async () => {
+    const values = [...document.querySelectorAll('.stat-card .stat-value')].map((el) => (el.textContent ?? '').trim())
+    assert(values.length >= 5 && values.every((v) => v.length > 0), `统计卡数值应全部非空，实际 ${JSON.stringify(values)}`)
+    assert(document.querySelector('#dash-approvals'), '待办审批容器在位')
+    assert(await waitFor(() => (document.querySelector('#dash-events')?.textContent ?? '').length > 0), '事件流应渲染出内容（demo 种子必产生事件）')
   })
 
-  await test('步骤 2（第 3 步，达标线内）：点击场景卡片直达功能页', async () => {
-    const firstCard = document.querySelector('#dash-scene-cards .dash-scene-card')
-    assert(firstCard, '存在可点击场景卡片')
-    firstCard.click()
-    await waitFor(() => (location.hash ?? '').startsWith('#/'), 3000)
-    assert((location.hash ?? '').startsWith('#/'), `点击后应进入 hash 路由，实际 ${location.hash}`)
+  await test('步骤 2（第 3 步，达标线内）：点击「查看 Agent」直达核心功能页', async () => {
+    const btn = document.querySelector('#dash-goto-agents')
+    assert(btn, '工作台主操作「查看 Agent」按钮在位')
+    btn.click()
+    assert(await waitFor(() => (location.hash ?? '').startsWith('#/agents'), 3000), `点击后应进入 #/agents，实际 ${location.hash}`)
     window.__steps = 3
   })
 
   await test('核心路径 ≤3 步达标（认证 1 + 进工作台 1 + 进功能 1）', async () => {
     assert((window.__steps ?? 99) <= 3, `核心路径实测 ${window.__steps} 步，超出 3 步达标线`)
-  })
-
-  await test('行为埋点（WP-07/D2）：卡片曝光与点击已上报 behavior 管道', async () => {
-    const { api } = await P('api.js')
-    const exposed = await api.get('/api/behavior/events?type=card.exposed&limit=5')
-    assert(exposed && exposed.total >= 1, `card.exposed 应有事件，实际=${JSON.stringify(exposed)}`)
-    const clicked = await api.get('/api/behavior/events?type=card.clicked&limit=5')
-    assert(clicked && clicked.total >= 1, `card.clicked 应有事件，实际=${JSON.stringify(clicked)}`)
   })
 
   const failed = results.filter(([state]) => state === 'FAIL').length
