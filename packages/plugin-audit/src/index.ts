@@ -587,6 +587,12 @@ export class AuditService extends Service {
   // -- 告警 ---------------------------------------------------------------
 
   createAlertRule(input: Omit<AlertRuleRecord, 'id' | 'createdAt' | 'updatedAt'>): AlertRuleRecord {
+    // REL-12：创建入口入参校验收口——此前缺 name、非有限 threshold 也能 200 建档（无 name 规则
+    // 告警不可读，非法阈值使「>阈值」比较语义失真）。非法即抛错（路由 guarded 统一映射 400 BAD_REQUEST）
+    if (typeof input.name !== 'string' || input.name.trim() === '') throw new Error('告警规则 name 必填（非空字符串）')
+    if (typeof input.metric !== 'string' || input.metric.trim() === '') throw new Error('告警规则 metric 必填（非空字符串）')
+    if (!Number.isFinite(input.threshold)) throw new Error(`告警规则 threshold 必须为有限数值，收到：${String(input.threshold)}`)
+    if (input.operator !== undefined && input.operator !== 'gt') throw new Error(`告警规则 operator 非法：${String(input.operator)}（当前仅支持 gt）`)
     return this.alertRules().insert({ id: newId('rule'), ...input })
   }
 
