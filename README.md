@@ -582,4 +582,4 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 
 ---
 
-> 最近更新：2026-09-12 · IAW 缺口批次落地（19/20 项）——flow-core 流程编排域、数据要素域、模型渠道治理、Agent 自治与 A2A、IAM 场景级授权、审计证据锚点、通知中心持久化（[docs/release-notes-2026-09-11-iaw-batch.md](docs/release-notes-2026-09-11-iaw-batch.md)）+ F 域余量反馈批次（scenegraph 校验口径对齐、面板登录面 PUBLIC_PATHS、next 消费共享模块）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
+> 最近更新：2026-09-13 · OPT 工程质量批次（P0-P3）——契约升级为可检查工件（output.schema 强校验）、审批执行能力令牌防冒充、事件总线持久化与重试/死信、TOCTOU 快照校验、平台自更新 pin/签名/回滚、连接器 ODD 声明块、P95 尾延迟质量闸门、market 域路由拆分首段；季度系统性测试报告落盘（总览 + 安全/计量/编排/市场四组详录，[docs/qa-report-20260912-overview.md](docs/qa-report-20260912-overview.md)）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。

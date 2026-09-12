@@ -14,6 +14,7 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - 流程编排（flow-core）：TF 编排 + 步骤状态机、模板库 + contextPack、SLA 与进度、甘特时间轴（`/api/flow/*`，`flow.*` 事件入总线与面板 SSE 扇出）
 - 数据要素域：数据集登记、四维质量分、血缘反向追溯、指标字典口径仲裁
 - 场景治理与协作：IAM 场景级授权（sceneCode，deny→allow→fail-closed）、审计证据锚点登记反查与场景维度时间线、通知中心持久化（since 增量 + 已读游标）
+- 平台工程加固：契约面 output.schema 强校验、审批执行能力令牌防冒充、事件总线持久化与重试/死信、平台自更新 pin/签名/回滚、连接器 ODD 声明块与 TOCTOU 执行侧快照校验、P95 尾延迟质量闸门与故障注入演练
 - 用量计量：schema v1 幂等管道（死信重放/消费幂等）、零价快照价格簿、三方对账、能力漂移检测、成本穿透报表（单位 DAU 成本）；事件保留策略默认 730 天（`USAGE_RETENTION_DAYS`，0=永久，附清除运维口）
 - 模型接入网关：OpenAI 兼容真实转发（模型未配置 endpoint 时拒绝调用，不生成假 completion），实测 input/output tokens 计量；渠道治理（分级路由 / 渠道组降级链 / 预算熔断 / TTFT 遥测诚实缺列）
 - 审计与治理：四类审计日志、告警规则引擎、越权计数告警、L4 强制审批（上线/下线/下架/吊销，单人通过即执行、结果回写）；审批深化（高风险二次确认 fail-closed、公司级终审、SLA 看板）；HTTP 全响应安全头默认开启（nosniff/SAMEORIGIN/Referrer-Policy）
@@ -41,6 +42,7 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - [M0 发布说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-09-m0.md)：当前商业模式口径与契约变更清单
 - [M1-1 契约冻结 v1 发布说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-11-optimization.md)：J1 面板技能/Agent 点名直调、J2 统一入口分诊、J3 会话直通契约与安全/数据治理加固
 - [IAW 缺口批次发布说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-11-iaw-batch.md)：flow-core 流程编排、数据要素域、模型渠道治理、Agent 自治与 A2A、场景级授权
+- [季度系统性测试报告](https://github.com/01men/ybkk-AIOS/blob/main/docs/qa-report-20260912-overview.md)：安全/计量/编排/市场四组详录与全链路、早高峰并发演练结论（2026-09-12）
 
 ## 边界与口径
 
@@ -48,4 +50,4 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - 生产部署默认基线初始化（零演示数据）；演示数据仅 `DEMO_SEED=1` 显式注入，请勿在生产启用
 - 全部文件操作经 MCP 文件网关并按真实用户身份（X-On-Behalf-User）留痕；测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock
 
-（更新日期：2026-09-12）
+（更新日期：2026-09-13）
