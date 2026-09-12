@@ -431,6 +431,14 @@ export class AppRegistryService extends Service {
     if (!this.ctx.resourceCore.get('app', appId)) throw new Error(`应用不存在：${appId}`)
     const date = usage.date ?? new Date().toISOString().slice(0, 10)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`date 格式非法：${date}（应为 YYYY-MM-DD）`)
+    // REL-04：指标入参校验（对照 beacon 侧 trackVisit 的非负钳制口径）——负数 pv/uv/dau/sessions
+    // 可刷减累计/取大口径，retention7 越界会污染留存口径，一律 400 拒收
+    for (const [key, value] of [['pv', usage.pv], ['uv', usage.uv], ['dau', usage.dau], ['sessions', usage.sessions]] as const) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 0)) throw new Error(`${key} 必须是非负整数（收到：${value}）`)
+    }
+    if (usage.retention7 !== undefined && (!Number.isFinite(usage.retention7) || usage.retention7 < 0 || usage.retention7 > 1)) {
+      throw new Error(`retention7 必须是 0..1 之间的数值（收到：${usage.retention7}）`)
+    }
     const existing = this.usage().findOne((item) => item.appId === appId && item.date === date)
     if (existing) {
       this.usage().update(existing.id, {
