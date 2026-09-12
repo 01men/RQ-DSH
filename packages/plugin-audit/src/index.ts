@@ -466,11 +466,22 @@ export class AuditService extends Service {
   /**
    * 场景/任务维度审计时间线：带 sceneCode 维度的审计日志倒序时间线（面板概览「最近动态」
    * 与场景抽屉的数据源；无 sceneCode 维度的全量审计仍走 query()/logs）。
+   * REL-10：证据登记（audit:evidence）同样带 sceneCode，但此前 timeline 只查 audit:logs——
+   * 证据登记 200 后场景时间线查不到（断链，IAW 5-1→5-2）。现把命中 sceneCode 的证据记录以
+   * entryType='evidence' 条目合并进时间线（按时间统一排序）；证据锚点引用 log id 时在对应
+   * log 条目上计算式回填 evidenceIds（只改响应，不改持久化 schema）。既有字段只增不改。
    */
   timeline(filter: { sceneCode?: string; since?: string; limit?: number } = {}): { total: number; items: Array<{
-    id: string; at: string; type: AuditType; action: string; actorName: string
+    id: string; at: string
+    /** 条目类型标记（REL-10，additive）：'log'=审计日志 / 'evidence'=证据锚点登记（IAW 5-1）。 */
+    entryType: 'log' | 'evidence'
+    /** 审计四类；evidence 条目无审计类型语义，缺省。 */
+    type?: AuditType
+    action: string; actorName: string
     resourceType: string; resourceId: string; resourceName: string
     result: AuditLogRecord['result']; detail: string; sceneCode?: string; evidenceIds: string[]
+    /** evidence 条目专有（additive）：锚点包与登记备注。 */
+    anchors?: EvidenceAnchor[]; note?: string
   }> } {
     const all = this.logs().find((log) => {
       if (filter.sceneCode && log.sceneCode !== filter.sceneCode) return false
