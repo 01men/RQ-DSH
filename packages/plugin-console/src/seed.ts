@@ -11,12 +11,23 @@ import type { Context } from '@deepseek-ai/cordis'
 import { newId } from '../../platform-core/src/index.ts'
 
 export async function seedAll(ctx: Context): Promise<void> {
-  if (ctx.iam.orgs().count() > 0) return
-  if (process.env.DEMO_SEED === '1') {
-    await seedDemo(ctx)
-    return
+  if (ctx.iam.orgs().count() === 0) {
+    if (process.env.DEMO_SEED === '1') {
+      await seedDemo(ctx)
+    } else {
+      seedBaseline(ctx)
+    }
   }
-  seedBaseline(ctx)
+  // ARC-01（QA A-02 修正到位）：内置角色权限迁移必须排在种子完成之后——此前调用挂在
+  // seedAll 顶部，仍在 ensureBuiltinRoles 之前，全新部署首次启动角色表为空 → 迁移空跑
+  // （connector 装配期兜底调用更早，同样空跑并先落 connector-permissions-v1 标记），
+  // 静态 BuiltinRoles 种出的角色缺迁移批次新增的权限点（audit 缺 nas.authz.read/panel.read
+  // 等），直到第二次重启迁移才真正生效。此处每次启动幂等重跑：迁移实现为「缺则补、永不
+  // 删改」，重跑不会覆盖管理员对角色的人工改权；iam:migrations 标记仅作观测、不拦截重跑，
+  // 故存量受损库（已落空跑标记、角色缺点）代码更新后下一次启动即自动补齐，无需清 marker。
+  try {
+    ctx.iam.ensureConnectorPermissionsMigration()
+  } catch { /* 迁移失败不阻断启动；connector 装配期兜底调用仍在 */ }
 }
 
 /** 生产基线：可上线的最小初始化（零演示数据）。 */
