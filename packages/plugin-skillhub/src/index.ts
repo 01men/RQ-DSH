@@ -262,6 +262,14 @@ export class SkillHubService extends Service {
     }
     if (level === 'domain' && target.status !== 'pending_domain') throw new Error('领域审批已完成，当前等待安全审批')
     if (level === 'security' && target.status !== 'pending_security') throw new Error('高风险 Skill 才需要安全加签，当前等待领域审批')
+    // REL-03：两级审批四眼原则——security 加签人须与 domain 审批人不同账号，
+    // 否则同一人可连过两级直接让版本 approved
+    if (level === 'security') {
+      const domainApproval = target.approvals.find((item) => item.level === 'domain')
+      if (domainApproval && domainApproval.approverId === approver.id) {
+        throw new Error('安全加签须与领域审批人不同账号（两级审批不得同一人连过，REL-03）')
+      }
+    }
     if (target.approvals.some((item) => item.level === level && item.approverId === approver.id)) {
       throw new Error('同一审批人不可重复审批')
     }
