@@ -3737,6 +3737,8 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     return ctx.usage.totals({
       ...(exchange.query.get('tenant_id') ? { tenant_id: exchange.query.get('tenant_id')! } : {}),
       ...(exchange.query.get('principal') ? { principal: exchange.query.get('principal')! } : {}),
+      // REL-08：resource 过滤此前被路由静默丢弃（服务层 totals() 已支持）——?resource=<不存在键> 返回全库数字
+      ...(exchange.query.get('resource') ? { resource: exchange.query.get('resource')! } : {}),
       ...(exchange.query.get('from') ? { from: exchange.query.get('from')! } : {}),
     })
   })
