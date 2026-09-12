@@ -419,6 +419,8 @@ export class NasAuthzService extends Service {
     const nas = this.ctx.resourceCore.get('nas', input.nasId)
     const approval = this.ctx.audit.createApproval({
       kind: 'nas.share',
+      // WP-10/L1（QA A-06）：L4 高危统一高风险——通过需二次确认 + 公司级终审标记
+      riskLevel: 'high',
       title: `NAS 分享申请：${user.displayName} → ${nas?.name ?? input.nasId} ${input.path}`,
       payload: {
         nasId: input.nasId, path: input.path, userId: user.id, userName: user.displayName,

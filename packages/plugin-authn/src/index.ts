@@ -895,9 +895,15 @@ export class AuthnService extends Service {
     if (!principal) throw new Error('令牌主体不存在')
     if (principal.status !== 'active') throw new Error('令牌主体已禁用')
     // 人机均实时解析：human 按用户角色、machine 按机器角色+附加权限点，角色变更即时同步到存量令牌
-    const scopes = principal.type === 'human'
+    let scopes = principal.type === 'human'
       ? this.ctx.iam.userPermissions(principal.refId ?? '')
       : this.resolveMachineScopes(principal)
+    // QA A-07：OBO 令牌签发时 scopes 取「父链 ∩ 目标」交集——验签若只按主体实时解析，
+    // 交集即被丢弃（透传令牌反而拿到目标全量权限）。对 OBO 签发的令牌按签发交集二次夹紧：
+    // 实时权限收缩仍然生效（交集），但不再放大出签发时刻授予之外的能力。
+    if (record.issuedBy?.startsWith('obo:')) {
+      scopes = intersectScopes(scopes, record.scopes)
+    }
     this.tokens().update(record.id, { lastUsedAt: new Date().toISOString() })
     return { principal, token: record, scopes, actChain: record.actChain }
   }

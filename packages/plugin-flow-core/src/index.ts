@@ -398,6 +398,25 @@ export function apply(ctx: Context) {
     const info = caller(exchange)
     return info.userId ?? info.principalId
   }
+  /**
+   * 场景级授权执行点（QA A-01）：checkScene 此前全平台唯一调用方是自查端点——
+   * 自查判 deny 实际动作仍 200。场景已配置策略时（判定非 default）本守卫强制裁决：
+   * deny / fail-closed（有策略无命中）一律 403 并落 audit.authz.denied；
+   * allow 放行；场景未配置策略回落角色 RBAC（存量口径不变）。机器主体暂不入场景域
+   * （权限点 RBAC 已覆盖），口径见 release-notes-2026-09-12。
+   */
+  const sceneGuard = (exchange: HttpExchange, sceneCode: string | undefined, action: string): boolean => {
+    if (!sceneCode?.trim()) return true
+    const info = caller(exchange)
+    if (!info.userId) return true
+    const decision = ctx.iam.checkScene(info.userId, sceneCode, action)
+    if (decision.decision !== 'deny') return true
+    ctx.platformBus.emit('audit.authz.denied', {
+      actorId: info.userId, actorName: info.name, point: `scene:${sceneCode}#${action}`, path: exchange.path,
+    })
+    exchange.fail(403, 'FORBIDDEN', `场景授权拒绝（${sceneCode} · ${action}）：${decision.reason}`)
+    return false
+  }
   /** 审计留痕（audit 缺席时静默跳过——dsh-bridge softRead 同款防御）。 */
   const auditSafe = (entry: Omit<AuditLogRecord, 'id' | 'createdAt' | 'updatedAt'>): void => {
     try {
@@ -443,6 +462,9 @@ export function apply(ctx: Context) {
   guarded('POST', '/api/flow/flows', 'flow.write', (exchange) => {
     const input = body<{ name: string; templateCode?: string; steps?: Array<{ key: string; name: string; actorType: FlowStepActorType; assignee?: string; note?: string }>; sceneCode?: string; dept?: string; slaMinutes?: number }>(exchange)
     const info = caller(exchange)
+    // QA A-01：场景执行点——入参场景或模板自带场景，存在策略即强制裁决（deny/fail-closed → 403）
+    const template = input.templateCode ? flow.templates().findOne((item) => item.code === input.templateCode) : undefined
+    if (!sceneGuard(exchange, input.sceneCode ?? template?.sceneCode, 'flow.create')) return
     const created = flow.createFlow({
       ...input,
       createdBy: actorOf(exchange),
@@ -468,6 +490,9 @@ export function apply(ctx: Context) {
   guarded('POST', '/api/flow/flows/:id/steps/:key/transition', 'flow.write', (exchange) => {
     const input = body<{ action?: FlowStepAction; note?: string }>(exchange)
     const action = input.action ?? 'complete'
+    // QA A-01：TF 挂场景时按场景策略裁决流转动作
+    const target = flow.getFlow(exchange.params['id']!)
+    if (target && !sceneGuard(exchange, target.sceneCode, 'flow.step.transition')) return
     const result = flow.stepTransition(exchange.params['id']!, exchange.params['key']!, action, actorOf(exchange), input.note)
     changeLog(exchange, `flow.step.${action}`, result.flow.name, `${exchange.params['key']}→${STEP_TRANSITIONS[action].to}${input.note ? `（${input.note}）` : ''}`)
     return result
@@ -475,6 +500,9 @@ export function apply(ctx: Context) {
 
   guarded('POST', '/api/flow/flows/:id/cancel', 'flow.write', (exchange) => {
     const input = body<{ note?: string }>(exchange)
+    // QA A-01：取消同样是场景内动作，按场景策略裁决
+    const target = flow.getFlow(exchange.params['id']!)
+    if (target && !sceneGuard(exchange, target.sceneCode, 'flow.cancel')) return
     const cancelled = flow.cancelFlow(exchange.params['id']!, actorOf(exchange), input.note)
     changeLog(exchange, 'flow.cancel', cancelled.name, input.note ?? '')
     return cancelled

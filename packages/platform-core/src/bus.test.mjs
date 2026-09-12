@@ -15,7 +15,7 @@
  */
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -88,7 +88,8 @@ test('retryDeadLetters 人工重投：恢复后重投成功且死信清空', asy
   assert.equal(bus.deadLetters().length, 1)
   healthy = true
   const requeued = bus.retryDeadLetters()
-  assert.equal(requeued, 1)
+  assert.equal(requeued.redelivered, 1, '恢复后重投成功（QA C-02 契约：redelivered 计数）')
+  assert.equal(requeued.retained, 0, '无可保留死信')
   await new Promise((resolve) => setTimeout(resolve, 50))
   assert.equal(delivered, 1, '重投后监听器成功消费')
   assert.equal(bus.deadLetters().length, 0, '重投成功后死信清空')
@@ -98,4 +99,48 @@ test('第三方命名空间校验保持不变（来源约束不受管道改造�
   const bus = new PlatformBusService(new Context())
   assert.throws(() => bus.emit('iam.user.frozen', {}, { source: 'plugin:evil' }), /不得发射/)
   assert.throws(() => bus.emit('plugin:evil:ev', {}, { source: 'plugin:other' }), /非自有命名空间/)
+})
+
+test('回授断路（QA C-01）：bus.listener_error 的失败监听器不再自激放大', async () => {
+  const bus = new PlatformBusService(new Context())
+  bus.on(PlatformEvents.BusListenerError, () => { throw new Error('feedback listener broken') })
+  // 源监听器失败一次即成功：恰好产生 1 条 bus.listener_error 反馈事件
+  let failed = false
+  bus.on('t7.x', () => {
+    if (!failed) {
+      failed = true
+      throw new Error('source broken once')
+    }
+  })
+  bus.emit('t7.x', {})
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  const feedbackDead = bus.deadLetters().filter((d) => d.eventName === PlatformEvents.BusListenerError)
+  // 无断路时：listener_error 失败 → 再发 listener_error → 无限循环（journal 持续净增）；
+  // 有断路时：反馈事件监听器失败不回授，恰好落死信一条
+  assert.equal(failed, true, '前置：源监听器确已失败过一次')
+  assert.equal(feedbackDead.length, 1, 'listener_error 失败只落死信一次，不回授放大')
+})
+
+test('死信逐条重投（QA C-02）：不可重投条目原地保留，不连带丢弃其余', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'bus-c02-'))
+  try {
+    const dlFile = join(dir, 'bus-dead-letters.jsonl')
+    const line = (eventName) => JSON.stringify({ id: `bdl-${Math.random().toString(36).slice(2)}`, eventName, payload: {}, listener: eventName, error: '历史失败', attempts: 4, at: new Date().toISOString() })
+    await writeFile(dlFile, `${line('plugin:ghost:ev')}
+${line('t8.ok')}
+`, 'utf8')
+    const bus = new PlatformBusService(new Context(), { dataDir: dir })
+    let delivered = 0
+    bus.on('t8.ok', () => { delivered++ })
+    const result = bus.retryDeadLetters()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    assert.equal(result.attempted, 2)
+    assert.equal(result.redelivered, 1, '可重投条目成功重发')
+    assert.equal(result.retained, 1, '丢 source 的 plugin: 事件原地保留')
+    assert.equal(delivered, 1, '健康条目重投后正常消费')
+    assert.equal(bus.deadLetters().length, 1)
+    assert.equal(bus.deadLetters()[0].eventName, 'plugin:ghost:ev')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })

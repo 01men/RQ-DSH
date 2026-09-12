@@ -781,7 +781,8 @@ export class PanelService extends Service {
         title: `${message.card.title} · ${op.label}`,
         payload: { messageId: message.id, dept: message.dept, opId: op.id, opLabel: op.label, reason: input.reason ?? '' },
         requesterId: input.actorId, requesterName: input.actorName,
-        ...(op.risk ? { riskLevel: op.risk } : {}),
+        // QA A-06：卡片未声明风险级时缺省 high（fail-closed），不再「一次 approve 即执行」
+        riskLevel: op.risk ?? 'high',
       })
       result = `已提交审批（${approval.id}），在审批中心跟进`
     } else if (action === 'dd.push') {
@@ -904,6 +905,10 @@ export class PanelService extends Service {
     this.ctx.platformBus.on(PlatformEvents.FlowCreated, forward(PlatformEvents.FlowCreated))
     this.ctx.platformBus.on(PlatformEvents.FlowStepUpdated, forward(PlatformEvents.FlowStepUpdated))
     this.ctx.platformBus.on(PlatformEvents.FlowCompleted, forward(PlatformEvents.FlowCompleted))
+    // QA E-03：连接器镜像失败类事件此前只走总线半程——面板 SSE 一并扇出（无 dept 广播全订阅者），
+    // 值班面板可见 fail-closed 状态
+    this.ctx.platformBus.on(PlatformEvents.ConnectorPolicyMirrorFailed, forward(PlatformEvents.ConnectorPolicyMirrorFailed))
+    this.ctx.platformBus.on(PlatformEvents.ConnectorPolicySnapshotDrifted, forward(PlatformEvents.ConnectorPolicySnapshotDrifted))
   }
 }
 

@@ -398,11 +398,13 @@ export class UsageService extends Service {
     return { total, items: rows.map(rowToEvent) }
   }
 
-  totals(filter: { tenant_id?: string; principal?: string; from?: string; to?: string } = {}): { count: number; charge_cents: number; cost_cents: number } {
+  totals(filter: { tenant_id?: string; principal?: string; resource?: string; from?: string; to?: string } = {}): { count: number; charge_cents: number; cost_cents: number } {
     const conditions: string[] = []
     const params: Array<string | number> = []
     if (filter.tenant_id) { conditions.push('tenant_id = ?'); params.push(filter.tenant_id) }
     if (filter.principal) { conditions.push('principal = ?'); params.push(filter.principal) }
+    // QA B-03：resource 过滤此前在 SQL 缺列被静默忽略（usage_query 工具返回全库数字）——补齐
+    if (filter.resource) { conditions.push('resource = ?'); params.push(filter.resource) }
     if (filter.from) { conditions.push('occurred_at >= ?'); params.push(filter.from) }
     if (filter.to) { conditions.push('occurred_at <= ?'); params.push(filter.to) }
     const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
@@ -463,7 +465,10 @@ export class UsageService extends Service {
     if (filter.subject) { conditions.push('e.subject = ?'); params.push(filter.subject) }
     const where = ` WHERE ${conditions.join(' AND ')}`
     const whereAnd = ` AND ${conditions.join(' AND ')}`
-    const tokensExpr = "COALESCE((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%'), 0)"
+    // QA B-01：关联子查询必须包在聚合函数内——SQLite 对 GROUP BY 查询 SELECT 列表中的
+    // 裸关联子查询只对组内某一行求值，tokens 因此只统计到每组任意一条事件（J4 报表小 176 倍）。
+    // SUM((SELECT …)) 语义 = 逐行求子查询值再求和，与 json_each JOIN 口径一致且三维自洽。
+    const tokensExpr = "COALESCE(SUM((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%')), 0)"
     const byResource = this.ctx.txnStore.sql<{ resource: string; events: number; tokens: number; cost_cents: number; charge_cents: number }>(
       `SELECT e.resource AS resource, COUNT(*) AS events, ${tokensExpr} AS tokens,` +
       " COALESCE(SUM(CAST(json_extract(e.pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents," +
@@ -548,7 +553,8 @@ export class UsageService extends Service {
     const period = month ?? new Date().toISOString().slice(0, 7)
     if (!/^\d{4}-\d{2}$/.test(period)) throw new Error('报表月份格式应为 YYYY-MM')
     const [from, to] = periodBoundsIso(period)
-    const tokensExpr = "COALESCE((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%'), 0)"
+    // QA B-01：同 summary——子查询必须包进 SUM()，否则 GROUP BY 下每组只统计任意一行
+    const tokensExpr = "COALESCE(SUM((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%')), 0)"
     const select = (dimension: string, extraWhere: string) =>
       this.ctx.txnStore.sql<ReportRow>(
         `SELECT ${dimension} AS dimension, COUNT(*) AS events, ${tokensExpr} AS tokens,` +

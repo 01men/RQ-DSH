@@ -149,6 +149,16 @@ export function approvalKindRule(kind: string): ApprovalKindRule {
   return { sensitiveInputPolicy: 'mask', ...APPROVAL_KIND_RULES[kind] }
 }
 
+/**
+ * L4 高危审批缺省即 high（QA A-06）：连接器网关下线/建连/admin 续调、MCP 下线、NAS 分享、
+ * 面板卡片动作与行业激活此前未标 riskLevel:'high'——一次 approve 即执行、无二次确认，
+ * 与 WP-10「高危操作需显式二次确认」口径冲突。中央闸兜底：调用方未显式声明时按 high 落库。
+ */
+const HIGH_RISK_APPROVAL_KINDS = new Set([
+  'connector.offline', 'connector.connect', 'connector.action.admin',
+  'mcp.offline', 'nas.share', 'panel.card-action', 'industry.activation',
+])
+
 // ---------------------------------------------------------------------------
 // 服务
 // ---------------------------------------------------------------------------
@@ -241,6 +251,37 @@ export class AuditService extends Service {
     ctx.platformBus.on(PlatformEvents.ConnectorConnected, auditOf('change', 'connector.connected'))
     ctx.platformBus.on(PlatformEvents.ConnectorDisconnected, auditOf('change', 'connector.disconnected'))
     ctx.platformBus.on(PlatformEvents.ConnectorPermGroupChanged, auditOf('change', 'connector.permgroup.changed'))
+    // QA E-03：镜像失败类事件此前只走总线半程（audit 无订阅、无告警）——补齐审计留痕 + 告警接线
+    ctx.platformBus.on(PlatformEvents.ConnectorPolicyMirrorFailed, (payload) => {
+      const p = payload as { groupId?: string; groupName?: string; reason?: string }
+      this.record({
+        type: 'invoke', actorType: 'system', actorId: 'connector-patrol', actorName: '连接器巡检',
+        action: 'connector.policy_mirror_failed', resourceType: 'connector_permgroup',
+        resourceId: String(p.groupId ?? ''), resourceName: String(p.groupName ?? ''),
+        result: 'error', detail: `策略镜像失败（fail-closed，旧运行时令牌已吊销）：${p.reason ?? ''}`,
+      })
+      this.fire({
+        severity: 'critical',
+        title: '[连接器] 权限组策略镜像失败',
+        message: `权限组「${p.groupName ?? p.groupId ?? '?'}」策略镜像至网关失败，已 fail-closed 并吊销旧运行时令牌：${p.reason ?? ''}`,
+        resourceType: 'connector_permgroup', ...(p.groupId !== undefined ? { resourceId: p.groupId } : {}),
+      })
+    })
+    ctx.platformBus.on(PlatformEvents.ConnectorPolicySnapshotDrifted, (payload) => {
+      const p = payload as { groupId?: string; groupName?: string; reason?: string }
+      this.record({
+        type: 'invoke', actorType: 'system', actorId: 'connector-patrol', actorName: '连接器巡检',
+        action: 'connector.policy_snapshot_drifted', resourceType: 'connector_permgroup',
+        resourceId: String(p.groupId ?? ''), resourceName: String(p.groupName ?? ''),
+        result: 'error', detail: `策略快照漂移（拒绝按旧快照执行）：${p.reason ?? ''}`,
+      })
+      this.fire({
+        severity: 'warning',
+        title: '[连接器] 权限组策略快照漂移',
+        message: `权限组「${p.groupName ?? p.groupId ?? '?'}」调用时检出策略快照漂移，本次调用已拒绝（重试即按新快照走授权）：${p.reason ?? ''}`,
+        resourceType: 'connector_permgroup', ...(p.groupId !== undefined ? { resourceId: p.groupId } : {}),
+      })
+    })
     ctx.platformBus.on(PlatformEvents.ConnectorGatewaySynced, (payload) => {
       const p = payload as { kind?: string; violations?: unknown[] }
       this.record({
@@ -343,7 +384,9 @@ export class AuditService extends Service {
         ...(connectorService !== undefined ? { connectorService } : {}),
         llmTokens: event.resource.startsWith('model:') ? tokens : 0,
         toolCalls: event.resource.startsWith('mcp:') || connectorService !== undefined ? 1 : 0,
-        costYuan: Math.round(event.pricing.charge_cents) / 100,
+        // QA B-06：成本口径取 cost_cents（内部成本）——此前取 charge_cents（应收口径）充当成本，
+        // 价格簿一旦调非零即以成本名义呈现应收金额（M0 禁止的结算语义残留）；charge 恒 0 仅快照兼容
+        costYuan: Math.round(safeCostCents * 100) / 10_000,
       })
     })
   }
@@ -434,17 +477,49 @@ export class AuditService extends Service {
       if (filter.since && log.createdAt < filter.since) return false
       return true
     })
-    const items = all
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-      .slice(0, Math.min(filter.limit ?? 50, 200))
-      .map((log) => ({
-        id: log.id, at: log.createdAt, type: log.type, action: log.action, actorName: log.actorName,
+    const evidences = this.evidence().find((evd) => {
+      if (filter.sceneCode && evd.sceneCode !== filter.sceneCode) return false
+      if (filter.since && evd.createdAt < filter.since) return false
+      return true
+    })
+    // 锚点引用 log id 时计算式回填 evidenceIds（响应层合并去重，不落库）
+    const anchorRefs = new Map<string, string[]>()
+    if (evidences.length > 0) {
+      const logIds = new Set(all.map((log) => log.id))
+      for (const evd of evidences) {
+        for (const anchor of evd.anchors) {
+          if (anchor.id && logIds.has(anchor.id)) {
+            const refs = anchorRefs.get(anchor.id) ?? []
+            if (!refs.includes(evd.id)) refs.push(evd.id)
+            anchorRefs.set(anchor.id, refs)
+          }
+        }
+      }
+    }
+    const items = [
+      ...all.map((log) => ({
+        id: log.id, at: log.createdAt, entryType: 'log' as const,
+        type: log.type, action: log.action, actorName: log.actorName,
         resourceType: log.resourceType, resourceId: log.resourceId, resourceName: log.resourceName,
         result: log.result, detail: log.detail,
         ...(log.sceneCode ? { sceneCode: log.sceneCode } : {}),
-        evidenceIds: log.evidenceIds ?? [],
-      }))
-    return { total: all.length, items }
+        evidenceIds: [...(log.evidenceIds ?? []), ...(anchorRefs.get(log.id) ?? [])],
+      })),
+      ...evidences.map((evd) => ({
+        id: evd.id, at: evd.createdAt, entryType: 'evidence' as const,
+        action: 'audit.evidence', actorName: evd.subject ?? '',
+        resourceType: 'evidence', resourceId: evd.id,
+        resourceName: evd.note?.slice(0, 50) || `证据锚点×${evd.anchors.length}`,
+        result: 'ok' as const,
+        detail: evd.note ?? evd.anchors.map((anchor) => `${anchor.kind}:${anchor.id}`).join(', ').slice(0, 300),
+        ...(evd.sceneCode ? { sceneCode: evd.sceneCode } : {}),
+        evidenceIds: [evd.id],
+        anchors: evd.anchors, ...(evd.note ? { note: evd.note } : {}),
+      })),
+    ]
+      .sort((a, b) => b.at.localeCompare(a.at))
+      .slice(0, Math.min(filter.limit ?? 50, 200))
+    return { total: all.length + evidences.length, items }
   }
 
   query(filter: {
@@ -598,9 +673,11 @@ export class AuditService extends Service {
       throw new Error(`审批拒绝：该类审批以原文入参执行，检出敏感命名入参（${sensitivePaths.join('、')}）。敏感值不得进入审批存储，请调整入参后重试（OPT-P2-02）`)
     }
     const { masked, maskedKeys } = maskSensitivePayload(input.payload)
+    const riskLevel = input.riskLevel ?? (HIGH_RISK_APPROVAL_KINDS.has(input.kind) ? 'high' as const : undefined)
     const record = this.approvals().insert({
       id: newId('apr'),
       ...input,
+      ...(riskLevel !== undefined ? { riskLevel } : {}),
       ...(maskedKeys.length > 0 ? { payload: { ...(masked as Record<string, unknown>), maskedKeys } } : {}),
       status: 'pending',
       createdAt: new Date().toISOString(),
@@ -628,6 +705,10 @@ export class AuditService extends Service {
     const approval = this.approvals().get(id)
     if (!approval) throw new Error(`审批单不存在：${id}`)
     if (approval.status !== 'pending') throw new Error(`审批单已处理（${approval.status}）`)
+    // QA A-05：提交人与审批人不得为同一账号（自审自批）——approve/reject 一并拦截
+    if (approverId && approverId === approval.requesterId) {
+      throw new Error('提交人与审批人不得为同一账号（自审自批拦截，QA A-05）：请交由其他审批人处理')
+    }
     const isHighRisk = approval.riskLevel === 'high'
     if (decision === 'approve' && isHighRisk && options.confirmed !== true) {
       throw new Error('高风险审批通过需二次确认（confirmed=true），请在前端确认弹窗中复核后提交')

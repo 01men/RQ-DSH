@@ -32,6 +32,7 @@ endpoints:
   - POST /api/usage/record（写入计量） · GET /api/usage/events（事件流水） · GET /api/usage/totals（聚合） · GET /api/usage/recent（最近条目）
   - POST /api/usage/reconcile（对账） · POST /api/usage/replay（重放） · GET/PUT /api/usage/price-book（价格册）
   - GET /api/usage/dead-letters · POST /api/usage/dead-letters/retry（死信查询/重投） · POST /api/usage/feedback（采纳率反馈） · PUT /api/usage/capability-grants（能力授予）
+  - GET /api/bus/dead-letters · POST /api/bus/dead-letters/retry（总线死信查询/逐条重投，QA C-03；usage.admin）
   - GET/POST /api/apps/beacon（公开访客埋点：GET 1x1 GIF / POST JSON；?app=&vid=&uid= → PV 累加、UV 去重；IP+应用 60 次/分钟限流）
   - # 静态托管 public/ SPA（飞书级控制台）
 

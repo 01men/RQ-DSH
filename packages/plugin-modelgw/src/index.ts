@@ -472,7 +472,9 @@ export class ModelGatewayService extends Service {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
         body: JSON.stringify({
-          model: input.model,
+          // QA B-02：以实际调用渠道为准——降级链入参为 Omit<…,'model'>，原写法转发体缺 model 字段，
+          // 真实 OpenAI 兼容上游下备渠道全链 400
+          model: model.slug,
           messages: input.messages,
           ...(input.maxTokens !== undefined ? { max_tokens: input.maxTokens } : {}),
           ...(input.temperature !== undefined ? { temperature: input.temperature } : {}),

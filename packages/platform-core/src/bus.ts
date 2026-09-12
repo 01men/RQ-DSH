@@ -134,6 +134,13 @@ const LISTENER_TIMEOUT_MS = 5_000
 const RETRY_BACKOFF_MS = [50, 200, 800]
 /** 派发队列越限水位：超出部分转入死信（reason=backpressure_overflow，journal 仍可回放，不丢证据）。 */
 const QUEUE_OVERFLOW_CAP = 10_000
+/**
+ * 回授断路集（QA C-01）：bus.listener_error / bus.dead_letter 是总线自观察事件。
+ * 这两类事件的监听器自身失败时**不得**再以事件形式回授（否则失败监听器订阅自身
+ * 即形成自激放大循环，journal 净增永不停歇，热点期挤占真实事件派发）——
+ * 异常仍逐次落死信（证据可查），仅切断事件回授路径。
+ */
+const FEEDBACK_EVENTS = new Set<string>([PlatformEvents.BusListenerError, PlatformEvents.BusDeadLetter])
 
 interface BusDeadLetterRecord {
   id: string
@@ -281,29 +288,40 @@ export class PlatformBusService extends Service {
   }
 
   /**
-   * 人工重投（OPT-P1-04）：清空死信后按原事件名全量重发（at-least-once）。
+   * 人工重投（OPT-P1-04）：按原事件名逐条重发（at-least-once）。
+   * QA C-02 修正：不再「先清空再重发」——一条不可重投的事件（如丢失 source 的 plugin:
+   * 事件，emit 校验即抛）不再连带丢弃其余死信；仅成功重发的移出，失败的原地保留。
    * ⚠ 口径与 usage 消费水位不同：总线无每监听器水位，重投会对已成功的监听器重复投递，
    * 消费方需自行幂等（审计/投影类消费方按事件 id 去重）。重投中再失败的监听器自然重新入死信。
    */
-  retryDeadLetters(): number {
+  retryDeadLetters(): { attempted: number; redelivered: number; retained: number } {
     const records = [...this.deadLetterStore]
-    this.deadLetterStore = []
-    if (this.deadLetterFile) {
-      try { writeFileSync(this.deadLetterFile, '', 'utf8') } catch { /* 落盘失败：内存已清，重投继续 */ }
-    }
+    let redelivered = 0
+    const retained: BusDeadLetterRecord[] = []
     for (const record of records) {
-      this.emit(record.eventName, record.payload)
+      try {
+        this.emit(record.eventName, record.payload)
+        redelivered++
+      } catch (error) {
+        // 不可重投（源校验失败/参数非法）：保留死信并注明原因，等待人工处置
+        retained.push({ ...record, error: `${record.error}；重投失败：${error instanceof Error ? error.message : String(error)}` })
+      }
     }
-    return records.length
+    this.deadLetterStore = retained
+    if (this.deadLetterFile) {
+      try { writeFileSync(this.deadLetterFile, retained.map((record) => JSON.stringify(record)).join('\n') + (retained.length > 0 ? '\n' : ''), 'utf8') } catch { /* 落盘失败：内存已对齐，下次重投再试 */ }
+    }
+    return { attempted: records.length, redelivered, retained: retained.length }
   }
 
-  /** 死信入账 + 告警事件（bus.dead_letter）。 */
-  private enterDeadLetter(event: PlatformEvent, listener: string, error: string, attempts: number): void {
+  /** 死信入账 + 告警事件（bus.dead_letter）。suppressAlert 时仅入账不回发事件（回授断路，QA C-01）。 */
+  private enterDeadLetter(event: PlatformEvent, listener: string, error: string, attempts: number, options: { suppressAlert?: boolean } = {}): void {
     const record: BusDeadLetterRecord = {
       id: `bdl-${randomUUID()}`, eventName: event.name, payload: event.payload,
       listener, error, attempts, at: new Date().toISOString(),
     }
     this.appendDeadLetter(record)
+    if (options.suppressAlert) return
     // 告警事件走完整管道（可被 audit 通配订阅落审计）；其自身失败由 deliver 的 console 兜底，不递归入死信
     this.emit(PlatformEvents.BusDeadLetter, record)
   }
@@ -340,8 +358,13 @@ export class PlatformBusService extends Service {
           delivered = true
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
-          // 监听器异常一律显式落事件（OPT-P1-04）：审计可查，不再 console.error 了事
+          // 监听器异常一律显式落事件（OPT-P1-04）：审计可查，不再 console.error 了事；
+          // 回授断路（QA C-01）：反馈事件自身的监听器失败不再回授，直接入死信（否则自激循环）
           console.error(`[bus] 监听器处理 ${event.name}（${label}）第 ${attempt} 次失败`, error)
+          if (FEEDBACK_EVENTS.has(event.name)) {
+            this.enterDeadLetter(event, label, `反馈事件监听器失败（不回授，QA C-01）：${message}`, attempt, { suppressAlert: true })
+            break
+          }
           this.emit(PlatformEvents.BusListenerError, { event: event.name, listener: label, attempt, error: message, at: new Date().toISOString() })
           if (attempt <= RETRY_BACKOFF_MS.length) {
             await sleep(RETRY_BACKOFF_MS[attempt - 1])

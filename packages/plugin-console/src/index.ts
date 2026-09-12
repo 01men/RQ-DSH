@@ -15,7 +15,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { HttpExchange, Collection, RecordBase } from '../../platform-core/src/index.ts'
 import { createPluginContext, newId, platformVersionInfo, PlatformEvents } from '../../platform-core/src/index.ts'
 import { nonbillableUsage } from '../../plugin-usage/src/index.ts'
-import { PermissionCatalog } from '../../plugin-iam/src/index.ts'
+import { PermissionCatalog, type UserManageActor } from '../../plugin-iam/src/index.ts'
 import { ProviderAuthError } from '../../plugin-iam/src/providers.ts'
 import { AppRegistryService } from '../../plugin-app/src/index.ts'
 import { AgentRegistryService } from '../../plugin-agent/src/index.ts'
@@ -194,6 +194,12 @@ export function apply(ctx: Context) {
   })
 
   const caller = (exchange: HttpExchange): CallerInfo => exchange.principal as CallerInfo
+
+  /** 账号管理操作者上下文（QA A-03）：传给 iam 服务层做组织归属校验（非平台管理员限本组织子树）。 */
+  const manageActor = (exchange: HttpExchange): UserManageActor => {
+    const info = caller(exchange)
+    return { userId: info.userId, permissions: info.permissions }
+  }
 
   const requirePermission = (exchange: HttpExchange, point: string): boolean => {
     const info = caller(exchange)
@@ -1068,8 +1074,9 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   guarded('POST', '/api/iam/users', 'iam.user.write', (exchange) => {
     const input = body<{ username: string; displayName: string; orgId: string; title?: string; email?: string; phone?: string; roleIds?: string[]; password?: string }>(exchange)
-    const { user, initialPassword } = ctx.iam.createUser(input)
-    if (input.roleIds?.length) ctx.iam.assignRoles(user.id, input.roleIds)
+    const actor = manageActor(exchange)
+    const { user, initialPassword } = ctx.iam.createUser(input, actor)
+    if (input.roleIds?.length) ctx.iam.assignRoles(user.id, input.roleIds, actor)
     ctx.iam.activateUser(user.id)
     changeLog(exchange, 'iam.user.create', 'user', user.id, user.displayName)
     return { ...decorateUser(ctx, ctx.iam.users().get(user.id)!), ...(initialPassword ? { initialPassword } : {}) }
@@ -1077,7 +1084,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   guarded('POST', '/api/iam/users/:id/reset-password', 'iam.user.write', (exchange) => {
     const { password } = body<{ password?: string }>(exchange)
-    const { user, initialPassword } = ctx.iam.resetPassword(exchange.params['id']!, password)
+    const { user, initialPassword } = ctx.iam.resetPassword(exchange.params['id']!, password, manageActor(exchange))
     changeLog(exchange, 'iam.user.reset_password', 'user', user.id, user.displayName, password ? '设置为指定口令' : '重置为随机初始口令')
     return { id: user.id, username: user.username, initialPassword }
   })
@@ -1091,9 +1098,10 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   guarded('PATCH', '/api/iam/users/:id', 'iam.user.write', (exchange) => {
     const input = body<{ displayName?: string; email?: string; phone?: string; title?: string; orgId?: string; roleIds?: string[]; accountType?: 'internal' | 'external' | 'suspended-review'; primaryOrgId?: string }>(exchange)
+    const actor = manageActor(exchange)
     const { roleIds, ...patch } = input
-    const user = ctx.iam.updateUser(exchange.params['id']!, patch)
-    if (roleIds) ctx.iam.assignRoles(user.id, roleIds)
+    const user = ctx.iam.updateUser(exchange.params['id']!, patch, actor)
+    if (roleIds) ctx.iam.assignRoles(user.id, roleIds, actor)
     changeLog(exchange, 'iam.user.update', 'user', user.id, user.displayName)
     return decorateUser(ctx, ctx.iam.users().get(user.id)!)
   })
@@ -1107,10 +1115,11 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     guarded('POST', `/api/iam/users/:id/${action}`, permission, (exchange) => {
       const { reason } = body<{ reason?: string }>(exchange)
       const id = exchange.params['id']!
-      const user = action === 'activate' ? ctx.iam.activateUser(id)
-        : action === 'freeze' ? ctx.iam.freezeUser(id, reason ?? '')
-          : action === 'unfreeze' ? ctx.iam.unfreezeUser(id)
-            : ctx.iam.deactivateUser(id, reason ?? '')
+      const actor = manageActor(exchange)
+      const user = action === 'activate' ? ctx.iam.activateUser(id, actor)
+        : action === 'freeze' ? ctx.iam.freezeUser(id, reason ?? '', actor)
+          : action === 'unfreeze' ? ctx.iam.unfreezeUser(id, actor)
+            : ctx.iam.deactivateUser(id, reason ?? '', actor)
       changeLog(exchange, `iam.user.${action}`, 'user', user.id, user.displayName, reason ?? '')
       return decorateUser(ctx, user)
     })
@@ -1118,14 +1127,14 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   guarded('POST', '/api/iam/users/:id/bindings', 'iam.user.write', (exchange) => {
     const input = body<{ provider: 'dingtalk' | 'feishu' | 'wecom'; unionId: string; displayName?: string; verifyCode?: string }>(exchange)
-    const user = ctx.iam.bindThirdParty(exchange.params['id']!, { ...input, displayName: input.displayName ?? input.unionId })
+    const user = ctx.iam.bindThirdParty(exchange.params['id']!, { ...input, displayName: input.displayName ?? input.unionId }, manageActor(exchange))
     changeLog(exchange, 'iam.user.bind', 'user', user.id, user.displayName, input.provider)
     return decorateUser(ctx, user)
   })
 
   guarded('DELETE', '/api/iam/users/:id/bindings/:provider', 'iam.user.write', (exchange) => {
     const { verifyCode } = body<{ verifyCode: string }>(exchange)
-    const user = ctx.iam.unbindThirdParty(exchange.params['id']!, exchange.params['provider']! as 'dingtalk', verifyCode)
+    const user = ctx.iam.unbindThirdParty(exchange.params['id']!, exchange.params['provider']! as 'dingtalk', verifyCode, manageActor(exchange))
     changeLog(exchange, 'iam.user.unbind', 'user', user.id, user.displayName, exchange.params['provider'])
     return decorateUser(ctx, user)
   })
@@ -3046,8 +3055,25 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     const header = String(exchange.headers['authorization'] ?? '').slice(7)
     const verified = ctx.authn.verify(header)
     if (verified.principal.type !== 'human') throw new Error('on-behalf-of 令牌必须由用户身份发起')
-    const result = ctx.agentRegistry.issueOnBehalfOfToken(exchange.params['id']!, verified)
-    changeLog(exchange, 'agent.obo_token', 'agent', exchange.params['id']!, '', `链路：${result.actChain.map((item) => (item as { name: string }).name).join(' → ')}`)
+    // QA A-07：透传令牌是「以该用户身份行事」的高敏凭证——此前任意 agent.write 持有者
+    // 可对他人 Agent 签发。收敛为：owner / 绑定用户 / 平台管理员（'*'）。
+    const id = exchange.params['id']!
+    const agent = ctx.resourceCore.get('agent', id)
+    if (!agent) throw new Error(`Agent 不存在：${id}`)
+    const isOwner = info.userId !== undefined && agent.ownerId === info.userId
+    const isBound = ctx.agentRegistry.boundUsers(id).some((item) => item.userId === info.userId)
+    if (!isOwner && !isBound && !info.permissions.includes('*')) {
+      ctx.platformBus.emit('audit.authz.denied', {
+        actorId: info.userId ?? info.principalId,
+        actorName: info.name,
+        point: `agent.obo(owner:${id})`,
+        path: exchange.path,
+      })
+      exchange.fail(403, 'FORBIDDEN', `仅 Agent 负责人或绑定用户可代「${agent.name}」签发 on-behalf-of 令牌（QA A-07）`)
+      return
+    }
+    const result = ctx.agentRegistry.issueOnBehalfOfToken(id, verified)
+    changeLog(exchange, 'agent.obo_token', 'agent', id, '', `链路：${result.actChain.map((item) => (item as { name: string }).name).join(' → ')}`)
     return result
   })
 
@@ -3439,7 +3465,31 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     return { app: result.app, credential: result.credential ?? null }
   })
 
+  /**
+   * 应用写操作归属守卫（QA A-04）：PATCH/删除/指标上报/状态流转此前仅校验 app.write，
+   * 任意 developer 可改写他人应用。平台管理员（'*'）、应用 owner、绑定本应用的机器主体
+   * （refType=app 自助上报通道）之外一律 403 并落 audit.authz.denied。
+   */
+  const assertAppOwner = (exchange: HttpExchange, appId: string): boolean => {
+    const info = caller(exchange)
+    if (info.permissions.includes('*')) return true
+    const app = ctx.resourceCore.get('app', appId)
+    if (!app) throw new Error(`应用不存在：${appId}`)
+    const isOwner = info.kind === 'human' && info.userId !== undefined && app.ownerId === info.userId
+    const isBoundMachine = info.kind === 'machine' && info.refType === 'app' && info.refId === appId
+    if (isOwner || isBoundMachine) return true
+    ctx.platformBus.emit('audit.authz.denied', {
+      actorId: info.userId ?? info.principalId,
+      actorName: info.name,
+      point: `app.write(owner:${appId})`,
+      path: exchange.path,
+    })
+    exchange.fail(403, 'FORBIDDEN', `仅平台管理员与应用负责人可变更「${app.name}」（owner 校验，QA A-04）`)
+    return false
+  }
+
   guarded('PATCH', '/api/apps/:id', 'app.write', (exchange) => {
+    if (!assertAppOwner(exchange, exchange.params['id']!)) return
     const input = body<{ name?: string; attrs?: Record<string, unknown> }>(exchange)
     const attrs = { ...(input.attrs ?? {}) }
     resolveDeveloperAttrs(attrs, { allowClear: true })
@@ -3451,6 +3501,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
   // 接入提示词（注册同款模板，平台侧生成）：rotate=true 轮换机器凭证 secret 并随提示词返回（旧值立即失效），
   // rotate=false 仅含 client_id（secret 丢失场景必须 rotate 才能拿到可用凭证）。控制台详情页按钮与外部推送方共用。
   guarded('POST', '/api/apps/:id/onboarding-prompt', 'app.write', (exchange) => {
+    if (!assertAppOwner(exchange, exchange.params['id']!)) return
     const { rotate } = body<{ rotate?: boolean }>(exchange)
     const id = exchange.params['id']!
     const result = ctx.appRegistry.buildOnboardingPrompt(id, requestOrigin(exchange) ?? 'http://127.0.0.1:7300', { rotate: rotate === true })
@@ -3460,6 +3511,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   /** 删除应用：草稿（从未上线）或已归档可删；级联清除依赖边、禁用 SSO 客户端与机器凭证（记录保留）。 */
   guarded('DELETE', '/api/apps/:id', 'app.write', (exchange) => {
+    if (!assertAppOwner(exchange, exchange.params['id']!)) return
     const id = exchange.params['id']!
     const app = ctx.resourceCore.get('app', id)
     if (!app) throw new Error(`应用不存在：${id}`)
@@ -3471,6 +3523,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   // 应用指标主动上报（接入方 → 宿主推送通道；同日 DAU/UV 取最大、会话/PV 累加，可指定 date 补录）
   guarded('POST', '/api/apps/:id/metrics-report', 'app.write', (exchange) => {
+    if (!assertAppOwner(exchange, exchange.params['id']!)) return
     const id = exchange.params['id']!
     const input = body<{ dau?: number; sessions?: number; avgDepth?: number; retention7?: number; pv?: number; uv?: number; date?: string }>(exchange)
     ctx.appRegistry.recordUsage(id, input)
@@ -3480,6 +3533,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
   })
 
   guarded('POST', '/api/apps/:id/transition', 'app.write', (exchange) => {
+    if (!assertAppOwner(exchange, exchange.params['id']!)) return
     const { action, note } = body<{ action: string; note?: string }>(exchange)
     const info = caller(exchange)
     const id = exchange.params['id']!
@@ -3607,9 +3661,18 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
   })
 
   guarded('GET', '/api/audit/cost', 'audit.read', (exchange) => {
+    // QA B-04：days 参数此前被静默丢弃（「近 14 天」实为全量聚合）——未显式给 from 时按 days 折算窗口起点
+    const from = exchange.query.get('from') ?? undefined
+    const to = exchange.query.get('to') ?? undefined
+    const daysParam = Number(exchange.query.get('days') ?? 0)
+    const days = Number.isInteger(daysParam) && daysParam > 0 ? Math.min(daysParam, 365) : 0
+    const effectiveFrom = from ?? (days > 0
+      ? new Date(Date.now() - (days - 1) * 86_400_000).toISOString().slice(0, 10)
+      : undefined)
     return {
       groupBy: exchange.query.get('groupBy') ?? 'app',
-      rows: ctx.audit.costReport((exchange.query.get('groupBy') ?? 'app') as 'app' | 'agent' | 'org' | 'date', exchange.query.get('from') ?? undefined, exchange.query.get('to') ?? undefined),
+      ...(days > 0 && !from ? { days } : {}),
+      rows: ctx.audit.costReport((exchange.query.get('groupBy') ?? 'app') as 'app' | 'agent' | 'org' | 'date', effectiveFrom, to),
     }
   })
 
@@ -3787,6 +3850,17 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
   guarded('POST', '/api/usage/dead-letters/retry', 'usage.admin', (exchange) => {
     const result = ctx.usage.retryDeadLetters()
     changeLog(exchange, 'usage.deadletter.retry', 'usage', 'dead-letters', '', `重投 ${result.retried} 条，剩余 ${result.remaining} 条`)
+    return result
+  })
+
+  // -- 总线死信（QA C-03）：对齐 usage 死信面——运维不再翻 jsonl -------------------
+  guarded('GET', '/api/bus/dead-letters', 'usage.admin', () => ({
+    deadLetters: ctx.platformBus.deadLetters(),
+  }))
+
+  guarded('POST', '/api/bus/dead-letters/retry', 'usage.admin', (exchange) => {
+    const result = ctx.platformBus.retryDeadLetters()
+    changeLog(exchange, 'bus.deadletter.retry', 'bus', 'dead-letters', '', `尝试 ${result.attempted} 条，重投 ${result.redelivered} 条，保留 ${result.retained} 条`)
     return result
   })
 

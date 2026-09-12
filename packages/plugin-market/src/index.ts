@@ -395,6 +395,13 @@ export class MarketService extends Service {
         throw new Error(`能力 ${cap} 不在插件请求清单内（approved ⊆ requested）`)
       }
     }
+    // QA E-02：权限面同口径——approvedPermissions 未做 ⊆ requested 校验，可授予插件从未申请的权限点
+    const requestedPermissions: string[] = submission.parsed.permissions.requested ?? []
+    for (const point of input.approvedPermissions ?? []) {
+      if (!requestedPermissions.includes(point)) {
+        throw new Error(`权限点 ${point} 不在插件申请清单内（approved ⊆ requested，QA E-02）：请让开发者更新 manifest/permissions.yaml 后重新提交`)
+      }
+    }
     const record = this.installs().insert({
       id: newId('ins'),
       pluginId: input.pluginId,

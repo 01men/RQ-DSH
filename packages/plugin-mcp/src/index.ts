@@ -491,6 +491,8 @@ export class McpService extends Service {
   requestOfflineApproval(id: string, requester: { id: string; name: string }, reason: string, impactPreview: string[]) {
     return this.ctx.audit.createApproval({
       kind: 'mcp.offline',
+      // WP-10/L1（QA A-06）：L4 高危统一高风险——通过需二次确认 + 公司级终审标记
+      riskLevel: 'high',
       title: `下线 MCP 服务：${this.requireService(id).name}`,
       payload: { serviceId: id, reason, impactPreview },
       requesterId: requester.id,

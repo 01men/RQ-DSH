@@ -96,6 +96,15 @@ export interface RoleRecord extends RecordBase {
   permissions: string[]
 }
 
+/**
+ * 账号管理操作者上下文（QA A-03）：HTTP 面必须传入；服务内部调用（种子/三方同步/导入）
+ * 不带 actor，由平台语义兜底。permissions 取操作者令牌实时解析结果（'*'=平台管理员）。
+ */
+export interface UserManageActor {
+  userId?: string
+  permissions: string[]
+}
+
 export interface UserGroupRule {
   orgIds?: string[]
   title?: string
@@ -1053,6 +1062,26 @@ export class IamService extends Service {
 
   // -- 账号 ---------------------------------------------------------------
 
+  /**
+   * 组织归属校验（QA A-03）：org_admin（iam.* 通配）此前可跨组织接管账号——服务层补栏：
+   * 非平台管理员（无 '*'）只允许管理本组织子树内的账号；机器主体与无法定位组织归属者
+   * 一律拒绝（fail-closed）。actor 缺省=服务内部调用（种子/三方同步/导入），不做限制。
+   */
+  private assertManageScope(actor: UserManageActor | undefined, targetOrgId: string, action: string): void {
+    if (!actor) return
+    if (actor.permissions.includes('*')) return
+    const actorUser = actor.userId ? this.users().get(actor.userId) : undefined
+    if (!actorUser || !this.orgSubtreeIds(actorUser.orgId).includes(targetOrgId)) {
+      throw new Error(`跨组织账号操作被拒绝（${action}）：目标不在操作者的组织子树内（组织隔离，QA A-03）`)
+    }
+  }
+
+  /** 口令强度（QA A-08）：建号与重置统一口径——≥8 位且不含中文（此前建号无校验，'123' 可建可登）。 */
+  private assertPasswordStrength(password: string): void {
+    if (password.trim().length < 8) throw new Error('口令长度不得少于 8 位')
+    if (/[\u4e00-\u9fff]/.test(password)) throw new Error('口令不得包含中文')
+  }
+
   /** 创建账号：未显式指定口令时生成随机初始口令（仅本次调用返回，须安全传达给本人）。 */
   createUser(input: {
     username: string
@@ -1064,11 +1093,13 @@ export class IamService extends Service {
     roleIds?: string[]
     password?: string
     jobNumber?: string
-  }): { user: UserRecord; initialPassword?: string } {
+  }, actor?: UserManageActor): { user: UserRecord; initialPassword?: string } {
     if (!input.username?.trim()) throw new Error('用户名不能为空')
     if (!/^[a-z0-9_.-]+$/i.test(input.username)) throw new Error('用户名仅支持字母、数字与 _ . -')
     if (this.users().findOne((user) => user.username === input.username)) throw new Error(`用户名已存在：${input.username}`)
     if (!this.orgs().get(input.orgId)) throw new Error(`组织不存在：${input.orgId}`)
+    this.assertManageScope(actor, input.orgId, '创建账号')
+    if (input.password !== undefined) this.assertPasswordStrength(input.password)
     const salt = generateSecret('salt').slice(0, 16)
     const password = input.password ?? generateSecret('init')
     const user = this.users().insert({
@@ -1090,13 +1121,11 @@ export class IamService extends Service {
   }
 
   /** 重置口令：不传 password 则生成随机初始口令；传入则设置为指定口令（均仅本次返回明文）。 */
-  resetPassword(id: string, password?: string): { user: UserRecord; initialPassword: string } {
+  resetPassword(id: string, password?: string, actor?: UserManageActor): { user: UserRecord; initialPassword: string } {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '重置口令')
     if (user.status === 'deactivated') throw new Error('账号已注销，无法重置口令')
-    if (password !== undefined) {
-      if (password.trim().length < 8) throw new Error('口令长度不得少于 8 位')
-      if (/[\u4e00-\u9fff]/.test(password)) throw new Error('口令不得包含中文')
-    }
+    if (password !== undefined) this.assertPasswordStrength(password)
     const next = password ?? generateSecret('init')
     const salt = generateSecret('salt').slice(0, 16)
     this.users().update(id, { passwordSalt: salt, passwordHash: hashPassword(next, salt) })
@@ -1116,29 +1145,33 @@ export class IamService extends Service {
     return { created, skipped }
   }
 
-  activateUser(id: string): UserRecord {
+  activateUser(id: string, actor?: UserManageActor): UserRecord {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '激活账号')
     if (user.status !== 'pending') throw new Error('仅待激活账号可激活')
     return this.users().update(id, { status: 'active' })
   }
 
-  freezeUser(id: string, reason: string): UserRecord {
-    this.requireUser(id)
+  freezeUser(id: string, reason: string, actor?: UserManageActor): UserRecord {
+    const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '冻结账号')
     if (!reason?.trim()) throw new Error('冻结必须填写原因（审计要求）')
     const updated = this.users().update(id, { status: 'frozen', frozenReason: reason })
     this.ctx.platformBus.emit(PlatformEvents.UserFrozen, { userId: id, username: updated.username, reason })
     return updated
   }
 
-  unfreezeUser(id: string): UserRecord {
-    this.requireUser(id)
+  unfreezeUser(id: string, actor?: UserManageActor): UserRecord {
+    const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '解冻账号')
     const updated = this.users().update(id, { status: 'active', frozenReason: undefined })
     this.ctx.platformBus.emit(PlatformEvents.UserActivated, { userId: id })
     return updated
   }
 
-  deactivateUser(id: string, reason: string): UserRecord {
-    this.requireUser(id)
+  deactivateUser(id: string, reason: string, actor?: UserManageActor): UserRecord {
+    const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '注销账号')
     if (!reason?.trim()) throw new Error('注销必须填写原因')
     const updated = this.users().update(id, { status: 'deactivated', frozenReason: reason })
     this.ctx.platformBus.emit(PlatformEvents.UserFrozen, { userId: id, username: updated.username, reason: `注销：${reason}` })
@@ -1155,15 +1188,17 @@ export class IamService extends Service {
     return this.users().update(id, patch)
   }
 
-  deleteUser(id: string): boolean {
+  deleteUser(id: string, actor?: UserManageActor): boolean {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '删除账号')
     if (user.status !== 'deactivated') throw new Error('仅已注销账号可物理删除')
     return this.users().remove(id)
   }
 
   /** 绑定三方身份：事实源为 identityLinks（引擎级唯一约束），user.bindings 为投影。 */
-  bindThirdParty(id: string, binding: { provider: ThirdPartyBinding['provider']; unionId: string; displayName: string; corpId?: string; verifyCode?: string }): UserRecord {
+  bindThirdParty(id: string, binding: { provider: ThirdPartyBinding['provider']; unionId: string; displayName: string; corpId?: string; verifyCode?: string }, actor?: UserManageActor): UserRecord {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '绑定三方身份')
     if (binding.verifyCode !== '000000' && binding.verifyCode !== undefined && binding.verifyCode.length !== 6) {
       throw new Error('二次验证码格式不正确')
     }
@@ -1183,8 +1218,9 @@ export class IamService extends Service {
     return this.users().get(id)!
   }
 
-  unbindThirdParty(id: string, provider: ThirdPartyBinding['provider'], verifyCode: string): UserRecord {
+  unbindThirdParty(id: string, provider: ThirdPartyBinding['provider'], verifyCode: string, actor?: UserManageActor): UserRecord {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '解绑三方身份')
     if (!verifyCode || verifyCode.length !== 6) throw new Error('解绑需二次验证（6 位验证码）')
     this.unlinkIdentity(id, provider)
     return this.users().get(id)!
@@ -1288,8 +1324,9 @@ export class IamService extends Service {
     }
   }
 
-  assignRoles(userId: string, roleIds: string[]): UserRecord {
-    this.requireUser(userId)
+  assignRoles(userId: string, roleIds: string[], actor?: UserManageActor): UserRecord {
+    const user = this.requireUser(userId)
+    this.assertManageScope(actor, user.orgId, '调整角色')
     for (const roleId of roleIds) {
       if (!this.roles().get(roleId)) throw new Error(`角色不存在：${roleId}`)
     }

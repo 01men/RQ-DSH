@@ -524,6 +524,8 @@ export function apply(ctx: Context) {
     const info = caller(exchange)
     const approval = ctx.audit.createApproval({
       kind: 'industry.activation',
+      // WP-10/L1（QA A-06）：L4 高危统一高风险——通过需二次确认 + 公司级终审标记
+      riskLevel: 'high',
       title: `行业功能包授权激活：${registry.name}（${code}）`,
       payload: { code, orgId, requestedBy: info.name, sub: registry.sub, graphLoaded: registry.graphLoaded },
       requesterId: info.userId ?? info.principalId,

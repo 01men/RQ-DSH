@@ -695,6 +695,8 @@ export class ConnectorHubService extends Service {
     if (needsApproval && !approvalDecided) {
       const approval = this.ctx.audit.createApproval({
         kind: 'connector.connect',
+        // WP-10/L1（QA A-06）：L4 高危统一高风险——通过需二次确认 + 公司级终审标记
+        riskLevel: 'high',
         title: `新建 SaaS 连接：${input.provider}`,
         payload: {
           // 审批负载禁止携带凭证字段（红线一）：只有 provider/org/alias 与发起人
@@ -1287,6 +1289,8 @@ export class ConnectorHubService extends Service {
       }
       const approval = this.ctx.audit.createApproval({
         kind: 'connector.action.admin',
+        // WP-10/L1（QA A-06）：L4 高危统一高风险——通过需二次确认 + 公司级终审标记
+        riskLevel: 'high',
         title: `高危调用：${action.service}/${action.id}`,
         payload: {
           // 操作数据（action 入参）可入审批负载；provider 凭证绝不入——两段式连接审批同理

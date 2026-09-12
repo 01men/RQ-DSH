@@ -82,8 +82,11 @@ test('⑫多约束叠加：白名单命中但排除命中 → 离域且理由累
   assert.equal(verdict.reasons.length, 1)
 })
 
-test('⑬normalizeOdd：非法时间窗/空数组折叠剔除', () => {
-  assert.equal(normalizeOdd({ activeHours: { start: 25, end: 2 } }), undefined)
-  const normalized = normalizeOdd({ excludedActions: [], dataFreshnessMinutes: -1, allowedServices: '*' })
+test('⑬normalizeOdd：非法声明抛错（QA C-04 fail-closed，不再静默剔除）', () => {
+  assert.throws(() => normalizeOdd({ activeHours: { start: 25, end: 2 } }), /activeHours/)
+  assert.throws(() => normalizeOdd({ dataFreshnessMinutes: -1 }), /dataFreshnessMinutes/)
+  assert.throws(() => normalizeOdd({ allowedServices: 'hackernews' }), /allowedServices/)
+  // 空数组=未声明（非非法），仍折叠剔除
+  const normalized = normalizeOdd({ excludedActions: [], allowedServices: '*' })
   assert.deepEqual(normalized, { allowedServices: '*' })
 })

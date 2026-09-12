@@ -551,7 +551,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'agent'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'oidc', 'iam', 'audit', 'usage']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'oidc', 'iam', 'audit', 'usage', 'httpServer']
 
 export function apply(ctx: Context) {
   const registry = new AgentRegistryService(ctx)

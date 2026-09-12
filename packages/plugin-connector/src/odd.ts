@@ -74,19 +74,47 @@ export function inOdd(
   return { in: reasons.length === 0, reasons }
 }
 
-/** 规范化入参声明：剔除未声明字段，防止部分赋值把 undefined 语义写进台账。 */
+/**
+ * 规范化入参声明：剔除未声明字段，防止部分赋值把 undefined 语义写进台账。
+ * QA C-04：**非法声明一律抛错（fail-closed）**——此前 start=25 / 负新鲜度 / 字符串形态白名单
+ * 等坏声明被静默剔除，运营以为域已生效实际裸奔（fail-open）。未声明（absent）仍返回 undefined。
+ * 抛错沿权限组 upsert 面板以 400 呈现，运营当场修正。
+ */
 export function normalizeOdd(input: unknown): OddDeclaration | undefined {
   if (!input || typeof input !== 'object') return undefined
   const odd = input as OddDeclaration
   const normalized: OddDeclaration = {}
-  if (odd.allowedServices === '*' || (Array.isArray(odd.allowedServices) && odd.allowedServices.length > 0)) {
-    normalized.allowedServices = odd.allowedServices
+  if (odd.allowedServices !== undefined) {
+    if (odd.allowedServices === '*') normalized.allowedServices = '*'
+    else if (Array.isArray(odd.allowedServices) && odd.allowedServices.length > 0
+      && odd.allowedServices.every((item) => typeof item === 'string' && item.trim() !== '')) {
+      normalized.allowedServices = odd.allowedServices
+    } else {
+      throw new Error(`ODD 声明非法：allowedServices 须为 '*' 或非空字符串数组（收到 ${JSON.stringify(odd.allowedServices)}）`)
+    }
   }
-  if (Array.isArray(odd.excludedActions) && odd.excludedActions.length > 0) normalized.excludedActions = [...odd.excludedActions]
-  if (typeof odd.dataFreshnessMinutes === 'number' && odd.dataFreshnessMinutes > 0) normalized.dataFreshnessMinutes = odd.dataFreshnessMinutes
-  if (odd.activeHours && Number.isInteger(odd.activeHours.start) && Number.isInteger(odd.activeHours.end)
-    && odd.activeHours.start >= 0 && odd.activeHours.start <= 23 && odd.activeHours.end >= 0 && odd.activeHours.end <= 23) {
-    normalized.activeHours = { start: odd.activeHours.start, end: odd.activeHours.end }
+  if (odd.excludedActions !== undefined) {
+    if (Array.isArray(odd.excludedActions) && odd.excludedActions.every((item) => typeof item === 'string' && item.trim() !== '')) {
+      if (odd.excludedActions.length > 0) normalized.excludedActions = [...odd.excludedActions]
+    } else {
+      throw new Error(`ODD 声明非法：excludedActions 须为非空字符串数组（收到 ${JSON.stringify(odd.excludedActions)}）`)
+    }
+  }
+  if (odd.dataFreshnessMinutes !== undefined) {
+    if (typeof odd.dataFreshnessMinutes === 'number' && Number.isFinite(odd.dataFreshnessMinutes) && odd.dataFreshnessMinutes > 0) {
+      normalized.dataFreshnessMinutes = odd.dataFreshnessMinutes
+    } else {
+      throw new Error(`ODD 声明非法：dataFreshnessMinutes 须为正数（分钟），收到 ${JSON.stringify(odd.dataFreshnessMinutes)}`)
+    }
+  }
+  if (odd.activeHours !== undefined) {
+    const { start, end } = odd.activeHours ?? ({} as { start?: unknown; end?: unknown })
+    const valid = (value: unknown): value is number => typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 23
+    if (valid(start) && valid(end)) {
+      normalized.activeHours = { start, end }
+    } else {
+      throw new Error(`ODD 声明非法：activeHours.start/end 须为 0-23 的整数（本地时，24h 制），收到 ${JSON.stringify(odd.activeHours)}`)
+    }
   }
   return Object.keys(normalized).length > 0 ? normalized : undefined
 }

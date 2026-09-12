@@ -564,6 +564,14 @@ export class UpdateService extends Service {
       })
       throw new Error(`git pull 失败（本地有未提交修改或分叉，请人工处理）：${message.slice(0, 300)}`)
     }
+    // QA E-01：merge 成功即登记回滚快照——此前 lastApplySnapshot 全仓无写入点，
+    // rollback 恒报「无可回滚快照」，一键回滚是死路；先于 npm install 落库，
+    // 即使依赖同步失败也保留回退锚点
+    updateStateCollection(this.ctx).update(STATE_ID, {
+      lastApplySnapshot: rollbackTo,
+      lastApplyPin: pin,
+      lastApplyAt: new Date().toISOString(),
+    })
     try {
       npmOutput = await runNpm(info.rootDir, ['install', '--no-audit', '--no-fund'])
     } catch (error) {
