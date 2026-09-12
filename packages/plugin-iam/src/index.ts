@@ -997,6 +997,8 @@ export class IamService extends Service {
     this.requireOrg(id)
     if (newParentId) {
       if (newParentId === id) throw new Error('不能将组织移动到自身之下')
+      // 父组织存在性校验（QA SEC-03）：不存在时下方环检测会静默放行，产生悬挂 parentId
+      if (!this.orgs().get(newParentId)) throw new Error(`父组织不存在：${newParentId}`)
       let cursor: string | null = newParentId
       while (cursor) {
         if (cursor === id) throw new Error('不允许形成组织环')
