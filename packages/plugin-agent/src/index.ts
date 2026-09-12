@@ -356,6 +356,14 @@ export class AgentRegistryService extends Service {
     const agent = this.ctx.resourceCore.get('agent', agentId)
     if (!agent) throw new Error(`Agent 不存在：${agentId}`)
     if (!reason?.trim()) throw new Error('下线必须填写原因（护栏要求）')
+    // REL-02：开单前状态预检（与 requestOnline 的 validateAttrs 同风格的入口护栏，口径直接读生命周期状态机）：
+    // 只有状态机允许流转到 offline 的状态（trial/online）才可开下线审批单，否则批准后执行器必然失败、
+    // 凭证吊销联动也不生效（白挂 L4 单）。执行期 transition 复核保留（双保险不动）。
+    const canOffline = this.ctx.resourceCore.availableTransitions('agent', agentId).some((item) => item.action === 'offline')
+    if (!canOffline) {
+      const stateLabel = this.ctx.resourceCore.stateLabel('agent', agent.status).label
+      throw new Error(`当前状态「${stateLabel}」不允许申请「下线」审批：仅试运行/已上线的 Agent 可开下线审批单（REL-02 预检）`)
+    }
     const impact = this.ctx.resourceCore.impact('agent', agentId)
     return this.ctx.audit.createApproval({
       kind: 'agent.offline',
