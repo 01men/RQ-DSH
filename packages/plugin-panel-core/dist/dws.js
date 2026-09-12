@@ -259,10 +259,10 @@ ${tail}`
    * 失败抛错（调用方落 audit/事件留痕），绝不静默。
    */
   async sendToGroup(text, group) {
-    const { installed, version } = await this.probe();
-    if (!installed) throw new Error(`dws CLI \u672A\u5B89\u88C5\uFF0C\u65E0\u6CD5\u6295\u9012\u3002${INSTALL_HINT}`);
     const target = group?.trim() || readBinding(this.ctx)?.group;
     if (!target) throw new Error("\u672A\u7ED1\u5B9A\u9489\u9489\u7FA4\uFF1A\u8BF7\u5148\u5728\u9762\u677F\u300C\u9489\u9489\u300D\u7ED1\u5B9A\u76EE\u6807\u7FA4");
+    const { installed, version } = await this.probe();
+    if (!installed) throw new Error(`dws CLI \u672A\u5B89\u88C5\uFF0C\u65E0\u6CD5\u6295\u9012\u3002${INSTALL_HINT}`);
     const result = await exec("dws", ["chat", "+send-to-group", "--group", target, "--content", text, "--format", "json"], SPAWN_TIMEOUT_MS);
     if (!result.ok) {
       const tail = (result.stderr || result.stdout).trim().split(/\r?\n/).slice(-4).join("\uFF1B");

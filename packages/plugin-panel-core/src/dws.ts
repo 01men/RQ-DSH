@@ -356,10 +356,13 @@ export class DwsCli {
    * 失败抛错（调用方落 audit/事件留痕），绝不静默。
    */
   async sendToGroup(text: string, group?: string): Promise<{ group: string; version?: string }> {
-    const { installed, version } = await this.probe()
-    if (!installed) throw new Error(`dws CLI 未安装，无法投递。${INSTALL_HINT}`)
+    // 绑定前置校验（零成本同步读）先于 probe 子进程探测：本方法被 panel.message.created
+    // 事件钩子以 fire-and-forget 调用，回执时延直接决定面板 ddSync 终态回写速度——
+    // 未绑群是最常见失败态，不该为它白付一次 dws --version spawn（负载下可达数秒，QA T-04 竞态根源）。
     const target = group?.trim() || readBinding(this.ctx)?.group
     if (!target) throw new Error('未绑定钉钉群：请先在面板「钉钉」绑定目标群')
+    const { installed, version } = await this.probe()
+    if (!installed) throw new Error(`dws CLI 未安装，无法投递。${INSTALL_HINT}`)
     const result = await exec('dws', ['chat', '+send-to-group', '--group', target, '--content', text, '--format', 'json'], SPAWN_TIMEOUT_MS)
     if (!result.ok) {
       const tail = (result.stderr || result.stdout).trim().split(/\r?\n/).slice(-4).join('；')

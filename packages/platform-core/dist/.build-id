@@ -1,2 +1,2 @@
-gate01-dist-build-id: 9eec0fb6179f5445
+gate01-dist-build-id: 7924931db91d1b66
 （预构建产物指纹——src 树或构建脚本变更后须重跑 npm run build:dist，selftest 装机段比对此值）

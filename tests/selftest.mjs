@@ -5149,11 +5149,16 @@ try {
     check('桥接：群桥解绑', unbind.ok && unbind.data.deleted === true, JSON.stringify(unbind.error ?? unbind.data))
 
     // QA T-04 回归：无群桥时投递失败必须回执事件 → 面板消息落 failed（旧代码不发事件，
-    // ddSync 永久 pending，用户对着「钉钉投递中…」等到天荒地老）
+    // ddSync 永久 pending，用户对着「钉钉投递中…」等到天荒地老）。
+    // 回执是异步事件链（投递方 → DingtalkDelivered → ddSync 回写），终态轮询断言，
+    // 不用固定 sleep 假设时延（OPT-02：固定 600ms 在高负载下与 dws probe spawn 竞态，曾致偶发红）。
     const t4Msg = await api('POST', '/api/panel/mfg/messages', { token: admin, body: { channelId: syncChannel.id, text: '无群桥投递回写自测', ddSync: true } })
-    await new Promise((resolve) => setTimeout(resolve, 600))
-    const t4After = (await api('GET', `/api/panel/mfg/messages?channelId=${syncChannel.id}&limit=5`, { token: admin }))
-      .data.messages.find((m) => m.id === t4Msg.data.message.id)
+    let t4After
+    for (let i = 0; i < 50 && t4After?.ddSync !== 'sent' && t4After?.ddSync !== 'failed'; i++) {
+      if (i > 0) await new Promise((resolve) => setTimeout(resolve, 100))
+      t4After = (await api('GET', `/api/panel/mfg/messages?channelId=${syncChannel.id}&limit=5`, { token: admin }))
+        .data.messages.find((m) => m.id === t4Msg.data.message.id)
+    }
     check('桥接：无群桥投递失败如实回写 failed（不永久 pending，QA T-04 回归）',
       t4After?.ddSync === 'failed', JSON.stringify({ ddSync: t4After?.ddSync }))
 
