@@ -702,6 +702,11 @@ export class AuditService extends Service {
     opinion?: string,
     options: { confirmed?: boolean; finalReview?: boolean } = {},
   ): Promise<ApprovalRecord> {
+    // REL-01：decision 入参收口——只接受 approve/reject。此前其余值（如 "maybe"）会被
+    // 当作 approve 落入执行器分支真实执行；服务层单点拦截（路由层 guarded 统一转 400）。
+    if (decision !== 'approve' && decision !== 'reject') {
+      throw new Error(`非法的审批决策：${String(decision)}（只允许 approve 或 reject）`)
+    }
     const approval = this.approvals().get(id)
     if (!approval) throw new Error(`审批单不存在：${id}`)
     if (approval.status !== 'pending') throw new Error(`审批单已处理（${approval.status}）`)
