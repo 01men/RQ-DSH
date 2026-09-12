@@ -564,6 +564,40 @@ export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'oi
 export function apply(ctx: Context) {
   const registry = new AgentRegistryService(ctx)
   ctx.plugin(agentTools)
+  // REL-05 守卫：onboarding-prompt 的 rotate=true 会立即作废旧机器凭证 secret 并一次性明文返回新
+  // secret——与同插件 obo-token（QA A-07）同口径收敛：仅 owner / 绑定用户 / 平台管理员（'*'）可轮换；
+  // 另允许该 Agent 自身机器凭证自助轮换（与 ssoManage「机器绑定本 Agent 可自助」同哲学，既有接入
+  // 流程依赖）。路由处理器在 console（非本插件所有权），故在本插件内以 httpServer 中间件在 HTTP
+  // 边界单点拦截；rotate=false（仅取 client_id）不受影响，令牌校验失败交由 console 鉴权中间件统一 401。
+  ctx.httpServer.use((exchange) => {
+    if (exchange.method !== 'POST' || !/^\/api\/agents\/[^/]+\/onboarding-prompt$/.test(exchange.path)) return
+    if ((exchange.body ?? {}).rotate !== true) return
+    const agentId = exchange.path.split('/')[3]!
+    const agent = ctx.resourceCore.get('agent', agentId)
+    if (!agent) return // Agent 不存在由原路由处理器报错，此处不干预
+    let verified: import('../../plugin-authn/src/index.ts').VerifiedPrincipal
+    try {
+      const header = String(exchange.headers['authorization'] ?? '')
+      verified = ctx.authn.verify(header.startsWith('Bearer ') ? header.slice(7) : header)
+    } catch {
+      return
+    }
+    const userId = verified.principal.type === 'human' ? verified.principal.refId : undefined
+    const isOwner = userId !== undefined && agent.ownerId === userId
+    const isBound = userId !== undefined && registry.boundUsers(agentId).some((item) => item.userId === userId)
+    const isAdmin = verified.scopes.includes('*')
+    const isSelfMachine = verified.principal.type === 'machine'
+      && verified.principal.refType === 'agent' && verified.principal.refId === agentId
+    if (isOwner || isBound || isAdmin || isSelfMachine) return
+    ctx.platformBus.emit('audit.authz.denied', {
+      actorId: userId ?? verified.principal.id,
+      actorName: verified.principal.name,
+      point: `agent.onboarding-rotate(owner:${agentId})`,
+      path: exchange.path,
+    })
+    exchange.fail(403, 'FORBIDDEN', `仅 Agent 负责人、绑定用户或平台管理员可轮换「${agent.name}」的机器凭证 secret（对齐 obo-token 守卫口径，REL-05）`)
+    return true
+  })
   // L4 审批执行器（闭包直持实例，避免插件注入自身服务的循环等待）
   ctx.effect(() => ctx.audit.registerExecutor('agent.online', async (payload) => {
     // 上线门禁执行期复核：审批挂单期间 SSO 客户端可能被禁用/entryUrl 可能被清——
