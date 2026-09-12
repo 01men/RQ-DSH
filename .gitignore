@@ -7,6 +7,8 @@ boot.log
 # 本地服务运行日志
 service.log
 dsh-run.log
+dev-*.log
+dsh-web-*.log
 .zcode/
 .workbuddy/
 cordis.local.yml
