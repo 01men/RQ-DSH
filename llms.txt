@@ -13,6 +13,7 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - 钉钉设备流登录：面板代发起授权，未登录/未绑定自动弹出激活指令
 - npm 发布通道：scripts/release.mjs 一键发布（登录自愈/版本决策/构建回归/发布验证/记录回填/推送备份）
 - 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md) ｜ 降级台账：[docs/gate01-degradation-ledger.md](docs/gate01-degradation-ledger.md)
+- 产品介绍单页：[产品.html](https://github.com/01men/RQ-DSH/blob/main/产品.html)——五空间 / 14 行业图谱包 / 四通道安装 / 场景与 FAQ，文案与配图均为产品事实（2026-09-13 亮色版重设计，交互经浏览器实测）
 - 双轨治理：宿主面需求在主分支（ybkk-AIOS）进行，定制分支经 merge 吸收上游；定制→上游仅允许交接清单文档受控回流
 
 ## 核心能力（均为已实现功能）
@@ -55,4 +56,4 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - 生产部署默认基线初始化（零演示数据）；演示数据仅 `DEMO_SEED=1` 显式注入，请勿在生产启用
 - 全部文件操作经 MCP 文件网关并按真实用户身份（X-On-Behalf-User）留痕；测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock
 
-（更新日期：2026-09-12）
+（更新日期：2026-09-13）

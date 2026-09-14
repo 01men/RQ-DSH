@@ -6,7 +6,7 @@
 > 经本机代理接入（浏览器零跨域），登录在宿主侧完成。定制轨范围：一线面板/看板（plugin-panel-core）、
 > 执行卡（plugin-rq-card）、钉钉桥（plugin-dingtalk-bridge）、scenegraphs 业务数据。宿主平台主仓库见
 > [01men/ybkk-AIOS](https://github.com/01men/ybkk-AIOS)（本分支经 merge 吸收上游 main，下文为宿主平台说明）。
-> 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md)。
+> 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md)。产品介绍单页：[产品.html](产品.html)（五空间 / 14 行业图谱 / 四通道安装 / 场景与 FAQ）。
 > 现状（2026-09-12）：**行业 AI 工作台（IAW）v1.0** 已落地——五空间信息架构、14 行业图谱包
 > （packages/platform-core/scenegraphs/）与 14 行业主题引擎、未激活行业只读演示预览；钉钉设备流登录
 > （面板代发起，未登录/未绑定自动弹激活指令）；npm 通道已实发布 **@ybkk/gate-01@1.2.0**
