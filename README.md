@@ -9,7 +9,7 @@
 > 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md)。产品介绍单页：[产品.html](产品.html)（五空间 / 14 行业图谱 / 四通道安装 / 场景与 FAQ）。
 > 现状（2026-09-12）：**行业 AI 工作台（IAW）v1.0** 已落地——五空间信息架构、14 行业图谱包
 > （packages/platform-core/scenegraphs/）与 14 行业主题引擎、未激活行业只读演示预览；钉钉设备流登录
-> （面板代发起，未登录/未绑定自动弹激活指令）；npm 通道已实发布 **@ybkk/gate-01@1.2.0**
+> （面板代发起，未登录/未绑定自动弹激活指令）；npm 通道已实发布 **@ybkk/gate-01@1.2.1**
 > （scripts/release.mjs 一键发布）。
 
 基于 **DeepSeek Harness（dsh）「一切皆插件」** 架构实现的企业级 AI 资源管理平台。
