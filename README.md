@@ -17,7 +17,7 @@
 > [docs/billing-archive-register.md](docs/billing-archive-register.md)）。
 >
 > **商业模式（2026-09-15 更新）**：按**「团队 + 领域资产」**定价，而非平台级打包定价——按开通团队规模与
-> 所选领域资产（行业图谱包/场景包）计价；制造业客户亦可走**私有化交付项目制**，先赚现金流。
+> 所选领域资产（行业图谱包/场景包）计价；制造业客户亦可走**私有化交付项目制**。
 >
 > **M1-1 契约冻结 v1 齐套（2026-09-11）**：J1 面板技能/Agent 点名直调（诚实降级 200+ok:false，
 > [contract-j1-panel-invoke.md](docs/contract-j1-panel-invoke.md)）· J2 统一入口分诊
@@ -266,7 +266,7 @@ mkdir -p .dsh/skills && cp -r skills/dsh-ops-* .dsh/skills/
 - **商业模式收敛（M0 决策，2026-09-09）**：取消按用量计费/转售/分账形态；计量管道保留为用量透明与内部成本
   参考（J4 报表口径），对外不呈现任何金额结算语义。
 - **商业模式更新（2026-09-15）**：定价按**「团队 + 领域资产」**计价——按开通团队规模与所选领域资产
-  （行业图谱包/场景包）计价，不做平台级打包定价；制造业客户走**私有化交付项目制**，先赚现金流。
+  （行业图谱包/场景包）计价，不做平台级打包定价；制造业客户走**私有化交付项目制**。
 
 ## 三C、应用统一身份接入 App SSO（本迭代，v1.4）
 
@@ -596,4 +596,4 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 
 ---
 
-> 最近更新：2026-09-15 · 审批逻辑调整——Skill 两级审批允许同一人依次完成（同人二次审批，取消原四眼原则换人限制）、审批中心提交人与审批人允许同一账号（自审自批拦截取消，权限点与高风险二次确认不变）、审批驳回支持删除（Skill 驳回记录可删；审批中心驳回审批单可删，pending/已执行单仍不可删，[docs/release-notes-2026-09-15-approval-relax.md](docs/release-notes-2026-09-15-approval-relax.md)）。此前：2026-09-14 · QA 优化批次落地——15 项安全与正确性修复（PATCH users 服务层白名单收敛防账号接管/绕过冻结、OIDC 客户端响应剥离 clientSecretHash、审批 decision 入参收口、价格簿 NaN 读侧兜底、usage_query 补权限声明封堵越权、Skill 审批四眼原则等）+ market 契约口径修正（审批表述对齐单级实现，[docs/release-notes-2026-09-13-qa-fixes.md](docs/release-notes-2026-09-13-qa-fixes.md)）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
+> 最近更新：2026-09-17 · M2 迭代交付——FinOps 报告 v1（CFO 视图：成本穿透部门×模型交叉矩阵、空转检测 v1（近似口径、页面标注需人工复核）、「财务视图」SPA 页 + 一键 CSV 导出）、首启体验产品化（上线三步走引导 + 部署可执行 checklist）、Ed25519 签名基建平台级抽升与发布清单验签工具（[docs/release-notes-2026-09-16-m2.md](docs/release-notes-2026-09-16-m2.md)）。此前：2026-09-15 · 审批逻辑调整——Skill 两级审批允许同一人依次完成（同人二次审批）、审批中心提交人与审批人允许同一账号（自审自批拦截取消，权限点与高风险二次确认不变）、审批驳回支持删除（[docs/release-notes-2026-09-15-approval-relax.md](docs/release-notes-2026-09-15-approval-relax.md)）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
