@@ -1,8 +1,8 @@
 # 榕器（ybkk-AIOS）· 企业 AI 资源管理平台
 
-> 榕器是基于 dsh/cordis「一切皆插件」架构的企业级 AI 资源统一管理平台：把 MCP 服务、Skill、Agent、AI 应用、模型路由、NAS 文件存储六类资产纳入一套身份（IAM/OIDC SSO）、一套权限、一套用量计量、一套审计；以「私有化年费 + 治理包」交付，对外只呈现用量透明与内部成本穿透，不含任何金额结算语义。
+> 榕器是基于 dsh/cordis「一切皆插件」架构的企业级 AI 资源统一管理平台：把 MCP 服务、Skill、Agent、AI 应用、模型路由、NAS 文件存储六类资产纳入一套身份（IAM/OIDC SSO）、一套权限、一套用量计量、一套审计；按「团队 + 领域资产」定价（制造业客户可走私有化交付项目制），对外只呈现用量透明与内部成本穿透，不含任何金额结算语义。
 
-RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: unified identity (IAM / OIDC SSO), permissions, usage metering and audit for six asset types — MCP services, skills, agents, AI apps, model routes and NAS file storage — delivered as private deployment (annual license + governance package).
+RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: unified identity (IAM / OIDC SSO), permissions, usage metering and audit for six asset types — MCP services, skills, agents, AI apps, model routes and NAS file storage — priced by team and domain assets (private project-based delivery available for manufacturing).
 
 ## 本仓库定位（定制轨 · 01门）
 
@@ -60,8 +60,8 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 
 ## 边界与口径
 
-- 商业模式为私有化年费 + 治理包；平台对外只呈现用量与内部成本穿透（价格簿零价快照 charge 恒 0 + 内部采购成本参考），钱包/充值/分账等结算语义已整体下线封存
+- 商业模式为按「团队 + 领域资产」定价（行业图谱包/场景包等，制造业客户可走私有化交付项目制）；平台对外只呈现用量与内部成本穿透（价格簿零价快照 charge 恒 0 + 内部采购成本参考），钱包/充值/分账等结算语义已整体下线封存
 - 生产部署默认基线初始化（零演示数据）；演示数据仅 `DEMO_SEED=1` 显式注入，请勿在生产启用
 - 全部文件操作经 MCP 文件网关并按真实用户身份（X-On-Behalf-User）留痕；测试内 stub 均为进程内真实 HTTP 服务，不降级为 mock
 
-（更新日期：2026-09-15）
+（更新日期：2026-09-17）
