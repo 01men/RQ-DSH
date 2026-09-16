@@ -10,6 +10,7 @@ export * from "./bus.js";
 export * from "./tools-lite.js";
 export * from "./http.js";
 export * from "./ids.js";
+export * from "./sensitive.js";
 export * from "./sqlite.js";
 export * from "./yaml.js";
 export * from "./zip.js";

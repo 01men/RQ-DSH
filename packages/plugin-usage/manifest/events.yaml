@@ -1,0 +1,6 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-usage
+events:
+  - name: audit.alert.fired
+    mode: emit
+    description: 计量对账异常触发告警（跨域发布，audit 域命名空间）

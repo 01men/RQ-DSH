@@ -40,6 +40,11 @@ export class ConnectClientService extends Service {
   private configFile: string
   private config: ConnectClientConfig | null = null
   private cached: CachedToken | null = null
+  /** 远程代理降级状态（OPT-P1-03）：安装失败时记录原因，connect_status 显式透出。 */
+  private degradedReason: string | undefined
+  private degradedDetail: string | undefined
+  /** 转发失败告警节流（OPT-P1-03）：60s 内至多发一次 connect.degraded，避免重试风暴刷屏审计。 */
+  private lastForwardFailureEmitAt = 0
 
   constructor(ctx: Context, options: { dataDir?: string } = {}) {
     super(ctx, 'connectClient')
@@ -186,6 +191,28 @@ export class ConnectClientService extends Service {
     }
   }
 
+  // ------------------------------------------------- 降级可观测（OPT-P1-03）
+
+  /** 安装级降级（扩展点缺失等）：状态持久记录，connect_status 显式透出。 */
+  noteDegraded(reason: string, detail?: string): void {
+    this.degradedReason = reason
+    this.degradedDetail = detail
+  }
+
+  /**
+   * 转发失败告警（OPT-P1-03 fail-closed）：调用侧已显式抛错不落本地，
+   * 此处补发 connect.degraded 事件（60s 节流）供总线/审计侧观测「以为在管远端其实在管本机」类语义漂移。
+   */
+  noteForwardFailure(toolName: string, error: unknown): void {
+    const now = Date.now()
+    if (now - this.lastForwardFailureEmitAt < 60_000) return
+    this.lastForwardFailureEmitAt = now
+    const message = error instanceof Error ? error.message : String(error)
+    try {
+      this.ctx.platformBus?.emit('connect.degraded', { reason: 'forward_failed', tool: toolName, detail: message, at: new Date().toISOString() })
+    } catch { /* 总线未就绪：lastError 已由 noteError 记录 */ }
+  }
+
   // ---------------------------------------------------------------- 状态探测
 
   /**
@@ -225,6 +252,7 @@ export class ConnectClientService extends Service {
     const base = {
       configured: config !== null,
       toolProxy: config ? 'remote（转发宿主执行）' : 'local（本地数据）',
+      ...(this.degradedReason ? { proxyDegraded: this.degradedReason, ...(this.degradedDetail ? { degradedDetail: this.degradedDetail } : {}) } : {}),
     }
     if (!config) return { ...base, hint: '尚未接入宿主服务：调用 connect_setup（接入码）或 connect_login（已有凭证）完成配置' }
     const probe = await this.probeHub().catch((error: unknown) => ({ reachable: false, error: error instanceof Error ? error.message : String(error) }))

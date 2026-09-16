@@ -4,7 +4,8 @@
  * - role=host（独立宿主默认）：提供接入码 / enroll / 客户端管理端点与工具，
  *   让远程 dsh 运行时（插件市场安装形态）可向本平台申请机器凭证。
  * - role=client（dsh.bundle 安装形态）：向宿主申请并保管机器凭证；
- *   配置完成后，平台全部运维工具的执行自动转发宿主（未配置时保持本地执行，向后兼容）；
+ *   配置完成后，平台全部运维工具的执行自动转发宿主（未配置时保持本地执行，向后兼容；
+ *   OPT-P1-03 起代理挂在 tools.intercept/decorate 正式扩展点上，转发失败 fail-closed 显式告警）；
  *   同时起一个仅本机可访问的配置页（默认 http://127.0.0.1:7390）供人工填写/更新配置，
  *   并向模型暴露 connect_* 工具，让 Agent 用自然语言完成「申请口令 / 改配置 / 断开」。
  */
@@ -49,16 +50,17 @@ export function apply(ctx: Context, config: ConnectConfig = {}) {
 function applyClient(ctx: Context, config: ConnectConfig): void {
   const client = new ConnectClientService(ctx, { dataDir: config.dataDir })
 
-  // 工具远程代理：包裹 tools.register，业务工具（非 connect_ 前缀）在已接入时
-  // 改为转发宿主 /api/tools/execute。包裹必须发生在业务插件注册之前——
-  // 因此本插件在 cordis.patch.yml 中紧随 platform-core 之后加载。
-  const wrapped = wrapToolRegistration(ctx, client)
+  // 工具远程代理（OPT-P1-03）：挂在 tools.intercept/decorate 正式扩展点上（不再原型猴补丁），
+  // 业务工具（非 connect_ 前缀）在已接入时转发宿主 /api/tools/execute；
+  // 转发失败显式抛错 + connect.degraded 事件（fail-closed），绝不静默落本地。
+  // 安装仍宜早于业务插件注册（入口层拦截新注册），先注册的存量工具由 decorate 兜底。
+  const proxied = installToolProxy(ctx, client)
 
   // 本机配置页（仅本机可访问；用户在 dsh 界面之外的可视化配置入口）
   const server = new ConnectConfigServer(ctx, client, config.configServer ?? {})
   void server.start().then(() => {
     ctx.logger('connect').info(
-      `接入配置页已就绪：http://${server.host}:${server.port}${wrapped ? '（当前工具为本地执行，接入后自动切换远程）' : ''}`,
+      `接入配置页已就绪：http://${server.host}:${server.port}${proxied ? '（当前工具为本地执行，接入后自动切换远程）' : '（远程转发不可用：运行时缺少工具扩展点，已显式降级本地，connect_status 可查）'}`,
     )
   }, (error: unknown) => {
     ctx.logger('connect').error(`接入配置页启动失败（端口 ${server.port}）：`, error)
@@ -180,99 +182,66 @@ function applyClient(ctx: Context, config: ConnectConfig): void {
 }
 
 /**
- * 包裹 ToolRuntime：把业务工具的 execute 在「已接入宿主」时替换为远程转发。
- * 返回是否成功包裹（失败时降级为纯本地执行并告警，不阻断启动）。
- *
- * 关键实现细节：
- * 1. cordis 经由 ctx 访问的服务是 traceable 代理——直接对代理赋值只写入 fiber
- *    shadow，真实实例不受影响；须以全局注册的 Symbol.for("cordis.original")
- *    解出真实服务实例。
- * 2. 包裹打在**原型**上（register 注册入口 + execute 执行出口双保险），对
- *    ToolRuntimeLite 与 dsh 原生 ToolRuntime 一视同仁。
- * 3. cordis 的 ctx.effect(fn) 语义是「fn 返回清理函数」——disposer 必须写成
- *    双层箭头，否则清理逻辑会在注册时立即执行（把包裹当场还原）。
- * 4. 第 1 层包装的 execute 带 Symbol 标记：第 2 层出口据此识别「已由入口层
- *    包裹的工具」，避免同一次调用被双重转发。
+ * 工具远程代理安装（OPT-P1-03，契约化改造）：
+ * - 入口层：tools.intercept 注册级拦截——此后注册的业务工具（非 connect_ 前缀）换装转发执行体；
+ * - 兜底层：tools.decorate 对先于本插件注册的存量业务工具逐个包扎；
+ * - fail-closed：转发失败显式抛错 + connect.degraded 节流告警事件（落总线/审计），绝不静默落本地；
+ * - 运行时缺少扩展点（非 ToolRuntime-lite 形态）→ 显式降级（事件 + 状态 + error 日志），不再原型猴补丁。
+ * 返回是否成功安装。
  */
-const PROXIED_EXECUTE_MARK = Symbol.for('dsh-ops.connect.proxied-execute')
-
-function wrapToolRegistration(ctx: Context, client: ConnectClientService): boolean {
-  const originalSymbol = Symbol.for('cordis.original')
-  const service = ctx.tools as unknown as Record<PropertyKey, unknown> | undefined
-  const target = (service && typeof service[originalSymbol] === 'object'
-    ? service[originalSymbol]
-    : service) as {
-      register?: (definition: unknown) => unknown
-      execute?: (input: { name: string; arguments?: unknown }) => Promise<unknown>
-      definitions?: Map<string, { execute?: unknown }>
-    } | undefined
-  const proto = (target ? Object.getPrototypeOf(target) : null) as Record<string, unknown> | null
-  if (!proto || typeof proto['register'] !== 'function') {
-    ctx.logger('connect').warn('未能定位 ToolRuntime.register（接口不兼容），工具远程代理不可用，保持本地执行')
+export function installToolProxy(ctx: Context, client: ConnectClientService): boolean {
+  const tools = ctx.tools as unknown as {
+    intercept?: (fn: (definition: Record<string, unknown>) => Record<string, unknown>) => () => void
+    decorate?: (name: string, wrap: (execute: unknown) => unknown) => () => void
+    schemas?: () => Array<{ name: string }>
+  } | undefined
+  if (!tools || typeof tools.intercept !== 'function' || typeof tools.decorate !== 'function') {
+    ctx.logger('connect').error('运行时缺少 tools.intercept/decorate 扩展点：远程转发不可用，已显式降级为本地执行（connect.degraded 已发事件）')
+    client.noteDegraded('tool_runtime_contract_missing', 'ctx.tools 未提供 intercept/decorate 扩展点（非 ToolRuntime-lite 形态）')
+    try { ctx.platformBus?.emit('connect.degraded', { reason: 'tool_runtime_contract_missing', detail: 'ctx.tools 未提供 intercept/decorate 扩展点（非 ToolRuntime-lite 形态）', at: new Date().toISOString() }) } catch { /* 总线未就绪：状态已记 client */ }
     return false
   }
 
-  // -- 第 1 层：注册入口包裹（新注册的业务工具换成转发执行体） ----------------
-  const originalRegister = proto['register'] as (this: unknown, definition: unknown) => unknown
-  const wrappedRegister = function (this: unknown, definition: unknown): unknown {
-    const spec = definition as { name?: unknown; execute?: (args: any, exec: any) => Promise<unknown> } | undefined
-    const toolName = spec?.name
-    if (typeof toolName === 'string' && isProxiedTool(toolName)) {
-      const localExecute = spec.execute
-      const proxiedExecute = async (args: any, exec: any): Promise<unknown> => {
-        if (client.hasHub()) return client.forward(toolName, args ?? {}, exec)
-        return localExecute?.(args, exec)
-      }
-      ;(proxiedExecute as unknown as Record<symbol, unknown>)[PROXIED_EXECUTE_MARK] = true
-      return originalRegister.call(this, { ...spec, execute: proxiedExecute })
-    }
-    return originalRegister.call(this, definition)
-  }
-  try {
-    proto['register'] = wrappedRegister
-  } catch (error) {
-    ctx.logger('connect').warn('包裹 ToolRuntime.register 失败', error)
-    return false
-  }
-  ctx.effect(() => () => {
-    if (proto['register'] === wrappedRegister) proto['register'] = originalRegister
-  })
-
-  // -- 第 2 层：执行出口兜底（注册早于本插件加载/入口被绕过时仍能转发） -------
-  const originalExecute = proto['execute'] as ((this: unknown, input: { name: string; arguments?: unknown }) => Promise<unknown>) | undefined
-  if (typeof originalExecute === 'function') {
-    const isAlreadyProxied = (self: unknown, name: string): boolean => {
-      const definitions = (self as typeof target | undefined)?.definitions
-      const execute = definitions?.get?.(name)?.execute as Record<symbol, unknown> | undefined
-      return execute?.[PROXIED_EXECUTE_MARK] === true
-    }
-    const wrappedExecute = async function (this: unknown, input: { name: string; arguments?: unknown }): Promise<unknown> {
-      const started = Date.now()
-      if (client.hasHub() && isProxiedTool(input?.name ?? '') && !isAlreadyProxied(this, input.name)) {
-        // 兜底路径：该工具未经入口层包裹（注册早于本插件），就地转发并按
-        // ToolRuntime 执行契约组装结果对象
-        const callId = `connect-${started}-${input.name}`
+  // 转发执行体：已接入→转发（失败显式抛错，绝不落本地）；未接入→本地（connect_reset 的显式语义，非降级）
+  const makeProxied = (toolName: string, localExecute: unknown): unknown => {
+    return async (args: Record<string, unknown>, exec: { signal?: AbortSignal }): Promise<unknown> => {
+      if (client.hasHub()) {
         try {
-          const value = await client.forward(input.name, (input.arguments ?? {}) as Record<string, unknown>)
-          return { isError: false, value, content: [{ type: 'text', text: JSON.stringify(value) }], callId, name: input.name, durationMs: Date.now() - started }
+          return await client.forward(toolName, args ?? {}, exec)
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          return { isError: true, content: [{ type: 'text', text: `工具执行失败：${message}` }], error: { message }, callId, name: input.name, durationMs: Date.now() - started }
+          client.noteForwardFailure(toolName, error)
+          throw error
         }
       }
-      return await originalExecute.call(this, input)
+      return await (localExecute as ((a: Record<string, unknown>, e: { signal?: AbortSignal }) => Promise<unknown>) | undefined)?.(args ?? {}, exec)
     }
-    try {
-      proto['execute'] = wrappedExecute
-      ctx.effect(() => () => {
-        if (proto['execute'] === wrappedExecute) proto['execute'] = originalExecute
-      })
-    } catch { /* execute 出口包裹失败：仅依赖注册入口层 */ }
   }
 
-  if (process.env['CONNECT_DEBUG']) {
-    console.error(`[connect-diag] wrapped ToolRuntime prototype:`, target?.constructor?.name)
+  const disposers: Array<() => void> = []
+  // 入口层：注册级拦截（覆盖此后注册的全部业务工具）；登记被换装的工具供注销时解包还原
+  const interceptedTools: Array<{ name: string; localExecute: unknown }> = []
+  disposers.push(tools.intercept((definition) => {
+    const toolName = definition?.['name']
+    if (typeof toolName !== 'string' || !isProxiedTool(toolName)) return definition
+    interceptedTools.push({ name: toolName, localExecute: definition['execute'] })
+    return { ...definition, execute: makeProxied(toolName, definition['execute']) }
+  }))
+  // 兜底层：存量已注册业务工具逐个包扎（竞态注销的工具跳过）
+  for (const schema of tools.schemas?.() ?? []) {
+    if (!isProxiedTool(schema.name)) continue
+    try {
+      disposers.push(tools.decorate(schema.name, (execute) => makeProxied(schema.name, execute)))
+    } catch { /* 工具已在装饰间隙注销：跳过 */ }
   }
+  ctx.effect(() => () => {
+    for (const off of [...disposers].reverse()) off()
+    // 注销时把入口层换装过的工具解包回本地执行体（decorate 语义：换回捕获的本地原执行体）
+    for (const item of interceptedTools) {
+      try {
+        tools.decorate?.(item.name, () => item.localExecute)
+      } catch { /* 工具已注销：跳过 */ }
+    }
+  })
   return true
 }
 

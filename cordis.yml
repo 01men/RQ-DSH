@@ -69,6 +69,9 @@
     # 部门 Agent 工作台面板（/panel 静态 + /api/panel/* REST）：REST 鉴权依赖 console 中间件，须在其后装配
     - id: ops-panel-core
       name: '<PROJECT_ROOT>/packages/plugin-panel-core/src/index.ts'
+    # 事务流引擎（/api/flow/*：TF 编排/模板库/SLA/甘特）：guarded 路由依赖 console 中间件，须在其后装配
+    - id: ops-flow-core
+      name: '<PROJECT_ROOT>/packages/plugin-flow-core/src/index.ts'
     # 钉钉桥接（群桥/出向投递/审批推送/告警通道）：订阅 panel.message.created / audit.alert.fired
     - id: ops-dingtalk-bridge
       name: '<PROJECT_ROOT>/packages/plugin-dingtalk-bridge/src/index.ts'

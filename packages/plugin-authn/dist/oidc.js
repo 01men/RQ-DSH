@@ -36,6 +36,7 @@ class OidcService extends Service {
     this.registerRoutes();
     this.cleanupExpired();
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 24 * 36e5);
+    this.cleanupTimer.unref?.();
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     });
@@ -105,6 +106,12 @@ class OidcService extends Service {
     return (client.status ?? "active") === "active";
   }
   // -- 客户端生命周期 -------------------------------------------------------
+  /** 对外脱敏（QA SEC-02）：clientSecretHash 为凭证哈希，客户端列表/详情响应一律不外发（对齐 principals 的脱敏口径）；内部校验仍走 clients()/clientByClientId() 原始记录。 */
+  publicClient(client) {
+    const { clientSecretHash, ...safe } = client;
+    void clientSecretHash;
+    return safe;
+  }
   createClient(input) {
     const clientType = input.clientType ?? "confidential";
     const clientId = "oc-" + newId("id").slice(3);
@@ -122,17 +129,17 @@ class OidcService extends Service {
       ...input.refType !== void 0 ? { refType: input.refType } : {},
       ...input.refId !== void 0 ? { refId: input.refId } : {}
     });
-    return { client, clientSecret };
+    return { client: this.publicClient(client), clientSecret };
   }
   listClients() {
-    return this.clients().all().map((client) => ({
+    return this.clients().all().map((client) => this.publicClient({
       ...client,
       ...client.refType === "app" && client.refId ? { refAppName: this.ctx.resourceCore?.get("app", client.refId)?.name ?? client.refId } : {},
       ...client.refType === "agent" && client.refId ? { refAgentName: this.ctx.resourceCore?.get("agent", client.refId)?.name ?? client.refId } : {}
     }));
   }
   updateClient(id, patch) {
-    return this.clients().update(id, patch);
+    return this.publicClient(this.clients().update(id, patch));
   }
   /** 轮换 secret：旧值立即失效，新值仅本次返回。 */
   rotateSecret(id) {
@@ -141,16 +148,16 @@ class OidcService extends Service {
     if ((client.clientType ?? "confidential") === "public") throw new Error("public \u5BA2\u6237\u7AEF\u65E0 secret\uFF0C\u65E0\u9700\u8F6E\u6362");
     const clientSecret = generateSecret("ocs");
     const updated = this.clients().update(id, { clientSecretHash: sha256Hex(clientSecret) });
-    return { client: updated, clientSecret };
+    return { client: this.publicClient(updated), clientSecret };
   }
   disableClient(id, reason) {
     const client = this.clients().get(id);
     if (!client) throw new Error(`OIDC \u5BA2\u6237\u7AEF\u4E0D\u5B58\u5728\uFF1A${id}`);
     this.revokeClientRefreshChains(client.clientId, `\u5BA2\u6237\u7AEF\u7981\u7528\u8054\u52A8\uFF1A${reason}`);
-    return this.clients().update(id, { status: "disabled" });
+    return this.publicClient(this.clients().update(id, { status: "disabled" }));
   }
   enableClient(id) {
-    return this.clients().update(id, { status: "active" });
+    return this.publicClient(this.clients().update(id, { status: "active" }));
   }
   // -- 浏览器授权流 ---------------------------------------------------------
   /** 允许对外签发的 scope 白名单（不得任意申请并原样进 JWT）。 */

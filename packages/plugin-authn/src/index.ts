@@ -2,7 +2,7 @@
  * @dsh-ops/plugin-authn —— 统一认证中心。
  *
  * 双轨身份：人（SSO/密码）与机器（Client Credentials）共用一套 Principal 体系。
- * 令牌：HMAC 签名的短期访问令牌（默认 2h，可刷新），支持吊销与密钥轮换。
+ * 令牌：HMAC 签名的短期访问令牌（默认 30min，可刷新），支持吊销与密钥轮换。
  * 令牌链（on-behalf-of）：用户 → 应用 → Agent → MCP，act 链在令牌中叠加，审计可还原。
  */
 import { createHmac, randomUUID } from 'node:crypto'
@@ -169,6 +169,7 @@ export class AuthnService extends Service {
     // 启动即清 + 每小时巡检
     this.cleanupExpiredTokens()
     this.cleanupTimer = setInterval(() => this.cleanupExpiredTokens(), 3600_000)
+    this.cleanupTimer.unref?.() // OPT-P3-02：嵌入/测试形态允许进程自然退出
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     })
@@ -894,9 +895,15 @@ export class AuthnService extends Service {
     if (!principal) throw new Error('令牌主体不存在')
     if (principal.status !== 'active') throw new Error('令牌主体已禁用')
     // 人机均实时解析：human 按用户角色、machine 按机器角色+附加权限点，角色变更即时同步到存量令牌
-    const scopes = principal.type === 'human'
+    let scopes = principal.type === 'human'
       ? this.ctx.iam.userPermissions(principal.refId ?? '')
       : this.resolveMachineScopes(principal)
+    // QA A-07：OBO 令牌签发时 scopes 取「父链 ∩ 目标」交集——验签若只按主体实时解析，
+    // 交集即被丢弃（透传令牌反而拿到目标全量权限）。对 OBO 签发的令牌按签发交集二次夹紧：
+    // 实时权限收缩仍然生效（交集），但不再放大出签发时刻授予之外的能力。
+    if (record.issuedBy?.startsWith('obo:')) {
+      scopes = intersectScopes(scopes, record.scopes)
+    }
     this.tokens().update(record.id, { lastUsedAt: new Date().toISOString() })
     return { principal, token: record, scopes, actChain: record.actChain }
   }

@@ -3,9 +3,11 @@ plugin: dsh-plugin-audit
 base: /api
 endpoints:
   - GET /api/audit/logs · GET /api/audit/summary
-  - GET/POST/PATCH /api/audit/alert-rules · GET /api/audit/alerts · POST /api/audit/alerts/:id/read · POST /api/audit/alerts/read-all
+  - GET/POST /api/audit/alert-rules · PATCH /api/audit/alert-rules/:id · GET /api/audit/alerts · POST /api/audit/alerts/:id/read · POST /api/audit/alerts/read-all
   - GET /api/audit/cost?groupBy=app|agent|org|date
-  - GET /api/approvals · POST /api/approvals/:id/decide
+  - GET /api/approvals · GET /api/approvals/sla · POST /api/approvals/:id/decide · DELETE /api/approvals/:id（仅驳回单可删）
+  - POST /api/audit/evidence（panel.write；IAW 5-1 结论级证据锚点登记）· GET /api/audit/evidence/:id（panel.read）
+  - GET /api/audit/timeline?sceneCode=（panel.read；IAW 5-2 场景/任务维度审计时间线）
 tools:
   - audit_logs
   - audit_alerts_list

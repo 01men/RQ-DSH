@@ -350,6 +350,11 @@ export class NasRegistryService extends Service {
   }
 
   setSkillStorage(patch: { mode?: 'local' | 'nas'; nasId?: string; basePath?: string }, actor: string): SkillStorageConfigRecord {
+    // REL-06：mode 枚举收口——只接受小写 local/nas（与运行时 mode!=='nas' 判定一致）；
+    // 此前 "NAS"/任意串都能入库，运行时静默回落本地存储
+    if (patch.mode !== undefined && patch.mode !== 'local' && patch.mode !== 'nas') {
+      throw new Error(`非法的存储模式：${String(patch.mode)}（只允许 local 或 nas）`)
+    }
     const current = this.getSkillStorage()
     const next: SkillStorageConfigRecord = {
       ...current,

@@ -8,6 +8,7 @@ class EntryTicketService extends Service {
   constructor(ctx) {
     super(ctx, "entryTickets");
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 24 * 36e5);
+    this.cleanupTimer.unref?.();
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     });

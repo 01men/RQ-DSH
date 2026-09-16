@@ -3,15 +3,38 @@ plugin: dsh-plugin-console
 base: /api
 endpoints:
   - POST /api/tools/execute（工具桥：与 dsh ToolRuntime 同一契约）
-  - POST /mcp（平台即 MCP Server：Streamable HTTP，initialize/tools/list/tools/call，Bearer 鉴权 + 工具级权限点）
+  - GET/POST/DELETE /mcp（平台即 MCP Server：Streamable HTTP，initialize/tools/list/tools/call，Bearer 鉴权 + 工具级权限点；GET=SSE 流、DELETE=会话终结） · GET /docs（控制台文档页）
+  - GET /api/health（存活探针） · GET /api/tools/schemas（工具 schema 目录） · GET /api/platform/route-matrix（路由矩阵自检）
   - GET /api/platform/info（插件树/工具目录/集合） · GET /api/overview（工作台聚合）
   - GET /api/assets/inventory（资产台账） · POST /api/assets/healthcheck（健康巡检） · GET /api/assets/report（成本报表）
   - GET /api/assets/benefit（成本穿透：内部成本参考 + 单位 DAU 成本，零价快照口径） · GET /api/assets/retire-reasons（下架分析：弃用/下线原因聚合）
   - GET /api/skills/usage-heatmap（技能热力图：skill × 日 使用矩阵）
   - GET /api/usage/report/monthly（J4 月度用量报表：部门/Agent/Skill tokens 三维聚合；format=csv 自助导出）
   - POST /api/usage/retention/purge（usage.admin；保留策略手动巡检，body.days 可临时收紧窗口，0=跳过）
+  - GET /api/usage/summary?window=today|month&org=&subject=（panel.read；IAW 4-1 成本摘要+预算进度，非 usage.read 主体强制收敛自身组织）
+  - GET /api/usage/feedback-stats?days=7|30|90|all（panel.read；IAW 4-2 产出采纳率聚合）
+  - GET /api/notifications?since=&limit= · POST /api/notifications/read-cursor（console.login；IAW 8-1 通知中心持久化+已读游标）
+  - GET /api/modelgw/channel-groups（panel.read）· PUT /api/modelgw/channel-groups（panel.config.write；IAW 1-2 渠道组降级链）
+  - GET /api/modelgw/:slug/telemetry?window=7d（panel.read；IAW 1-3 渠道遥测，TTFT 诚实缺列）
+  - GET /api/modelgw/budgets（panel.read）· PUT /api/modelgw/budgets（panel.config.write；IAW 1-4 预算熔断）
+  - PUT /api/iam/scene-policies（iam.scene.write）· GET /api/iam/scene-policies（iam.org.read）· DELETE /:id（IAW 6-1 场景级授权）· POST /api/iam/scene-authz/check（panel.read 自查）
+  - GET /api/resource/datasets?scene=（panel.read）· PUT /api/resource/datasets · PUT /api/resource/datasets/:code/quality（resource.dataset.write；IAW 2-1/2-2）
+  - GET /api/resource/lineage?dataset=（panel.read）· PUT /api/resource/lineage（resource.dataset.write；IAW 2-3 血缘）
+  - GET/PUT /api/resource/metrics/:code/definitions（读 panel.read / 写 resource.dataset.write）· POST /api/resource/metrics/:code/arbitrate（IAW 2-4 指标口径仲裁）
+  - POST /api/agents/:id/a2a/invoke（agent.a2a.invoke；IAW 7-1 A2A 跨运行时点名调用，autonomy/runtime 随响应透出）
+  - POST /api/market/developers/register · POST /api/market/developers/login（开发者入驻，公开）
+  - GET /api/market/submissions · POST /api/market/submit（提交上架） · GET /api/market/submissions/mine（我的提交）
+  - POST /api/market/submissions/:id/approve · POST /api/market/submissions/:id/reject（两级审批）
+  - GET /api/market/plugins · POST /api/market/plugins/:id/install · POST /api/market/plugins/:id/uninstall（安装/卸载）
+  - GET /api/market/installed · GET /api/market/prompts · POST /api/market/prompts/use（已装清单/提示词市场） · POST /api/market/sandbox-check（沙箱预检）
+  - GET/POST /api/modelgw/models · DELETE /api/modelgw/models/:id（模型登记治理，panel.config.write）
+  - POST /api/modelgw/invoke（网关统一调用入口） · POST /api/modelgw/channel-groups/:id/invoke（渠道组定向调用）
+  - POST /api/usage/record（写入计量） · GET /api/usage/events（事件流水） · GET /api/usage/totals（聚合） · GET /api/usage/recent（最近条目）
+  - POST /api/usage/reconcile（对账） · POST /api/usage/replay（重放） · GET/PUT /api/usage/price-book（价格册）
+  - GET /api/usage/dead-letters · POST /api/usage/dead-letters/retry（死信查询/重投） · POST /api/usage/feedback（采纳率反馈） · PUT /api/usage/capability-grants（能力授予）
+  - GET /api/bus/dead-letters · POST /api/bus/dead-letters/retry（总线死信查询/逐条重投，QA C-03；usage.admin）
   - GET/POST /api/apps/beacon（公开访客埋点：GET 1x1 GIF / POST JSON；?app=&vid=&uid= → PV 累加、UV 去重；IP+应用 60 次/分钟限流）
-  - 静态托管 public/ SPA（飞书级控制台）
+  - # 静态托管 public/ SPA（飞书级控制台）
 
 services:
   []

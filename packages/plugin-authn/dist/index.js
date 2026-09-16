@@ -49,6 +49,7 @@ class AuthnService extends Service {
     });
     this.cleanupExpiredTokens();
     this.cleanupTimer = setInterval(() => this.cleanupExpiredTokens(), 36e5);
+    this.cleanupTimer.unref?.();
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     });
@@ -693,7 +694,10 @@ class AuthnService extends Service {
     const principal = this.principals().get(record.principalId);
     if (!principal) throw new Error("\u4EE4\u724C\u4E3B\u4F53\u4E0D\u5B58\u5728");
     if (principal.status !== "active") throw new Error("\u4EE4\u724C\u4E3B\u4F53\u5DF2\u7981\u7528");
-    const scopes = principal.type === "human" ? this.ctx.iam.userPermissions(principal.refId ?? "") : this.resolveMachineScopes(principal);
+    let scopes = principal.type === "human" ? this.ctx.iam.userPermissions(principal.refId ?? "") : this.resolveMachineScopes(principal);
+    if (record.issuedBy?.startsWith("obo:")) {
+      scopes = intersectScopes(scopes, record.scopes);
+    }
     this.tokens().update(record.id, { lastUsedAt: (/* @__PURE__ */ new Date()).toISOString() });
     return { principal, token: record, scopes, actChain: record.actChain };
   }

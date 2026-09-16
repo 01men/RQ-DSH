@@ -4,4 +4,5 @@ publish:
   - connect.code.created        # 接入码创建（载荷：id/template/ttlMinutes）
   - connect.client.enrolled     # 远程客户端完成接入（载荷：principalId/name/template/hostname）
   - connect.client.disabled     # 客户端被禁用（载荷：principalId/name/reason）
+  - connect.degraded            # 远程代理显式降级（OPT-P1-03：扩展点缺失/转发失败节流告警，载荷：reason/tool/detail）
 subscribe: []

@@ -16,3 +16,6 @@ events:
   - name: iam.connector.synced
     mode: emit
     description: 三方同步完成
+  - name: iam.scene_policy.changed
+    mode: emit
+    description: 场景级授权策略变更（IAW 6-1）

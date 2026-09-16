@@ -192,7 +192,7 @@ async function openSkillDetail(id, ctx, refresh) {
       ${session.can('skill.approve') && (current?.status === 'pending_domain' || current?.status === 'pending_security') ? `<button class="btn btn-primary" id="sk-approve">${icon('check', 14)}审批</button>` : ''}
       ${session.can('skill.approve') && current?.status === 'approved' && skill.status !== 'published' ? `<button class="btn btn-primary" id="sk-publish">${icon('send', 14)}上架</button>` : ''}
       ${session.can('skill.publish') && skill.status === 'published' ? `<button class="btn btn-danger-ghost" id="sk-deprecate">${icon('alert', 14)}弃用</button>` : ''}
-      ${session.can('skill.publish') && ['deprecated', 'offline'].includes(skill.status) ? `<button class="btn btn-danger-ghost" id="sk-delete">${icon('trash', 14)}删除</button>` : ''}`,
+      ${session.can('skill.publish') && ['deprecated', 'offline', 'rejected'].includes(skill.status) ? `<button class="btn btn-danger-ghost" id="sk-delete">${icon('trash', 14)}删除</button>` : ''}`,
   })
 
   const tabBody = drawer.body.querySelector('#sk-tab-body')
@@ -297,7 +297,7 @@ async function openSkillDetail(id, ctx, refresh) {
       body: `
         <div class="muted-box mb-14" style="display:flex;gap:8px">
           ${icon('info', 15)}
-          <span>${needLevel === 'domain' ? '领域负责人审批：评估业务适用性与描述准确性。' : '安全团队加签：该 Skill 包含外联/写文件等高风险行为。'}${skill.riskLevel === 'high' ? '（高风险：两级审批均须通过）' : ''}</span>
+          <span>${needLevel === 'domain' ? '领域负责人审批：评估业务适用性与描述准确性。' : '安全团队加签：该 Skill 包含外联/写文件等高风险行为。'}${skill.riskLevel === 'high' ? '（高风险：两级审批均须通过，允许同一人连审两级）' : ''}</span>
         </div>
         ${field('审批意见', textareaField('opinion', { placeholder: '请说明审批依据…' }), { required: true })}`,
       foot: '<button class="btn btn-danger-ghost" data-reject>驳回</button><button class="btn btn-primary" data-ok>通过</button>',

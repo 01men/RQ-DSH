@@ -2,15 +2,18 @@
 plugin: dsh-plugin-agent
 base: /api
 endpoints:
-  - GET/POST /api/agents · GET /api/agents/:id · PATCH /api/agents/:id
+  - GET/POST /api/agents · GET /api/agents/:id · PATCH/DELETE /api/agents/:id
   - POST /api/agents/:id/transition（L4 走审批）
-  - POST/DELETE /api/agents/:id/bindings[/:userId]
+  - POST /api/agents/:id/bindings · DELETE /api/agents/:id/bindings/:userId
   - POST /api/agents/:id/obo-token（on-behalf-of）
+  - POST /api/agents/:id/sso-client · PATCH /api/agents/:id/sso-client · POST /api/agents/:id/sso-client/rotate（SSO 客户端治理）
+  - POST /api/agents/:id/entry-ticket（平台授权直达入场票据） · POST /api/agents/:id/metrics-report（指标主动上报） · POST /api/agents/:id/onboarding-prompt（入职提示词重生成）
 tools:
   - agent_list
   - agent_get
   - agent_offline
   - agent_metrics
+  - agent_metrics_report
   - agent_bind_user
 services:
   - key: agentRegistry

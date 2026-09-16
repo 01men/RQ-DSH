@@ -14,6 +14,16 @@ endpoints:
   - GET /api/panel/stream?dept=&ticket=|token=（SSE；EventSource 无法带 Bearer：首选一次性 ticket 消费即焚，?token= 旧通道自校验 fail-closed）
   - GET /api/panel/industries（三态）· POST /api/panel/industries/:code/activate-requests
   - GET /api/panel/scenegraph?industry=（scenegraph.read）· POST /api/panel/scenegraphs/reload（panel.config.write）
+  - GET /panel（面板 SPA 页面） · GET /api/panel/orgs（部门树）
+  - GET/POST /api/panel/models（模型端点登记） · DELETE /api/panel/models/:id · POST /api/panel/models/:id/test（连通性测试）
+  - POST /api/panel/channels/:id/read（频道已读游标）
+  - PUT /api/panel/:dept/config（面板配置） · PUT /api/panel/:dept/agents（Agent 阵容） · POST /api/panel/:dept/artifacts（产物登记）
+  - POST /api/panel/:dept/scenes/:scene/diagnose（场景诊断） · POST /api/panel/:dept/scenes/:scene/sync-dingtalk（场景钉钉同步）
+  - POST /api/panel/auth/login · POST /api/panel/auth/refresh（面板命名空间登录/换票：iam+authn 基线种子链，01门登录通道）
+  - GET/POST/DELETE /api/panel/ddws/login（dws CLI 设备流登录：发起/轮询/取消；写动词 panel.config.write，读 panel.read）
+  - GET /api/panel/ddws/status（panel.read；installed/bound/auth 形状）· POST /api/panel/ddws/install · POST /api/panel/ddws/test · POST /api/panel/ddws/pull（panel.config.write）
+  - PUT/DELETE /api/panel/ddws/bind（panel.config.write；绑定/解绑钉钉群）
+  - POST /api/panel/:dept/agent-stream（panel.read；SSE 流式对话降级通道）
 tools:
   - panel_agents_list
   - panel_msg_send

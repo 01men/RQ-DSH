@@ -168,16 +168,16 @@ class PanelService extends Service {
   agentWithAsset(agentCard) {
     const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
     if (!ref) return { ...agentCard };
-    const asset = this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref);
-    if (!asset) return { ...agentCard };
-    const attrs = asset.attrs;
+    const asset2 = this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref);
+    if (!asset2) return { ...agentCard };
+    const attrs = asset2.attrs;
     return {
       ...agentCard,
       asset: {
-        id: asset.id,
-        ...asset.slug ? { slug: asset.slug } : {},
-        name: asset.name,
-        status: String(asset.status ?? "draft"),
+        id: asset2.id,
+        ...asset2.slug ? { slug: asset2.slug } : {},
+        name: asset2.name,
+        status: String(asset2.status ?? "draft"),
         ...attrs?.model ? { model: String(attrs.model) } : {}
       }
     };
@@ -305,30 +305,30 @@ class PanelService extends Service {
   prepareAgentInvocation(dept, agentCard, trigger, modelOverride, contextNote) {
     const channel = this.channels().get(trigger.channelId);
     const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
-    const asset = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
-    if (!asset) return { ok: false, reason: "\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08\u8BF7\u5728\u63A7\u5236\u53F0\u300CAgent \u672C\u4F53\u300D\u767B\u8BB0\u5E76\u5728\u6B64\u914D\u7F6E agentRef\uFF09" };
-    const preferred = modelOverride ?? String(asset.attrs?.model ?? "");
+    const asset2 = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
+    if (!asset2) return { ok: false, reason: "\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08\u8BF7\u5728\u63A7\u5236\u53F0\u300CAgent \u672C\u4F53\u300D\u767B\u8BB0\u5E76\u5728\u6B64\u914D\u7F6E agentRef\uFF09" };
+    const preferred = modelOverride ?? String(asset2.attrs?.model ?? "");
     const resolved = resolvePanelModelGateway(this.ctx);
     const catalog = resolved?.gateway.models?.().all?.() ?? [];
     const online = catalog.filter((item) => item.status === "online");
-    let model = preferred;
-    if (!model || !catalog.some((item) => item.slug === model)) {
-      if (online.length > 0) model = online[0].slug;
-      else if (resolved?.kind === "dsh") model = "default";
+    let model2 = preferred;
+    if (!model2 || !catalog.some((item) => item.slug === model2)) {
+      if (online.length > 0) model2 = online[0].slug;
+      else if (resolved?.kind === "dsh") model2 = "default";
     }
-    if (!model) return { ok: false, reason: "Agent \u8D44\u4EA7\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u4F1A\u8BDD\u672A\u6307\u5B9A\u6A21\u578B" };
+    if (!model2) return { ok: false, reason: "Agent \u8D44\u4EA7\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u4F1A\u8BDD\u672A\u6307\u5B9A\u6A21\u578B" };
     const recent = this.messages().find((m) => m.channelId === trigger.channelId).slice(-8);
     const contextText = recent.map((m) => `${m.senderName}: ${m.text}`).join("\n");
     const sceneSummary = this.sceneSummaryForDept(dept);
     const systemPrompt = [
-      String(asset.attrs?.systemPrompt ?? `\u4F60\u662F\u4F01\u4E1A\u90E8\u95E8\u534F\u4F5C\u9762\u677F\u4E2D\u7684\u6570\u5B57\u540C\u4E8B\u300C${agentCard.name}\u300D\uFF08${agentCard.desc}\uFF09\u3002`),
+      String(asset2.attrs?.systemPrompt ?? `\u4F60\u662F\u4F01\u4E1A\u90E8\u95E8\u534F\u4F5C\u9762\u677F\u4E2D\u7684\u6570\u5B57\u540C\u4E8B\u300C${agentCard.name}\u300D\uFF08${agentCard.desc}\uFF09\u3002`),
       sceneSummary ? `\u672C\u90E8\u95E8\u6302\u8F7D\u7684\u884C\u4E1A\u573A\u666F\u56FE\u8C31\u8981\u70B9\uFF1A
 ${sceneSummary}` : "",
       contextNote ?? "",
       channel ? `\u4EE5\u4E0B\u662F\u9891\u9053\u300C${channel.name}\u300D\u6700\u8FD1\u5BF9\u8BDD\uFF1A
 ${contextText}` : ""
     ].filter(Boolean).join("\n\n");
-    return { ok: true, model, systemPrompt, userText: trigger.text };
+    return { ok: true, model: model2, systemPrompt, userText: trigger.text };
   }
   /** Agent 调用后的协作计量（D1 裁决键格式；org 主键缺省跳过，计量失败不阻塞协作面）。 */
   meterAgentCall(dept, trigger, agentCard) {
@@ -376,9 +376,35 @@ ${contextText}` : ""
         ]
       });
       await reply(stripThink(result.content), void 0, result.model);
+      this.auditSafe({
+        type: "invoke",
+        actorType: "machine",
+        actorId: `agent:${agentCard.name}`,
+        actorName: agentCard.name,
+        action: "panel.agent.invoke",
+        resourceType: "agent",
+        resourceId: asset.id,
+        resourceName: agentCard.name,
+        result: "ok",
+        detail: `model=${result.model} tokens=${result.inputTokens}/${result.outputTokens}`,
+        ...trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       await fallbackToHuman(`\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${message}\uFF09\u3002`);
+      this.auditSafe({
+        type: "invoke",
+        actorType: "machine",
+        actorId: `agent:${agentCard.name}`,
+        actorName: agentCard.name,
+        action: "panel.agent.invoke",
+        resourceType: "agent",
+        resourceId: asset.id,
+        resourceName: agentCard.name,
+        result: "error",
+        detail: `model=${model} \u5931\u8D25\uFF1A${message}`,
+        ...trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}
+      });
     } finally {
       this.meterAgentCall(dept, trigger, agentCard);
     }
@@ -476,14 +502,14 @@ ${contextText}` : ""
       return { ok: false, reason: `\u90E8\u95E8 ${dept.id}\uFF08${dept.label}\uFF09\u540D\u518C\u65E0\u6B64 Agent\u3002\u53EF\u7528\u9635\u5BB9\uFF1A${names.join("\u3001") || "\uFF08\u65E0\uFF09"}` };
     }
     const ref = agentCard.agentRef?.replace(/^agent:/, "") ?? "";
-    const asset = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
-    if (!asset) return { ok: false, reason: `Agent\u300C${agentName}\u300D\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08agentRef\uFF09\uFF0C\u65E0\u6CD5\u81EA\u4E3B\u5E94\u7B54` };
-    const model = options.modelOverride ?? String(asset.attrs?.model ?? "");
-    if (!model) return { ok: false, reason: `Agent\u300C${agentName}\u300D\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u672A\u6307\u5B9A\u6A21\u578B` };
+    const asset2 = ref ? this.soft("resourceCore")?.list("agent").find((item) => item.id === ref || item.slug === ref || item.name === ref) : void 0;
+    if (!asset2) return { ok: false, reason: `Agent\u300C${agentName}\u300D\u672A\u7ED1\u5B9A Agent \u8D44\u4EA7\uFF08agentRef\uFF09\uFF0C\u65E0\u6CD5\u81EA\u4E3B\u5E94\u7B54` };
+    const model2 = options.modelOverride ?? String(asset2.attrs?.model ?? "");
+    if (!model2) return { ok: false, reason: `Agent\u300C${agentName}\u300D\u672A\u914D\u7F6E\u6A21\u578B\uFF08model \u5C5E\u6027\u4E3A\u7A7A\uFF09\uFF0C\u4E14\u672C\u6B21\u672A\u6307\u5B9A\u6A21\u578B` };
     const orgId = this.callerOrgId(options.userId);
     const sceneSummary = this.sceneSummaryForDept(dept);
     const systemPrompt = [
-      String(asset.attrs?.systemPrompt ?? `\u4F60\u662F\u4F01\u4E1A\u90E8\u95E8\u534F\u4F5C\u9762\u677F\u4E2D\u7684\u6570\u5B57\u540C\u4E8B\u300C${agentCard.name}\u300D\uFF08${agentCard.desc}\uFF09\u3002`),
+      String(asset2.attrs?.systemPrompt ?? `\u4F60\u662F\u4F01\u4E1A\u90E8\u95E8\u534F\u4F5C\u9762\u677F\u4E2D\u7684\u6570\u5B57\u540C\u4E8B\u300C${agentCard.name}\u300D\uFF08${agentCard.desc}\uFF09\u3002`),
       sceneSummary ? `\u672C\u90E8\u95E8\u6302\u8F7D\u7684\u884C\u4E1A\u573A\u666F\u56FE\u8C31\u8981\u70B9\uFF1A
 ${sceneSummary}` : "",
       options.contextNote ?? ""
@@ -492,7 +518,7 @@ ${sceneSummary}` : "",
       const gateway = resolvePanelModelGateway(this.ctx)?.gateway;
       if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
       const result = await gateway.invoke({
-        model,
+        model: model2,
         orgId,
         subject: options.userId ? `user:${options.userId}` : "panel:tool",
         messages: [
@@ -500,9 +526,35 @@ ${sceneSummary}` : "",
           { role: "user", content: question }
         ]
       });
+      this.auditSafe({
+        type: "invoke",
+        actorType: "machine",
+        actorId: `agent:${agentName}`,
+        actorName: agentName,
+        action: "panel.agent.invoke",
+        resourceType: "agent",
+        resourceId: asset2.id,
+        resourceName: agentName,
+        result: "ok",
+        detail: `model=${result.model}\uFF08askAgent \u76F4\u7B54\uFF09`,
+        ...options.sceneCode ? { sceneCode: options.sceneCode } : {}
+      });
       return { ok: true, reply: stripThink(result.content), model: result.model };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      this.auditSafe({
+        type: "invoke",
+        actorType: "machine",
+        actorId: `agent:${agentName}`,
+        actorName: agentName,
+        action: "panel.agent.invoke",
+        resourceType: "agent",
+        resourceId: asset2.id,
+        resourceName: agentName,
+        result: "error",
+        detail: `model=${model2} \u5931\u8D25\uFF1A${message}`,
+        ...options.sceneCode ? { sceneCode: options.sceneCode } : {}
+      });
       return { ok: false, reason: `\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${message}\uFF09` };
     } finally {
       if (orgId) {
@@ -566,11 +618,11 @@ ${sceneSummary}` : "",
     const version = record?.versions.find((item) => item.version === skill.version && item.status === "published");
     const content = version?.content?.trim() ?? "";
     if (!content) return { ok: false, reason: `\u6280\u80FD\u300C${skill.name}\u300D\u5F53\u524D\u7248\u672C\uFF08${skill.version}\uFF09\u65E0\u6307\u4EE4\u5185\u5BB9\uFF0C\u65E0\u6CD5\u76F4\u8C03` };
-    let model = options.modelOverride?.trim() ?? "";
-    if (!model) {
+    let model2 = options.modelOverride?.trim() ?? "";
+    if (!model2) {
       const online = resolvePanelModelGateway(this.ctx)?.gateway.models().all().filter((item) => item.status === "online" && item.endpoint.trim() !== "") ?? [];
       if (online.length === 0) return { ok: false, reason: "\u6A21\u578B\u76EE\u5F55\u6682\u65E0\u5728\u7EBF\u6A21\u578B\u2014\u2014\u8BF7\u7BA1\u7406\u5458\u5728\u300C\u6A21\u578B\u7BA1\u7406\u300D\u4E2D\u63A5\u5165\u540E\u518D\u76F4\u8C03\u6280\u80FD" };
-      model = online[0].slug;
+      model2 = online[0].slug;
     }
     const systemPrompt = [
       `\u4F60\u5728\u6267\u884C\u4F01\u4E1A\u6280\u80FD\u5E73\u53F0\u4E0A\u67B6\u7684\u6280\u80FD\u300C${skill.name}\u300D\uFF08${skill.summary}\uFF09\u3002\u4E25\u683C\u6309\u4EE5\u4E0B\u6280\u80FD\u6307\u4EE4\u5B8C\u6210\u4EFB\u52A1\uFF1A`,
@@ -581,7 +633,7 @@ ${sceneSummary}` : "",
       const gateway = resolvePanelModelGateway(this.ctx)?.gateway;
       if (!gateway) throw new Error("\u6A21\u578B\u7F51\u5173\u672A\u63A5\u5165\uFF0801\u95E8\u6F14\u793A\u6001\uFF09\u2014\u2014\u8FDE\u63A5\u5BBF\u4E3B\u540E\u53EF\u7528");
       const result = await gateway.invoke({
-        model,
+        model: model2,
         orgId,
         subject: options.userId ? `user:${options.userId}` : "panel:tool",
         messages: [
@@ -589,9 +641,35 @@ ${sceneSummary}` : "",
           { role: "user", content: message || "\uFF08\u65E0\u9644\u52A0\u8F93\u5165\uFF0C\u6309\u6280\u80FD\u6307\u4EE4\u6267\u884C\uFF09" }
         ]
       });
+      this.auditSafe({
+        type: "invoke",
+        actorType: options.userId ? "human" : "machine",
+        actorId: options.userId ?? "panel:tool",
+        actorName: options.userId ?? "panel:tool",
+        action: "panel.skill.invoke",
+        resourceType: "skill",
+        resourceId: skill.id,
+        resourceName: skill.name,
+        result: "ok",
+        detail: `model=${result.model} version=${skill.version}`,
+        ...options.sceneCode ? { sceneCode: options.sceneCode } : {}
+      });
       return { ok: true, reply: stripThink(result.content), model: result.model, skill: { name: skill.name, version: skill.version } };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      this.auditSafe({
+        type: "invoke",
+        actorType: options.userId ? "human" : "machine",
+        actorId: options.userId ?? "panel:tool",
+        actorName: options.userId ?? "panel:tool",
+        action: "panel.skill.invoke",
+        resourceType: "skill",
+        resourceId: skill.id,
+        resourceName: skill.name,
+        result: "error",
+        detail: `model=${model2} \u5931\u8D25\uFF1A${reason}`,
+        ...options.sceneCode ? { sceneCode: options.sceneCode } : {}
+      });
       return { ok: false, reason: `\u6A21\u578B\u7F51\u5173\u8C03\u7528\u5931\u8D25\uFF08${reason}\uFF09` };
     } finally {
       if (orgId) {
@@ -659,7 +737,8 @@ ${sceneSummary}` : "",
         payload: { messageId: message.id, dept: message.dept, opId: op.id, opLabel: op.label, reason: input.reason ?? "" },
         requesterId: input.actorId,
         requesterName: input.actorName,
-        ...op.risk ? { riskLevel: op.risk } : {}
+        // QA A-06：卡片未声明风险级时缺省 high（fail-closed），不再「一次 approve 即执行」
+        riskLevel: op.risk ?? "high"
       });
       result = `\u5DF2\u63D0\u4EA4\u5BA1\u6279\uFF08${approval.id}\uFF09\uFF0C\u5728\u5BA1\u6279\u4E2D\u5FC3\u8DDF\u8FDB`;
     } else if (action === "dd.push") {
@@ -684,9 +763,17 @@ ${sceneSummary}` : "",
     return { message: updated, result };
   }
   // -- 任务 -------------------------------------------------------------------
+  /** 审计落痕（IAW 交接 5-2）：任务/Agent 直调带 sceneCode 维度落审计时间线；失败不阻塞面板主链。 */
+  auditSafe(entry) {
+    try {
+      const audit = this.ctx.reflect.get("audit", false);
+      audit?.record(entry);
+    } catch {
+    }
+  }
   createTask(input) {
     this.dept(input.dept);
-    return this.tasks().insert({
+    const record = this.tasks().insert({
       id: newId("ptask"),
       dept: input.dept,
       title: input.title,
@@ -697,6 +784,20 @@ ${sceneSummary}` : "",
       ...input.sceneCode ? { sceneCode: input.sceneCode } : {},
       createdBy: input.createdBy
     });
+    this.auditSafe({
+      type: "change",
+      actorType: input.createdBy.startsWith("agent:") ? "machine" : "human",
+      actorId: input.createdBy,
+      actorName: input.createdBy,
+      action: "panel.task.create",
+      resourceType: "panel_task",
+      resourceId: record.id,
+      resourceName: input.title,
+      result: "ok",
+      detail: `\u6CF3\u9053 ${input.lane ?? "todo"}${input.assigneeName ? `\uFF0C\u6307\u6D3E ${input.assigneeName}` : ""}`,
+      ...input.sceneCode ? { sceneCode: input.sceneCode } : {}
+    });
+    return record;
   }
   transitionTask(taskId, lane, actorId) {
     const task = this.tasks().get(taskId);
@@ -704,6 +805,19 @@ ${sceneSummary}` : "",
     if (!TASK_LANES.includes(lane)) throw new Error(`\u975E\u6CD5\u6CF3\u9053\uFF1A${lane}`);
     const updated = this.tasks().update(taskId, { lane });
     this.ctx.platformBus.emit(PlatformEvents.PanelTaskUpdated, { taskId, dept: task.dept, lane, actorId, title: task.title });
+    this.auditSafe({
+      type: "change",
+      actorType: actorId.startsWith("agent:") ? "machine" : "human",
+      actorId,
+      actorName: actorId,
+      action: "panel.task.transition",
+      resourceType: "panel_task",
+      resourceId: taskId,
+      resourceName: task.title,
+      result: "ok",
+      detail: `${task.lane} \u2192 ${lane}`,
+      ...task.sceneCode ? { sceneCode: task.sceneCode } : {}
+    });
     return updated;
   }
   // -- 场景诊断（会话 × 图谱联动） -------------------------------------------------
@@ -749,7 +863,7 @@ ${sceneSummary}` : "",
     this.streamSubscribers.set(dept, set);
     return () => set.delete(listener);
   }
-  /** 平台事件 → SSE 订阅者扇出（panel.* 与 dingtalk-bridge.delivered）。 */
+  /** 平台事件 → SSE 订阅者扇出（panel.* / flow.* / dingtalk-bridge.delivered）。 */
   wireEventBus() {
     const forward = (name) => (payload) => {
       const dept = payload?.dept;
@@ -769,6 +883,11 @@ ${sceneSummary}` : "",
     this.ctx.platformBus.on(PlatformEvents.PanelIndustryActivated, forward(PlatformEvents.PanelIndustryActivated));
     this.ctx.platformBus.on(PlatformEvents.DingtalkDelivered, forward(PlatformEvents.DingtalkDelivered));
     this.ctx.platformBus.on(PlatformEvents.ScenegraphUpdated, forward(PlatformEvents.ScenegraphUpdated));
+    this.ctx.platformBus.on(PlatformEvents.FlowCreated, forward(PlatformEvents.FlowCreated));
+    this.ctx.platformBus.on(PlatformEvents.FlowStepUpdated, forward(PlatformEvents.FlowStepUpdated));
+    this.ctx.platformBus.on(PlatformEvents.FlowCompleted, forward(PlatformEvents.FlowCompleted));
+    this.ctx.platformBus.on(PlatformEvents.ConnectorPolicyMirrorFailed, forward(PlatformEvents.ConnectorPolicyMirrorFailed));
+    this.ctx.platformBus.on(PlatformEvents.ConnectorPolicySnapshotDrifted, forward(PlatformEvents.ConnectorPolicySnapshotDrifted));
   }
 }
 function extractMentions(text) {

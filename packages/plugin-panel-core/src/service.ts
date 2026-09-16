@@ -26,6 +26,7 @@ import type { SceneActivity, ScenegraphPack } from '../../platform-core/src/scen
 import { ACTIVITY_LABELS } from '../../platform-core/src/scenegraph.ts'
 import { newId } from '../../platform-core/src/ids.ts'
 import { resolvePanelModelGateway } from './llm-bridge.ts'
+import type { AuditLogRecord } from '../../plugin-audit/src/index.ts'
 
 // ---------------------------------------------------------------------------
 // 记录模型
@@ -595,9 +596,21 @@ export class PanelService extends Service {
         ],
       })
       await reply(stripThink(result.content), undefined, result.model)
+      this.auditSafe({
+        type: 'invoke', actorType: 'machine', actorId: `agent:${agentCard.name}`, actorName: agentCard.name,
+        action: 'panel.agent.invoke', resourceType: 'agent', resourceId: asset.id, resourceName: agentCard.name,
+        result: 'ok', detail: `model=${result.model} tokens=${result.inputTokens}/${result.outputTokens}`,
+        ...(trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}),
+      })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await fallbackToHuman(`模型网关调用失败（${message}）。`)
+      this.auditSafe({
+        type: 'invoke', actorType: 'machine', actorId: `agent:${agentCard.name}`, actorName: agentCard.name,
+        action: 'panel.agent.invoke', resourceType: 'agent', resourceId: asset.id, resourceName: agentCard.name,
+        result: 'error', detail: `model=${model} 失败：${message}`,
+        ...(trigger.sceneCode ? { sceneCode: trigger.sceneCode } : {}),
+      })
     } finally {
       this.meterAgentCall(dept, trigger, agentCard)
     }
@@ -699,7 +712,7 @@ export class PanelService extends Service {
     deptId: string,
     agentName: string,
     question: string,
-    options: { userId?: string; modelOverride?: string; contextNote?: string } = {},
+    options: { userId?: string; modelOverride?: string; contextNote?: string; sceneCode?: string } = {},
   ): Promise<{ ok: true; reply: string; model: string } | { ok: false; reason: string }> {
     const dept = this.dept(deptId)
     const agentCard = dept.agents.find((card) => card.name === agentName)
@@ -729,9 +742,21 @@ export class PanelService extends Service {
           { role: 'user', content: question },
         ],
       })
+      this.auditSafe({
+        type: 'invoke', actorType: 'machine', actorId: `agent:${agentName}`, actorName: agentName,
+        action: 'panel.agent.invoke', resourceType: 'agent', resourceId: asset.id, resourceName: agentName,
+        result: 'ok', detail: `model=${result.model}（askAgent 直答）`,
+        ...(options.sceneCode ? { sceneCode: options.sceneCode } : {}),
+      })
       return { ok: true, reply: stripThink(result.content), model: result.model }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
+      this.auditSafe({
+        type: 'invoke', actorType: 'machine', actorId: `agent:${agentName}`, actorName: agentName,
+        action: 'panel.agent.invoke', resourceType: 'agent', resourceId: asset.id, resourceName: agentName,
+        result: 'error', detail: `model=${model} 失败：${message}`,
+        ...(options.sceneCode ? { sceneCode: options.sceneCode } : {}),
+      })
       return { ok: false, reason: `模型网关调用失败（${message}）` }
     } finally {
       // 与 invokeAgent 同风格的协作计量（org 主键缺省跳过；失败不阻塞应答）
@@ -784,7 +809,7 @@ export class PanelService extends Service {
   async invokeSkill(
     skillName: string,
     message: string,
-    options: { userId?: string; modelOverride?: string; contextNote?: string } = {},
+    options: { userId?: string; modelOverride?: string; contextNote?: string; sceneCode?: string } = {},
   ): Promise<{ ok: true; reply: string; model: string; skill: { name: string; version: string } } | { ok: false; reason: string }> {
     const name = skillName.trim()
     if (!name) return { ok: false, reason: '技能名为空（用 /技能名 或 panel_skill_invoke 点名）' }
@@ -828,9 +853,23 @@ export class PanelService extends Service {
           { role: 'user', content: message || '（无附加输入，按技能指令执行）' },
         ],
       })
+      this.auditSafe({
+        type: 'invoke', actorType: options.userId ? 'human' : 'machine', actorId: options.userId ?? 'panel:tool',
+        actorName: options.userId ?? 'panel:tool',
+        action: 'panel.skill.invoke', resourceType: 'skill', resourceId: skill.id, resourceName: skill.name,
+        result: 'ok', detail: `model=${result.model} version=${skill.version}`,
+        ...(options.sceneCode ? { sceneCode: options.sceneCode } : {}),
+      })
       return { ok: true, reply: stripThink(result.content), model: result.model, skill: { name: skill.name, version: skill.version } }
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
+      this.auditSafe({
+        type: 'invoke', actorType: options.userId ? 'human' : 'machine', actorId: options.userId ?? 'panel:tool',
+        actorName: options.userId ?? 'panel:tool',
+        action: 'panel.skill.invoke', resourceType: 'skill', resourceId: skill.id, resourceName: skill.name,
+        result: 'error', detail: `model=${model} 失败：${reason}`,
+        ...(options.sceneCode ? { sceneCode: options.sceneCode } : {}),
+      })
       return { ok: false, reason: `模型网关调用失败（${reason}）` }
     } finally {
       // 与 askAgent 同风格的协作计量（org 主键缺省跳过；失败不阻塞回包）
@@ -896,7 +935,8 @@ export class PanelService extends Service {
         title: `${message.card.title} · ${op.label}`,
         payload: { messageId: message.id, dept: message.dept, opId: op.id, opLabel: op.label, reason: input.reason ?? '' },
         requesterId: input.actorId, requesterName: input.actorName,
-        ...(op.risk ? { riskLevel: op.risk } : {}),
+        // QA A-06：卡片未声明风险级时缺省 high（fail-closed），不再「一次 approve 即执行」
+        riskLevel: op.risk ?? 'high',
       })
       result = `已提交审批（${approval.id}），在审批中心跟进`
     } else if (action === 'dd.push') {
@@ -916,9 +956,19 @@ export class PanelService extends Service {
 
   // -- 任务 -------------------------------------------------------------------
 
+  /** 审计落痕（IAW 交接 5-2）：任务/Agent 直调带 sceneCode 维度落审计时间线；失败不阻塞面板主链。 */
+  private auditSafe(entry: Omit<AuditLogRecord, 'id' | 'createdAt' | 'updatedAt'>): void {
+    try {
+      // soft 读（plan-gate01 瘦身口径）：01门 5 键装态无 audit 面——缺席时静默跳过（审计面独立降级）；
+      // 全量形态正常落审计。不可写 this.ctx.audit：cordis 未 inject 的键访问即抛错，全量形态也会被吞。
+      const audit = this.ctx.reflect.get('audit', false)
+      audit?.record(entry)
+    } catch { /* 审计面独立降级 */ }
+  }
+
   createTask(input: { dept: string; title: string; detail?: string; lane?: TaskLane; assigneeType?: 'human' | 'agent'; assigneeName?: string; sceneCode?: string; createdBy: string }): TaskRecord {
     this.dept(input.dept)
-    return this.tasks().insert({
+    const record = this.tasks().insert({
       id: newId('ptask'), dept: input.dept, title: input.title,
       ...(input.detail ? { detail: input.detail } : {}),
       lane: input.lane ?? 'todo',
@@ -927,6 +977,14 @@ export class PanelService extends Service {
       ...(input.sceneCode ? { sceneCode: input.sceneCode } : {}),
       createdBy: input.createdBy,
     })
+    this.auditSafe({
+      type: 'change', actorType: input.createdBy.startsWith('agent:') ? 'machine' : 'human',
+      actorId: input.createdBy, actorName: input.createdBy,
+      action: 'panel.task.create', resourceType: 'panel_task', resourceId: record.id, resourceName: input.title,
+      result: 'ok', detail: `泳道 ${input.lane ?? 'todo'}${input.assigneeName ? `，指派 ${input.assigneeName}` : ''}`,
+      ...(input.sceneCode ? { sceneCode: input.sceneCode } : {}),
+    })
+    return record
   }
 
   transitionTask(taskId: string, lane: TaskLane, actorId: string): TaskRecord {
@@ -935,6 +993,13 @@ export class PanelService extends Service {
     if (!TASK_LANES.includes(lane)) throw new Error(`非法泳道：${lane}`)
     const updated = this.tasks().update(taskId, { lane })
     this.ctx.platformBus.emit(PlatformEvents.PanelTaskUpdated, { taskId, dept: task.dept, lane, actorId, title: task.title })
+    this.auditSafe({
+      type: 'change', actorType: actorId.startsWith('agent:') ? 'machine' : 'human',
+      actorId, actorName: actorId,
+      action: 'panel.task.transition', resourceType: 'panel_task', resourceId: taskId, resourceName: task.title,
+      result: 'ok', detail: `${task.lane} → ${lane}`,
+      ...(task.sceneCode ? { sceneCode: task.sceneCode } : {}),
+    })
     return updated
   }
 
@@ -976,7 +1041,7 @@ export class PanelService extends Service {
     return () => set.delete(listener)
   }
 
-  /** 平台事件 → SSE 订阅者扇出（panel.* 与 dingtalk-bridge.delivered）。 */
+  /** 平台事件 → SSE 订阅者扇出（panel.* / flow.* / dingtalk-bridge.delivered）。 */
   wireEventBus(): void {
     const forward = (name: string) => (payload: unknown) => {
       const dept = (payload as { dept?: string } | undefined)?.dept
@@ -993,6 +1058,14 @@ export class PanelService extends Service {
     this.ctx.platformBus.on(PlatformEvents.PanelIndustryActivated, forward(PlatformEvents.PanelIndustryActivated))
     this.ctx.platformBus.on(PlatformEvents.DingtalkDelivered, forward(PlatformEvents.DingtalkDelivered))
     this.ctx.platformBus.on(PlatformEvents.ScenegraphUpdated, forward(PlatformEvents.ScenegraphUpdated))
+    // 事务流引擎（IAW 交接 3-1）：TF 步骤状态机事件随面板 SSE 扇出（无 dept 的 TF 广播全订阅者）
+    this.ctx.platformBus.on(PlatformEvents.FlowCreated, forward(PlatformEvents.FlowCreated))
+    this.ctx.platformBus.on(PlatformEvents.FlowStepUpdated, forward(PlatformEvents.FlowStepUpdated))
+    this.ctx.platformBus.on(PlatformEvents.FlowCompleted, forward(PlatformEvents.FlowCompleted))
+    // QA E-03：连接器镜像失败类事件此前只走总线半程——面板 SSE 一并扇出（无 dept 广播全订阅者），
+    // 值班面板可见 fail-closed 状态
+    this.ctx.platformBus.on(PlatformEvents.ConnectorPolicyMirrorFailed, forward(PlatformEvents.ConnectorPolicyMirrorFailed))
+    this.ctx.platformBus.on(PlatformEvents.ConnectorPolicySnapshotDrifted, forward(PlatformEvents.ConnectorPolicySnapshotDrifted))
   }
 }
 

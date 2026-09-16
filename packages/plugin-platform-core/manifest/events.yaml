@@ -7,3 +7,9 @@ events:
   - name: scenegraph.updated
     mode: emit
     description: 行业场景图谱重载完成（部门面板热刷新）
+  - name: bus.listener_error
+    mode: emit
+    description: 总线监听器异常（OPT-P1-04：重试后入死信，审计可查）
+  - name: bus.dead_letter
+    mode: emit
+    description: 总线死信入账告警（支持人工重投 retryDeadLetters）

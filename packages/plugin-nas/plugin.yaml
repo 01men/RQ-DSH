@@ -9,3 +9,6 @@ provides:
 permissions:
   - nas.read
   - nas.write
+  - nas.authz.read
+  - nas.authz.write
+  - nas.authz.check

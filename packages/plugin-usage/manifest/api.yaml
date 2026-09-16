@@ -1,0 +1,14 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-usage
+base: /api
+endpoints:
+  - # REST 面由 console 聚合暴露（见 console 清单 usage.* 各条）；工具面如下
+tools:
+  - usage_query
+  - usage_reconcile
+  - usage_replay
+  - usage_deadletter_retry
+services:
+  - key: usage
+    access: ctx.usage
+    description: 计量事实源：idempotency_key 幂等 + 消费水位 + 3 次重试 + 死信 + 重放（at-least-once），保留策略 730d 巡检
