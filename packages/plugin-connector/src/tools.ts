@@ -70,7 +70,7 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'connector_execute',
-    description: '通过连接器网关调用 SaaS action：七步链（RBAC→权限组→审批→限流→计费预检→oct_ 令牌）。admin 级 action 会返回审批单。',
+    description: '通过连接器网关调用 SaaS action：六步链（RBAC→权限组→审批→限流→oct_ 令牌→数据面；计费预检已废止 OPT-P0-02）。admin 级 action 会返回审批单。',
     permission: 'connector.invoke',
     parameters: {
       actionId: { type: 'string', required: true, description: 'action ID（如 hackernews.get_top_stories）' },
@@ -92,7 +92,7 @@ export function apply(ctx: Context) {
 
   t.register(defineTool({
     name: 'connector_perm_group_list',
-    description: '列出连接器权限组（policies/subjects/rateLimitPerMin/precheckCents 与令牌台账状态）。',
+    description: '列出连接器权限组（policies/subjects/rateLimitPerMin 与令牌台账状态；precheckCents 出参已废止 OPT-P0-02）。',
     permission: 'connector.connection.read',
     parameters: {},
     output: { type: 'object', additionalProperties: true },
@@ -113,7 +113,8 @@ export function apply(ctx: Context) {
               denyParams: policy.constraints?.denyParams ?? [],
             },
           ])),
-          subjects: group.subjects, rateLimitPerMin: group.rateLimitPerMin, precheckCents: group.precheckCents,
+          subjects: group.subjects, rateLimitPerMin: group.rateLimitPerMin,
+          // precheckCents 出参已随 M0-2 billing 下线废止（OPT-P0-02）：不再对外暴露 legacy 字段
         })),
       }
     },

@@ -2,16 +2,15 @@
  * 契约清单 lint：校验全部平台插件 manifest（plugin.yaml + manifest/*.yaml）可解析。
  * 使用与市场契约解析器相同的 YAML 子集解析器（platform-core yaml.ts）——
  * 平台自己的清单与第三方五面走同一套语法口径（吃自己的狗粮）。
- * WP-05/B2：增卡片包校验（各包 cardpacks 目录下 *.json）——schema 必填/上限/徽标枚举/ref 格式，
- * 与运行时装载（cardpacks.ts validateCardpack）同一套规则，故意配错即红。
  * 用法：npm run lint:manifests
  */
 import { readdir, readFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseYaml } from '../packages/platform-core/src/yaml.ts'
-import { validateCardpack } from '../packages/plugin-panel-core/src/cardpacks.ts'
 import { validateScenegraph } from '../packages/platform-core/src/scenegraph.ts'
+import { runContractLint } from './contract-lint.mjs'
+import { scanTimerHygiene } from './lint-timers.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const packagesDir = join(root, 'packages')
@@ -49,33 +48,6 @@ for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
   }
 }
 
-// -- 卡片包（WP-05/B2）：packages/*/cardpacks/*.json 逐个过 validateCardpack ----------
-let packTotal = 0
-let packFailed = 0
-for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
-  if (!pkg.isDirectory()) continue
-  const packDir = join(packagesDir, pkg.name, 'cardpacks')
-  let files = []
-  try {
-    files = (await readdir(packDir)).filter((file) => file.endsWith('.json'))
-  } catch {
-    continue
-  }
-  for (const name of files) {
-    packTotal++
-    const file = join(packDir, name)
-    try {
-      const parsed = JSON.parse(await readFile(file, 'utf8'))
-      const errors = validateCardpack(parsed, name)
-      if (errors.length > 0) throw new Error(errors.join('；'))
-      console.log(`  ✔ ${pkg.name}/cardpacks/${name}`)
-    } catch (error) {
-      packFailed++
-      console.error(`  ✘ ${pkg.name}/cardpacks/${name}：${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
-}
-
 // -- 行业场景图谱（review-dsh-agent-panel-v2 Phase 2）：packages/*/scenegraphs/*.json 逐个过 validateScenegraph
 // 与运行时装载（scenegraph.ts）同一套规则，故意配错即红
 let sgTotal = 0
@@ -104,5 +76,21 @@ for (const pkg of await readdir(packagesDir, { withFileTypes: true })) {
   }
 }
 
-console.log(`\n清单校验：${total - failed}/${total} 通过；卡片包：${packTotal - packFailed}/${packTotal} 通过；场景图谱：${sgTotal - sgFailed}/${sgTotal} 通过`)
-process.exit(failed + packFailed + sgFailed > 0 ? 1 : 0)
+console.log(`\n清单校验：${total - failed}/${total} 通过；场景图谱：${sgTotal - sgFailed}/${sgTotal} 通过`)
+
+// -- 契约↔实现双向一致性（OPT-P0-01，2026-09-12）：代码注册面 ↔ 清单声明面双向比对 --
+const contract = await runContractLint(root)
+const exemptCount = contract.diffs.filter((d) => d.severity === 'exempt').length
+console.log(`契约比对：路由 代码${contract.stats.codeRoutes}/清单${contract.stats.manifestRoutes} · 工具 代码${contract.stats.codeTools}/清单${contract.stats.manifestTools} · 差异 ${contract.diffs.filter((d) => d.severity === 'red').length} 红 ${contract.diffs.filter((d) => d.severity === 'warn').length} 警${exemptCount > 0 ? ` · ${exemptCount} 豁免（见 scripts/contract-lint.exemptions.json）` : ''}`)
+for (const diff of contract.diffs) {
+  const mark = diff.severity === 'red' ? '✘' : '⚠'
+  ;(diff.severity === 'red' ? console.error : console.log)(`  ${mark} [${diff.kind}] ${diff.message}`)
+}
+if (!contract.ok) console.error('契约比对存在红项：实现与清单漂移，拒绝放行')
+
+// -- 定时器卫生（OPT-P3-02）：setInterval 必须就近配 unref（保活语义需注释豁免）或文件内存在 clearInterval 生命周期管理 --
+const timerReport = await scanTimerHygiene(packagesDir)
+console.log(`定时器卫生：${timerReport.total} 处 setInterval，${timerReport.violations} 处违规`)
+for (const message of timerReport.messages) console.error(`  ⚠ [timer_hygiene] ${message}`)
+
+process.exit(failed + sgFailed > 0 || !contract.ok || timerReport.violations > 0 ? 1 : 0)

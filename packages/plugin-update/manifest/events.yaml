@@ -7,3 +7,6 @@ events:
   - name: platform.update.applied
     mode: emit
     description: 一键升级执行完成
+  - name: platform.update.rolled_back
+    mode: emit
+    description: 升级回滚完成（OPT-P2-03，reset 到升级前 HEAD）

@@ -146,6 +146,7 @@ export class OidcService extends Service {
     this.registerRoutes()
     this.cleanupExpired()
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 24 * 3600_000)
+    this.cleanupTimer.unref?.() // OPT-P3-02
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     })
@@ -234,6 +235,13 @@ export class OidcService extends Service {
 
   // -- 客户端生命周期 -------------------------------------------------------
 
+  /** 对外脱敏（QA SEC-02）：clientSecretHash 为凭证哈希，客户端列表/详情响应一律不外发（对齐 principals 的脱敏口径）；内部校验仍走 clients()/clientByClientId() 原始记录。 */
+  private publicClient<C extends OidcClientRecord>(client: C): Omit<C, 'clientSecretHash'> {
+    const { clientSecretHash, ...safe } = client
+    void clientSecretHash
+    return safe
+  }
+
   createClient(input: {
     name: string
     redirectUris: string[]
@@ -243,7 +251,7 @@ export class OidcService extends Service {
     clientType?: 'confidential' | 'public'
     refType?: 'app' | 'agent'
     refId?: string
-  }): { client: OidcClientRecord; clientSecret: string } {
+  }): { client: Omit<OidcClientRecord, 'clientSecretHash'>; clientSecret: string } {
     const clientType = input.clientType ?? 'confidential'
     const clientId = 'oc-' + newId('id').slice(3)
     // public 客户端无 secret（强制 PKCE、不发 refresh）；confidential 一次性生成
@@ -261,11 +269,11 @@ export class OidcService extends Service {
       ...(input.refType !== undefined ? { refType: input.refType } : {}),
       ...(input.refId !== undefined ? { refId: input.refId } : {}),
     })
-    return { client, clientSecret }
+    return { client: this.publicClient(client), clientSecret }
   }
 
-  listClients(): Array<OidcClientRecord & { refAppName?: string }> {
-    return this.clients().all().map((client) => ({
+  listClients(): Array<Omit<OidcClientRecord, 'clientSecretHash'> & { refAppName?: string; refAgentName?: string }> {
+    return this.clients().all().map((client) => this.publicClient({
       ...client,
       ...(client.refType === 'app' && client.refId
         ? { refAppName: this.ctx.resourceCore?.get('app', client.refId)?.name ?? client.refId }
@@ -276,29 +284,29 @@ export class OidcService extends Service {
     }))
   }
 
-  updateClient(id: string, patch: { name?: string; redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }): OidcClientRecord {
-    return this.clients().update(id, patch)
+  updateClient(id: string, patch: { name?: string; redirectUris?: string[]; description?: string; consentRequired?: boolean; postLogoutUris?: string[] }): Omit<OidcClientRecord, 'clientSecretHash'> {
+    return this.publicClient(this.clients().update(id, patch))
   }
 
   /** 轮换 secret：旧值立即失效，新值仅本次返回。 */
-  rotateSecret(id: string): { client: OidcClientRecord; clientSecret: string } {
+  rotateSecret(id: string): { client: Omit<OidcClientRecord, 'clientSecretHash'>; clientSecret: string } {
     const client = this.clients().get(id)
     if (!client) throw new Error(`OIDC 客户端不存在：${id}`)
     if ((client.clientType ?? 'confidential') === 'public') throw new Error('public 客户端无 secret，无需轮换')
     const clientSecret = generateSecret('ocs')
     const updated = this.clients().update(id, { clientSecretHash: sha256Hex(clientSecret) })
-    return { client: updated, clientSecret }
+    return { client: this.publicClient(updated), clientSecret }
   }
 
-  disableClient(id: string, reason: string): OidcClientRecord {
+  disableClient(id: string, reason: string): Omit<OidcClientRecord, 'clientSecretHash'> {
     const client = this.clients().get(id)
     if (!client) throw new Error(`OIDC 客户端不存在：${id}`)
     this.revokeClientRefreshChains(client.clientId, `客户端禁用联动：${reason}`)
-    return this.clients().update(id, { status: 'disabled' })
+    return this.publicClient(this.clients().update(id, { status: 'disabled' }))
   }
 
-  enableClient(id: string): OidcClientRecord {
-    return this.clients().update(id, { status: 'active' })
+  enableClient(id: string): Omit<OidcClientRecord, 'clientSecretHash'> {
+    return this.publicClient(this.clients().update(id, { status: 'active' }))
   }
 
   // -- 浏览器授权流 ---------------------------------------------------------

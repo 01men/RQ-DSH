@@ -2,12 +2,15 @@
 plugin: dsh-plugin-nas
 base: /api
 endpoints:
-  - GET/POST /api/nas · GET/PATCH /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）
+  - GET/POST /api/nas · GET/PATCH/DELETE /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）
   - POST /api/nas/:id/transition|health|sync-tools
-  - GET /api/nas/:id/fs[?path=] · GET /api/nas/:id/fs/info
+  - GET /api/nas/:id/fs（?path= 子目录定位） · GET /api/nas/:id/fs/info
   - GET /api/nas/:id/fs/file?path=&inline=（流式文件下载：浏览器拿到 bytes + content-disposition attachment|inline）
-  - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download|upload-many（经网关 fs_* 工具）
+  - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download|upload-many（经网关 fs_* 工具） · POST /api/nas/:id/fs/download-ticket（下载票据：浏览器持票直连网关取流）
   - GET/PUT /api/skill-storage（Skill 包存储后端：local | 已纳管 NAS 资产）
+  - GET /api/nas/authz/scope · GET /api/nas/authz/rules · PUT /api/nas/authz/rules · POST /api/nas/authz/rules/import（授权规则面）
+  - POST /api/nas/authz/check（单点鉴权自查） · POST /api/nas/authz/exceptions · GET /api/nas/authz/exceptions（例外登记/清单）
+  - GET /api/nas/authz/decisions（判定留痕查询） · POST /api/nas/authz/reconcile · POST /api/nas/authz/leader-vacancy-scan（对账与主例外巡检）
 tools:
   - nas_list
   - nas_get

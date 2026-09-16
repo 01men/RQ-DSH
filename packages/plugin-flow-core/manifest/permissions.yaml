@@ -1,0 +1,6 @@
+# 权限点声明（注册进统一 RBAC，控制台/CLI/工具共用）
+plugin: dsh-plugin-flow-core
+points:
+  - flow.read
+  - flow.write
+  - flow.admin

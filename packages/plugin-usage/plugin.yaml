@@ -1,0 +1,12 @@
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+id: dsh-plugin-usage
+version: 1.1.0
+label: 计量与成本
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam']
+provides:
+  services:
+    - usage
+permissions:
+  - usage.read
+  - usage.write
+  - usage.admin

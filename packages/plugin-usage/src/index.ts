@@ -145,6 +145,8 @@ export class UsageService extends Service {
 
   private consumers = new Map<string, { handler: UsageConsumer; attempts: Map<string, number> }>()
   private seq = 0
+  /** REL-11 读侧加固：已发过 warning 的脏数据键（进程内去重，防告警风暴）。 */
+  private warnedDirtyKeys = new Set<string>()
   /** 事件保留天数（USAGE_RETENTION_DAYS，默认 730=2 年；0=永久保留不清理）。 */
   readonly retentionDays: number
   private retentionTimer: ReturnType<typeof setInterval> | undefined
@@ -180,6 +182,7 @@ export class UsageService extends Service {
       const first = setTimeout(() => void this.sweepRetention(), 20_000)
       ctx.effect(() => () => clearTimeout(first))
       this.retentionTimer = setInterval(() => void this.sweepRetention(), 6 * 3_600_000)
+      this.retentionTimer.unref?.() // OPT-P3-02
       ctx.effect(() => {
         if (this.retentionTimer) clearInterval(this.retentionTimer)
       })
@@ -246,8 +249,19 @@ export class UsageService extends Service {
       )
     }
     const meter = input.meters.find((item) => item.key === price.meter_key)!
-    const charge = Math.round((meter.value / price.units_per_step) * price.list_cents_per_unit)
-    const cost = Math.round((meter.value / price.units_per_step) * price.cost_cents_per_unit)
+    // REL-11 读侧加固：存量脏费率（非有限/负值/零步长）按 0 计价并发 warning（防永久投毒）；
+    // 合法数值走原值，计价结果不变。快照记录实际采用的修正值（非有限值 JSON 序列化为 null 会继续污染对账）
+    const listRate = Number.isFinite(price.list_cents_per_unit) && price.list_cents_per_unit >= 0
+      ? price.list_cents_per_unit
+      : this.warnDirtyData(`pricebook:${price.pattern}:list`, `价格簿 ${price.pattern} 的 list_cents_per_unit=${String(price.list_cents_per_unit)} 为非法数值，本次计价按 0 处理；请尽快修正价格簿（REL-11）`)
+    const costRate = Number.isFinite(price.cost_cents_per_unit) && price.cost_cents_per_unit >= 0
+      ? price.cost_cents_per_unit
+      : this.warnDirtyData(`pricebook:${price.pattern}:cost`, `价格簿 ${price.pattern} 的 cost_cents_per_unit=${String(price.cost_cents_per_unit)} 为非法数值，本次计价按 0 处理；请尽快修正价格簿（REL-11）`)
+    const step = Number.isFinite(price.units_per_step) && price.units_per_step > 0
+      ? price.units_per_step
+      : this.warnDirtyData(`pricebook:${price.pattern}:step`, `价格簿 ${price.pattern} 的 units_per_step=${String(price.units_per_step)} 为非法数值（须为正数），本次计价按 0 处理；请尽快修正价格簿（REL-11）`)
+    const charge = step > 0 ? Math.round((meter.value / step) * listRate) : 0
+    const cost = step > 0 ? Math.round((meter.value / step) * costRate) : 0
     const event: UsageEvent = {
       schema: USAGE_SCHEMA,
       schema_version: USAGE_SCHEMA_VERSION,
@@ -268,9 +282,10 @@ export class UsageService extends Service {
         rate: {
           pattern: price.pattern,
           meter_key: price.meter_key,
-          list_cents_per_unit: price.list_cents_per_unit,
-          cost_cents_per_unit: price.cost_cents_per_unit,
-          units_per_step: price.units_per_step,
+          // REL-11：记录实际采用的修正后费率（合法数值时与原值恒等）
+          list_cents_per_unit: listRate,
+          cost_cents_per_unit: costRate,
+          units_per_step: step,
           tax_rate: price.tax_rate,
           ...(nonbillable ? { nonbillable: true } : {}),
         },
@@ -397,11 +412,13 @@ export class UsageService extends Service {
     return { total, items: rows.map(rowToEvent) }
   }
 
-  totals(filter: { tenant_id?: string; principal?: string; from?: string; to?: string } = {}): { count: number; charge_cents: number; cost_cents: number } {
+  totals(filter: { tenant_id?: string; principal?: string; resource?: string; from?: string; to?: string } = {}): { count: number; charge_cents: number; cost_cents: number } {
     const conditions: string[] = []
     const params: Array<string | number> = []
     if (filter.tenant_id) { conditions.push('tenant_id = ?'); params.push(filter.tenant_id) }
     if (filter.principal) { conditions.push('principal = ?'); params.push(filter.principal) }
+    // QA B-03：resource 过滤此前在 SQL 缺列被静默忽略（usage_query 工具返回全库数字）——补齐
+    if (filter.resource) { conditions.push('resource = ?'); params.push(filter.resource) }
     if (filter.from) { conditions.push('occurred_at >= ?'); params.push(filter.from) }
     if (filter.to) { conditions.push('occurred_at <= ?'); params.push(filter.to) }
     const where = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : ''
@@ -449,6 +466,98 @@ export class UsageService extends Service {
   }
 
   /**
+   * 成本/用量摘要（IAW 交接 4-1：面板侧成本查询的最小接口）。
+   * 窗口 [from, to) 内按 org / subject 过滤的聚合：事件数、内部成本（cost_cents 口径，
+   * charge_cents 零价快照恒 0）、tokens 三分（input/output/其他）与按资源分项。
+   * 权限分层由 HTTP 层负责：usage.read 可查任意主体，panel.read 只读自身组织（scope 收敛在端点做）。
+   */
+  summary(filter: { from: string; to: string; org?: string; subject?: string }): UsageSummary {
+    if (!filter.from || !filter.to) throw new Error('summary 需要 from/to 窗口')
+    const conditions = ['e.occurred_at >= ?', 'e.occurred_at < ?']
+    const params: Array<string | number> = [filter.from, filter.to]
+    if (filter.org) { conditions.push('e.org = ?'); params.push(filter.org) }
+    if (filter.subject) { conditions.push('e.subject = ?'); params.push(filter.subject) }
+    const where = ` WHERE ${conditions.join(' AND ')}`
+    const whereAnd = ` AND ${conditions.join(' AND ')}`
+    // QA B-01：关联子查询必须包在聚合函数内——SQLite 对 GROUP BY 查询 SELECT 列表中的
+    // 裸关联子查询只对组内某一行求值，tokens 因此只统计到每组任意一条事件（J4 报表小 176 倍）。
+    // SUM((SELECT …)) 语义 = 逐行求子查询值再求和，与 json_each JOIN 口径一致且三维自洽。
+    const tokensExpr = "COALESCE(SUM((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%')), 0)"
+    const byResource = this.ctx.txnStore.sql<{ resource: string; events: number; tokens: number; cost_cents: number; charge_cents: number }>(
+      `SELECT e.resource AS resource, COUNT(*) AS events, ${tokensExpr} AS tokens,` +
+      " COALESCE(SUM(CAST(json_extract(e.pricing_json, '$.cost_cents') AS INTEGER)), 0) AS cost_cents," +
+      " COALESCE(SUM(CAST(json_extract(e.pricing_json, '$.charge_cents') AS INTEGER)), 0) AS charge_cents" +
+      ` FROM usage_events e${where} GROUP BY e.resource ORDER BY cost_cents DESC, events DESC`,
+      params,
+    ).map((row) => ({ resource: row.resource, events: Number(row.events), tokens: Number(row.tokens), cost_cents: Number(row.cost_cents), charge_cents: Number(row.charge_cents) }))
+    const tokenSplit = (key: string): number => Number((this.ctx.txnStore.sql<{ n: number }>(
+      "SELECT COALESCE(SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)), 0) AS n FROM usage_events e, json_each(e.meters_json) m" +
+      ` WHERE json_extract(m.value, '$.key') = ?${whereAnd}`,
+      [key, ...params],
+    )[0] ?? { n: 0 }).n)
+    return {
+      from: filter.from,
+      to: filter.to,
+      events: byResource.reduce((sum, row) => sum + row.events, 0),
+      cost_cents: byResource.reduce((sum, row) => sum + row.cost_cents, 0),
+      charge_cents: byResource.reduce((sum, row) => sum + row.charge_cents, 0),
+      input_tokens: tokenSplit('input_tokens'),
+      output_tokens: tokenSplit('output_tokens'),
+      byResource,
+    }
+  }
+
+  /**
+   * 产出反馈聚合（IAW 交接 4-2：Agent 产出采纳率）。
+   * 数据源：👍/👎 反馈落账的零价快照 usage 事件（幂等键前缀 feedback:，D2 口径）；
+   * score 取幂等键末段（:up/:down），资源/主体取事件字段。adoptionRate = up/(up+down)，无反馈时为 null。
+   */
+  feedbackStats(filter: { from?: string; to?: string; org?: string } = {}): {
+    from?: string; to?: string
+    up: number; down: number; total: number; adoptionRate: number | null
+    byResource: Array<{ resource: string; up: number; down: number; total: number; adoptionRate: number | null }>
+    byDay: Array<{ day: string; up: number; down: number }>
+  } {
+    const conditions = ["idempotency_key LIKE 'feedback:%'"]
+    const params: Array<string | number> = []
+    if (filter.from) { conditions.push('occurred_at >= ?'); params.push(filter.from) }
+    if (filter.to) { conditions.push('occurred_at < ?'); params.push(filter.to) }
+    if (filter.org) { conditions.push('org = ?'); params.push(filter.org) }
+    const rows = this.ctx.txnStore.sql<{ resource: string; subject: string; org: string; day: string; idempotency_key: string }>(
+      `SELECT resource, subject, org, substr(occurred_at, 1, 10) AS day, idempotency_key FROM usage_events WHERE ${conditions.join(' AND ')}`,
+      params,
+    ).map((row) => ({ ...row, score: row.idempotency_key.slice(row.idempotency_key.lastIndexOf(':') + 1) }))
+    const count = (score: string) => rows.filter((row) => row.score === score).length
+    const rate = (up: number, total: number): number | null => (total === 0 ? null : Math.round((up / total) * 1000) / 1000)
+    const resources = new Map<string, { up: number; down: number }>()
+    const days = new Map<string, { up: number; down: number }>()
+    for (const row of rows) {
+      const bucket = resources.get(row.resource) ?? { up: 0, down: 0 }
+      if (row.score === 'up') bucket.up++
+      if (row.score === 'down') bucket.down++
+      resources.set(row.resource, bucket)
+      const day = days.get(row.day) ?? { up: 0, down: 0 }
+      if (row.score === 'up') day.up++
+      if (row.score === 'down') day.down++
+      days.set(row.day, day)
+    }
+    const up = count('up')
+    const down = count('down')
+    return {
+      ...(filter.from ? { from: filter.from } : {}),
+      ...(filter.to ? { to: filter.to } : {}),
+      up,
+      down,
+      total: rows.length,
+      adoptionRate: rate(up, rows.length),
+      byResource: [...resources.entries()].map(([resource, bucket]) => ({
+        resource, up: bucket.up, down: bucket.down, total: bucket.up + bucket.down, adoptionRate: rate(bucket.up, bucket.up + bucket.down),
+      })).sort((a, b) => b.total - a.total),
+      byDay: [...days.entries()].map(([day, bucket]) => ({ day, ...bucket })).sort((a, b) => a.day.localeCompare(b.day)),
+    }
+  }
+
+  /**
    * J4 月度用量报表聚合（M0-3：用量透明计量报表；契约口径见 docs/contract-j4-usage-report.md）。
    * tokens 三维聚合：部门（org 归口字段）/ Agent（subject=agent:*）/ Skill（resource=skill:*），
    * 附模型维度（byModel，additive）与全口径 totals；tokens 取计量键名含 "tokens" 的米值求和
@@ -458,7 +567,8 @@ export class UsageService extends Service {
     const period = month ?? new Date().toISOString().slice(0, 7)
     if (!/^\d{4}-\d{2}$/.test(period)) throw new Error('报表月份格式应为 YYYY-MM')
     const [from, to] = periodBoundsIso(period)
-    const tokensExpr = "COALESCE((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%'), 0)"
+    // QA B-01：同 summary——子查询必须包进 SUM()，否则 GROUP BY 下每组只统计任意一行
+    const tokensExpr = "COALESCE(SUM((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%')), 0)"
     const select = (dimension: string, extraWhere: string) =>
       this.ctx.txnStore.sql<ReportRow>(
         `SELECT ${dimension} AS dimension, COUNT(*) AS events, ${tokensExpr} AS tokens,` +
@@ -496,6 +606,18 @@ export class UsageService extends Service {
   }
 
   upsertPrice(entry: Omit<PriceBookEntry, 'id' | 'createdAt' | 'updatedAt'>): PriceBookEntry {
+    // REL-11：写入口数值校验——此前 {"list_cents_per_unit":"abc"} 也能 200 入簿，计价产出 NaN 快照、
+    // 对账恒 mismatch 且每次发 critical 告警（存量脏数据永久投毒）。非法即抛错（guarded 统一映射 400）
+    for (const [field, value, min] of [
+      ['list_cents_per_unit', entry.list_cents_per_unit, 0],
+      ['cost_cents_per_unit', entry.cost_cents_per_unit, 0],
+      ['tax_rate', entry.tax_rate, 0],
+      ['units_per_step', entry.units_per_step, 1], // 计价除数：0 会产出 Infinity，负数会产出负金额
+    ] as Array<[string, number, number]>) {
+      if (!Number.isFinite(value) || value < min) {
+        throw new Error(`价格簿字段 ${field} 必须为有限数值且 ≥${min}，收到：${String(value)}`)
+      }
+    }
     const existing = this.priceBook().findOne((item) => item.pattern === entry.pattern)
     if (existing) return this.priceBook().update(existing.id, { ...entry })
     return this.priceBook().insert({ id: newId('rate'), ...entry })
@@ -560,7 +682,9 @@ export class UsageService extends Service {
       const rows = this.ctx.opsStorage.collection<ProjectionRow>(`usage:projection:${consumerId}`).all()
         .filter((row) => (windowFromIso ? row.window >= windowFromIso.slice(0, 10) : true))
       const count = rows.reduce((sum, row) => sum + row.count, 0)
-      const charge = rows.reduce((sum, row) => sum + row.charge_cents, 0)
+      // REL-11 读侧加固：投影集合中的存量脏行（非有限 charge_cents）按 0 计入对账，不再恒 mismatch 反复告警
+      const charge = rows.reduce((sum, row) => sum + (Number.isFinite(row.charge_cents) ? row.charge_cents
+        : this.warnDirtyData(`projection-row:${consumerId}:${row.id}`, `usage 投影 ${consumerId} 窗口 ${row.window} 的 charge_cents 非有限（存量脏数据），对账按 0 计入（REL-11）`)), 0)
       projections.push({
         consumer: consumerId,
         count,
@@ -582,11 +706,15 @@ export class UsageService extends Service {
   project(consumerId: string, event: UsageEvent): void {
     const collection = this.ctx.opsStorage.collection<ProjectionRow>(`usage:projection:${consumerId}`)
     const day = event.occurred_at.slice(0, 10)
+    // REL-11 读侧加固：存量脏事件的 charge_cents 非有限时按 0 投影（防对账口径持续失真），按事件去重告警
+    const rawCharge = event.pricing.charge_cents
+    const charge = Number.isFinite(rawCharge) ? rawCharge
+      : this.warnDirtyData(`projection:${event.event_id}`, `usage 事件 ${event.event_id} 的 pricing.charge_cents=${String(rawCharge)} 非有限（存量脏数据），本次投影按 0 计入（REL-11）`)
     const existing = collection.findOne((row) => row.window === day)
     if (existing) {
-      collection.update(existing.id, { count: existing.count + 1, charge_cents: existing.charge_cents + event.pricing.charge_cents })
+      collection.update(existing.id, { count: existing.count + 1, charge_cents: existing.charge_cents + charge })
     } else {
-      collection.insert({ id: newId('prj'), window: day, count: 1, charge_cents: event.pricing.charge_cents })
+      collection.insert({ id: newId('prj'), window: day, count: 1, charge_cents: charge })
     }
   }
 
@@ -635,6 +763,21 @@ export class UsageService extends Service {
   }
 
   // -- 内部 -----------------------------------------------------------------
+
+  /**
+   * REL-11 读侧加固：脏数据（存量非有限费率/金额）warning 告警，恒返回 0 供计价/投影回落。
+   * 同一 key（进程生命周期内）只告一次，防止每个事件重复触发告警风暴。
+   */
+  private warnDirtyData(key: string, message: string): 0 {
+    if (!this.warnedDirtyKeys.has(key)) {
+      this.warnedDirtyKeys.add(key)
+      this.ctx.platformBus.emit('audit.alert.fired', {
+        id: newId('alt'), severity: 'warning', title: 'usage 脏数据按 0 兜底（REL-11）',
+        message,
+      })
+    }
+    return 0
+  }
 
   private validate(input: UsageRecordInput): void {
     if (!input.org?.trim()) throw new Error('usage 事件 org 必填')
@@ -691,6 +834,19 @@ export interface MonthlyUsageReport {
   bySkill: MonthlyUsageReportRow[]
   /** 模型维度（resource=model:*，additive 便于成本穿透）。 */
   byModel: MonthlyUsageReportRow[]
+}
+
+/** 成本/用量摘要（IAW 交接 4-1）：窗口聚合 + tokens 三分 + 按资源分项。 */
+export interface UsageSummary {
+  from: string
+  to: string
+  events: number
+  /** 内部成本参考（分）；charge_cents 为零价快照兼容字段（恒 0）。 */
+  cost_cents: number
+  charge_cents: number
+  input_tokens: number
+  output_tokens: number
+  byResource: Array<{ resource: string; events: number; tokens: number; cost_cents: number; charge_cents: number }>
 }
 
 interface ReportRow {

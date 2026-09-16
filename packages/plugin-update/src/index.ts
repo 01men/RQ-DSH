@@ -104,6 +104,12 @@ export interface UpdateStateRecord extends RecordBase {
   recentCommits: UpstreamCommit[]
   /** 已忽略的版本（控制台「忽略此版本」后不再弹横幅，新版本出现自动恢复）。 */
   dismissedVersion: string | null
+  /** OPT-P2-03：签名策略——true 时升级目标提交必须通过 git verify-commit（默认关闭，仓库签署化后开启）。 */
+  requireSignedCommits?: boolean
+  /** OPT-P2-03：最近一次 apply 的回滚锚点（升级前 HEAD）。 */
+  lastApplySnapshot?: string
+  lastApplyPin?: string
+  lastApplyAt?: string
   /** 最近一次广播过 platform.update.available 的版本（防重复通知）。 */
   announcedVersion: string
 }
@@ -216,6 +222,7 @@ export class UpdateService extends Service {
       intervalHours: clampIntervalHours(this.config0.intervalHours ?? 24),
     })
     this.tickTimer = setInterval(() => void this.maybeAutoCheck(), AUTO_CHECK_TICK_MS)
+    this.tickTimer.unref?.() // OPT-P3-02
     this.ctx.effect?.(() => () => {
       if (this.tickTimer) clearInterval(this.tickTimer)
     })
@@ -399,7 +406,59 @@ export class UpdateService extends Service {
     } catch { /* 状态异常不致命 */ }
   }
 
-  setSettings(patch: { autoCheck?: boolean; intervalHours?: number; dismissedVersion?: string | null }): UpdateStatus {
+  /** OPT-P2-03：签名策略读取（默认关闭——仓库签署化 adoption 完成后经 settings 开启即全量强制）。 */
+  private requireSignedCommits(): boolean {
+    try {
+      return updateStateCollection(this.ctx).get(STATE_ID)?.requireSignedCommits === true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * OPT-P2-03：一键回滚——git reset --hard 到最近一次 apply 登记的升级前 HEAD + npm install，
+   * 审计留痕 + platform.update.rolled_back 事件；需重启进程生效。无可回滚快照即拒绝。
+   */
+  async rollbackUpdate(options: { reason?: string; actor?: { id: string; name: string } } = {}): Promise<Record<string, unknown>> {
+    const info = platformVersionInfo()
+    if (info.installMode !== 'source') return { ok: false, supported: false, notice: 'bundle 形态请在宿主 dsh 侧回退插件版本' }
+    const state = updateStateCollection(this.ctx).get(STATE_ID)
+    const snapshot = state?.lastApplySnapshot
+    if (!snapshot) throw new Error('无可回滚快照：本进程尚未执行过带 pin 的升级（OPT-P2-03）')
+    const reason = (options.reason ?? '').trim()
+    if (!reason) throw new Error('回滚原因必填（留痕要求）')
+    const actor = options.actor ?? { id: 'api', name: 'api' }
+    const from = info.version
+    await runGit(info.rootDir, ['reset', '--hard', snapshot])
+    let npmFailed = false
+    let npmOutput = ''
+    try {
+      npmOutput = await runNpm(info.rootDir, ['install', '--no-audit', '--no-fund'])
+    } catch (error) {
+      npmFailed = true
+      npmOutput = error instanceof Error ? error.message : String(error)
+    }
+    const to = readRootVersion(info.rootDir)
+    updateStateCollection(this.ctx).update(STATE_ID, { lastApplySnapshot: '', lastApplyPin: '', lastApplyAt: new Date().toISOString() })
+    this.ctx.audit?.record({
+      type: 'change', actorType: 'human', actorId: actor.id, actorName: actor.name,
+      action: 'platform.update.rollback', resourceType: 'platform', resourceId: 'self', resourceName: '平台升级回滚',
+      result: npmFailed ? 'partial' : 'ok', detail: `${from} → ${to}（reset ${snapshot.slice(0, 12)}），原因：${reason}`,
+    })
+    this.ctx.platformBus.emit(PlatformEvents.UpdateRolledBack, { from, to, snapshot, reason, actor: actor.name, npmFailed })
+    return {
+      ok: !npmFailed,
+      supported: true,
+      from,
+      to,
+      rolledBackTo: snapshot,
+      npmFailed,
+      needRestart: true,
+      notice: npmFailed ? '代码已回退但依赖同步失败：请手动执行 npm install 后重启' : '已回退到升级前版本，请重启平台进程生效',
+    }
+  }
+
+  setSettings(patch: { autoCheck?: boolean; intervalHours?: number; dismissedVersion?: string | null; requireSignedCommits?: boolean }): UpdateStatus {
     const update: Partial<UpdateStateRecord> = {}
     if (typeof patch.autoCheck === 'boolean') update.autoCheck = patch.autoCheck
     if (patch.intervalHours !== undefined) {
@@ -410,6 +469,7 @@ export class UpdateService extends Service {
         ? null
         : String(patch.dismissedVersion)
     }
+    if (typeof patch.requireSignedCommits === 'boolean') update.requireSignedCommits = patch.requireSignedCommits
     if (Object.keys(update).length > 0) updateStateCollection(this.ctx).update(STATE_ID, update)
     return this.status()
   }
@@ -419,9 +479,35 @@ export class UpdateService extends Service {
    *   git pull --ff-only（脏工作区/分叉会安全失败而非强改）→ npm install → 提示重启。
    * bundle 形态返回宿主侧升级指引（不支持进程内回写 dsh profile，安全边界）。
    */
-  async applyUpdate(options: { dryRun?: boolean; reason?: string; actor?: { id: string; name: string } } = {}): Promise<Record<string, unknown>> {
+  async applyUpdate(options: { dryRun?: boolean; reason?: string; pin?: string; actor?: { id: string; name: string } } = {}): Promise<Record<string, unknown>> {
     const info = platformVersionInfo()
     const status = this.status()
+    // OPT-P2-03：pin 强制——禁止裸拉上游最新（版本钉扎是可回滚与可审计的前提）
+    const pin = String(options.pin ?? '').trim()
+    if (info.installMode === 'source' && !options.dryRun && !pin) {
+      throw new Error('必须显式 pin 升级目标（tag / commit / 分支名，如 v1.1.0），禁止裸拉 main 最新（OPT-P2-03）')
+    }
+    let targetResolved = ''
+    let signatureVerified: boolean | undefined
+    let signatureNote = ''
+    if (info.installMode === 'source' && pin) {
+      try {
+        await runGit(info.rootDir, ['fetch', 'origin', '--tags', '--prune'])
+        targetResolved = (await runGit(info.rootDir, ['rev-parse', '--verify', `${pin}^{commit}`])).trim()
+      } catch (error) {
+        throw new Error(`pin 目标无法解析：${pin}（${error instanceof Error ? error.message.slice(0, 160) : String(error)}）`)
+      }
+      try {
+        await runGit(info.rootDir, ['verify-commit', targetResolved])
+        signatureVerified = true
+      } catch (error) {
+        signatureVerified = false
+        signatureNote = error instanceof Error ? error.message.split('\n')[0]!.slice(0, 160) : String(error)
+        if (this.requireSignedCommits()) {
+          throw new Error(`目标提交签名校验未通过（requireSignedCommits=true，OPT-P2-03）：${signatureNote}`)
+        }
+      }
+    }
     const base = {
       installMode: info.installMode,
       currentVersion: info.version,
@@ -446,8 +532,10 @@ export class UpdateService extends Service {
         ok: true,
         supported: true,
         dryRun: true,
+        ...(pin ? { pin, targetResolved, signatureVerified, ...(signatureNote ? { signatureNote } : {}) } : { pin: '（dryRun 未指定；正式执行必须 pin，OPT-P2-03）' }),
+        requireSignedCommits: this.requireSignedCommits(),
         steps: [
-          `git pull --ff-only（目录 ${info.rootDir}；脏工作区/分叉将安全失败，不会强改本地修改）`,
+          `git fetch origin --tags + verify-commit（签名核验）+ git merge --ff-only（目录 ${info.rootDir}；脏工作区/分叉将安全失败）`,
           'npm install（依赖同步，package-lock 有变化时生效）',
           '重启平台进程（systemd / pm2 / 手动 node src/main.ts），新版本生效',
         ],
@@ -463,8 +551,10 @@ export class UpdateService extends Service {
     let gitOutput = ''
     let npmOutput = ''
     let npmFailed = false
+    // OPT-P2-03：升级前 HEAD 快照——健康检查失败可一键回退（POST /api/update/rollback）
+    const rollbackTo = (await runGit(info.rootDir, ['rev-parse', 'HEAD'])).trim()
     try {
-      gitOutput = await runGit(info.rootDir, ['pull', '--ff-only'])
+      gitOutput = await runGit(info.rootDir, ['merge', '--ff-only', targetResolved])
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.ctx.audit?.record({
@@ -474,6 +564,14 @@ export class UpdateService extends Service {
       })
       throw new Error(`git pull 失败（本地有未提交修改或分叉，请人工处理）：${message.slice(0, 300)}`)
     }
+    // QA E-01：merge 成功即登记回滚快照——此前 lastApplySnapshot 全仓无写入点，
+    // rollback 恒报「无可回滚快照」，一键回滚是死路；先于 npm install 落库，
+    // 即使依赖同步失败也保留回退锚点
+    updateStateCollection(this.ctx).update(STATE_ID, {
+      lastApplySnapshot: rollbackTo,
+      lastApplyPin: pin,
+      lastApplyAt: new Date().toISOString(),
+    })
     try {
       npmOutput = await runNpm(info.rootDir, ['install', '--no-audit', '--no-fund'])
     } catch (error) {
@@ -495,6 +593,11 @@ export class UpdateService extends Service {
       supported: true,
       from,
       to,
+      pin,
+      targetResolved,
+      signatureVerified,
+      ...(signatureNote ? { signatureNote } : {}),
+      rollbackTo,
       gitOutput: gitOutput.slice(0, 2000),
       ...(npmOutput ? { npmOutput: npmOutput.slice(0, 2000) } : {}),
       npmFailed,
@@ -574,12 +677,22 @@ export const updateApi = {
 
     http.register('POST', '/api/update/apply', async (exchange) => {
       if (!requirePermission(exchange, 'platform.update.apply')) return
-      const input = (exchange.body ?? {}) as { dryRun?: boolean; reason?: string }
+      const input = (exchange.body ?? {}) as { dryRun?: boolean; reason?: string; pin?: string }
       try {
-        exchange.ok(await service.applyUpdate({ dryRun: input.dryRun === true, reason: input.reason, actor: actorOf(exchange) }))
+        exchange.ok(await service.applyUpdate({ dryRun: input.dryRun === true, reason: input.reason, pin: input.pin, actor: actorOf(exchange) }))
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         exchange.fail(400, 'APPLY_FAILED', message)
+      }
+    }, { access: 'guarded', permission: 'platform.update.apply' })
+    http.register('POST', '/api/update/rollback', async (exchange) => {
+      if (!requirePermission(exchange, 'platform.update.apply')) return
+      const input = (exchange.body ?? {}) as { reason?: string }
+      try {
+        exchange.ok(await service.rollbackUpdate({ reason: input.reason, actor: actorOf(exchange) }))
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        exchange.fail(400, 'ROLLBACK_FAILED', message)
       }
     }, { access: 'guarded', permission: 'platform.update.apply' })
   },
@@ -625,13 +738,14 @@ export const updateTools = {
       parameters: {
         dryRun: { type: 'boolean', description: '预演模式：只返回将执行的步骤，不做任何变更' },
         reason: { type: 'string', description: '升级原因（留痕要求，正式执行时必填）' },
+        pin: { type: 'string', description: '升级目标钉扎（tag/commit/分支，如 v1.1.0）；正式执行必填，禁止裸拉最新（OPT-P2-03）' },
       },
       output: { type: 'object', additionalProperties: true },
       async execute(args) {
         const dryRun = args.dryRun === true
         const reason = String(args.reason ?? '')
         if (!dryRun && !reason.trim()) throw new Error('正式执行升级必须给出 reason（留痕要求）')
-        return await service.applyUpdate({ dryRun, reason, actor: { id: 'tool:update_apply', name: 'dsh Agent' } })
+        return await service.applyUpdate({ dryRun, reason, pin: args.pin === undefined ? undefined : String(args.pin), actor: { id: 'tool:update_apply', name: 'dsh Agent' } })
       },
     }))
   },

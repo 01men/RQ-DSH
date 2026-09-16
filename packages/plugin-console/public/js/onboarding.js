@@ -79,25 +79,49 @@ curl -s -X POST ${origin}/api/apps/${app.id}/metrics-report \\
   -H "Authorization: Bearer <token>" -H 'content-type: application/json' \\
   -d '{"dau":1,"sessions":1,"avgDepth":1,"retention7":0}'
 → 返回 200 即接入成功；GET ${origin}/api/apps/${app.id} 中 metrics.sessions ≥ 1 可复核。
-建议每日定时提报（同日 DAU 取最大值、会话数累加，重复上报安全，可带 date 补录历史）。
+每日定时提报是接入义务（与 Agent 同级）：同日 DAU 取最大值、会话数累加，重复上报安全，可带 date 补录历史。
+建议再做一行 beacon 埋点补齐 PV/UV（免鉴权免 secret）：页面加载时
+GET ${origin}/api/apps/beacon?app=${app.id}&vid=<浏览器localStorage持久随机ID>（已知平台身份时附 uid=<sub>）；
+与主动提报自然合并不互相覆盖，埋点示例见 ${origin}/docs/app-sso-integration.md §十一。
 
 【第 3 步 · 用户登录打通（SSO）】web/h5 形态必做（未签发无法上线，上线门禁）；其余形态建议接入。
 终端用户登录一律走平台 OIDC（授权码 + 强制 PKCE S256），身份以平台账号体系 sub 为准；
 钉钉扫码等三方登录由平台登录页承接，应用不直接对接钉钉 SDK。接入文档（含 SDK 一行接入示例）：
 ${origin}/docs/app-sso-integration.md
-a. 把应用侧回调地址（redirect_uri）交给平台管理员（应用 owner），由其在控制台
-   「AI 应用 → 应用详情 → SSO 配置」签发 OIDC 客户端后取回 client_id / client_secret（机器身份自签一律 403）；
+a. 签发 SSO 客户端：回调地址为本机环回（http://127.0.0.1:端口/…、http://localhost:端口/…、http://0.0.0.0:端口/…）时，
+   可凭上方平台机器凭证自助签发，无须管理员/owner 代办：
+   POST ${origin}/api/apps/${app.id}/sso-client -H "Authorization: Bearer <token>"
+   -d '{"redirectUris":["http://127.0.0.1:5000/oauth/cb"]}' → 响应含 client_id / client_secret（仅此一次）；
+   含改回调 PATCH 同路径、换 secret POST …/rotate；非环回回调（内网 IP / 公网域名）
+   由应用 owner 在控制台「AI 应用 → 应用详情 → SSO 配置」签发或改配；
 b. 应用按 discovery 接入：GET ${origin}/.well-known/openid-configuration
    （换牌 POST /oauth/token、用户身份 GET /oauth/userinfo；302 跳授权页 → 带 code 回回调地址）；
 c. userinfo 返回的 sub/org 即用户唯一关联键，业务权限（谁能用哪些功能）由应用基于 sub 自建；
 d. 未完成 OIDC 改造前，可先用平台「带平台身份打开」兜底（控制台发起，一次性 entry-ticket 票据换取身份）。
+
+【第 3 步 ·附 · 应用内权限模块（RBAC）构造指引】web/h5 形态建议随 SSO 一并完成
+（凡有业务数据管理界面的应用必做）；完整构造指南（含 React 模板与授权管理页规范）：
+${origin}/docs/app-rbac-guide.md
+- 关联键只用 userinfo.sub：平台账号的稳定唯一键；userinfo.roles 是平台治理角色，
+  禁止当应用业务角色用——业务角色由应用自建 sub → 角色 映射表。
+- 三级角色分层（能力名可按应用语义增删，分层保持）：viewer（默认，仅查看）/
+  editor（+数据增删改、导入导出）/ admin（+恢复初始数据、用户授权管理）。
+- 登录门：未取到平台身份前不渲染任何业务数据、不调业务接口。
+- 未登记的登录用户一律默认 viewer（只读），不放开写操作。
+- 首登引导：映射表中尚无任何管理员时，把首个登录用户自动授予 admin——
+  交付时务必提醒用户用正确的管理员账号首发登录。
+- 最后管理员保护：降级/移除角色时禁止动最后一个 admin，防止权限系统自锁。
+- 存储语义写进交付文档：映射表若存浏览器 localStorage，换浏览器/电脑需重新分配；
+  「恢复初始数据」类功能只清业务数据、不清权限映射（否则把管理员锁在门外）。
+- UI 纪律：按能力点判断（如 can('edit')）而非角色名比较；无权限的按钮隐藏而非禁用；
+  只读态表格去掉勾选列/操作列并同步修正空态 colSpan。
 
 【第 4 步 · 计量自推（可选）】
 仅绕过平台网关直连消耗才需要：POST ${origin}/api/usage/record（凭证默认含 usage.write）。
 经平台网关的调用已自动计量，禁止双计。
 
 【平台能力速查】（本凭证默认含 app.read/app.write/usage.write/mcp.invoke/agent.read/skill.read）
-- 接入文档索引：GET ${origin}/docs（app-sso-integration.md、app-onboarding.md 等）
+- 接入文档索引：GET ${origin}/docs（app-sso-integration.md、app-rbac-guide.md、app-onboarding.md 等）
 - 自身资料与指标复核：GET / PATCH ${origin}/api/apps/${app.id}（app.read/app.write）
 - 上线申请：POST ${origin}/api/apps/${app.id}/transition（进入审批流，禁止绕过审批改状态）
 - MCP 工具网关：mcp.invoke 调用平台已部署 MCP 服务；Skill/Agent 目录：skill.read / agent.read 浏览

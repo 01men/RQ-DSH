@@ -114,7 +114,7 @@ export class NasAuthzService extends Service {
       })
     })
     // 每日组织↔目录对账 job（R1）+ 留痕滚动清理；unref 不阻断进程退出
-    const daily = setInterval(() => {
+    const daily: ReturnType<typeof setInterval> = setInterval(() => {
       void this.dailyReconcile().catch((error) => this.ctx.logger('nasAuthz').warn('对账 job 失败', error))
     }, 24 * 60 * 60_000)
     daily.unref?.()
@@ -419,6 +419,8 @@ export class NasAuthzService extends Service {
     const nas = this.ctx.resourceCore.get('nas', input.nasId)
     const approval = this.ctx.audit.createApproval({
       kind: 'nas.share',
+      // WP-10/L1（QA A-06）：L4 高危统一高风险——通过需二次确认 + 公司级终审标记
+      riskLevel: 'high',
       title: `NAS 分享申请：${user.displayName} → ${nas?.name ?? input.nasId} ${input.path}`,
       payload: {
         nasId: input.nasId, path: input.path, userId: user.id, userName: user.displayName,

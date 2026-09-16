@@ -96,6 +96,15 @@ export interface RoleRecord extends RecordBase {
   permissions: string[]
 }
 
+/**
+ * 账号管理操作者上下文（QA A-03）：HTTP 面必须传入；服务内部调用（种子/三方同步/导入）
+ * 不带 actor，由平台语义兜底。permissions 取操作者令牌实时解析结果（'*'=平台管理员）。
+ */
+export interface UserManageActor {
+  userId?: string
+  permissions: string[]
+}
+
 export interface UserGroupRule {
   orgIds?: string[]
   title?: string
@@ -199,6 +208,7 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'iam.user.freeze', label: '冻结/注销账号', group: '组织账号' },
   { point: 'iam.role.write', label: '管理角色', group: '组织账号' },
   { point: 'iam.connector.write', label: '管理三方接入', group: '组织账号' },
+  { point: 'iam.scene.write', label: '管理场景级授权策略（场景 ABAC）', group: '组织账号' },
   { point: 'iam.roster.read', label: '读取全员名册（组织数据通道，接入应用拉取）', group: '组织账号' },
   { point: 'authn.principal.read', label: '查看身份/凭证', group: '统一认证' },
   { point: 'authn.principal.write', label: '管理机器凭证', group: '统一认证' },
@@ -237,9 +247,12 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'agent.write', label: '管理 Agent', group: 'Agent 本体' },
   { point: 'agent.approve', label: '审批 Agent 上线', group: 'Agent 本体' },
   { point: 'agent.offline', label: '下线 Agent', group: 'Agent 本体' },
+  { point: 'agent.a2a.invoke', label: 'A2A 跨运行时点名调用（IAW 7-1）', group: 'Agent 本体' },
   { point: 'app.read', label: '查看 AI 应用', group: 'AI 应用' },
   { point: 'app.write', label: '管理 AI 应用', group: 'AI 应用' },
   { point: 'app.offline', label: '下线 AI 应用', group: 'AI 应用' },
+  // 数据要素域（IAW 交接 2-1..2-4）：数据集登记/质量分/血缘/指标字典
+  { point: 'resource.dataset.write', label: '管理数据要素（数据集/质量分/血缘/指标字典）', group: '数据要素' },
   { point: 'audit.read', label: '查看审计日志', group: '审计' },
   { point: 'audit.rule.write', label: '管理告警规则', group: '审计' },
   { point: 'approval.read', label: '查看审批中心', group: '审批' },
@@ -266,14 +279,18 @@ export const PermissionCatalog: Array<{ point: string; label: string; group: str
   { point: 'scenegraph.read', label: '查看行业场景图谱', group: '部门面板' },
   { point: 'scenegraph.activate', label: '管理行业授权激活（审批执行）', group: '部门面板' },
   { point: 'dingtalk.message.send', label: '钉钉桥接消息投递（群桥绑定/推送/回决回调）', group: '部门面板' },
+  // 事务流引擎（IAW 交接 3-1..3-4，宿主新域 flow）
+  { point: 'flow.read', label: '查看事务流（编排/模板/SLA）', group: '事务流' },
+  { point: 'flow.write', label: '事务流流转（创建实例/步骤推进/取消）', group: '事务流' },
+  { point: 'flow.admin', label: '管理事务流模板库', group: '事务流' },
 ]
 
 export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedAt'>> = [
   { code: 'super_admin', name: '平台超级管理员', builtin: true, description: '拥有全部权限点', permissions: ['*'] },
   { code: 'org_admin', name: '组织管理员', builtin: true, description: '管理本组织账号与用户组', permissions: ['console.login', 'iam.*', 'approval.read'] },
-  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS/连接器资源', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'connector.*', 'approval.read'] },
+  { code: 'resource_admin', name: '资源管理员', builtin: true, description: '管理 MCP/Skill/Agent/应用/NAS/连接器资源与数据要素', permissions: ['console.login', 'mcp.*', 'skill.*', 'agent.*', 'app.*', 'nas.*', 'authn.oidc.*', 'connector.*', 'resource.dataset.write', 'approval.read'] },
   { code: 'developer', name: '开发者', builtin: true, description: '提交与调试资源（应用限自身 owner 范围，服务端校验）', permissions: ['console.login', 'iam.user.read', 'iam.org.read', 'mcp.service.read', 'mcp.invoke', 'skill.read', 'skill.submit', 'skill.install', 'agent.read', 'agent.write', 'app.read', 'app.write', 'nas.read', 'connector.catalog.read', 'connector.connection.read', 'connector.invoke'] },
-  { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read', 'panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read'] },
+  { code: 'member', name: '普通用户', builtin: true, description: '浏览市场与可用资源', permissions: ['console.login', 'skill.read', 'agent.read', 'app.read', 'panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read', 'flow.read', 'flow.write'] },
   { code: 'auditor', name: '审计员（只读）', builtin: true, description: '全平台只读审计', permissions: ['console.login', 'iam.org.read', 'iam.user.read', 'authn.principal.read', 'authn.oidc.read', 'mcp.service.read', 'skill.read', 'agent.read', 'app.read', 'nas.read', 'audit.read', 'approval.read', 'connector.runs.read', 'connector.connection.read'] },
 ]
 
@@ -283,19 +300,59 @@ export const BuiltinRoles: Array<Omit<RoleRecord, 'id' | 'createdAt' | 'updatedA
  * 重新比对（幂等），历史标记（connector-permissions-v1）仅作观测。
  */
 export const BUILTIN_ROLE_MIGRATION: Record<string, string[]> = {
-  resource_admin: ['connector.gateway.write', 'connector.catalog.read', 'connector.connection.read', 'connector.connection.write', 'connector.invoke', 'connector.permgroup.write', 'connector.runs.read'],
+  resource_admin: ['connector.gateway.write', 'connector.catalog.read', 'connector.connection.read', 'connector.connection.write', 'connector.invoke', 'connector.permgroup.write', 'connector.runs.read', 'resource.dataset.write', 'flow.admin'],
   // developer 补 agent.write：与 app.write 对称——开发者应能注册/提报更新 Agent（2026-08 修复"总是报没有 agent.write 权限"）
-  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke', 'agent.write', 'panel.read', 'scenegraph.read'],
+  developer: ['connector.catalog.read', 'connector.connection.read', 'connector.invoke', 'agent.write', 'panel.read', 'scenegraph.read', 'flow.read'],
   // auditor 补 nas.authz.read：审计员可查看 NAS 数据权限规则与判定留痕（dev-plan-nas-authz §2.3）
-  auditor: ['connector.runs.read', 'connector.connection.read', 'nas.authz.read', 'panel.read', 'scenegraph.read'],
+  auditor: ['connector.runs.read', 'connector.connection.read', 'nas.authz.read', 'panel.read', 'scenegraph.read', 'flow.read'],
   // 部门面板（review-dsh-agent-panel-v2 Phase 0）：业务成员=member 直用面板；org_admin 增配置与行业激活；
   // 存量库经迁移补点，新装库直接来自 BuiltinRoles 定义（两处必须同步）
-  member: ['panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read'],
-  org_admin: ['panel.read', 'panel.write', 'panel.task.write', 'panel.config.write', 'scenegraph.read', 'scenegraph.activate'],
+  member: ['panel.read', 'panel.write', 'panel.task.write', 'scenegraph.read', 'flow.read', 'flow.write'],
+  org_admin: ['panel.read', 'panel.write', 'panel.task.write', 'panel.config.write', 'scenegraph.read', 'scenegraph.activate', 'flow.read', 'flow.write', 'flow.admin'],
 }
 
 /** 兼容别名：迁移通道创建时的历史命名（仅 connector 批次）。 */
 export const CONNECTOR_ROLE_MIGRATION = BUILTIN_ROLE_MIGRATION
+
+// ---------------------------------------------------------------------------
+// 场景级授权（IAW 交接 6-1：角色 L1-L5 × 场景 ABAC 细粒度）
+// ---------------------------------------------------------------------------
+
+/**
+ * 场景授权策略条目：按角色/用户 × 动作 × allow/deny 的 ABAC 规则行。
+ * action 键与权限点同形（panel.read/panel.task.write…）或业务自定义动作键（如 'scene.export'）；
+ * principalId='*' 为通配。
+ */
+export interface ScenePolicyEntry {
+  principalType: 'role' | 'user'
+  principalId: string
+  actions: string[]
+  effect: 'allow' | 'deny'
+}
+
+/**
+ * 场景授权策略：挂 sceneCode 维度（ScenegraphScene.code，如 QB01-A-2-5）。
+ * 判定语义（fail-closed）：场景无任何策略 → default（回落角色 RBAC 与部门范围权限，存量行为不变）；
+ * 有策略 → deny 条目优先命中即拒，allow 命中即放行，都不命中一律拒绝。
+ * version 乐观锁：并发编辑以 expectedVersion 对账（冲突抛错，先读后写）。
+ */
+export interface ScenePolicyRecord extends RecordBase {
+  sceneCode: string
+  /** 组织维度收敛（缺省=全组织通用策略）；同场景可按组织各挂一条。 */
+  orgId?: string
+  entries: ScenePolicyEntry[]
+  note?: string
+  version: number
+}
+
+export interface SceneCheckDecision {
+  /** default=场景未配置策略（回落 RBAC）；allow/deny=场景策略裁决。 */
+  decision: 'allow' | 'deny' | 'default'
+  reason: string
+  policyId?: string
+  sceneCode: string
+  action: string
+}
 
 // ---------------------------------------------------------------------------
 // 三方连接器接口
@@ -575,6 +632,7 @@ export class IamService extends Service {
     // 通讯录变动（新入职/离职/调岗）需人工点同步才进平台。启动后首跑补同步超期配置，
     // 此后每分钟巡检到期；IAM_CONNECTOR_AUTO_SYNC=off 一键停用（对齐 PORTAL_SYNC 惯例）。
     this.autoSyncTimer = setInterval(() => void this.runDueAutoSyncs(), AUTO_SYNC_TICK_MS)
+    this.autoSyncTimer.unref?.() // OPT-P3-02
     setTimeout(() => void this.runDueAutoSyncs(), AUTO_SYNC_BOOT_DELAY_MS)
     ctx.effect(() => {
       if (this.autoSyncTimer) clearInterval(this.autoSyncTimer)
@@ -739,6 +797,104 @@ export class IamService extends Service {
     })
   }
 
+  // -- 场景级授权（IAW 交接 6-1） ---------------------------------------------
+
+  scenePolicies(): Collection<ScenePolicyRecord> {
+    const collection = this.ctx.opsStorage.collection<ScenePolicyRecord>('iam:scenePolicies')
+    collection.uniqueOn('scene_org', (policy) => `${policy.sceneCode}|${policy.orgId ?? ''}`)
+    return collection
+  }
+
+  /**
+   * 登记场景授权策略（upsert by sceneCode+orgId，version 乐观锁）：
+   * expectedVersion 与存量 version 不一致时拒绝（并发编辑对账）；新建不带 expectedVersion。
+   */
+  upsertScenePolicy(input: { sceneCode: string; orgId?: string; entries: ScenePolicyEntry[]; note?: string; expectedVersion?: number }): ScenePolicyRecord {
+    if (!input.sceneCode?.trim()) throw new Error('场景策略 sceneCode 必填（如 QB01-A-2-5）')
+    if (!Array.isArray(input.entries) || input.entries.length === 0) throw new Error('场景策略 entries 至少一条（空策略请用 DELETE 移除）')
+    for (const entry of input.entries) {
+      if (!['role', 'user'].includes(entry.principalType)) throw new Error(`策略条目 principalType 非法：${entry.principalType}（role/user）`)
+      if (!entry.principalId?.trim()) throw new Error('策略条目 principalId 必填（roleId/userId/*）')
+      if (!Array.isArray(entry.actions) || entry.actions.length === 0) throw new Error('策略条目 actions 至少一项')
+      if (!['allow', 'deny'].includes(entry.effect)) throw new Error(`策略条目 effect 非法：${entry.effect}（allow/deny）`)
+      if (entry.principalType === 'role' && entry.principalId !== '*' && !this.roles().get(entry.principalId)) {
+        throw new Error(`策略条目引用的角色不存在：${entry.principalId}`)
+      }
+      if (entry.principalType === 'user' && entry.principalId !== '*' && !this.users().get(entry.principalId)) {
+        throw new Error(`策略条目引用的用户不存在：${entry.principalId}`)
+      }
+    }
+    const existing = this.scenePolicies().findOne((item) => item.sceneCode === input.sceneCode && (item.orgId ?? '') === (input.orgId ?? ''))
+    if (existing) {
+      if (input.expectedVersion !== undefined && input.expectedVersion !== existing.version) {
+        throw new Error(`场景策略版本冲突：当前 v${existing.version}，请求基于 v${input.expectedVersion}（请刷新后重试）`)
+      }
+      const updated = this.scenePolicies().update(existing.id, {
+        entries: input.entries,
+        ...(input.note !== undefined ? { note: input.note } : {}),
+        version: existing.version + 1,
+      })
+      this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: input.sceneCode, orgId: input.orgId ?? null, policyId: updated.id, version: updated.version, action: 'updated' })
+      return updated
+    }
+    const created = this.scenePolicies().insert({
+      id: newId('scp'), sceneCode: input.sceneCode,
+      ...(input.orgId ? { orgId: input.orgId } : {}),
+      entries: input.entries,
+      ...(input.note ? { note: input.note } : {}),
+      version: 1,
+    })
+    this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: input.sceneCode, orgId: input.orgId ?? null, policyId: created.id, version: 1, action: 'created' })
+    return created
+  }
+
+  deleteScenePolicy(id: string): { deleted: boolean } {
+    const policy = this.scenePolicies().get(id)
+    if (!policy) throw new Error(`场景策略不存在：${id}`)
+    this.scenePolicies().remove(id)
+    this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: policy.sceneCode, orgId: policy.orgId ?? null, policyId: id, action: 'deleted' })
+    return { deleted: true }
+  }
+
+  /**
+   * iam.check(scene, action)（IAW 交接 6-1）：场景维度 ABAC 判定。
+   * 判定序：①场景无策略 → default（回落 hasPermission 角色链路，存量行为不变）；
+   * ②deny 条目命中（用户/角色/通配 × 动作）→ deny；③allow 命中 → allow；④其余 → deny（fail-closed）。
+   * 本判定是场景维度的**细粒度收敛**，不替代角色 RBAC：调用方应同时满足 hasPermission(基础权限点)。
+   */
+  checkScene(userId: string, sceneCode: string, action: string): SceneCheckDecision {
+    const user = this.users().get(userId)
+    if (!user) {
+      return { decision: 'deny', reason: `用户不存在：${userId}`, sceneCode, action }
+    }
+    const policies = this.scenePolicies().all().filter((item) =>
+      item.sceneCode === sceneCode && ((item.orgId ?? '') === '' || item.orgId === user.orgId))
+    if (policies.length === 0) {
+      return { decision: 'default', reason: '场景未配置授权策略，回落角色 RBAC 与部门范围权限（存量口径）', sceneCode, action }
+    }
+    const matches = (entry: ScenePolicyEntry): boolean =>
+      (entry.principalId === '*' && entry.principalType === 'role')
+      || (entry.principalType === 'user' && (entry.principalId === '*' || entry.principalId === userId))
+      || (entry.principalType === 'role' && user.roleIds.includes(entry.principalId))
+    const actionHit = (entry: ScenePolicyEntry): boolean => entry.actions.includes('*') || entry.actions.includes(action)
+    for (const policy of policies) {
+      for (const entry of policy.entries) {
+        if (entry.effect === 'deny' && matches(entry) && actionHit(entry)) {
+          return { decision: 'deny', reason: `场景策略 deny 命中（policy=${policy.id}）`, policyId: policy.id, sceneCode, action }
+        }
+      }
+    }
+    for (const policy of policies) {
+      for (const entry of policy.entries) {
+        if (entry.effect === 'allow' && matches(entry) && actionHit(entry)) {
+          return { decision: 'allow', reason: `场景策略 allow 命中（policy=${policy.id}）`, policyId: policy.id, sceneCode, action }
+        }
+      }
+    }
+    const policy = policies[0]!
+    return { decision: 'deny', reason: `场景已配置授权策略且无命中条目（fail-closed，policy=${policy.id}）`, policyId: policy.id, sceneCode, action }
+  }
+
   createTenant(input: { name: string; plan?: TenantRecord['plan'] }): TenantRecord {
     if (!input.name?.trim()) throw new Error('租户名称不能为空')
     if (this.tenants().findOne((tenant) => tenant.name === input.name)) throw new Error(`租户已存在：${input.name}`)
@@ -841,6 +997,8 @@ export class IamService extends Service {
     this.requireOrg(id)
     if (newParentId) {
       if (newParentId === id) throw new Error('不能将组织移动到自身之下')
+      // 父组织存在性校验（QA SEC-03）：不存在时下方环检测会静默放行，产生悬挂 parentId
+      if (!this.orgs().get(newParentId)) throw new Error(`父组织不存在：${newParentId}`)
       let cursor: string | null = newParentId
       while (cursor) {
         if (cursor === id) throw new Error('不允许形成组织环')
@@ -906,6 +1064,26 @@ export class IamService extends Service {
 
   // -- 账号 ---------------------------------------------------------------
 
+  /**
+   * 组织归属校验（QA A-03）：org_admin（iam.* 通配）此前可跨组织接管账号——服务层补栏：
+   * 非平台管理员（无 '*'）只允许管理本组织子树内的账号；机器主体与无法定位组织归属者
+   * 一律拒绝（fail-closed）。actor 缺省=服务内部调用（种子/三方同步/导入），不做限制。
+   */
+  private assertManageScope(actor: UserManageActor | undefined, targetOrgId: string, action: string): void {
+    if (!actor) return
+    if (actor.permissions.includes('*')) return
+    const actorUser = actor.userId ? this.users().get(actor.userId) : undefined
+    if (!actorUser || !this.orgSubtreeIds(actorUser.orgId).includes(targetOrgId)) {
+      throw new Error(`跨组织账号操作被拒绝（${action}）：目标不在操作者的组织子树内（组织隔离，QA A-03）`)
+    }
+  }
+
+  /** 口令强度（QA A-08）：建号与重置统一口径——≥8 位且不含中文（此前建号无校验，'123' 可建可登）。 */
+  private assertPasswordStrength(password: string): void {
+    if (password.trim().length < 8) throw new Error('口令长度不得少于 8 位')
+    if (/[\u4e00-\u9fff]/.test(password)) throw new Error('口令不得包含中文')
+  }
+
   /** 创建账号：未显式指定口令时生成随机初始口令（仅本次调用返回，须安全传达给本人）。 */
   createUser(input: {
     username: string
@@ -917,11 +1095,13 @@ export class IamService extends Service {
     roleIds?: string[]
     password?: string
     jobNumber?: string
-  }): { user: UserRecord; initialPassword?: string } {
+  }, actor?: UserManageActor): { user: UserRecord; initialPassword?: string } {
     if (!input.username?.trim()) throw new Error('用户名不能为空')
     if (!/^[a-z0-9_.-]+$/i.test(input.username)) throw new Error('用户名仅支持字母、数字与 _ . -')
     if (this.users().findOne((user) => user.username === input.username)) throw new Error(`用户名已存在：${input.username}`)
     if (!this.orgs().get(input.orgId)) throw new Error(`组织不存在：${input.orgId}`)
+    this.assertManageScope(actor, input.orgId, '创建账号')
+    if (input.password !== undefined) this.assertPasswordStrength(input.password)
     const salt = generateSecret('salt').slice(0, 16)
     const password = input.password ?? generateSecret('init')
     const user = this.users().insert({
@@ -943,13 +1123,11 @@ export class IamService extends Service {
   }
 
   /** 重置口令：不传 password 则生成随机初始口令；传入则设置为指定口令（均仅本次返回明文）。 */
-  resetPassword(id: string, password?: string): { user: UserRecord; initialPassword: string } {
+  resetPassword(id: string, password?: string, actor?: UserManageActor): { user: UserRecord; initialPassword: string } {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '重置口令')
     if (user.status === 'deactivated') throw new Error('账号已注销，无法重置口令')
-    if (password !== undefined) {
-      if (password.trim().length < 8) throw new Error('口令长度不得少于 8 位')
-      if (/[\u4e00-\u9fff]/.test(password)) throw new Error('口令不得包含中文')
-    }
+    if (password !== undefined) this.assertPasswordStrength(password)
     const next = password ?? generateSecret('init')
     const salt = generateSecret('salt').slice(0, 16)
     this.users().update(id, { passwordSalt: salt, passwordHash: hashPassword(next, salt) })
@@ -969,38 +1147,55 @@ export class IamService extends Service {
     return { created, skipped }
   }
 
-  activateUser(id: string): UserRecord {
+  activateUser(id: string, actor?: UserManageActor): UserRecord {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '激活账号')
     if (user.status !== 'pending') throw new Error('仅待激活账号可激活')
     return this.users().update(id, { status: 'active' })
   }
 
-  freezeUser(id: string, reason: string): UserRecord {
-    this.requireUser(id)
+  freezeUser(id: string, reason: string, actor?: UserManageActor): UserRecord {
+    const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '冻结账号')
     if (!reason?.trim()) throw new Error('冻结必须填写原因（审计要求）')
     const updated = this.users().update(id, { status: 'frozen', frozenReason: reason })
     this.ctx.platformBus.emit(PlatformEvents.UserFrozen, { userId: id, username: updated.username, reason })
     return updated
   }
 
-  unfreezeUser(id: string): UserRecord {
-    this.requireUser(id)
+  unfreezeUser(id: string, actor?: UserManageActor): UserRecord {
+    const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '解冻账号')
     const updated = this.users().update(id, { status: 'active', frozenReason: undefined })
     this.ctx.platformBus.emit(PlatformEvents.UserActivated, { userId: id })
     return updated
   }
 
-  deactivateUser(id: string, reason: string): UserRecord {
-    this.requireUser(id)
+  deactivateUser(id: string, reason: string, actor?: UserManageActor): UserRecord {
+    const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '注销账号')
     if (!reason?.trim()) throw new Error('注销必须填写原因')
     const updated = this.users().update(id, { status: 'deactivated', frozenReason: reason })
     this.ctx.platformBus.emit(PlatformEvents.UserFrozen, { userId: id, username: updated.username, reason: `注销：${reason}` })
     return updated
   }
 
-  updateUser(id: string, patch: Partial<Pick<UserRecord, 'displayName' | 'email' | 'phone' | 'title' | 'orgId' | 'accountType' | 'primaryOrgId'>>): UserRecord {
-    this.requireUser(id)
-    if (patch.orgId && !this.orgs().get(patch.orgId)) throw new Error(`组织不存在：${patch.orgId}`)
+  updateUser(id: string, patch: Partial<Pick<UserRecord, 'displayName' | 'email' | 'phone' | 'title' | 'orgId' | 'accountType' | 'primaryOrgId'>>, actor?: UserManageActor): UserRecord {
+    // 白名单收敛（QA SEC-01）：PATCH 编辑仅接受档案类字段，与上方 TS 签名一致；
+    // status/passwordHash/passwordSalt/username/id 等字段原样落库会造成越权改状态、植入口令
+    // （账号接管），此处显式拒绝并点名被拒字段（诚实拒绝，不静默忽略）。
+    const allowedFields = ['displayName', 'email', 'phone', 'title', 'orgId', 'accountType', 'primaryOrgId']
+    const rejected = Object.keys(patch ?? {}).filter((key) => !allowedFields.includes(key))
+    if (rejected.length > 0) {
+      throw new Error(`账号编辑不接受以下字段：${rejected.join('、')}（状态请走冻结/解冻/激活/注销端点，口令请走重置口令端点，角色请走角色分配接口）`)
+    }
+    const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '修改账号')
+    if (patch.orgId) {
+      if (!this.orgs().get(patch.orgId)) throw new Error(`组织不存在：${patch.orgId}`)
+      // 迁移目标组织同样受操作者组织子树约束（防止借「改归属」把账号挪出隔离域）
+      this.assertManageScope(actor, patch.orgId, '迁移账号组织')
+    }
     if (patch.primaryOrgId && !this.orgs().get(patch.primaryOrgId)) throw new Error(`主归属组织不存在：${patch.primaryOrgId}`)
     if (patch.accountType !== undefined && !['internal', 'external', 'suspended-review'].includes(patch.accountType)) {
       throw new Error(`非法账号类型：${patch.accountType}`)
@@ -1008,15 +1203,17 @@ export class IamService extends Service {
     return this.users().update(id, patch)
   }
 
-  deleteUser(id: string): boolean {
+  deleteUser(id: string, actor?: UserManageActor): boolean {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '删除账号')
     if (user.status !== 'deactivated') throw new Error('仅已注销账号可物理删除')
     return this.users().remove(id)
   }
 
   /** 绑定三方身份：事实源为 identityLinks（引擎级唯一约束），user.bindings 为投影。 */
-  bindThirdParty(id: string, binding: { provider: ThirdPartyBinding['provider']; unionId: string; displayName: string; corpId?: string; verifyCode?: string }): UserRecord {
+  bindThirdParty(id: string, binding: { provider: ThirdPartyBinding['provider']; unionId: string; displayName: string; corpId?: string; verifyCode?: string }, actor?: UserManageActor): UserRecord {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '绑定三方身份')
     if (binding.verifyCode !== '000000' && binding.verifyCode !== undefined && binding.verifyCode.length !== 6) {
       throw new Error('二次验证码格式不正确')
     }
@@ -1036,8 +1233,9 @@ export class IamService extends Service {
     return this.users().get(id)!
   }
 
-  unbindThirdParty(id: string, provider: ThirdPartyBinding['provider'], verifyCode: string): UserRecord {
+  unbindThirdParty(id: string, provider: ThirdPartyBinding['provider'], verifyCode: string, actor?: UserManageActor): UserRecord {
     const user = this.requireUser(id)
+    this.assertManageScope(actor, user.orgId, '解绑三方身份')
     if (!verifyCode || verifyCode.length !== 6) throw new Error('解绑需二次验证（6 位验证码）')
     this.unlinkIdentity(id, provider)
     return this.users().get(id)!
@@ -1141,8 +1339,9 @@ export class IamService extends Service {
     }
   }
 
-  assignRoles(userId: string, roleIds: string[]): UserRecord {
-    this.requireUser(userId)
+  assignRoles(userId: string, roleIds: string[], actor?: UserManageActor): UserRecord {
+    const user = this.requireUser(userId)
+    this.assertManageScope(actor, user.orgId, '调整角色')
     for (const roleId of roleIds) {
       if (!this.roles().get(roleId)) throw new Error(`角色不存在：${roleId}`)
     }

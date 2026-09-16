@@ -4,8 +4,11 @@
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+// QA G-01：URL.pathname 是百分号编码形态——中文目录（如「元冰可产品」）下直接当文件路径必现
+// ENOENT；fileURLToPath 负责解码并处理盘符，Windows/非 ASCII 路径均正确。
+const root = fileURLToPath(new URL('..', import.meta.url))
 const docFiles = [
   'docs/agent-onboarding.md', 'docs/app-onboarding.md', 'docs/app-sso-integration.md',
   'docs/portal-integration.md', 'docs/connector-integration.md', 'docs/frontend-host-switching.md',
@@ -47,6 +50,10 @@ walk(join(root, 'packages'), (file) => {
 })
 
 // 2. 提取文档端点引用
+// 豁免名单（对齐 contract-lint.exemptions.json 惯例）：并非平台路由的引用——
+// /oauth/callback 与 /api/connections 指 open-connector sidecar 自身服务（端口 3000，非平台），
+// /api 为前缀概念提及。G-01 修复后本脚本首次可在本机完整跑通，暴露的即这三处历史误报。
+const DOC_REF_EXEMPTS = new Set(['/oauth/callback', '/api/connections', '/api'])
 let missing = [], total = 0
 for (const doc of docFiles) {
   const full = join(root, doc)
@@ -57,6 +64,7 @@ for (const doc of docFiles) {
   for (const m of text.matchAll(/`((?:\/(?:api|oauth|\.well-known|auth|panel)|\{base\}\/api)[A-Za-z0-9/:_{}.\-]*)`/g)) refs.add(m[1])
   for (const ref of refs) {
     if (ref.endsWith('…') || ref.endsWith('…/')) continue
+    if (DOC_REF_EXEMPTS.has(ref)) continue
     total++
     const methodMatch = ref.match(/^(GET|POST|PUT|PATCH|DELETE)\s+(.*)/)
     const method = methodMatch ? methodMatch[1] : 'ANY'

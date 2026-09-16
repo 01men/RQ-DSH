@@ -1,0 +1,9 @@
+# 事件声明（发布/订阅）——跨插件联动只许通过事件或扩展点
+plugin: dsh-plugin-modelgw
+events:
+  - name: modelgw.degraded
+    mode: emit
+    description: 渠道组降级链切换（IAW 1-2）
+  - name: modelgw.budget.warning
+    mode: emit
+    description: 预算熔断预警（IAW 1-4）

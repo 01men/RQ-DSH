@@ -3,3 +3,6 @@ plugin: dsh-plugin-nas
 points:
   - nas.read
   - nas.write
+  - nas.authz.read
+  - nas.authz.write
+  - nas.authz.check

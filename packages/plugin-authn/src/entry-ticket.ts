@@ -51,6 +51,7 @@ export class EntryTicketService extends Service {
   constructor(ctx: Context) {
     super(ctx, 'entryTickets')
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 24 * 3600_000)
+    this.cleanupTimer.unref?.() // OPT-P3-02
     ctx.effect(() => {
       if (this.cleanupTimer) clearInterval(this.cleanupTimer)
     })

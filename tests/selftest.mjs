@@ -235,6 +235,8 @@ const OC_TOKEN = 'oc-selftest-admin-token'
 const ocCalls = []          // POST /v1/actions/:id 调用记录 {actionId,bearerOk,alias,idempotencyKey,input}
 const ocPuts = []           // PUT /api/runtime-tokens/:id 记录（四数组断言用）
 const ocDeletes = []        // DELETE /api/runtime-tokens/:id
+let ocMirrorFailOnce = false   // OPT-P1-05：下一次 PUT runtime-token 返回 500（镜像失败注入）
+let ocDriftOnMint = null       // OPT-P1-05：下一次 POST runtime-token 先并发收紧权限组再延迟应答（快照漂移注入）
 const ocMintedValues = []   // 每次铸造返回的 oct_ 一次性值（T-24 全文扫描名单）
 const ocLedgerTokens = new Map()  // id → {policy,name}
 const ocTokenByValue = new Map()
@@ -243,6 +245,7 @@ const ocIdemCache = new Map()   // Idempotency-Key → 完整响应体（24h 重
 const ocClientsConfigured = new Set()   // 已存 OAuth client 配置的 service
 const ocRuns = []           // 伪造/真实 run 日志（runtimeTokenId 维度对账）
 const ocCtl = {
+  failNextExec: false,        // OPT-P3-01：下一次 /v1/actions 执行回 500（网关 5xx 故障注入）
   connNotAllowedOnce: null,   // 下一次该 tokenValue 执行回 403 connection_not_allowed 后自动清除
   alwaysDenyToken: null,      // 该 tokenValue 执行恒 403 connection_not_allowed（自动恢复重试仍失败路径）
   auditPersistedNext: false,  // 下一次成功执行 meta.auditPersisted=false
@@ -376,6 +379,13 @@ const ocStub = createServer(async (req, res) => {
 
   // -- 运行时令牌 -------------------------------------------------------------
   if (req.method === 'POST' && path === '/api/runtime-tokens') {
+    if (ocDriftOnMint) {
+      const hook = ocDriftOnMint
+      ocDriftOnMint = null
+      // 并发收紧权限组（确定性快照漂移注入）+ 延迟应答，保证外层镜像最后落账（ledger 滞后于当前策略）
+      await api('PATCH', `/api/connector/perm-groups/${hook.permGroupId}`, { token: hook.token, body: hook.body })
+      await new Promise((resolve) => setTimeout(resolve, hook.delayMs ?? 150))
+    }
     const requiredArrays = ['allowedActions', 'blockedActions', 'allowedProxies', 'allowedConnections']
     for (const key of requiredArrays) {
       if (!Array.isArray(body[key])) return ocEnvelope(res, 400, { success: false, errorCode: 'invalid_policy_arrays', message: `${key} 必须是数组（四数组全发契约）` })
@@ -393,6 +403,10 @@ const ocStub = createServer(async (req, res) => {
   const tokenMatch = path.match(/^\/api\/runtime-tokens\/([^/]+)$/)
   if (req.method === 'PUT' && tokenMatch) {
     const id = decodeURIComponent(tokenMatch[1])
+    if (ocMirrorFailOnce) {
+      ocMirrorFailOnce = false
+      return ocEnvelope(res, 500, { success: false, errorCode: 'injected_mirror_failure', message: 'OPT-P1-05 注入：镜像 PUT 失败一次' })
+    }
     if (!ocLedgerTokens.has(id)) return ocEnvelope(res, 404, { success: false, errorCode: 'unknown_token' })
     for (const key of ['allowedActions', 'blockedActions', 'allowedProxies', 'allowedConnections']) {
       if (!Array.isArray(body[key])) return ocEnvelope(res, 400, { success: false, errorCode: 'invalid_policy_arrays', message: `${key} 缺失或非数组（PUT 四数组全发契约）` })
@@ -443,6 +457,10 @@ const ocStub = createServer(async (req, res) => {
     const denyAlwaysMatch = ocCtl.alwaysDenyToken !== null && (ocCtl.alwaysDenyToken === '*ANY*' || ocCtl.alwaysDenyToken === bearer)
     if (denyAlwaysMatch) {
       return ocEnvelope(res, 403, { success: false, errorCode: 'connection_not_allowed' })
+    }
+    if (ocCtl.failNextExec) {
+      ocCtl.failNextExec = false
+      return ocEnvelope(res, 500, { success: false, errorCode: 'injected_gateway_error', message: 'OPT-P3-01 注入：网关 5xx' })
     }
     const executionId = `exec-${++ocSeq}`
     ocRuns.push({ id: executionId, service: actionId.split('.')[0], actionId, ok: true, runtimeTokenId: tokenId, caller: 'http', startedAt: new Date().toISOString(), latencyMs: 12 })
@@ -933,6 +951,14 @@ try {
   check('分配角色', assign.ok && assign.data.roleIds.length === 1)
   check('开发者角色默认含 agent.write（与 app.write 对称，注册/提报更新闭环）', devRole.permissions.includes('agent.write'))
 
+  // 第二审批人账号（与发起人不同账号）：供异人审批/复核类断言使用（同人审批放开后非必需，保留覆盖双人路径）
+  const superRole = roleList.data.roles.find((role) => role.code === 'super_admin')
+  const approverCreate = await api('POST', '/api/iam/users', { token: admin, body: { username: 'approver02', displayName: '第二审批人', orgId: newOrg.data.id, password: 'Ybk@2026', roleIds: [superRole.id] } })
+  check('第二审批人账号就绪', approverCreate.ok && approverCreate.data.roleIds.length === 1)
+  const approverLogin = await api('POST', '/api/auth/login', { body: { username: 'approver02', password: 'Ybk@2026' } })
+  check('第二审批人可登录', approverLogin.ok && typeof approverLogin.data.token === 'string')
+  const approver = approverLogin.data.token
+
   const importResult = await api('POST', '/api/iam/users/import', { token: admin, body: { items: [
     { username: 'batch01', displayName: '批量一号', orgId: newOrg.data.id },
     { username: 'batch02', displayName: '批量二号', orgId: newOrg.data.id },
@@ -1412,6 +1438,31 @@ try {
     check('四态：rq-card 随包单测全绿（node --test）', stateTest.exitCode === 0, `exit=${stateTest.exitCode}`)
   }
 
+  // ================================================================ 交接 F 清单 M 节：scenegraph 校验器口径对齐原文
+  section('场景图谱校验器（F 清单 M 节：8 类价值标签 / tags 可空 / links 可选，既有包零改动兼容）')
+  {
+    const sg = await import(new URL('../packages/platform-core/src/scenegraph.ts', import.meta.url).href)
+    const baseScene = (overrides = {}) => ({
+      code: 'TST01-A-1-1', name: '测试场景', type: '主场景', s: 3, tags: ['降本'], pain: '痛点',
+      tools: ['t'], models: ['m'], data: ['d'], talent: ['p'], ...overrides,
+    })
+    const packOf = (scene, extra = {}) => ({
+      code: 'TST01', name: '测试行业', icon: '🧪', version: 'v1', chains: '测试链',
+      activities: { mfg: [scene] }, ...extra,
+    })
+    const errorsOf = (pack) => sg.validateScenegraph(pack, 'm节自测')
+    check('M：原文口径标签 增收/安全/环保 入白名单（8 类=原文 7 类+节能兼容保留）',
+      errorsOf(packOf(baseScene({ tags: ['增收', '安全', '环保'] }))).length === 0
+      && errorsOf(packOf(baseScene({ tags: ['节能'] }))).length === 0
+      && sg.SCENE_TAGS.length === 8, JSON.stringify(sg.SCENE_TAGS))
+    check('M：词表外标签仍被拒', errorsOf(packOf(baseScene({ tags: ['虚构标签'] }))).some((line) => line.includes('tags 非法')))
+    check('M：tags 空数组放行（原文未标注场景如实装载，不造假标签）',
+      errorsOf(packOf(baseScene({ tags: [] }))).length === 0)
+    check('M：tags 缺位（非数组）仍被拒', errorsOf(packOf(baseScene({ tags: undefined }))).some((line) => line.includes('tags 非法')))
+    check('M：links 可选字段零校验负担（带环节链的包零错误，既有包无需改动）',
+      errorsOf(packOf(baseScene(), { links: [{ key: 'A', name: '铁前' }, { key: 'B', name: '炼铁' }] })).length === 0)
+  }
+
   // ================================================================ 第 3 步：契约五面 / 事件源校验 / L0 市场
   section('第 3 步：契约五面 / 事件源校验 / 代理 ctx / L0 市场')
 
@@ -1484,6 +1535,10 @@ try {
   check('安装（权限确认 + 能力固化）', installPlugin.ok && installPlugin.data.status === 'running')
   const capExceed = await api('POST', '/api/market/plugins/com.acme.hello/install', { token: admin, body: { orgId: newOrg.data.id, approvedCapabilities: ['model-gateway.invoke'] } })
   check('越权能力安装被拒（approved ⊆ requested）', !capExceed.ok && JSON.stringify(capExceed.error).includes('请求清单'))
+  const permExceed = await api('POST', '/api/market/plugins/com.acme.hello/install', { token: admin, body: { orgId: newOrg.data.id, approvedCapabilities: ['knowledgebase.read'], approvedPermissions: ['usage.admin'] } })
+  check('越权权限安装被拒（QA E-02：approvedPermissions ⊆ requested）', !permExceed.ok && /申请清单/.test(permExceed.error?.message ?? ''), JSON.stringify(permExceed.error ?? {}))
+  const permOkInstall = await api('POST', '/api/market/plugins/com.acme.hello/install', { token: admin, body: { orgId: newOrg.data.id, approvedCapabilities: ['knowledgebase.read'], approvedPermissions: ['knowledgebase.read'] } })
+  check('权限范围内安装通过（QA E-02 正向）', permOkInstall.ok && permOkInstall.data.status === 'running', JSON.stringify(permOkInstall.error ?? {}))
 
   const prompts = await api('GET', '/api/market/prompts?orgId=' + tenantOrg.data.id, { token: admin })
   check('L0 运行时：提示词包可取用', prompts.ok && prompts.data.prompts.length >= 1 && prompts.data.prompts[0].template.includes('磁姆助手'))
@@ -2180,6 +2235,40 @@ try {
   const rosterAudit = await api('GET', '/api/audit/logs?type=invoke&q=roster', { token: admin })
   check('名册拉取留痕（invoke 审计含 machine actor）', rosterAudit.ok && JSON.stringify(rosterAudit.data).includes('iam.roster.pull'))
 
+  // 应用组织架构同步（org-sync：默认凭证自助复用平台组织模块，2026-09-15）
+  section('应用组织架构同步（org-sync：绑定凭证自助拉平台组织树，version 轮询）')
+  const orgSyncApp = await api('POST', '/api/apps', { token: admin, body: { name: '组织同步验收应用', attrs: { description: 'org-sync 组织模块复用验收', appType: 'web', riskLevel: 'low', dataClass: 'internal' } } })
+  check('注册组织同步验收应用（自动带默认机器凭证）', orgSyncApp.ok && Boolean(orgSyncApp.data?.credential?.clientId), JSON.stringify(orgSyncApp.error))
+  const orgSyncAppId = orgSyncApp.data.app.id
+  const orgSyncCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: orgSyncApp.data.credential.clientId, clientSecret: orgSyncApp.data.credential.clientSecret } })
+  const orgSync1 = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`, { token: orgSyncCc.data?.token })
+  check('应用默认凭证自助拉取组织快照 200（orgs+users+version）',
+    orgSync1.ok && Array.isArray(orgSync1.data.orgs) && Array.isArray(orgSync1.data.users) && /^[0-9a-f]{16}$/.test(orgSync1.data.version ?? ''), JSON.stringify(orgSync1.error ?? orgSync1.data).slice(0, 200))
+  const orgSyncText = orgSync1.ok ? JSON.stringify(orgSync1.data) : ''
+  check('org-sync PII 最小化（无 email/phone/口令/三方绑定）',
+    orgSyncText !== '' && !orgSyncText.includes('"email"') && !orgSyncText.includes('"phone"') && !orgSyncText.includes('passwordHash') && !orgSyncText.includes('"bindings"'))
+  check('org-sync 含部门负责人字段与成员组织归属（组织模块复用要素）',
+    orgSync1.ok && orgSync1.data.orgs.some((org) => Array.isArray(org.leaderUserIds)) && orgSync1.data.users.length > 0 && orgSync1.data.users.every((user) => Boolean(user.orgId)))
+  const orgSync2 = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`, { token: orgSyncCc.data?.token })
+  check('version 内容哈希幂等（同内容再拉 version 不变）', orgSync2.ok && orgSync2.data.version === orgSync1.data.version)
+  const orgSyncUnchanged = await api('GET', `/api/apps/${orgSyncAppId}/org-sync?ifNoneMatch=${orgSync1.data.version}`, { token: orgSyncCc.data?.token })
+  check('ifNoneMatch 命中返回 unchanged（零载荷轮询）', orgSyncUnchanged.ok && orgSyncUnchanged.data.unchanged === true && orgSyncUnchanged.data.orgs === undefined)
+  const orgSyncOrgCreate = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '同步验收临时部门' } })
+  check('平台新增组织成功（构造变更源）', orgSyncOrgCreate.ok, JSON.stringify(orgSyncOrgCreate.error))
+  const orgSync3 = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`, { token: orgSyncCc.data?.token })
+  check('组织变更后 version 变化且新组织入快照',
+    orgSync3.ok && orgSync3.data.version !== orgSync1.data.version && orgSync3.data.orgs.some((org) => org.name === '同步验收临时部门'))
+  const orgSyncStale = await api('GET', `/api/apps/${orgSyncAppId}/org-sync?ifNoneMatch=${orgSync1.data.version}`, { token: orgSyncCc.data?.token })
+  check('过期 ifNoneMatch 不命中（回落全量快照）', orgSyncStale.ok && orgSyncStale.data.unchanged === false && Array.isArray(orgSyncStale.data.orgs))
+  const orgSyncNoAuth = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`)
+  check('未认证拉取组织快照 401', orgSyncNoAuth.status === 401)
+  const orgSyncDenied = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`, { token: rosterDeniedCc.data?.token })
+  check('无 app.read 的他应用凭证 403', orgSyncDenied.status === 403)
+  const orgSyncAudit = await api('GET', '/api/audit/logs?type=invoke&q=org-sync', { token: admin })
+  check('org-sync 拉取留痕（invoke 审计 app.org-sync.pull）', orgSyncAudit.ok && JSON.stringify(orgSyncAudit.data).includes('app.org-sync.pull'))
+  const orgSyncOrgDelete = await api('DELETE', `/api/iam/orgs/${orgSyncOrgCreate.data.id}`, { token: admin, body: {} })
+  check('验收临时组织清理成功', orgSyncOrgDelete.ok, JSON.stringify(orgSyncOrgDelete.error))
+
   mcpStub.close()
   ddStub.close()
 
@@ -2431,6 +2520,11 @@ try {
   const j4Csv = await rawReq('GET', `/api/usage/report/monthly?month=${j4Month}&format=csv`, { headers: { authorization: `Bearer ${admin}` } })
   check('J4 CSV 自助导出（text/csv + BOM + 表头）', j4Csv.status === 200 && (j4Csv.headers['content-type'] ?? '').includes('text/csv') && j4Csv.body.startsWith('\ufeff') && j4Csv.body.includes('维度,维度值,事件数,tokens'), JSON.stringify({ status: j4Csv.status, ct: j4Csv.headers['content-type'], head: j4Csv.body.slice(0, 80) }))
 
+  const j4OrgTokenSum = j4Report.data.byOrg.reduce((sum, row) => sum + row.tokens, 0)
+  check('J4 三维自洽（QA B-01：totals.tokens = ΣbyOrg.tokens，修复前差 176 倍）',
+    j4OrgTokenSum === j4Report.data.totals.tokens && j4Report.data.totals.tokens > 0,
+    JSON.stringify({ totals: j4Report.data.totals.tokens, orgSum: j4OrgTokenSum }))
+
   const onlineTooEarly = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: ops, body: { action: 'online' } })
   check('缺治理属性不可上线（校验）', !onlineTooEarly.ok)
 
@@ -2510,12 +2604,13 @@ try {
       JSON.stringify(selfAudit.error ?? selfAudit.data?.items?.map((item) => item.action)))
   }
 
-  // L4 上线：单人审批制——发起人（admin）自审通过
+  // L4 上线（2026-09-15 同人审批放开）：提交人与审批人允许同一账号——发起人自审直接通过并自动执行
+  // （原 QA A-05 自审自批拦截已按业务决策取消；approver 账号保留，供其余双人流程断言使用）
   const onlineRequest = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: admin, body: { action: 'online', note: '自测上线' } })
   check('上线生成 L4 审批单', onlineRequest.ok && onlineRequest.data.approval.status === 'pending')
 
-  const selfApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '自审通过', confirmed: true } })
-  check('发起人可自审，单人审批通过自动执行上线', selfApprove.ok && selfApprove.data.status === 'executed')
+  const selfApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '自审通过（同人审批放开）', confirmed: true } })
+  check('发起人自审通过并自动执行上线（同人审批放开）', selfApprove.ok && selfApprove.data.status === 'executed', JSON.stringify(selfApprove.error ?? {}).slice(0, 160))
   const agentAfter = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
   check('Agent 状态已上线', agentAfter.data.status === 'online')
 
@@ -2638,7 +2733,7 @@ try {
   check('上线门禁（点1）：已签发客户端后放行并快照 clientId', oidcGatePass.ok && oidcGatePass.data.approval?.payload?.ssoClientId, JSON.stringify(oidcGatePass.error))
   const oidcDisable = await api('POST', `/api/agents/${oidcAgentId}/sso-client/disable`, { token: admin, body: { reason: '执行期复核测试' } })
   check('管理员禁用客户端 200', oidcDisable.ok)
-  const oidcApproveFail = await api('POST', `/api/approvals/${oidcGatePass.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '复核应失败', confirmed: true } })
+  const oidcApproveFail = await api('POST', `/api/approvals/${oidcGatePass.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '复核应失败', confirmed: true } })
   const oidcAfterFail = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
   check('上线门禁（点2）：审批期间禁用 → 执行期复核失败留痕',
     oidcApproveFail.ok && oidcApproveFail.data.status === 'failed' && String(oidcApproveFail.data.execution?.error ?? '').includes('身份纳管'), JSON.stringify(oidcApproveFail.data))
@@ -2646,13 +2741,13 @@ try {
   const oidcEnable = await api('POST', `/api/agents/${oidcAgentId}/sso-client/enable`, { token: ops, body: {} })
   check('owner 重新启用客户端 200', oidcEnable.ok && oidcEnable.data.status === 'active')
   const oidcGatePass2 = await api('POST', `/api/agents/${oidcAgentId}/transition`, { token: ops, body: { action: 'online' } })
-  const oidcApproveOk = await api('POST', `/api/approvals/${oidcGatePass2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '复核通过', confirmed: true } })
+  const oidcApproveOk = await api('POST', `/api/approvals/${oidcGatePass2.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '复核通过', confirmed: true } })
   const oidcAfterOnline = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
   check('重新发起上线 → 审批执行成功（状态 online）', oidcApproveOk.ok && oidcApproveOk.data.status === 'executed' && oidcAfterOnline.data.status === 'online', JSON.stringify(oidcApproveFail.data))
   const oidcRotate = await api('POST', `/api/agents/${oidcAgentId}/sso-client/rotate`, { token: ops, body: {} })
   check('owner 轮换 secret 200（旧值立即失效）', oidcRotate.ok && Boolean(oidcRotate.data.clientSecret))
   const oidcOfflineReq = await api('POST', `/api/agents/${oidcAgentId}/transition`, { token: ops, body: { action: 'offline', note: '联动测试' } })
-  const oidcOfflineOk = await api('POST', `/api/approvals/${oidcOfflineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '下线', confirmed: true } })
+  const oidcOfflineOk = await api('POST', `/api/approvals/${oidcOfflineReq.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '下线', confirmed: true } })
   const oidcAfterOffline = await api('GET', `/api/agents/${oidcAgentId}`, { token: admin })
   check('Agent 下线联动：关联 OIDC 客户端自动禁用（refresh 链一并吊销）',
     oidcOfflineOk.ok && oidcAfterOffline.data.status === 'offline' && oidcAfterOffline.data.sso?.status === 'disabled', JSON.stringify(oidcAfterOffline.data?.sso))
@@ -2728,14 +2823,14 @@ try {
   const onlineReq1 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
   check('签发后发起上线（审批单快照 ssoClientId）', onlineReq1.ok && onlineReq1.data.approval.payload.ssoClientId === issueSso.data.clientId)
   await api('POST', `/api/apps/${ssoAppId}/sso-client/disable`, { token: ops, body: { reason: '审批期间禁用（执行期复核演练）' } })
-  const approveFail = await api('POST', `/api/approvals/${onlineReq1.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '应触发执行期复核失败', confirmed: true } })
+  const approveFail = await api('POST', `/api/approvals/${onlineReq1.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '应触发执行期复核失败', confirmed: true } })
   const appAfterFail = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('门禁点2：审批期间禁用 → 上线执行失败留痕', approveFail.ok && approveFail.data.status === 'failed' && String(approveFail.data.execution?.error ?? '').includes('复核') && appAfterFail.data.status !== 'online')
 
   // 重新启用 → 再次审批 → 上线成功
   await api('POST', `/api/apps/${ssoAppId}/sso-client/enable`, { token: ops })
   const onlineReq2 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
-  await api('POST', `/api/approvals/${onlineReq2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意发布', confirmed: true } })
+  await api('POST', `/api/approvals/${onlineReq2.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '同意发布', confirmed: true } })
   const appOnlineDetail = await api('GET', `/api/apps/${ssoAppId}`, { token: admin })
   check('复核通过后上线成功', appOnlineDetail.data.status === 'online')
   check('应用拓扑穿透（app→agent→skill）', appOnlineDetail.ok && appOnlineDetail.data.topology.children.length >= 1)
@@ -2808,7 +2903,7 @@ try {
 
   // 生命周期联动：下架 → 客户端禁用；恢复上线 → 客户端启用；归档 → 客户端禁用（终态）
   const offlineReq1 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'offline', note: '联动演练：下架' } })
-  await api('POST', `/api/approvals/${offlineReq1.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意下架', confirmed: true } })
+  await api('POST', `/api/approvals/${offlineReq1.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '同意下架', confirmed: true } })
   const afterOffline = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('应用下架 → SSO 客户端联动禁用（app.offlined）', afterOffline.data.status === 'offline' && afterOffline.data.sso?.status === 'disabled')
   // 重新上线：下架联动禁用了客户端 → 门禁要求先重新启用（控制台 SSO tab 有警示与入口）
@@ -2817,11 +2912,11 @@ try {
   await api('POST', `/api/apps/${ssoAppId}/sso-client/enable`, { token: ops })
   await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'retrial' } })
   const onlineReq3 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'online' } })
-  await api('POST', `/api/approvals/${onlineReq3.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '再次上线', confirmed: true } })
+  await api('POST', `/api/approvals/${onlineReq3.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '再次上线', confirmed: true } })
   const afterReline = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('应用恢复上线 → 客户端联动启用（app.onlined）', afterReline.data.status === 'online' && afterReline.data.sso?.status === 'active')
   const offlineReq2 = await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'offline', note: '归档前下架' } })
-  await api('POST', `/api/approvals/${offlineReq2.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '同意', confirmed: true } })
+  await api('POST', `/api/approvals/${offlineReq2.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '同意', confirmed: true } })
   await api('POST', `/api/apps/${ssoAppId}/transition`, { token: ops, body: { action: 'archive' } })
   const afterArchive = await api('GET', `/api/apps/${ssoAppId}`, { token: ops })
   check('应用归档 → 客户端联动禁用（app.archived 终态）', afterArchive.data.status === 'archived' && afterArchive.data.sso?.status === 'disabled')
@@ -3015,6 +3110,15 @@ try {
 
   const updApplyNoReason = await api('POST', '/api/update/apply', { token: admin, body: {} })
   check('正式升级缺少原因被拒（400）', updApplyNoReason.status === 400)
+  // OPT-P2-03：pin 强制 + 回滚面（均在触碰 git 前即拒绝，测试零副作用、零外网依赖）
+  const updNoPin = await api('POST', '/api/update/apply', { token: admin, body: { reason: '未带 pin 的裸拉尝试' } })
+  const updNoPinMsg = String(updNoPin.error?.message ?? JSON.stringify(updNoPin.error ?? updNoPin.data ?? {}))
+  check('P2-03 正式升级缺 pin 被拒（禁止裸拉最新）', updNoPin.status === 400 && /pin/i.test(updNoPinMsg), updNoPinMsg.slice(0, 160))
+  const updRollbackNoSnap = await api('POST', '/api/update/rollback', { token: admin, body: { reason: '无快照回滚演练' } })
+  const updRollbackMsg = String(updRollbackNoSnap.error?.message ?? JSON.stringify(updRollbackNoSnap.error ?? updRollbackNoSnap.data ?? {}))
+  check('P2-03 无可回滚快照被拒（本进程未执行过 apply）', updRollbackNoSnap.status === 400 && /快照/.test(updRollbackMsg), updRollbackMsg.slice(0, 160))
+  const updDryPin = await api('POST', '/api/update/apply', { token: admin, body: { dryRun: true } })
+  check('P2-03 dryRun 透出 pin/签名策略口径', updDryPin.ok && updDryPin.data.requireSignedCommits === false && String(updDryPin.data.pin).includes('pin'), JSON.stringify(updDryPin.data ?? {}).slice(0, 220))
 
   const updDismiss = await api('POST', '/api/update/settings', { token: admin, body: { dismissedVersion: '9.9.9' } })
   check('忽略指定版本（横幅静默）', updDismiss.ok && updDismiss.data.dismissed === true)
@@ -3342,6 +3446,12 @@ try {
   check('票据一次性（重放 401）', ticketReplay.status === 401)
   const badTicket = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=nastk_bogus`)
   check('未知票据 401', badTicket.status === 401)
+  // 分享链接票据（mode=link，前端「复制下载链接」场景）：TTL 内可重复消费
+  const linkTicketResp = await api('POST', `/api/nas/${nasId}/fs/download-ticket`, { token: admin, body: { path: '/skillhub/selftest/a.zip', mode: 'link' } })
+  check('签发分享链接票据（mode=link，TTL 600s）', linkTicketResp.ok && linkTicketResp.data.expiresInSec === 600)
+  const linkFile1 = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=${encodeURIComponent(linkTicketResp.data.ticket)}`)
+  const linkFile2 = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=${encodeURIComponent(linkTicketResp.data.ticket)}`)
+  check('链接票据 TTL 内可重复消费', linkFile1.ok && linkFile2.ok)
   const nasAudit = await api('GET', `/api/audit/logs?resourceId=${nasId}&limit=20`, { token: admin })
   check('写类文件操作审计留痕', (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.mkdir') && (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.upload'))
 
@@ -3989,15 +4099,24 @@ try {
   const dupApproval = await api('POST', '/api/connector/execute', { token: connDevLogin.data.token, body: { actionId: 'hackernews.do_the_thing', input: { work: 1 } } })
   check('同图 pending 审批单复用（不重复开单）', dupApproval.data?.approvalId === approvalFlow.approvalId, JSON.stringify(dupApproval).slice(0, 180))
   const beforeCalls = ocCalls.filter((call) => call.actionId === 'hackernews.do_the_thing').length
-  const decide = await api('POST', `/api/approvals/${approvalFlow.approvalId}/decide`, { token: admin, body: { decision: 'approve', opinion: '自测批准' } })
+  const decide = await api('POST', `/api/approvals/${approvalFlow.approvalId}/decide`, { token: admin, body: { decision: 'approve', opinion: '自测批准', confirmed: true } })
   check('审批通过后 executor 同步完成调用（L4 闭环）', decide.ok && String(decide.data.execution?.result ?? '').includes('runId'), JSON.stringify(decide.data?.execution ?? {}).slice(0, 240))
   const afterCalls = ocCalls.filter((call) => call.actionId === 'hackernews.do_the_thing').length
   check('executor 真实下发一次数据面调用', afterCalls === beforeCalls + 1, `before=${beforeCalls} after=${afterCalls}`)
 
+  // -- OPT-P1-02 冒充面封死（能力令牌替代旧布尔旁路） ---------------------------------
+  const smuggleResp = await api('POST', '/api/tools/execute', { token: connDevLogin.data.token, body: { name: 'connector_execute', args: { actionId: 'hackernews.do_the_thing', input: { work: 1 }, viaApprovalExecutor: true, approvalCapability: { token: 'forged-by-attacker', actionId: 'hackernews.do_the_thing', callerId: 'attacker', expiresAt: Date.now() + 60_000 } } } })
+  const smuggleValue = smuggleResp.data?.value ?? smuggleResp.data ?? {}
+  check('P1-02 工具桥走私旧布尔/伪造能力令牌 → 仍强制开单（fail-closed）', smuggleValue?.status === 'approval_required' && Boolean(smuggleValue.approvalId), JSON.stringify(smuggleValue ?? {}).slice(0, 240))
+  let booleanBypassHits = 0
+  const scanBypass = (dir) => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const filePath = join(dir, entry.name); if (entry.isDirectory()) { if (entry.name !== 'node_modules') scanBypass(filePath) } else if (filePath.endsWith('.ts') && readFileSync(filePath, 'utf8').includes('viaApprovalExecutor')) booleanBypassHits++ } }
+  scanBypass('packages'); scanBypass('src')
+  check('P1-02 旧布尔旁路全仓 0 命中（能力令牌替代，验收 grep 口径）', booleanBypassHits === 0, `hits=${booleanBypassHits}`)
+
   // -- connector.connect 两段式审批门禁（T-18，凭证不入审批负载） -------------------
   const gatedConnectReq = await api('POST', '/api/connector/connections/api-key', { token: admin, body: { orgId: connOrg, provider: 'github', aliasSuffix: 'gated-pat', values: { apiKey: 'client-supersecret-oauth-xyz' }, requireApproval: true } })
   check('T-18 requireApproval → 仅生成审批单（凭证不落任何集合）', gatedConnectReq.data?.approvalRequired === true && Boolean(gatedConnectReq.data.approvalId), JSON.stringify(gatedConnectReq).slice(0, 200))
-  await api('POST', `/api/approvals/${gatedConnectReq.data.approvalId}/decide`, { token: admin, body: { decision: 'approve' } })
+  await api('POST', `/api/approvals/${gatedConnectReq.data.approvalId}/decide`, { token: approver, body: { decision: 'approve', confirmed: true } })
   const gatedFinalize = await api('POST', '/api/connector/connections/api-key', { token: admin, body: { orgId: connOrg, provider: 'github', aliasSuffix: 'gated-pat', values: { apiKey: 'client-supersecret-oauth-xyz' }, approvalId: gatedConnectReq.data.approvalId } })
   check('审批通过后携 approvalId 完成实际创建', gatedFinalize.ok && gatedFinalize.data.reference?.status === 'active', JSON.stringify(gatedFinalize).slice(0, 220))
 
@@ -4046,6 +4165,82 @@ try {
   const recoveredLog = await api('GET', `/api/audit/logs?q=${encodeURIComponent('recovered-audit')}&type=invoke&limit=50`, { token: admin })
   check('T-28 平台补记审计', recoveredLog.ok && recoveredLog.data.items.length >= 1, JSON.stringify(recoveredLog.data?.items?.slice(0, 1)))
 
+  // -- OPT-P1-05 TOCTOU 收紧（镜像失败 fail-closed + 执行侧快照漂移拒绝） -------------
+  // 隔离主体（isoGroup 仅本组覆盖 fetch_item），保证候选组唯一、断言不受其他健康组干扰
+  const pgP105 = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'P1-05 TOCTOU 观测组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: ['hackernews.fetch_item'], riskCap: 'write' } },
+    subjects: [{ type: 'user_group', id: isoGroup.id }],
+    rateLimitPerMin: 60,
+  } })).data
+  const p105Invoke = () => api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  const p105Baseline = await p105Invoke()
+  check('P1-05 基线调用成功（健康组可用）', p105Baseline.data?.status === 'ok', JSON.stringify(p105Baseline.data ?? {}).slice(0, 200))
+  // 场景一：镜像注入失败 → 旧 oct_ 令牌立即吊销 + 组级 fail-closed
+  // （快照哈希只含 allowedActions/connections 面——扩动作列表才会触发镜像 PUT）
+  const deletesBeforeFail = ocDeletes.length
+  ocMirrorFailOnce = true
+  await api('PATCH', `/api/connector/perm-groups/${pgP105.id}`, { token: admin, body: { policies: { hackernews: { allowedActions: ['hackernews.fetch_item', 'hackernews.get_top_stories'], riskCap: 'write' } } } })
+  await waitFor(() => ocDeletes.length > deletesBeforeFail, 4000)
+  check('P1-05 镜像失败 → 旧 oct_ 令牌立即吊销（DELETE 命中 stub，不静默放大窗口）', ocDeletes.length > deletesBeforeFail)
+  const p105FailClosed = await p105Invoke()
+  check('P1-05 镜像失败期间组级 fail-closed → invoke 拒绝', p105FailClosed.data?.status === 'denied' && String(p105FailClosed.data.error).includes('fail-closed'), JSON.stringify(p105FailClosed.data ?? {}).slice(0, 220))
+  // 场景二：恢复铸币期间并发收紧（确定性注入：钩子 PATCH 收紧至 H3 并延迟应答，外层镜像最后落账 H2）
+  const mintedBeforeDrift = ocMintedValues.length
+  // PATCH#2 回收组面（H2：单动作）触发恢复铸币；钩子在铸币期间并发改到 H3（双动作）并延迟应答，
+  // 外层镜像最后按 H2 落账 → ledger(H2) 滞后于当前策略(H3)，确定性制造快照漂移
+  ocDriftOnMint = { permGroupId: pgP105.id, token: admin, delayMs: 150, body: { policies: { hackernews: { allowedActions: ['hackernews.fetch_item', 'hackernews.get_top_stories', 'hackernews.submit_post'], riskCap: 'write' } } } }
+  await api('PATCH', `/api/connector/perm-groups/${pgP105.id}`, { token: admin, body: { policies: { hackernews: { allowedActions: ['hackernews.get_top_stories'], riskCap: 'write' } } } })
+  await waitFor(() => ocMintedValues.length > mintedBeforeDrift + 1, 5000)
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  const p105Drift = await p105Invoke()
+  check('P1-05 授权后策略漂移（ledger 滞后当前策略）→ 执行侧拒绝按旧快照执行',
+    p105Drift.data?.status === 'denied' && String(p105Drift.data.error).includes('快照漂移'), JSON.stringify(p105Drift.data ?? {}).slice(0, 240))
+  // 收敛：镜像一次 PUT（账本哈希对齐当前）→ 调用恢复
+  await api('PATCH', `/api/connector/perm-groups/${pgP105.id}`, { token: admin, body: { policies: { hackernews: { allowedActions: ['hackernews.fetch_item', 'hackernews.get_top_stories'], riskCap: 'write' } } } })
+  await waitFor(() => ocPuts.length > mintedBeforeDrift, 4000).catch(() => {})
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  const p105Recovered = await p105Invoke()
+  check('P1-05 镜像收敛后调用恢复（对齐账本哈希后正常执行）', p105Recovered.data?.status === 'ok', JSON.stringify(p105Recovered.data ?? {}).slice(0, 200))
+  // 观测组退场：删除组（连带吊销令牌），恢复 isoGroup 单点清单组口径，不污染后续用例
+  await api('DELETE', `/api/connector/perm-groups/${pgP105.id}`, { token: admin })
+
+  // OPT-P2-02：敏感命名入参不入审批存储（admin 审批通道 fail-closed）
+  const pgP202 = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'P2-02 敏感面观测组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: ['hackernews.do_the_thing'], riskCap: 'admin' } },
+    subjects: [{ type: 'user_group', id: isoGroup.id }],
+    rateLimitPerMin: 60,
+  } })).data
+  const p202Sensitive = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.do_the_thing', input: { password: 'plain-secret' } } })
+  check('P2-02 admin 调用携敏感命名入参 → 拒绝开单（敏感值不入审批存储）',
+    p202Sensitive.data?.status === 'denied' && String(p202Sensitive.data.error).includes('敏感命名参数'), JSON.stringify(p202Sensitive.data ?? {}).slice(0, 220))
+  await api('DELETE', `/api/connector/perm-groups/${pgP202.id}`, { token: admin })
+
+  // OPT-P2-01：ODD 域内判定（排除 action → 离域拒绝 + connector.odd_exit 落审计）
+  const pgOdd = (await api('POST', '/api/connector/perm-groups', { token: admin, body: {
+    name: 'P2-01 ODD 观测组', orgId: connOrg,
+    policies: { hackernews: { allowedActions: ['hackernews.fetch_item', 'hackernews.get_top_stories'], riskCap: 'write' } },
+    subjects: [{ type: 'user_group', id: isoGroup.id }],
+    rateLimitPerMin: 60,
+    odd: { allowedServices: ['hackernews'], excludedActions: ['hackernews.fetch_item'] },
+  } })).data
+  check('P2-01 ODD 块声明入库', Boolean(pgOdd.odd?.excludedActions?.length === 1), JSON.stringify(pgOdd.odd ?? {}))
+  const oddDenied = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  check('P2-01 排除清单内 action → ODD 离域拒绝', oddDenied.data?.status === 'denied' && String(oddDenied.data.error).includes('ODD'), JSON.stringify(oddDenied.data ?? {}).slice(0, 220))
+  // OPT-P1-04 起总线异步派发：审计落账为最终一致，轮询等待（FIFO 中其他监听器退避重试会延迟投递）
+  let oddTrailItems
+  const oddTrailDeadline = Date.now() + 4000
+  while (Date.now() < oddTrailDeadline) {
+    const trail = await api('GET', '/api/audit/logs?q=' + encodeURIComponent('ODD') + '&type=invoke&limit=20', { token: admin })
+    if (trail.ok && trail.data.items.length >= 1) { oddTrailItems = trail.data.items; break }
+    await new Promise((resolve) => setTimeout(resolve, 150))
+  }
+  check('P2-01 离域事件落审计（ODD 离域可检索）', Array.isArray(oddTrailItems) && oddTrailItems.length >= 1, JSON.stringify(oddTrailItems?.slice(0, 1) ?? []).slice(0, 180))
+  const oddAllowed = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('P2-01 白名单内 action 正常执行', oddAllowed.data?.status === 'ok', JSON.stringify(oddAllowed.data ?? {}).slice(0, 160))
+  await api('DELETE', `/api/connector/perm-groups/${pgOdd.id}`, { token: admin })
+
   // -- T-16a 限流（用单点清单组保证候选组唯一，绕开多组并集下的候选顺序不确定性） --------
   await api('PATCH', `/api/connector/perm-groups/${pgIso.id}`, { token: admin, body: { rateLimitPerMin: 1 } })
   const rateLimited = await api('POST', '/api/connector/execute', { token: isoLogin.data.token, body: { actionId: 'hackernews.get_top_stories', input: {} } })
@@ -4069,6 +4264,56 @@ try {
   await api('POST', '/api/connector/gateway/health', { token: admin })
   const recoveredState = await api('GET', '/api/connector/gateway', { token: admin })
   check('T-19 恢复后自动回 healthy 并可继续调用', recoveredState.data.available === true, JSON.stringify(recoveredState).slice(0, 160))
+
+  // -- OPT-P3-01 故障注入回归（4 类：网关 5xx / sidecar 审计失联 / 目录漂移 / oct_ 令牌吊销） ----
+  // ①网关 5xx：注入一次 500 → 调用显式失败（不静默、可计数），随后恢复
+  ocCtl.failNextExec = true
+  const gw5xx = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('P3-01 故障① 网关 5xx → 调用显式失败（status=error 计入 error_rate）', gw5xx.data?.status === 'error', JSON.stringify(gw5xx.data ?? {}).slice(0, 200))
+  const gw5xxRecover = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+  check('P3-01 故障① 注入解除后调用恢复', gw5xxRecover.data?.status === 'ok', JSON.stringify(gw5xxRecover.data ?? {}).slice(0, 160))
+  // ②sidecar 审计失联：数据面 auditPersisted=false → 平台补记（fail-visible 双写口径）
+  ocCtl.auditPersistedNext = true
+  const auditLost = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: { fault: 'audit-loss' } } })
+  ocCtl.auditPersistedNext = false
+  check('P3-01 故障② sidecar 审计失联 → 平台补记且向调用方透出', auditLost.data?.status === 'ok' && auditLost.data.meta.auditPersisted === false, JSON.stringify(auditLost.data?.meta ?? {}))
+  // ③目录漂移：action 被目录同步移除 → 后续调用 fail-closed 拒绝
+  ocCtl.actions = (ocCtl.actions ?? [...ocActionsDefault]).filter((action) => action.id !== 'hackernews.fetch_item')
+  await api('POST', '/api/connector/catalog/sync', { token: admin })
+  const driftDenied = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  check('P3-01 故障③ 目录漂移（action 被移除）→ 调用拒绝', driftDenied.data?.status === 'denied' && String(driftDenied.data.error).includes('不在纳管目录'), JSON.stringify(driftDenied.data ?? {}).slice(0, 200))
+  ocCtl.actions = [...(ocCtl.actions ?? [])].filter((action) => action.id !== 'hackernews.fetch_item').concat(ocActionsDefault.filter((action) => action.id === 'hackernews.fetch_item'))
+  await api('POST', '/api/connector/catalog/sync', { token: admin })
+  const driftRecover = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.fetch_item', input: {} } })
+  check('P3-01 故障③ 目录回补后调用恢复', driftRecover.data?.status === 'ok', JSON.stringify(driftRecover.data ?? {}).slice(0, 160))
+  // ④oct_ 令牌吊销：sidecar 侧令牌被吊销 → 401 → 自动重铸恢复（obtainOctToken 重铸语义）
+  const revokedToken = [...ocTokenByValue.entries()][0]
+  if (revokedToken) {
+    ocTokenByValue.delete(revokedToken[0])
+    const afterRevoke = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+    check('P3-01 故障④ oct_ 令牌被吊销 → 自动重铸恢复调用', afterRevoke.data?.status === 'ok', JSON.stringify(afterRevoke.data ?? {}).slice(0, 200))
+  }
+
+  // -- OPT-P3-01 P95 尾延迟质量闸门（阈值键可经环境覆盖：P95_GATE_LOGIN_MS / P95_GATE_INVOKE_MS） ----
+  const P95_GATE_LOGIN_MS = Number(process.env.P95_GATE_LOGIN_MS ?? 800)
+  const P95_GATE_INVOKE_MS = Number(process.env.P95_GATE_INVOKE_MS ?? 1500)
+  const pct = (samples, p) => { const sorted = [...samples].sort((a, b) => a - b); return sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * p) - 1))] }
+  const loginSamples = []
+  const invokeSamples = []
+  for (let i = 0; i < 20; i++) {
+    const loginStart = Date.now()
+    await api('POST', '/api/auth/login', { body: { username: 'admin', password: 'Ybk@2026' } })
+    loginSamples.push(Date.now() - loginStart)
+    const invokeStart = Date.now()
+    await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
+    invokeSamples.push(Date.now() - invokeStart)
+  }
+  const loginP95 = pct(loginSamples, 0.95)
+  const invokeP95 = pct(invokeSamples, 0.95)
+  const dist = (samples) => `P50=${pct(samples, 0.5)}ms P95=${pct(samples, 0.95)}ms max=${Math.max(...samples)}ms`
+  console.log(`  » P95 分布（n=20）：登录 ${dist(loginSamples)} ｜ connector invoke ${dist(invokeSamples)}`)
+  check(`P3-01 登录换票 P95 ≤ ${P95_GATE_LOGIN_MS}ms`, loginP95 <= P95_GATE_LOGIN_MS, `p95=${loginP95}ms`)
+  check(`P3-01 connector invoke P95 ≤ ${P95_GATE_INVOKE_MS}ms`, invokeP95 <= P95_GATE_INVOKE_MS, `p95=${invokeP95}ms`)
 
   // -- T-21 org 巡检注入不一致 -----------------------------------------------------
   const foreignConnectionSummary = (() => { return { id: 'oc-con-fake-foreign' } })()
@@ -4187,10 +4432,10 @@ try {
     check('终审探针：注册（entryUrl 免登通道过上线门禁）', probe.ok, JSON.stringify(probe.error))
     const onlineReq = await api('POST', `/api/agents/${probe.data.agent.id}/transition`, { token: admin, body: { action: 'online', note: 'WP-10 二次确认验证' } })
     check('终审探针：L4 上线审批单为高风险', onlineReq.ok && onlineReq.data.approval?.status === 'pending' && onlineReq.data.approval.riskLevel === 'high', JSON.stringify(onlineReq.data?.approval ?? onlineReq.error))
-    const noConfirm = await api('POST', `/api/approvals/${onlineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '未二次确认应被拒' } })
+    const noConfirm = await api('POST', `/api/approvals/${onlineReq.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '未二次确认应被拒' } })
     check('终审探针：高风险通过缺二次确认被拒（服务端强制，非仅前端拦截）',
       noConfirm.status === 400 && JSON.stringify(noConfirm.error).includes('二次确认'), `${noConfirm.status} ${JSON.stringify(noConfirm.error)}`)
-    const withConfirm = await api('POST', `/api/approvals/${onlineReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '已复核影响面（二次确认）', confirmed: true } })
+    const withConfirm = await api('POST', `/api/approvals/${onlineReq.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '已复核影响面（二次确认）', confirmed: true } })
     check('终审探针：二次确认后通过并自动执行', withConfirm.ok && withConfirm.data.status === 'executed', JSON.stringify(withConfirm.error))
     check('终审探针：审批单落公司级终审标记（终审人 + 时间）',
       withConfirm.ok && Boolean(withConfirm.data.finalReview?.approverId) && Boolean(withConfirm.data.finalReview?.at), JSON.stringify(withConfirm.data?.finalReview))
@@ -4279,7 +4524,7 @@ try {
   // ① 网关维护下线：L4 审批闭环（executor 落地 → fail-closed → 恢复探活）
   const gwOfflineReq = await api('POST', '/api/connector/gateway/offline', { token: admin, body: { reason: '验收回归-维护窗口' } })
   check('gateway.offline 默认生成 L4 审批单', gwOfflineReq.data?.approvalRequired === true && Boolean(gwOfflineReq.data.approvalId), JSON.stringify(gwOfflineReq).slice(0, 200))
-  await api('POST', `/api/approvals/${gwOfflineReq.data.approvalId}/decide`, { token: admin, body: { decision: 'approve' } })
+  await api('POST', `/api/approvals/${gwOfflineReq.data.approvalId}/decide`, { token: approver, body: { decision: 'approve', confirmed: true } })
   const gwAfterOff = await api('GET', '/api/connector/gateway', { token: admin })
   check('审批通过 → executor 落地下线（fail-closed，原因含维护说明）', gwAfterOff.data.available === false && /验收回归/.test(String(gwAfterOff.data.reason)), JSON.stringify({ reason: gwAfterOff.data.reason }))
   const execBlockedMaint = await api('POST', '/api/connector/execute', { token: admin, body: { actionId: 'hackernews.get_top_stories', input: {} } })
@@ -4345,6 +4590,37 @@ try {
   const landingTest = spawn(process.execPath, ['packages/plugin-console/public/js/landing.test.mjs'], { stdio: 'pipe' })
   await new Promise((resolve) => landingTest.on('close', resolve))
   check('落地分诊随包单测全绿（node --test）', landingTest.exitCode === 0, `exit=${landingTest.exitCode}`)
+  // 登录回跳共享面随包单测（F 清单 P 节：一次读取消费/白名单/出口规则，next-redirect.test.mjs）
+  const nextRedirectTest = spawn(process.execPath, ['packages/plugin-console/public/js/next-redirect.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => nextRedirectTest.on('close', resolve))
+  check('登录回跳共享面随包单测全绿（node --test）', nextRedirectTest.exitCode === 0, `exit=${nextRedirectTest.exitCode}`)
+  // 契约↔实现双向一致性（OPT-P0-01，2026-09-12）：引擎构造性红/绿测试 + 真仓零红闸门
+  const contractLintTest = spawn(process.execPath, ['scripts/contract-lint.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => contractLintTest.on('close', resolve))
+  check('契约 lint 引擎构造性红/绿测试全绿（node --test）', contractLintTest.exitCode === 0, `exit=${contractLintTest.exitCode}`)
+  const contractLintRepo = spawn(process.execPath, ['scripts/lint-manifests.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => contractLintRepo.on('close', resolve))
+  check('契约比对真仓零红（路由/工具/权限双向一致，lint:manifests 通道）', contractLintRepo.exitCode === 0, `exit=${contractLintRepo.exitCode}`)
+  // connect 工具远程代理契约化自证（OPT-P1-03：扩展点挂载/转发失败 fail-closed/注销还原）
+  const connectProxyTest = spawn(process.execPath, ['packages/plugin-connect/src/proxy.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => connectProxyTest.on('close', resolve))
+  check('connect 远程代理契约化随包单测全绿（node --test）', connectProxyTest.exitCode === 0, `exit=${connectProxyTest.exitCode}`)
+  // 平台总线管道自证（OPT-P1-04：异步串行派发/异常落事件/3 次退避重试入死信/journal 重启回放/人工重投）
+  const busPipelineTest = spawn(process.execPath, ['packages/platform-core/src/bus.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => busPipelineTest.on('close', resolve))
+  check('平台总线管道随包单测全绿（node --test）', busPipelineTest.exitCode === 0, `exit=${busPipelineTest.exitCode}`)
+  // 工具注册契约自证（OPT-P2-04：output.schema 强校验，无 schema 注册即抛）
+  const toolsLiteTest = spawn(process.execPath, ['packages/platform-core/src/tools-lite.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => toolsLiteTest.on('close', resolve))
+  check('工具注册契约随包单测全绿（node --test）', toolsLiteTest.exitCode === 0, `exit=${toolsLiteTest.exitCode}`)
+  // 审批卫生与规则源自证（OPT-P2-02：敏感面掩码/拒绝 + 补偿注册表编排）
+  const approvalTest = spawn(process.execPath, ['packages/plugin-audit/src/approval.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => approvalTest.on('close', resolve))
+  check('审批卫生与补偿注册表随包单测全绿（node --test）', approvalTest.exitCode === 0, `exit=${approvalTest.exitCode}`)
+  // ODD 域内判定纯函数自证（OPT-P2-01）
+  const oddTest = spawn(process.execPath, ['packages/plugin-connector/src/odd.test.mjs'], { stdio: 'pipe' })
+  await new Promise((resolve) => oddTest.on('close', resolve))
+  check('ODD 域内判定随包单测全绿（node --test）', oddTest.exitCode === 0, `exit=${oddTest.exitCode}`)
   // 前端接线 grep 不变量（纯前端逻辑的静态面断言）
   const panelBoot = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'boot.js'), 'utf8')
   check('面板 boot 宿主直通走根绝对 /dsh-bridge/*（带 BASE 在挂载形态会 miss → 静默失效）',
@@ -4353,10 +4629,12 @@ try {
   check('控制台启动链含宿主会话直通 + 落地分诊（exchangeBridgeSession/resolveLanding）',
     consoleBoot.includes('exchangeBridgeSession') && consoleBoot.includes('resolveLanding'))
   const loginSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'pages', 'login.js'), 'utf8')
-  check('登录回跳接线（?next= 一次读取共享 + 401 暂存 heng_ops_next 消费 + 跨源白名单双 sanitize）',
-    loginSrc.includes('urlNextParam') && loginSrc.includes("sanitizeNext(urlNextParam")
-    && loginSrc.includes("sanitizeCrossOriginNext(urlNextParam")
-    && loginSrc.includes('heng_ops_next') && loginSrc.includes('sanitizeNext'))
+  const nextRedirectSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-console', 'public', 'js', 'next-redirect.js'), 'utf8')
+  check('登录回跳接线（F 清单 P 节：消费面提升共享模块 next-redirect.js，login/app 双消费者同规则）',
+    loginSrc.includes('consumeNextSources') && loginSrc.includes('exitWithNext')
+    && consoleBoot.includes('exitWithNext') && consoleBoot.includes('consumeNextSources')
+    && nextRedirectSrc.includes('sanitizeNext') && nextRedirectSrc.includes('sanitizeCrossOriginNext')
+    && nextRedirectSrc.includes('heng_ops_next') && nextRedirectSrc.includes('heng_ops_next_cross'))
   const panelApp = readFileSync(join(process.cwd(), 'packages', 'plugin-panel-core', 'public', 'js', 'app.js'), 'utf8')
   check('面板侧切换接线（管理控制台 data-landing 偏好 + 401 引导带 ?next= 回面板）',
     panelApp.includes('data-landing') && panelApp.includes('next='))
@@ -4458,7 +4736,7 @@ try {
   // 全链路：注册 → L4 审批上线 → 门户拉取即可见（miniapp 形态不走 SSO 门禁）
   const portalProbe = await api('POST', '/api/apps', { token: admin, body: { name: '门户拉取探针应用', attrs: { description: '门户数据通道验收：上线即对门户可见', appType: 'miniapp', url: 'http://192.168.0.8:9000/', riskLevel: 'low', dataClass: 'internal' } } })
   const portalProbeReq = await api('POST', `/api/apps/${portalProbe.data.app.id}/transition`, { token: admin, body: { action: 'online' } })
-  await api('POST', `/api/approvals/${portalProbeReq.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '门户可见性验收', confirmed: true } })
+  await api('POST', `/api/approvals/${portalProbeReq.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '门户可见性验收', confirmed: true } })
   const portalAppsAfter = await portalJson('/apps', { origin: portalOrigin })
   const portalApp = portalAppsAfter.body.data.find((item) => item.id === portalProbe.data.app.id)
   check('已上线应用进入 /apps（link=访问地址，tag/version/accent 契约齐全）',
@@ -4597,7 +4875,7 @@ try {
     check('面板：申请后行业显示审批中（pending 三态）', actPending.state === 'pending')
     const decideNoConfirm = await api('POST', `/api/approvals/${actReq.data.approval.id}/decide`, { token: panelAdmin, body: { decision: 'approve' } })
     check('面板：高风险审批未二次确认被拒（fail-closed）', !decideNoConfirm.ok)
-    const decideOk = await api('POST', `/api/approvals/${actReq.data.approval.id}/decide`, { token: panelAdmin, body: { decision: 'approve', confirmed: true, opinion: '新能源汽车图谱启用' } })
+    const decideOk = await api('POST', `/api/approvals/${actReq.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '新能源汽车图谱启用', confirmed: true } })
     check('面板：审批通过 → 激活执行器生效（active + grantCapabilities）',
       decideOk.ok && decideOk.data.status === 'executed', JSON.stringify(decideOk.data?.execution ?? decideOk.error))
     const industriesAfter = await api('GET', '/api/panel/industries', { token: panelAdmin })
@@ -5134,11 +5412,12 @@ try {
     // 回决写回：staffId 反查 fail-closed 三连
     const cbNoLink = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'nobody-staff', approvalId: pcbReq.data.approval.id, decision: 'approve' } })
     check('桥接：未绑定 staffId 回决被拒（fail-closed）', !cbNoLink.ok && /未绑定/.test(cbNoLink.error.message))
-    const adminUser = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('沈亦澜'), { token: admin })).data.users[0]
-    await api('POST', `/api/iam/users/${adminUser.id}/bindings`, { token: admin, body: { provider: 'dingtalk', unionId: 'selftest-staff-001', displayName: '沈亦澜' } })
+    // QA A-05：回决人须非提交人——绑定第二审批人（approver02）作为钉钉侧回决身份
+    const dingApprover = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('第二审批人'), { token: admin })).data.users[0]
+    await api('POST', `/api/iam/users/${dingApprover.id}/bindings`, { token: admin, body: { provider: 'dingtalk', unionId: 'selftest-staff-001', displayName: '第二审批人' } })
+    const cbOk = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'selftest-staff-001', approvalId: pcbReq.data.approval.id, decision: 'approve', opinion: '钉钉侧回决（自测）', confirmed: true } })
     const cbNoConfirm = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'selftest-staff-001', approvalId: pcbReq.data.approval.id, decision: 'approve' } })
-    check('桥接：高风险审批钉钉回决缺二次确认被拒（fail-closed）', !cbNoLink.ok && !cbNoConfirm.ok && /二次确认/.test(cbNoConfirm.error.message))
-    const cbOk = await api('POST', '/api/dingtalk/bridge/callback', { token: admin, body: { staffId: 'selftest-staff-001', approvalId: pcbReq.data.approval.id, decision: 'approve', confirmed: true, opinion: '钉钉侧回决（自测）' } })
+    check('桥接：高风险审批钉钉回决缺二次确认被拒（fail-closed）', !cbNoConfirm.ok && /二次确认/.test(cbNoConfirm.error.message))
     check('桥接：合规回决写回（staffId↔identityLinks 反查 + confirmed）→ 审批执行',
       cbOk.ok && cbOk.data.approval.status === 'executed', JSON.stringify(cbOk.data ?? cbOk.error))
     const pcbAfter = (await api('GET', '/api/panel/industries', { token: admin })).data.industries.find((ind) => ind.code === 'SJ02')
@@ -5769,6 +6048,350 @@ try {
     await new Promise((resolve) => sim.close(resolve))
   }
 
+  // ================================================================ IAW 交接批次（docs/handoff-iaw-gaps-to-main.md 2026-09-11）
+  // 批次共享主体（模块顶层声明，跨分节复用）：根组织 / 成员账号 / 仅 console.login 的机器凭证
+  const iawRootOrg = (await api('GET', '/api/iam/orgs', { token: admin })).data.find((org) => org.parentId === null)
+  // 成员挂 mfg 部门绑定的组织（面板组织子树范围语义：通知/面板可见性同源）
+  const iawMfgOrgId = (await api('GET', '/api/panel/depts', { token: admin })).data.depts.find((dept) => dept.id === 'mfg')?.orgId
+  const iawMemberOrgId = iawMfgOrgId ?? iawRootOrg.id
+  const iawMemberRole = (await api('GET', '/api/iam/roles', { token: admin })).data.roles.find((role) => role.code === 'member')
+  const iawMemberInit = await api('POST', '/api/iam/users', { token: admin, body: { username: 'iaw_member', displayName: 'IAW 成员', orgId: iawMemberOrgId, roleIds: [iawMemberRole.id] } })
+  const iawMemberInitPassword = iawMemberInit.data?.initialPassword ?? 'Ybk@2026'
+  const iawMemberToken = (await api('POST', '/api/auth/login', { body: { username: 'iaw_member', password: iawMemberInitPassword } })).data.token
+  const iawCred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'iaw-no-panel', refType: 'external', scopes: ['console.login'] } })
+  const iawMachine = (await api('POST', '/api/auth/client-credentials', { body: { clientId: iawCred.data.clientId, clientSecret: iawCred.data.clientSecret } })).data.token
+
+  section('IAW 4-1/4-2：usage 成本摘要与反馈聚合（面板度量驾驶舱数据源）')
+  {
+    const iawAdminSummary = await api('GET', '/api/usage/summary?window=today', { token: admin })
+    check('4-1：管理员查摘要（scope=platform，cost_cents/byResource 齐备）',
+      iawAdminSummary.ok && iawAdminSummary.data.scope === 'platform' && iawAdminSummary.data.window === 'today'
+      && Number.isFinite(iawAdminSummary.data.cost_cents) && Array.isArray(iawAdminSummary.data.byResource)
+      && Number.isFinite(iawAdminSummary.data.input_tokens) && Number.isFinite(iawAdminSummary.data.output_tokens),
+      JSON.stringify({ scope: iawAdminSummary.data?.scope, cost: iawAdminSummary.data?.cost_cents }))
+    const iawMonth = await api('GET', '/api/usage/summary?window=month', { token: admin })
+    check('4-1：month 窗口边界为当月 1 日（UTC 口径）',
+      iawMonth.ok && iawMonth.data.from === `${new Date().toISOString().slice(0, 7)}-01T00:00:00.000Z` && iawMonth.data.window === 'month',
+      JSON.stringify({ from: iawMonth.data?.from }))
+    const iawMemberSummary = await api('GET', '/api/usage/summary?window=today&org=other-org', { token: iawMemberToken })
+    check('4-1：panel.read 成员强制收敛自身组织（传入 org=other 被忽略，scope=self-org）',
+      iawMemberSummary.ok && iawMemberSummary.data.scope === 'self-org' && iawMemberSummary.data.org === iawMemberOrgId,
+      JSON.stringify({ scope: iawMemberSummary.data?.scope, org: iawMemberSummary.data?.org }))
+    const iawDenied = await api('GET', '/api/usage/summary', { token: iawMachine })
+    check('4-1：无 panel.read 主体被拒 403', iawDenied.status === 403, String(iawDenied.status))
+
+    // 4-2：一组全新 up/down 反馈 → 聚合口径与采纳率
+    const fbUp = await api('POST', '/api/usage/feedback', { token: iawMemberToken, body: { resource: 'panel:mfg.qb01', messageId: 'iaw-msg-up-1', score: 'up' } })
+    const fbDown = await api('POST', '/api/usage/feedback', { token: iawMemberToken, body: { resource: 'panel:mfg.qb01', messageId: 'iaw-msg-down-1', score: 'down' } })
+    check('4-2：反馈落账（零价快照 up/down 各一条）', fbUp.ok && fbDown.ok, JSON.stringify({ up: fbUp.error, down: fbDown.error }))
+    await api('POST', '/api/usage/feedback', { token: iawMemberToken, body: { resource: 'panel:mfg.qb01', messageId: 'iaw-msg-up-2', score: 'up' } })
+    const fbReplayIaw = await api('POST', '/api/usage/feedback', { token: iawMemberToken, body: { resource: 'panel:mfg.qb01', messageId: 'iaw-msg-up-1', score: 'up' } })
+    check('4-2：同键重放幂等（不重复计数）', fbReplayIaw.ok && fbReplayIaw.data.event_id === fbUp.data.event_id)
+    const fbStats = await api('GET', '/api/usage/feedback-stats?days=7', { token: iawMemberToken })
+    const iawRow = (fbStats.data?.byResource ?? []).find((row) => row.resource === 'panel:mfg.qb01')
+    check('4-2：采纳率聚合（自测行 up=2/down=1，adoptionRate≈0.667，scope 收敛自身组织）',
+      fbStats.ok && fbStats.data.scope === 'self-org' && iawRow && iawRow.up === 2 && iawRow.down === 1
+      && Math.abs(iawRow.adoptionRate - 2 / 3) < 0.001 && fbStats.data.adoptionRate > 0 && fbStats.data.adoptionRate <= 1,
+      JSON.stringify({ up: iawRow?.up, down: iawRow?.down, rate: iawRow?.adoptionRate, global: fbStats.data.adoptionRate }))
+    const fbStatsAdmin = await api('GET', '/api/usage/feedback-stats?days=7', { token: admin })
+    check('4-2：usage.read 主体可跨组织聚合（scope=platform 且含同资源行）',
+      fbStatsAdmin.ok && fbStatsAdmin.data.scope === 'platform'
+      && fbStatsAdmin.data.byResource.some((row) => row.resource === 'panel:mfg.qb01' && row.up >= 2))
+  }
+
+  section('IAW 5-1/5-2：结论级证据锚点 + 场景维度审计时间线')
+  {
+    const evPost = await api('POST', '/api/audit/evidence', { token: iawMemberToken, body: {
+      sceneCode: 'QB01-G-4-1', messageId: 'iaw-msg-ev-1', subject: 'user:iaw_member',
+      anchors: [
+        { kind: 'dataset', id: 'ds_selftest_a', name: '自测数据集A', qualityScore: 92 },
+        { kind: 'query', id: 'q-77', timeWindow: { from: '2026-09-01', to: '2026-09-11' }, hitRows: 42 },
+      ],
+    } })
+    check('5-1：证据登记（2 锚点落库发 id，panel.write）', evPost.ok && evPost.data.anchors.length === 2, JSON.stringify(evPost.error))
+    const evGet = await api('GET', `/api/audit/evidence/${evPost.data.id}`, { token: iawMemberToken })
+    check('5-1：证据反查（锚点/时间窗/命中行数原样可读）',
+      evGet.ok && evGet.data.anchors[1].hitRows === 42 && evGet.data.anchors[0].qualityScore === 92 && evGet.data.sceneCode === 'QB01-G-4-1')
+    const ev404 = await api('GET', '/api/audit/evidence/evd_not_exist', { token: iawMemberToken })
+    check('5-1：不存在的证据 404', ev404.status === 404, String(ev404.status))
+    const evBad = await api('POST', '/api/audit/evidence', { token: iawMemberToken, body: { anchors: [{ kind: 'bogus', id: 'x' }] } })
+    check('5-1：非法锚点 kind 被拒 400', !evBad.ok && /kind 非法/.test(evBad.error.message), JSON.stringify(evBad.error))
+    const evMachineDenied = await api('POST', '/api/audit/evidence', { token: iawMachine, body: { anchors: [{ kind: 'doc', id: 'd1' }] } })
+    check('5-1：无 panel.write 主体登记被拒 403', evMachineDenied.status === 403, String(evMachineDenied.status))
+
+    // 5-2：任务带 sceneCode 创建/流转 → 审计时间线可反查
+    const tlTask = await api('POST', '/api/panel/mfg/tasks', { token: admin, body: { title: 'IAW 时间线自测任务', lane: 'doing', sceneCode: 'QB01-G-4-2' } })
+    check('5-2：带场景任务创建', tlTask.ok && tlTask.data.task.sceneCode === 'QB01-G-4-2', JSON.stringify(tlTask.error))
+    const tlMove = await api('POST', `/api/panel/tasks/${tlTask.data.task.id}/transition`, { token: admin, body: { lane: 'done' } })
+    check('5-2：任务流转', tlMove.ok, JSON.stringify(tlMove.error))
+    const tl = await api('GET', '/api/audit/timeline?sceneCode=QB01-G-4-2', { token: iawMemberToken })
+    const tlActions = (tl.data?.items ?? []).map((item) => item.action)
+    check('5-2：场景时间线含 create+transition（panel.read 可读，倒序）',
+      tl.ok && tlActions.includes('panel.task.create') && tlActions.includes('panel.task.transition')
+      && tl.data.items[0].at >= tl.data.items[tl.data.items.length - 1].at,
+      JSON.stringify(tlActions))
+    const tlEmpty = await api('GET', '/api/audit/timeline?sceneCode=QB01-NOPE-0-0', { token: iawMemberToken })
+    check('5-2：无痕场景时间线为空（诚实空集）', tlEmpty.ok && tlEmpty.data.total === 0 && tlEmpty.data.items.length === 0)
+    const tlDenied = await api('GET', '/api/audit/timeline', { token: iawMachine })
+    check('5-2：无 panel.read 主体被拒 403', tlDenied.status === 403, String(tlDenied.status))
+  }
+
+  section('IAW 8-1：通知中心持久化（任务/告警落账 + since/已读游标）')
+  {
+    const before = await api('GET', '/api/notifications', { token: iawMemberToken })
+    const baselineUnread = before.data?.unread ?? 0
+    // 任务事件 → 部门绑定组织范围通知（mfg 绑定组织后组织子树成员可见）
+    const ntfTask = await api('POST', '/api/panel/mfg/tasks', { token: admin, body: { title: 'IAW 通知自测任务', lane: 'todo' } })
+    check('8-1：触发事件（任务创建→流转产生 panel.task.updated）', ntfTask.ok, JSON.stringify(ntfTask.error))
+    await api('POST', `/api/panel/tasks/${ntfTask.data.task.id}/transition`, { token: admin, body: { lane: 'doing' } })
+    const after = await api('GET', '/api/notifications', { token: iawMemberToken })
+    const taskNotif = (after.data?.items ?? []).find((item) => item.type === 'task' && /IAW 通知自测任务/.test(item.title))
+    check('8-1：任务通知持久化并按组织范围可见（unread 递增）',
+      after.ok && Boolean(taskNotif) && after.data.unread >= baselineUnread + 1,
+      JSON.stringify({ count: after.data?.items?.length, unread: after.data?.unread }))
+    // 告警事件（全局范围）：告警规则 threshold=0 + 一次越权 → audit.authz.denied → 告警 → 通知
+    const ruleIaw = await api('POST', '/api/audit/alert-rules', { token: admin, body: { name: 'IAW 通知自测规则', metric: 'permission_denied', threshold: 0, severity: 'warning' } })
+    const deniedHit = await api('POST', '/api/iam/orgs', { token: iawMachine, body: { name: 'IAW 通知触发越权' } })
+    check('8-1：越权探针（403 触发 permission_denied 链路）', deniedHit.status === 403 && ruleIaw.ok, JSON.stringify({ denied: deniedHit.status }))
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    const afterAlert = await api('GET', '/api/notifications', { token: iawMemberToken })
+    check('8-1：告警通知落账（type=alert，全局范围）',
+      afterAlert.ok && (afterAlert.data.items ?? []).some((item) => item.type === 'alert' && /IAW 通知自测规则/.test(item.title)),
+      JSON.stringify(afterAlert.data?.items?.slice(0, 2).map((item) => item.title)))
+    // 已读游标 + since 增量
+    const markRead = await api('POST', '/api/notifications/read-cursor', { token: iawMemberToken, body: {} })
+    check('8-1：已读游标推进', markRead.ok && markRead.data.unread === 0, JSON.stringify(markRead.data))
+    const afterRead = await api('GET', '/api/notifications', { token: iawMemberToken })
+    check('8-1：游标后 unread=0 且历史可见（游标语义非删除）', afterRead.ok && afterRead.data.unread === 0 && afterRead.data.items.length >= 1)
+    const sinceNow = await api('GET', '/api/notifications?since=' + encodeURIComponent(markRead.data.readCursor), { token: iawMemberToken })
+    check('8-1：since 增量拉取（游标后零新增）', sinceNow.ok && sinceNow.data.items.length === 0, JSON.stringify(sinceNow.data?.items?.length))
+    const machineNotif = await api('GET', '/api/notifications', { token: iawMachine })
+    check('8-1：机器主体无个人通知面（空集诚实返回）', machineNotif.ok && machineNotif.data.items.length === 0 && /机器主体/.test(machineNotif.data.note ?? ''))
+  }
+
+  section('IAW 1-1..1-4：模型渠道分级路由 / 降级链 / 遥测 / 预算熔断')
+  {
+    // 双 stub：主渠道恒 500，备渠道正常应答
+    const gwPrimaryStub = createServer((req, res) => {
+      if ((req.url ?? '').endsWith('/chat/completions')) { res.writeHead(500).end('{"error":"primary down"}'); return }
+      res.writeHead(404).end('{}')
+    })
+    const gwBackupStub = createServer((req, res) => {
+      if ((req.url ?? '').endsWith('/chat/completions')) {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ choices: [{ message: { content: '降级链自测：备用渠道应答' } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }))
+        return
+      }
+      res.writeHead(404).end('{}')
+    })
+    await new Promise((resolve) => gwPrimaryStub.listen(0, '127.0.0.1', resolve))
+    await new Promise((resolve) => gwBackupStub.listen(0, '127.0.0.1', resolve))
+    try {
+      const primaryPort = gwPrimaryStub.address().port
+      const backupPort = gwBackupStub.address().port
+      // 1-1 分级：public 上限渠道 + secret 数据 → 直接拒绝（选择器锁死+原因）
+      const regPub = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'iaw-pub', displayName: '公开级渠道', endpoint: `http://127.0.0.1:${backupPort}/v1`, apiKey: 'stub', costCentsPerKTokens: 0, dataClassLimit: 'public' } })
+      const regSecret = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'iaw-scr', displayName: '秘密级渠道', endpoint: `http://127.0.0.1:${primaryPort}/v1`, apiKey: 'stub', costCentsPerKTokens: 1, dataClassLimit: 'secret' } })
+      const regSecretOk = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'iaw-scrok', displayName: '秘密级可用渠道', endpoint: `http://127.0.0.1:${backupPort}/v1`, apiKey: 'stub', costCentsPerKTokens: 1, dataClassLimit: 'secret' } })
+      const regBackup = await api('POST', '/api/modelgw/models', { token: admin, body: { slug: 'iaw-bkp', displayName: '内部级备用渠道', endpoint: `http://127.0.0.1:${backupPort}/v1`, apiKey: 'stub', costCentsPerKTokens: 1 } })
+      check('1-1：四渠道登记（public/secret-500/secret-ok/默认 internal）', regPub.ok && regSecret.ok && regSecretOk.ok && regBackup.ok, JSON.stringify({ pub: regPub.error, scr: regSecret.error, scrok: regSecretOk.error, bkp: regBackup.error }))
+      const gradedDeny = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'iaw-pub', messages: [{ role: 'user', content: 'x' }], orgId: iawRootOrg.id, dataClass: 'secret' } })
+      check('1-1：秘密数据 → 公开级渠道被锁死拒绝（错误含原因）',
+        gradedDeny.status === 400 && /数据分级越界/.test(gradedDeny.error.message) && /锁死/.test(gradedDeny.error.message),
+        JSON.stringify(gradedDeny.error))
+      const gradedAllow = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'iaw-scrok', messages: [{ role: 'user', content: '分级内调用' }], orgId: iawRootOrg.id, dataClass: 'secret' } })
+      check('1-1：秘密数据 → 秘密级渠道放行（真实应答）', gradedAllow.ok && gradedAllow.data.content.includes('备用渠道应答'), JSON.stringify(gradedAllow.error))
+
+      // 1-2 降级链：主(500) → 备(ok)，manual=true
+      const grpPut = await api('PUT', '/api/modelgw/channel-groups', { token: admin, body: { slug: 'iaw-grp', name: 'IAW 自测渠道组', primary: 'iaw-scr', backup1: 'iaw-bkp', manual: true, stepTimeoutMs: 2000 } })
+      check('1-2：渠道组登记（主/备/转人工）', grpPut.ok && grpPut.data.primary === 'iaw-scr' && grpPut.data.backup1 === 'iaw-bkp' && grpPut.data.manual === true, JSON.stringify(grpPut.error))
+      const fbCall = await api('POST', '/api/modelgw/channel-groups/iaw-grp/invoke', { token: admin, body: { prompt: '降级链自测' } })
+      check('1-2：主渠道 5xx → 备渠道自动接管（真实应答 + degradations 留痕）',
+        fbCall.ok && fbCall.data.ok === true && fbCall.data.model === 'iaw-bkp' && Array.isArray(fbCall.data.degradations) && fbCall.data.degradations.length === 1
+        && /HTTP 500/.test(fbCall.data.degradations[0].reason),
+        JSON.stringify({ model: fbCall.data?.model, degradations: fbCall.data?.degradations }))
+      // 1-3 遥测：主渠道失败 1 次 → 可用率下降；ttft 诚实缺列
+      const telPrimary = await api('GET', '/api/modelgw/iaw-scr/telemetry?window=7d', { token: admin })
+      check('1-3：主渠道遥测（failures>=1，availability<1，ttftMs=null 诚实缺列）',
+        telPrimary.ok && telPrimary.data.failures >= 1 && telPrimary.data.availability !== null && telPrimary.data.availability < 1
+        && telPrimary.data.ttftMs === null && /TTFT/.test(telPrimary.data.note),
+        JSON.stringify({ inv: telPrimary.data?.invocations, fail: telPrimary.data?.failures, avail: telPrimary.data?.availability }))
+      const telBackup = await api('GET', '/api/modelgw/iaw-bkp/telemetry?window=7d', { token: admin })
+      check('1-3：备用渠道遥测（degraded 标记 + TPS 代理口径）',
+        telBackup.ok && telBackup.data.invocations >= 1 && telBackup.data.degradedInvocations >= 1
+        && (telBackup.data.avgTps === null || telBackup.data.avgTps > 0),
+        JSON.stringify({ inv: telBackup.data?.invocations, deg: telBackup.data?.degradedInvocations }))
+      const tel404 = await api('GET', '/api/modelgw/iaw-none/telemetry', { token: admin })
+      check('1-3：未登记模型遥测 404', tel404.status === 404, String(tel404.status))
+
+      // 1-4 预算：org 级日预算 1 分 + block → 熔断；摘要带预算进度
+      const budgetPut = await api('PUT', '/api/modelgw/budgets', { token: admin, body: { orgId: iawRootOrg.id, dailyLimitCents: 1, monthlyLimitCents: 100, warnRatio: 0.5, action: 'block' } })
+      check('1-4：预算登记（日 1 分 block / 月 100 分）', budgetPut.ok && budgetPut.data.dailyLimitCents === 1, JSON.stringify(budgetPut.error))
+      const budgetBlocked = await api('POST', '/api/modelgw/invoke', { token: admin, body: { model: 'iaw-scr', messages: [{ role: 'user', content: '预算内调用' }], orgId: iawRootOrg.id } })
+      check('1-4：日预算触达 → 调用前熔断（错误含「预算熔断」）',
+        budgetBlocked.status === 400 && /预算熔断/.test(budgetBlocked.error.message), JSON.stringify(budgetBlocked.error))
+      const summaryBudget = await api('GET', `/api/usage/summary?window=today&org=${encodeURIComponent(iawRootOrg.id)}`, { token: admin })
+      check('1-4：成本摘要携带预算进度（budget.daily.limitCents=1）',
+        summaryBudget.ok && summaryBudget.data.budget && summaryBudget.data.budget.daily
+        && summaryBudget.data.budget.daily.limitCents === 1 && summaryBudget.data.budget.daily.breached === true,
+        JSON.stringify(summaryBudget.data?.budget))
+      // 放宽预算（action=warn + 大额），避免影响后续分节
+      const budgetRelax = await api('PUT', '/api/modelgw/budgets', { token: admin, body: { orgId: iawRootOrg.id, dailyLimitCents: 100000, monthlyLimitCents: 1000000, warnRatio: 0.99, action: 'warn' } })
+      check('1-4：预算放宽（upsert 同键覆盖）', budgetRelax.ok && budgetRelax.data.action === 'warn', JSON.stringify(budgetRelax.error))
+    } finally {
+      await new Promise((resolve) => gwPrimaryStub.close(resolve))
+      await new Promise((resolve) => gwBackupStub.close(resolve))
+    }
+  }
+
+  section('IAW 6-1：场景级授权策略（scene ABAC）与 iam.check 自检')
+  {
+    const iawMemberId = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('iaw_member'), { token: admin })).data.users.find((user) => user.username === 'iaw_member').id
+    const polPut = await api('PUT', '/api/iam/scene-policies', { token: admin, body: {
+      sceneCode: 'QB01-G-4-1',
+      entries: [
+        { principalType: 'role', principalId: '*', actions: ['scene.export'], effect: 'deny' },
+        { principalType: 'user', principalId: iawMemberId, actions: ['*'], effect: 'allow' },
+      ],
+      note: 'IAW 自测策略：全员禁导出，该成员全放行',
+    } })
+    check('6-1：策略登记（deny 导出 + 成员 allow，v1）', polPut.ok && polPut.data.version === 1, JSON.stringify(polPut.error))
+    const versionConflict = await api('PUT', '/api/iam/scene-policies', { token: admin, body: { sceneCode: 'QB01-G-4-1', expectedVersion: 99, entries: [{ principalType: 'role', principalId: '*', actions: ['x'], effect: 'allow' }] } })
+    check('6-1：version 乐观锁冲突被拒 400', versionConflict.status === 400 && /版本冲突/.test(versionConflict.error.message), JSON.stringify(versionConflict.error))
+    const checkAllow = await api('POST', '/api/iam/scene-authz/check', { token: iawMemberToken, body: { sceneCode: 'QB01-G-4-1', action: 'panel.read' } })
+    check('6-1：iam.check allow 命中（成员 allow 条目）', checkAllow.ok && checkAllow.data.decision === 'allow', JSON.stringify(checkAllow.data))
+    const checkDeny = await api('POST', '/api/iam/scene-authz/check', { token: iawMemberToken, body: { sceneCode: 'QB01-G-4-1', action: 'scene.export' } })
+    check('6-1：iam.check deny 优先命中（全员禁导出）', checkDeny.ok && checkDeny.data.decision === 'deny', JSON.stringify(checkDeny.data))
+    const checkDefault = await api('POST', '/api/iam/scene-authz/check', { token: iawMemberToken, body: { sceneCode: 'QB01-NOPE-9-9', action: 'panel.read' } })
+    check('6-1：未配置策略场景回落 default（存量 RBAC 口径不变）', checkDefault.ok && checkDefault.data.decision === 'default', JSON.stringify(checkDefault.data))
+    const polList = await api('GET', '/api/iam/scene-policies?sceneCode=QB01-G-4-1', { token: iawMemberToken })
+    check('6-1：member 无 iam.org.read 策略列表被拒 403', polList.status === 403, String(polList.status))
+    const machineCheck = await api('POST', '/api/iam/scene-authz/check', { token: iawMachine, body: { sceneCode: 'QB01-G-4-1', action: 'panel.read', userId: iawMemberId } })
+    check('6-1：机器代查被拒 403（无 iam.user.read）', machineCheck.status === 403, String(machineCheck.status))
+    const polDel = await api('DELETE', `/api/iam/scene-policies/${polPut.data.id}`, { token: admin })
+    check('6-1：策略删除（回滚自测环境）', polDel.ok && polDel.data.deleted === true)
+    const afterDel = await api('POST', '/api/iam/scene-authz/check', { token: iawMemberToken, body: { sceneCode: 'QB01-G-4-1', action: 'scene.export' } })
+    check('6-1：删除后回落 default（fail-closed 随策略移除）', afterDel.ok && afterDel.data.decision === 'default')
+  }
+
+  section('IAW 2-1..2-4：数据要素域（数据集登记/质量分/血缘/指标字典仲裁）')
+  {
+    const dsPut = await api('PUT', '/api/resource/datasets', { token: admin, body: { code: 'ds_selftest_a', name: '自测数据集A', sourceSystem: '自测台账', classification: 'secret', refreshFrequency: '每日', sceneCodes: ['QB01-G-4-1', 'QB01-G-4-2'] } })
+    check('2-1：数据集登记（分级/来源/刷新/双场景）', dsPut.ok && dsPut.data.classification === 'secret' && dsPut.data.sceneCodes.length === 2, JSON.stringify(dsPut.error))
+    await api('PUT', '/api/resource/datasets', { token: admin, body: { code: 'ds_selftest_a', name: '自测数据集A（改）', sourceSystem: '自测台账', classification: 'internal', sceneCodes: ['QB01-G-4-1'] } })
+    const dsList = await api('GET', '/api/resource/datasets?scene=QB01-G-4-1', { token: admin })
+    const dsRow = (dsList.data?.datasets ?? []).find((item) => item.code === 'ds_selftest_a')
+    check('2-1：按场景过滤 + upsert 幂等（sceneCount=1）', dsList.ok && Boolean(dsRow) && dsRow.sceneCount === 1 && dsRow.classification === 'internal', JSON.stringify(dsRow))
+    const dsQuality = await api('PUT', '/api/resource/datasets/ds_selftest_a/quality', { token: admin, body: { completeness: 90, accuracy: 80, timeliness: 100, consistency: 70 } })
+    check('2-2：质量分四维登记（等权 overall=85）', dsQuality.ok && dsQuality.data.quality.overall === 85, JSON.stringify(dsQuality.error))
+    const dsBadQuality = await api('PUT', '/api/resource/datasets/ds_selftest_a/quality', { token: admin, body: { completeness: 120, accuracy: 80, timeliness: 100, consistency: 70 } })
+    check('2-2：越界质量分被拒 400', dsBadQuality.status === 400 && /0-100/.test(dsBadQuality.error.message), JSON.stringify(dsBadQuality.error))
+    await api('PUT', '/api/resource/datasets', { token: admin, body: { code: 'ds_selftest_b', name: '自测数据集B（派生）', sourceSystem: '自测台账', classification: 'internal' } })
+    const lineagePut = await api('PUT', '/api/resource/lineage', { token: admin, body: { derived: 'ds_selftest_b', source: 'ds_selftest_a' } })
+    check('2-3：血缘边登记（派生→源）', lineagePut.ok && lineagePut.data.toId === 'ds_selftest_a', JSON.stringify(lineagePut.error))
+    const lineageUp = await api('GET', '/api/resource/lineage?dataset=ds_selftest_b', { token: admin })
+    const lineageDown = await api('GET', '/api/resource/lineage?dataset=ds_selftest_a', { token: admin })
+    check('2-3：反向追溯（B 的 upstream=A，A 的 downstream=B）',
+      lineageUp.ok && lineageUp.data.upstream.some((item) => item.code === 'ds_selftest_a')
+      && lineageDown.ok && lineageDown.data.downstream.some((item) => item.code === 'ds_selftest_b'),
+      JSON.stringify({ up: lineageUp.data?.upstream, down: lineageDown.data?.downstream }))
+    // 2-4 指标字典：口径冲突留账 + 仲裁
+    const mDef1 = await api('PUT', '/api/resource/metrics/gm_selftest/definitions', { token: admin, body: { name: '毛利额（口径一）', unit: '元', description: '收入-成本（含税口径）' } })
+    const mDefSame = await api('PUT', '/api/resource/metrics/gm_selftest/definitions', { token: admin, body: { name: '毛利额（口径一）', unit: '元', description: '收入-成本（含税口径）' } })
+    check('2-4：口径登记（首条 active；同内容幂等）', mDef1.ok && mDef1.data.definition.status === 'active' && mDefSame.data.definition.id === mDef1.data.definition.id)
+    const mDef2 = await api('PUT', '/api/resource/metrics/gm_selftest/definitions', { token: admin, body: { name: '毛利额（口径二）', unit: '元', description: '收入-成本（不含税口径）' } })
+    check('2-4：口径冲突并存（新定义 superseded 待仲裁）', mDef2.ok && mDef2.data.conflict === true && mDef2.data.definition.status === 'superseded', JSON.stringify(mDef2.data))
+    const mList = await api('GET', '/api/resource/metrics/gm_selftest/definitions', { token: admin })
+    check('2-4：定义列表双条（按时间倒序）', mList.ok && mList.data.definitions.length === 2 && mList.data.definitions[0].id === mDef2.data.definition.id)
+    const mArb = await api('POST', '/api/resource/metrics/gm_selftest/arbitrate', { token: admin, body: { definitionId: mDef2.data.definition.id } })
+    check('2-4：仲裁定版（口径二 active，取代 1 条）', mArb.ok && mArb.data.active.status === 'active' && mArb.data.superseded === 1, JSON.stringify(mArb.data))
+    const dsWriteDenied = await api('PUT', '/api/resource/datasets', { token: iawMachine, body: { code: 'ds_x', name: 'x', sourceSystem: 'x', classification: 'public' } })
+    check('2-1：无 resource.dataset.write 被拒 403', dsWriteDenied.status === 403, String(dsWriteDenied.status))
+  }
+
+  section('IAW 3-1..3-4：事务流引擎（模板库 / TF 编排 / 步骤状态机 / SLA 进度）')
+  {
+    const tplPut = await api('PUT', '/api/flow/templates', { token: admin, body: {
+      code: 'tpl_iaw_selftest', name: 'IAW 自测模板', sceneCode: 'QB01-G-4-1', slaMinutes: 120,
+      steps: [
+        { key: 's1', name: '现场复核', actorType: 'human' },
+        { key: 's2', name: 'Agent 诊断', actorType: 'agent', assignee: '设备运维 Agent' },
+        { key: 's3', name: '网关归档', actorType: 'gateway' },
+      ],
+      contextPack: { kpiRef: '一次装机合格率', window: '7d' },
+    } })
+    check('3-2：模板登记（3 步 + SLA + 上下文包）', tplPut.ok && tplPut.data.steps.length === 3, JSON.stringify(tplPut.error))
+    const tplList = await api('GET', '/api/flow/templates?sceneCode=QB01-G-4-1', { token: iawMemberToken })
+    check('3-2：按场景查模板（panel 成员 flow.read 可读）', tplList.ok && tplList.data.templates.some((item) => item.code === 'tpl_iaw_selftest'))
+    const tplDenied = await api('PUT', '/api/flow/templates', { token: iawMemberToken, body: { code: 'tpl_x', name: 'x', steps: [{ key: 'a', name: 'a', actorType: 'human' }] } })
+    check('3-2：member 无 flow.admin 被拒 403', tplDenied.status === 403, String(tplDenied.status))
+    // 实例化：模板复制推广 + 上下文包自动注入 + SLA 折算 dueAt
+    const flowCreate = await api('POST', '/api/flow/flows', { token: iawMemberToken, body: { name: 'IAW 自测事务流', templateCode: 'tpl_iaw_selftest', sceneCode: 'QB01-G-4-1', dept: 'mfg' } })
+    check('3-1/3-2：TF 模板实例化（首步 running + contextPack 注入 + dueAt 折算）',
+      flowCreate.ok && flowCreate.data.steps[0].status === 'running' && flowCreate.data.steps[1].status === 'pending'
+      && flowCreate.data.contextPack && flowCreate.data.contextPack.kpiRef === '一次装机合格率'
+      && Boolean(flowCreate.data.dueAt) && /^tf_/.test(flowCreate.data.code),
+      JSON.stringify(flowCreate.error))
+    const flowId = flowCreate.data.id
+    const wrongOrder = await api('POST', `/api/flow/flows/${flowId}/steps/s2/transition`, { token: iawMemberToken, body: { action: 'complete' } })
+    check('3-1：步骤状态机拒绝跳序（pending 不可 complete）', wrongOrder.status === 400 && /不允许/.test(wrongOrder.error.message), JSON.stringify(wrongOrder.error))
+    const s1 = await api('POST', `/api/flow/flows/${flowId}/steps/s1/transition`, { token: iawMemberToken, body: { action: 'complete', note: '复核完成' } })
+    check('3-1：s1 complete → s2 自动 running', s1.ok && s1.data.completed === false && s1.data.flow.currentStep === 's2', JSON.stringify(s1.data?.flow?.steps))
+    const s2 = await api('POST', `/api/flow/flows/${flowId}/steps/s2/transition`, { token: iawMemberToken, body: { action: 'complete' } })
+    check('3-1：s2 complete → s3 自动 running', s2.ok && s2.data.flow.currentStep === 's3')
+    const s3 = await api('POST', `/api/flow/flows/${flowId}/steps/s3/transition`, { token: iawMemberToken, body: { action: 'skip', note: '网关缺位跳过' } })
+    check('3-1：s3 skip → TF completed（进度 100）', s3.ok && s3.data.completed === true && s3.data.flow.status === 'completed' && s3.data.flow.progress === 100, JSON.stringify({ status: s3.data?.flow?.status, progress: s3.data?.flow?.progress }))
+    const flowGet = await api('GET', `/api/flow/flows/${flowId}`, { token: iawMemberToken })
+    check('3-3/3-4：TF 详情（elapsedMinutes/finishedAt/步骤时间轴齐备，甘特数据源）',
+      flowGet.ok && flowGet.data.status === 'completed' && Number.isFinite(flowGet.data.elapsedMinutes)
+      && flowGet.data.steps.every((step) => Boolean(step.startedAt)) && flowGet.data.steps.every((step) => Boolean(step.finishedAt) || step.status === 'running'),
+      JSON.stringify({ status: flowGet.data?.status }))
+    // 自由编排 + 取消
+    const flowAdhoc = await api('POST', '/api/flow/flows', { token: admin, body: { name: 'IAW 自由编排流', steps: [{ key: 'a', name: '步骤A', actorType: 'human' }], sceneCode: 'QB01-G-4-2' } })
+    const flowCancel = await api('POST', `/api/flow/flows/${flowAdhoc.data.id}/cancel`, { token: admin, body: { note: '自测取消' } })
+    check('3-1：自由编排 + 取消（status=cancelled）', flowAdhoc.ok && flowCancel.ok && flowCancel.data.status === 'cancelled', JSON.stringify(flowCancel.error))
+    const afterCancel = await api('POST', `/api/flow/flows/${flowAdhoc.data.id}/steps/a/transition`, { token: admin, body: { action: 'start' } })
+    check('3-1：已结束 TF 步骤不可流转', afterCancel.status === 400 && /已结束/.test(afterCancel.error.message), JSON.stringify(afterCancel.error))
+    const flowList = await api('GET', '/api/flow/flows?sceneCode=QB01-G-4-1&status=completed', { token: iawMemberToken })
+    check('3-1：TF 列表按场景+状态过滤（视图字段 progress/slaBreached 随行）',
+      flowList.ok && flowList.data.flows.some((item) => item.id === flowId && Number.isFinite(item.progress) && item.slaBreached === false),
+      JSON.stringify(flowList.data?.flows?.length))
+  }
+
+  // ================================================================ QA-20260912 修复批次回归（A-03 / A-04 / A-08 / B-04）
+  console.log('\n\x1b[36m━━ QA-20260912 修复批次回归（A-03 / A-04 / A-08 / B-04） ━━\x1b[0m')
+
+  // A-08：建号口令强度（'123' 不可建号，与重置口径统一）
+  const weakPwCreate = await api('POST', '/api/iam/users', { token: admin, body: { username: 'qaweak01', displayName: '弱口令靶子', orgId: newOrg.data.id, password: '123' } })
+  check('弱口令建号被拒（QA A-08：≥8 位统一口径）', !weakPwCreate.ok && /8 位/.test(weakPwCreate.error?.message ?? ''), JSON.stringify(weakPwCreate.error ?? {}))
+
+  // A-03：org_admin 组织隔离（服务层补栏）
+  const roleListQa = (await api('GET', '/api/iam/roles', { token: admin })).data.roles
+  const orgAdminRole = roleListQa.find((role) => role.code === 'org_admin')
+  const qaOrgAdminCreate = await api('POST', '/api/iam/users', { token: admin, body: { username: 'qaorgadmin', displayName: 'QA部门管理员', orgId: newOrg.data.id, password: 'Ybk@2026', roleIds: [orgAdminRole.id] } })
+  check('QA部门管理员建号（org_admin，归属自测事业部）', qaOrgAdminCreate.ok, JSON.stringify(qaOrgAdminCreate.error ?? {}))
+  const qaOrgAdminLogin = await api('POST', '/api/auth/login', { body: { username: 'qaorgadmin', password: 'Ybk@2026' } })
+  const qaOrgAdmin = qaOrgAdminLogin.data.token
+  const qaBatch01 = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('batch01'), { token: admin })).data.users[0]
+  const qaInsideReset = await api('POST', `/api/iam/users/${qaBatch01.id}/reset-password`, { token: qaOrgAdmin })
+  check('org_admin 可管理本组织子树内账号（QA A-03 正向）', qaInsideReset.ok && typeof qaInsideReset.data.initialPassword === 'string', JSON.stringify(qaInsideReset.error ?? {}))
+  const qaCascadeUser = (await api('GET', '/api/iam/users?q=' + encodeURIComponent('cascadeu01'), { token: admin })).data.users[0]
+  const qaOutsideReset = await api('POST', `/api/iam/users/${qaCascadeUser.id}/reset-password`, { token: qaOrgAdmin })
+  check('org_admin 跨组织接管被拒（QA A-03：服务层组织隔离）', !qaOutsideReset.ok && /组织隔离|组织子树/.test(qaOutsideReset.error?.message ?? ''), JSON.stringify(qaOutsideReset.error ?? {}))
+
+  // A-04：非 owner 开发者不可改写他人应用
+  const qaOwnerApp = await api('POST', '/api/apps', { token: admin, body: { name: 'QA回归-Owner校验', attrs: { description: 'QA 修复批次回归用应用（owner=admin）', appType: 'web', riskLevel: 'low' } } })
+  check('QA回归应用创建（owner=admin）', qaOwnerApp.ok && Boolean(qaOwnerApp.data.app?.id), JSON.stringify(qaOwnerApp.error ?? {}))
+  const qaForeignPatch = await api('PATCH', `/api/apps/${qaOwnerApp.data.app.id}`, { token: otherDev, body: { name: '越权改名' } })
+  check('非 owner 开发者改写他人应用被拒（QA A-04）', !qaForeignPatch.ok && /owner|负责人/.test(qaForeignPatch.error?.message ?? ''), JSON.stringify(qaForeignPatch.error ?? {}))
+  const qaOwnerPatch = await api('PATCH', `/api/apps/${qaOwnerApp.data.app.id}`, { token: admin, body: { name: 'QA回归-Owner校验（已更新）' } })
+  check('平台管理员/owner 可正常更新（QA A-04 正向）', qaOwnerPatch.ok, JSON.stringify(qaOwnerPatch.error ?? {}))
+
+  // B-04：audit/cost 的 days 参数真实生效
+  const qaCostDays = await api('GET', '/api/audit/cost?days=14', { token: admin })
+  check('audit/cost days 参数生效（QA B-04：不再被静默丢弃）', qaCostDays.ok && qaCostDays.data.days === 14 && Array.isArray(qaCostDays.data.rows), JSON.stringify(qaCostDays.data ?? qaCostDays.error).slice(0, 160))
+  const qaCostBare = await api('GET', '/api/audit/cost', { token: admin })
+  check('audit/cost 不带 days 保持全量口径（QA B-04 兼容）', qaCostBare.ok && qaCostBare.data.days === undefined)
   // ================================================================ 01门 5 键装态（plan-gate01 Phase 2）
   // 等价于 cordis.patch.yml 4-entry 装配的最小形态：仅数据面基座（platform-core 5 键）+ panel-core。
   // iam/authn/audit/usage/modelgw/mcp/skillhub 全缺席——spike 定稿：裸访问=硬抛 without inject，

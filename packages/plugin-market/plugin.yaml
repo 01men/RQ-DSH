@@ -1,0 +1,14 @@
+# 插件声明：id、版本、依赖与权限点（插件标准解剖结构）
+id: dsh-plugin-market
+version: 1.1.0
+label: 插件市场
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-authn', 'dsh-plugin-usage']
+provides:
+  services:
+    - market
+permissions:
+  - market.read
+  - market.submit
+  - market.approve
+  - market.install
+  - market.developer

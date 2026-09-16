@@ -2,7 +2,7 @@
 id: dsh-plugin-connector
 version: 1.1.0
 label: SaaS 连接器纳管
-depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam', 'dsh-plugin-audit', 'dsh-plugin-usage', 'dsh-plugin-billing']
+depends: ['dsh-plugin-platform-core', 'dsh-plugin-iam', 'dsh-plugin-audit', 'dsh-plugin-usage']
 provides:
   services:
     - connectorHub

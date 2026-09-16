@@ -2,7 +2,8 @@
 plugin: dsh-plugin-platform-core
 base: /api
 endpoints:
-  - # 平台自身无业务 REST；由 console 插件聚合暴露
+  - # 平台自身无业务 REST 页面；behavior 采集面如下（console 聚合面见 console 清单）
+  - POST /api/behavior/events（行为采集 write-only：公开挂载于 console 鉴权之后，行为层再校验主体，双层 fail-closed） · GET /api/behavior/events（读取：主体权限校验）
 
 services:
   - key: opsStorage

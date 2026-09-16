@@ -19,7 +19,7 @@ open-connector v1.4.0（Apache-2.0）作为**连接器数据面网关 + 凭证�
 三条红线（全路径有效）：
 1. **凭证零进平台**——provider 凭证只存 open-connector 保险库（AES-256-GCM）；平台连接引用无凭证字段；oct_ 值仅进程内存。
 2. **授权双出验证**——平台权限组与 oct_ 策略两层各自独立拒绝（绕过平台直连 sidecar 同样会被令牌策略拦下）。
-3. **actChain 审计 + 计量对账**——每次调用可由 runId（= `meta.executionId`）反查审计链；`GET /api/runs` 按 runtimeTokenId 与 usage trace_id 交叉校验，「有 run 无 meter」即绕行 critical 告警。
+3. **actChain 审计 + 计量对账**——每次调用可由 runId（= `meta.executionId`）反查审计链；`GET /api/connector/runs` 按 runtimeTokenId 与 usage trace_id 交叉校验，「有 run 无 meter」即绕行 critical 告警。
 
 ---
 
@@ -485,7 +485,7 @@ OAuth 连接（原生链路）：`POST /api/connector/connections/oauth` 得 `{a
 - [ ] no_auth：HackerNews 目录可见 + invoke 成功 + 平台调用日志/计量可见（`mcp:` 口径）
 - [ ] OAuth：GitHub 自备 App（`PUT /api/oauth/configs/:service` + `ALLOWED_CUSTOM_OAUTH`）→ 发起授权 → 回调 → `GET /api/connections` 出现 configured 连接；未配 client 时 `400 oauth_client_config_required` 复现（预期护栏）
 - [ ] API Key 型：`PUT /api/connections/:service` 建命名连接 → invoke 经 `x-oo-connector-alias` 路由成功
-- [ ] runs 留痕：`GET /api/runs`（Bearer ADMIN_TOKEN）可见上述调用，`runtimeTokenId`/`policy` 字段正确
+- [ ] runs 留痕：`GET /api/connector/runs`（Bearer ADMIN_TOKEN）可见上述调用，`runtimeTokenId`/`policy` 字段正确
 
 **D. 平台侧 fail-closed / 逃生验证**
 - [ ] `GET /api/connector/gateway` envChecks 正常上报强制 env 状态；`?assumeEnv={"OOMOL_CONNECT_ENCRYPTION_KEY":false}` 预演文案正确

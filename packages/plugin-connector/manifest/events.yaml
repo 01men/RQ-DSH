@@ -19,3 +19,12 @@ events:
   - name: connector.permgroup.changed
     mode: emit
     description: 权限组变更（oct_ 令牌镜像联动）
+  - name: connector.policy_mirror_failed
+    mode: emit
+    description: OPT-P1-05：令牌策略镜像失败（吊销旧令牌 + 组级 fail-closed 直至恢复）
+  - name: connector.odd_exit
+    mode: emit
+    description: OPT-P2-01：权限组 ODD 离域（provider 白名单/排除 action/目录新鲜度/时间窗，落审计）
+  - name: connector.policy_snapshot_drifted
+    mode: emit
+    description: OPT-P1-05：授权后策略快照漂移（执行侧拒绝按旧快照执行）

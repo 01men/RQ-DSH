@@ -13,6 +13,9 @@ export function apply(ctx: Context) {
   t.register(defineTool({
     name: 'usage_query',
     description: '查询资源消耗计量事件（按主体/资源/时间窗过滤，返回事件数与应收金额）。',
+    // REL-07：此前未声明权限点（缺省仅登录），audit 等无 usage.read 主体可经工具桥读到全平台计量——
+    // 与 REST 面 GET /api/usage/totals（usage.read）口径对齐
+    permission: 'usage.read',
     parameters: {
       principal: { type: 'string', description: '计费责任主体过滤（org:<id> / plugin:<id>）' },
       resource: { type: 'string', description: '资源过滤（model:<slug> / mcp:<slug> / plugin:<id>）' },

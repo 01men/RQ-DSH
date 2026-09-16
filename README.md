@@ -38,6 +38,14 @@
 > 同批加固：安全响应头默认开启（`SECURITY_HEADERS=off` 可关）、usage 事件保留策略默认 730 天
 > （`USAGE_RETENTION_DAYS`，0=永久）——详见
 > [docs/release-notes-2026-09-11-optimization.md](docs/release-notes-2026-09-11-optimization.md)。
+>
+> **IAW 缺口批次 + F 域余量反馈（2026-09-11）**：新增 **flow-core 流程编排域**（TF 编排 + 步骤状态机 /
+> 模板库 contextPack / SLA 与进度 / 甘特时间轴，[contract-c2-flow-tf.md](docs/contract-c2-flow-tf.md)）·
+> **数据要素域**（数据集登记 / 四维质量分 / 血缘反向追溯 / 指标字典口径仲裁）· **模型渠道治理**
+> （分级路由 / 渠道组降级链 / 预算熔断，[contract-c1-modelgw-channel-governance.md](docs/contract-c1-modelgw-channel-governance.md)）·
+> **Agent 自治与 A2A**（autonomy A0-A3 + 点名调用端点，[contract-c3-agent-a2a.md](docs/contract-c3-agent-a2a.md)）·
+> IAM 场景级授权（sceneCode，deny→allow→fail-closed）· 审计证据锚点与场景维度时间线 · 通知中心持久化——
+> 详见 [docs/release-notes-2026-09-11-iaw-batch.md](docs/release-notes-2026-09-11-iaw-batch.md)。
 
 ---
 
@@ -444,6 +452,14 @@ SaaS 数据面网关（roadmap 第 9 步之二「连接器市场」执行缺口�
   PII 最小化：不含手机号；已注销账号不出名册；每次拉取记 invoke 审计（谁在何时拉了多少）。
   授权：org_admin 经 `iam.*` 通配自带；应用注册凭证经「统一认证中心」追加 scope 授权。
   接入示例见 docs/app-sso-integration.md §十。
+- **应用组织架构同步 `GET /api/apps/:id/org-sync`（2026-09-15，组织模块复用，默认凭证自助）**：
+  接入应用凭自身绑定机器凭证拉取平台组织树 + 在职成员，在应用内复刻/关联平台组织架构功能
+  （组织树、部门成员、负责人识别），无需管理员追加 scope。契约：orgs[]（id/name/parentId/
+  order/status/leaderUserIds/updatedAt）+ users[]（`id`=userinfo 的 sub/username/displayName/
+  title/jobNumber/orgId/orgName/primaryOrgId/status/accountType/updatedAt）；PII 最小化
+  （无手机号/邮箱）；`version` 内容哈希 + `?ifNoneMatch=` 零载荷变更轮询，快照即事实全量对齐；
+  授权同 app 资产 owner 校验（绑定凭证/owner/管理员），每次拉取记 invoke 审计（`app.org-sync.pull`）。
+  字段契约与落地示例见 docs/app-org-sync.md。验收：selftest 新增「应用组织架构同步」分节 13 项全绿。
 - 验收：selftest 700/700（新增「连接器自动同步与全员名册」分节 16 项：到期判定/0=仅手动不巡检/
   不重复处理/名册契约/负责人链/PII 最小化/401/403/机器凭证拉取/审计留痕）；lint:manifests 75/75。
 
@@ -489,6 +505,7 @@ cordis.patch.yml            dsh.bundle 安装补丁（dsh plugin add）
 | 组织/账号/角色/用户组（§2） | 多级组织树、批量导入、账号状态机、动态/静态用户组、权限点矩阵 |
 | 三方同步与冲突（§2.1/2.3） | OrgConnector 接口 + 钉钉模拟连接器、全量同步、三种冲突策略、对比式冲突工单；**intervalMinutes 定时自动同步**（到期巡检，0=仅手动，`IAM_CONNECTOR_AUTO_SYNC=off` 停用） |
 | 组织数据通道（接入应用拉名册） | `GET /api/iam/roster`（`iam.roster.read`）：在职账号 + 组织树 + 部门负责人，机器凭证授权、invoke 审计留痕、PII 最小化（无手机号/无注销账号） |
+| 组织架构同步（应用复用组织模块） | `GET /api/apps/:id/org-sync`（默认凭证自助）：组织树 + 在职成员 + 负责人，users[].id=SSO sub 同键关联，version 哈希 + `?ifNoneMatch=` 零载荷变更轮询，invoke 审计留痕（docs/app-org-sync.md） |
 | 统一认证（§7） | 双轨身份、HMAC 短期令牌（默认 2h）、吊销/轮换、Client Credentials、机器凭证 scopes 编辑与 secret 轮换（联动吊销令牌） |
 | on-behalf-of（§5.5/6.5） | 用户→Agent 令牌链（act 叠加），审计可还原完整链路 |
 | MCP 部署/灰度/回滚（§3.2） | 草稿→验证→灰度→全量，版本不可变，一键回滚 |
@@ -591,4 +608,4 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 
 ---
 
-> 最近更新：2026-09-11 · M1-1 契约冻结 v1 齐套（J1 直调落地 + J2/J3 成文）+ 安全响应头与 usage 保留策略加固（[docs/release-notes-2026-09-11-optimization.md](docs/release-notes-2026-09-11-optimization.md)）；selftest 数量以本次运行为准。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
+> 最近更新：2026-09-15 · 审批逻辑调整——Skill 两级审批允许同一人依次完成（同人二次审批，取消原四眼原则换人限制）、审批中心提交人与审批人允许同一账号（自审自批拦截取消，权限点与高风险二次确认不变）、审批驳回支持删除（Skill 驳回记录可删；审批中心驳回审批单可删，pending/已执行单仍不可删，[docs/release-notes-2026-09-15-approval-relax.md](docs/release-notes-2026-09-15-approval-relax.md)）。此前：2026-09-14 · QA 优化批次落地——15 项安全与正确性修复（PATCH users 服务层白名单收敛防账号接管/绕过冻结、OIDC 客户端响应剥离 clientSecretHash、审批 decision 入参收口、价格簿 NaN 读侧兜底、usage_query 补权限声明封堵越权、Skill 审批四眼原则等）+ market 契约口径修正（审批表述对齐单级实现，[docs/release-notes-2026-09-13-qa-fixes.md](docs/release-notes-2026-09-13-qa-fixes.md)）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。

@@ -1,0 +1,11 @@
+# OpenAPI 摘要（REST + 工具 + 服务键）—— CLI/Skill/Web 三端对齐的唯一事实源
+plugin: dsh-plugin-market
+base: /api
+endpoints:
+  - # REST 面由 console 聚合暴露（见 console 清单 market.* 各条）；工具面如下
+tools:
+  - market_plugin_list
+services:
+  - key: market
+    access: ctx.market
+    description: 插件提交→审批→上架→安装计量；开发者门户与沙箱预检（REST 面由 console 聚合暴露）

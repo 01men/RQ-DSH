@@ -1,0 +1,44 @@
+{
+  "exemptions": [
+    {
+      "kind": "endpoint_ghost",
+      "key": "GET /api/portal",
+      "reason": "portal 为单 handler 内部前缀分发（PORTAL_API_PREFIX 环境可配，exchange.path 手工路由），无逐路由注册可供字面量提取；销账条件：portal 改造为逐路由 http.register 注册后移除本豁免（OPT-P0-01，2026-09-12）"
+    },
+    {
+      "kind": "endpoint_ghost",
+      "key": "GET /api/portal/apps",
+      "reason": "同 GET /api/portal：portal 单 handler 内部前缀分发，无字面量注册（OPT-P0-01，2026-09-12）"
+    },
+    {
+      "kind": "endpoint_ghost",
+      "key": "GET /api/portal/employees",
+      "reason": "同 GET /api/portal：portal 单 handler 内部前缀分发，无字面量注册（OPT-P0-01，2026-09-12）"
+    },
+    {
+      "kind": "endpoint_ghost",
+      "key": "GET /api/portal/skills",
+      "reason": "同 GET /api/portal：portal 单 handler 内部前缀分发，无字面量注册（OPT-P0-01，2026-09-12）"
+    },
+    {
+      "kind": "endpoint_ghost",
+      "key": "GET /api/portal/skills/:*/download",
+      "reason": "同 GET /api/portal：portal 单 handler 内部前缀分发，无字面量注册（OPT-P0-01，2026-09-12）"
+    },
+    {
+      "kind": "endpoint_ghost",
+      "key": "GET /api/portal/solutions",
+      "reason": "同 GET /api/portal：portal 单 handler 内部前缀分发，无字面量注册（OPT-P0-01，2026-09-12）"
+    },
+    {
+      "kind": "endpoint_ghost",
+      "key": "GET /api/portal/tools",
+      "reason": "同 GET /api/portal：portal 单 handler 内部前缀分发，无字面量注册（OPT-P0-01，2026-09-12）"
+    },
+    {
+      "kind": "endpoint_ghost",
+      "key": "GET /api/portal/stats",
+      "reason": "同 GET /api/portal：portal 单 handler 内部前缀分发，无字面量注册（OPT-P0-01，2026-09-12）"
+    }
+  ]
+}
