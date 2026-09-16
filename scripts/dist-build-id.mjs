@@ -11,7 +11,9 @@
  *     ——浏览器半归 build.mjs/lib/client.js 管，服务端 dist 不含它）；
  *   - 非 TS 运行期资产同布局拷贝：packages/plugin-panel-core/src/seed/demo-content.json
  *     （seed.ts 经 import.meta 同级解析，esbuild 不拷贝 JSON）——它就在 src/** 内，天然入指纹；
- *   - scripts/build-dist.mjs 自身（构建语义变化 → 全部产物过期重建）。
+ *   - scripts/build-dist.mjs 自身（构建语义变化 → 全部产物过期重建）；
+ *   - 全部文件内容 \r 归一后哈希：Windows autocrlf 工作区（CRLF）与 Linux CI 检出（LF）
+ *     必须算出同值——否则指纹变成平台相关的假新鲜（2026-09-16 CI 实证，双端各红一次）。
  */
 
 import { createHash } from 'node:crypto'
@@ -61,10 +63,15 @@ export function computeDistBuildId(rootDir) {
   for (const rel of relevant) {
     hash.update(rel)
     hash.update('\0')
-    hash.update(readFileSync(join(rootDir, rel)))
+    hash.update(stripCr(readFileSync(join(rootDir, rel))))
     hash.update('\0')
   }
   return hash.digest('hex').slice(0, 16)
+}
+
+/** 内容 \r 归一：Windows autocrlf 工作区（CRLF）与 Linux CI 检出（LF）必须算出同值。 */
+function stripCr(buf) {
+  return Buffer.from(buf.toString('utf8').replace(/\r/g, ''), 'utf8')
 }
 
 /** 读取某包 dist/.build-id 的指纹值（缺失/坏文件返回 null）。 */

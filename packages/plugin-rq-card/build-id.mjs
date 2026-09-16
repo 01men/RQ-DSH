@@ -11,6 +11,8 @@
  * 【指纹输入】src/client/**（排除 *.test.mjs）+ src/wire.ts + build.mjs + package.json，
  * 按排序后的相对路径与内容顺序喂 sha256，取前 16 位十六进制。任何影响浏览器半行为或
  * 构建形状的改动都会改变指纹；测试文件不参与（改测试不应强制重建）。
+ * 全部内容 \r 归一后哈希：Windows autocrlf 工作区（CRLF）与 Linux CI 检出（LF）必须
+ * 算出同值——否则指纹变成平台相关的假新鲜（2026-09-16 CI 实证）。
  */
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
@@ -45,12 +47,17 @@ export function computeClientBuildId(pkgRoot = PKG_ROOT) {
   for (const rel of listFiles(clientDir)) {
     if (rel.endsWith('.test.mjs')) continue
     hash.update(rel)
-    hash.update(readFileSync(join(clientDir, rel)))
+    hash.update(stripCr(readFileSync(join(clientDir, rel))))
   }
-  hash.update(readFileSync(join(pkgRoot, 'src', 'wire.ts')))
-  hash.update(readFileSync(join(pkgRoot, 'build.mjs')))
-  hash.update(readFileSync(join(pkgRoot, 'package.json')))
+  hash.update(stripCr(readFileSync(join(pkgRoot, 'src', 'wire.ts'))))
+  hash.update(stripCr(readFileSync(join(pkgRoot, 'build.mjs'))))
+  hash.update(stripCr(readFileSync(join(pkgRoot, 'package.json'))))
   return hash.digest('hex').slice(0, 16)
+}
+
+/** 内容 \r 归一：Windows autocrlf 工作区（CRLF）与 Linux CI 检出（LF）必须算出同值。 */
+function stripCr(buf) {
+  return Buffer.from(buf.toString('utf8').replace(/\r/g, ''), 'utf8')
 }
 
 /**
