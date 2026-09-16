@@ -23,28 +23,65 @@
 
 ---
 
-## 二、人工部署 runbook（形态 A）
+## 二、人工部署 runbook（形态 A · 可执行 checklist）
+
+> 每一步都给出「命令 + 预期输出」：预期不符即停，按右侧排障列处理后再继续。
+
+### 步骤 0：环境预检
+
+- [ ] `node -v` → **v22.6+**（原生跑 TS，无构建步骤）
+      ✘ 低于 22.6：升级 Node 后继续，不要绕过（老版本无法直接执行 src/main.ts）
+
+### 步骤 1：获取代码与依赖
 
 ```bash
-# 1. 获取代码
 git clone <仓库地址> ops-platform && cd ops-platform
-
-# 2. 安装依赖
-npm install
-
-# 3. 生产初始化（关键：绝不在生产设置 DEMO_SEED=1）
-#    admin 口令必须显式指定，否则随机生成一次性写入 data/admin-initial-password.txt
-export ADMIN_PASSWORD='<强口令>'          # Windows PowerShell: $env:ADMIN_PASSWORD='...'
-npm start -- --port 7300 --data ./data    # 首次启动执行基线初始化（内置角色+根组织+admin，零演示数据）
-
-# 4. 验证
-curl -X POST localhost:7300/api/auth/login -H 'content-type: application/json' \
-     -d '{"username":"admin","password":"<口令>"}'        # 应返回 token
-npm run selftest                                          # 端到端断言（隔离实例，不碰生产数据）
-npm run lint:manifests                                    # 60 项清单校验
+npm install                # 预期：无 ERR 结尾；package-lock 未变时秒级完成
 ```
 
-进程守护（Linux systemd 示例）：
+### 步骤 2：首次启动（基线初始化向导）
+
+```bash
+# 生产：口令必须显式指定（不设则随机生成一次性写入 data/admin-initial-password.txt）
+export ADMIN_PASSWORD='<强口令>'            # Windows PowerShell: $env:ADMIN_PASSWORD='...'
+npm start -- --port 7300 --data ./data
+```
+
+- [ ] 日志出现「平台基线初始化完成」+ 「上线三步走」引导框（首启一次性）
+- [ ] 日志出现「榕器|企业AI资源管理平台已启动」与「控制台地址：http://0.0.0.0:7300」
+- [ ] `curl -s http://127.0.0.1:7300/api/health` → `{"status":"ok",...}`
+- [ ] （若未设 ADMIN_PASSWORD）确认 `data/admin-initial-password.txt` 已生成，**读完立即转到步骤 4 改密**
+
+### 步骤 3：功能验证
+
+```bash
+# 登录（预期返回 token 字段）
+curl -s -X POST localhost:7300/api/auth/login -H 'content-type: application/json' \
+     -d '{"username":"admin","password":"<口令>"}'
+# 首启状态（预期 initialPasswordPending=true——口令文件还在服务器时为 true，改密删文件后变 false）
+curl -s http://127.0.0.1:7300/api/platform/bootstrap
+```
+
+- [ ] 登录返回 token；浏览器打开控制台，登录页出现黄色「首次部署提示」横幅（口令文件未删时）
+- [ ] 质量门（隔离实例，不碰生产数据）：`npm run selftest` 全绿、`npm run lint:manifests` 0 红
+
+### 步骤 4：收尾（安全接管）
+
+- [ ] 控制台修改 admin 口令（右上角头像 → 修改密码）
+- [ ] 删除服务器 `data/admin-initial-password.txt` → `curl -s http://127.0.0.1:7300/api/platform/bootstrap` 变 `initialPasswordPending:false`，登录页横幅消失
+- [ ] （供应链加固，可选但推荐）发布清单验签：
+
+```bash
+# 发布方（一次性）：生成密钥对 → 私钥自持，公钥登记平台
+node scripts/release-manifest.mjs --generate-key --key-file /secure/release-key.pem
+# 管理员侧（一次性）：登记公钥 + 开启强制（顺序不能反，未登记公钥时开启会被拒绝）
+curl -X POST localhost:7300/api/update/settings -H "authorization: Bearer <token>" \
+     -H 'content-type: application/json' -d '{"releasePublicKey":"<公钥 base64>"}'
+curl -X POST localhost:7300/api/update/settings -H "authorization: Bearer <token>" \
+     -H 'content-type: application/json' -d '{"requireSignedManifests":true}'
+```
+
+### 步骤 5：进程守护（Linux systemd 示例）
 
 ```ini
 # /etc/systemd/system/ops-platform.service
@@ -195,9 +232,11 @@ DSHCTL_URL=http://宿主IP:7300 DSHCTL_USER=admin DSHCTL_PASS=*** \
 ## 六、验收清单
 
 - [ ] `GET /` 200，控制台可登录（admin + `ADMIN_PASSWORD`）
-- [ ] `npm run selftest` 全绿、`npm run lint:manifests` 70/70
+- [ ] `npm run selftest` 全绿、`npm run lint:manifests` 0 红
 - [ ] 生产数据目录**不含**演示数据（`data/iam~users.json` 无 ops/hr/dev 等演示账号）
+- [ ] `GET /api/platform/bootstrap` 返回 `initialPasswordPending:false`（初始口令已接管收尾）
 - [ ] （形态 B）dsh web 启动且 Agent 能回答 `dshctl mcp list` 类问题
 - [ ] （形态 C）远程电脑 `connect_status` 显示 remote 模式；宿主「平台接入」页可见该客户端
 - [ ] 备份策略就位（data/ 目录定时冷备）
 - [ ] admin 初始口令已更换，演示口令 `Ybk@2026` 无法登录
+- [ ] （可选供应链加固）`GET /api/update/status` 显示 `releaseKeyConfigured:true`

@@ -34,6 +34,7 @@ import { renderApps } from './pages/apps.js'
 import { renderAudit } from './pages/audit.js'
 import { renderApprovals } from './pages/approvals.js'
 import { renderAssets } from './pages/assets.js'
+import { renderFinops } from './pages/finops.js'
 import { renderRegister } from './pages/register.js'
 import { renderPlatform } from './pages/platform.js'
 import { renderConnect } from './pages/connect.js'
@@ -59,6 +60,7 @@ const NAV = [
   ] },
   { section: '治理与运营', items: [
     { path: '#/assets', label: '资产运营', icon: 'layers', perm: 'usage.read' },
+    { path: '#/finops', label: '财务视图', icon: 'coins', perm: 'usage.read' },
     { path: '#/approvals', label: '审批中心', icon: 'checkSquare', perm: 'approval.read', badge: 'approvals' },
     { path: '#/audit', label: '审计与告警', icon: 'scroll', perm: 'audit.read', badge: 'alerts' },
     { path: '#/authn', label: '认证与令牌', icon: 'key', perm: 'authn.principal.read' },
@@ -120,6 +122,7 @@ function navigate() {
     agents: renderAgents,
     apps: renderApps,
     assets: renderAssets,
+    finops: renderFinops,
     audit: renderAudit,
     approvals: renderApprovals,
     platform: renderPlatform,

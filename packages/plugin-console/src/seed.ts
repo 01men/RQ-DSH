@@ -9,6 +9,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import { newId } from '../../platform-core/src/index.ts'
+import { recordBootstrap } from './routes/platform.ts'
 
 export async function seedAll(ctx: Context): Promise<void> {
   if (ctx.iam.orgs().count() === 0) {
@@ -35,7 +36,8 @@ function seedBaseline(ctx: Context): void {
   const logger = ctx.logger('seed')
   logger.info('首次启动，正在初始化平台基线（内置角色 + 根组织 + 平台管理员）…')
   ctx.iam.ensureBuiltinRoles()
-  const root = ctx.iam.createOrg({ name: process.env.ORG_NAME ?? '元冰可集团' })
+  const orgName = process.env.ORG_NAME ?? '元冰可集团'
+  const root = ctx.iam.createOrg({ name: orgName })
   const roleSuper = ctx.iam.roles().findOne((role) => role.code === 'super_admin')!
   const { user: admin, initialPassword } = ctx.iam.createUser({
     username: 'admin',
@@ -47,15 +49,27 @@ function seedBaseline(ctx: Context): void {
   })
   ctx.iam.users().update(admin.id, { status: 'active' })
   void admin
+  let passwordFile: string | undefined
   if (initialPassword) {
     const file = join(ctx.opsStorage.dataDirPath, 'admin-initial-password.txt')
     if (!existsSync(file)) {
       writeFileSync(file, `平台管理员 admin 的初始口令（仅生成一次；首次登录后请妥善保管并删除本文件）：\n${initialPassword}\n`, 'utf8')
     }
+    passwordFile = file
     logger.info(`平台管理员 admin 初始口令已生成，写入 ${file}（请立即登录并妥善保管）`)
   } else {
     logger.info('平台管理员 admin 已按 ADMIN_PASSWORD 环境变量初始化')
   }
+  recordBootstrap(ctx, { mode: 'baseline', orgName, ...(passwordFile ? { initialPasswordFile: passwordFile } : {}) })
+  // 首启引导（M2 部署产品化）：管理员打开控制台前的「三步走」，对齐 docs/deploy-enterprise.md checklist
+  logger.info([
+    '',
+    '┌─ 首次启动完成 · 上线三步走（详见 docs/deploy-enterprise.md）────────────',
+    '│ ① 用上方初始口令以 admin 登录控制台（地址见启动日志「控制台地址」行）',
+    '│ ② 立即修改 admin 口令，并删除服务器上的 admin-initial-password.txt',
+    '│ ③ 从「资产登记」接入第一类 AI 资产（模型路由 / MCP / Agent / 应用 / Skill / NAS）',
+    '└──────────────────────────────────────────────────────────────────────',
+  ].join('\n'))
   logger.info('平台基线初始化完成。如需完整演示数据：设 DEMO_SEED=1 并清空数据目录后重启')
 }
 
@@ -63,6 +77,7 @@ function seedBaseline(ctx: Context): void {
 async function seedDemo(ctx: Context): Promise<void> {
   const logger = ctx.logger('seed')
   logger.info('首次启动（DEMO_SEED=1），正在初始化演示数据…')
+  recordBootstrap(ctx, { mode: 'demo', orgName: '元冰可集团' })
 
   // -- 组织树 --------------------------------------------------------------
   const root = ctx.iam.createOrg({ name: '元冰可集团' })

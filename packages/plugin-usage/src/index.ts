@@ -599,8 +599,245 @@ export class UsageService extends Service {
     }
   }
 
-  // -- 价格簿 ---------------------------------------------------------------
+  // -- FinOps 成本穿透与空转检测（M2） ---------------------------------------
 
+  /**
+   * FinOps 成本穿透（CFO 视图 v1）：月度窗口内 org×model 交叉透视 + 上月环比 + Top 消耗主体。
+   * 金额口径与 J4 一致：cost_cents 内部采购成本参考（charge_cents 零价快照恒 0，不参与穿透）。
+   * matrix 取 Top 8 部门 × Top 8 模型（按成本降序），其余并入「其他」，防小样本淹没主结论。
+   */
+  costPenetration(month?: string): FinOpsCostPenetration {
+    const period = month ?? new Date().toISOString().slice(0, 7)
+    if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period)) throw new Error('报表月份格式应为 YYYY-MM（月份 01-12）')
+    const [from, to] = periodBoundsIso(period)
+    const [prevFrom, prevTo] = month === undefined ? currentPrevMonthBoundsIso() : prevMonthBoundsIso(period)
+    const tokensExpr = "COALESCE(SUM((SELECT SUM(CAST(json_extract(m.value, '$.value') AS INTEGER)) FROM json_each(e.meters_json) m WHERE json_extract(m.value, '$.key') LIKE '%tokens%')), 0)"
+    const costExpr = "COALESCE(SUM(CAST(json_extract(e.pricing_json, '$.cost_cents') AS INTEGER)), 0)"
+
+    const windowTotals = (lo: string, hi: string): { events: number; cost_cents: number; tokens: number } => {
+      const row = this.ctx.txnStore.sql<{ events: number; cost_cents: number; tokens: number }>(
+        `SELECT COUNT(*) AS events, ${costExpr} AS cost_cents, ${tokensExpr} AS tokens FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ?`,
+        [lo, hi],
+      )[0] ?? { events: 0, cost_cents: 0, tokens: 0 }
+      return { events: Number(row.events), cost_cents: Number(row.cost_cents), tokens: Number(row.tokens) }
+    }
+    const deltaPct = (cur: number, prev: number): number | null =>
+      prev === 0 ? (cur === 0 ? 0 : null) : Math.round(((cur - prev) / prev) * 1000) / 10
+
+    const orgRows = this.ctx.txnStore.sql<{ org: string; events: number; tokens: number; cost_cents: number }>(
+      `SELECT e.org AS org, COUNT(*) AS events, ${tokensExpr} AS tokens, ${costExpr} AS cost_cents FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ? GROUP BY e.org ORDER BY cost_cents DESC, events DESC`,
+      [from, to],
+    )
+    const prevByOrg = new Map(this.ctx.txnStore.sql<{ org: string; cost_cents: number }>(
+      `SELECT e.org AS org, ${costExpr} AS cost_cents FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ? GROUP BY e.org`,
+      [prevFrom, prevTo],
+    ).map((row) => [row.org, Number(row.cost_cents)]))
+    // 每部门的 Top 模型（成本占比）——一次 SQL 按 org×model 聚合后内存取 Top3
+    const orgModelRows = this.ctx.txnStore.sql<{ org: string; resource: string; cost_cents: number }>(
+      `SELECT e.org AS org, e.resource AS resource, ${costExpr} AS cost_cents FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ? AND e.resource LIKE 'model:%' GROUP BY e.org, e.resource`,
+      [from, to],
+    )
+    const modelsByOrg = new Map<string, Array<{ model: string; cost_cents: number }>>()
+    for (const row of orgModelRows) {
+      const list = modelsByOrg.get(row.org) ?? []
+      list.push({ model: row.resource.slice('model:'.length), cost_cents: Number(row.cost_cents) })
+      modelsByOrg.set(row.org, list)
+    }
+
+    const byOrg: FinOpsDimRow[] = orgRows.map((row) => {
+      const cost = Number(row.cost_cents)
+      const topModels = (modelsByOrg.get(row.org) ?? [])
+        .sort((a, b) => b.cost_cents - a.cost_cents).slice(0, 3)
+        .map((item) => ({ model: item.model, cost_cents: item.cost_cents, share: cost > 0 ? Math.round((item.cost_cents / cost) * 1000) / 10 : 0 }))
+      return {
+        dimension: row.org,
+        events: Number(row.events),
+        tokens: Number(row.tokens),
+        cost_cents: cost,
+        prev_cost_cents: prevByOrg.get(row.org) ?? 0,
+        delta_pct: deltaPct(cost, prevByOrg.get(row.org) ?? 0),
+        ...(topModels.length > 0 ? { topModels } : {}),
+      }
+    })
+
+    const byModel: FinOpsDimRow[] = this.ctx.txnStore.sql<{ resource: string; events: number; tokens: number; cost_cents: number }>(
+      `SELECT e.resource AS resource, COUNT(*) AS events, ${tokensExpr} AS tokens, ${costExpr} AS cost_cents FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ? AND e.resource LIKE 'model:%' GROUP BY e.resource ORDER BY cost_cents DESC, events DESC`,
+      [from, to],
+    ).map((row) => {
+      const cost = Number(row.cost_cents)
+      const prev = Number((this.ctx.txnStore.sql<{ cost_cents: number }>(
+        `SELECT ${costExpr} AS cost_cents FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ? AND e.resource = ?`,
+        [prevFrom, prevTo, row.resource],
+      )[0] ?? { cost_cents: 0 }).cost_cents)
+      return {
+        dimension: row.resource.slice('model:'.length),
+        events: Number(row.events),
+        tokens: Number(row.tokens),
+        cost_cents: cost,
+        prev_cost_cents: prev,
+        delta_pct: deltaPct(cost, prev),
+      }
+    })
+
+    // org×model 交叉矩阵（Top8×Top8，行列各带「其他」兜底项；总计恒 = 全口径成本）
+    const topOrgs = byOrg.slice(0, 8).map((row) => row.dimension)
+    const topModels = byModel.slice(0, 8).map((row) => row.dimension)
+    const orgIndex = new Map(topOrgs.map((org, i) => [org, i]))
+    const modelIndex = new Map(topModels.map((model, i) => [model, i]))
+    const R = topOrgs.length
+    const C = topModels.length
+    const byModelKey = new Map(byModel.map((row) => [row.dimension, row]))
+    const cells: number[][] = Array.from({ length: R + 1 }, () => Array<number>(C + 1).fill(0))
+    for (const row of orgModelRows) {
+      const model = row.resource.slice('model:'.length)
+      const i = orgIndex.get(row.org) ?? R
+      const j = modelIndex.get(model) ?? C
+      cells[i]![j]! += Number(row.cost_cents)
+    }
+    const totals = windowTotals(from, to)
+    const prevTotals = windowTotals(prevFrom, prevTo)
+    // 「其他」行/列 = 该部门/模型在 model 域的全量 − Top8 直角和（注意行口径必须同为 model 域，
+    // 不能用 byOrg 全资源成本，否则矩阵混入非模型成本、总计失守）；角格保持第一步循环的原始累加
+    // （org 与 model 双双超出 Top8 的成本天然落在 cells[R][C]），矩阵总计恒等于全口径 model 成本
+    const orgModelTotal = new Map<string, number>()
+    for (const row of orgModelRows) orgModelTotal.set(row.org, (orgModelTotal.get(row.org) ?? 0) + Number(row.cost_cents))
+    for (let i = 0; i < R; i++) {
+      cells[i]![C] = (orgModelTotal.get(topOrgs[i]!) ?? 0) - cells[i]!.slice(0, C).reduce((sum, v) => sum + v, 0)
+    }
+    for (let j = 0; j < C; j++) {
+      const modelFull = byModelKey.get(topModels[j]!)?.cost_cents ?? 0
+      cells[R]![j] = modelFull - Array.from({ length: R }, (_, i) => cells[i]![j]!).reduce((sum, v) => sum + v, 0)
+    }
+
+    const topSubjects = this.ctx.txnStore.sql<{ subject: string; org: string; events: number; cost_cents: number }>(
+      `SELECT e.subject AS subject, e.org AS org, COUNT(*) AS events, ${costExpr} AS cost_cents FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ? GROUP BY e.subject, e.org ORDER BY cost_cents DESC, events DESC LIMIT 10`,
+      [from, to],
+    ).map((row) => ({ subject: row.subject, org: row.org, events: Number(row.events), cost_cents: Number(row.cost_cents) }))
+
+    return {
+      month: period,
+      from,
+      to,
+      prevFrom,
+      prevTo,
+      totals: { ...totals, prev_cost_cents: prevTotals.cost_cents, delta_pct: deltaPct(totals.cost_cents, prevTotals.cost_cents) },
+      byOrg,
+      byModel,
+      matrix: { orgs: topOrgs, models: topModels, cells },
+      topSubjects,
+    }
+  }
+
+  /**
+   * FinOps 空转检测 v1（近似口径）：「窗口内无后续动作调用的模型调用」。
+   * 规划口径（M2）：空转 = 无业务结果回传的调用，先以「无后续动作」近似——
+   *   模型调用发生后的 idleWindowMinutes 内，同一主体（subject）没有任何非模型资源动作
+   *  （skill:/mcp:/nas:/app:/connector:/kb: 等），且其 trace_id 未关联任何动作事件 → 计为疑似空转。
+   * 已知误报：纯对话（模型调用后直接答复用户、无工具调用）会计入——页面须标注「近似口径、需人工复核」，
+   * 精确口径等 M4 证据引擎的 task_success/task_fail 结果回传（零费率计量键）落地后替换。
+   */
+  idleAnalysis(filter: { from?: string; to?: string; month?: string; idleWindowMinutes?: number } = {}): FinOpsIdleAnalysis {
+    let from = filter.from ?? ''
+    let to = filter.to ?? ''
+    let month = filter.month
+    if (!from || !to) {
+      month = month ?? new Date().toISOString().slice(0, 7)
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error('报表月份格式应为 YYYY-MM（月份 01-12）')
+      ;[from, to] = periodBoundsIso(month)
+    }
+    const idleWindowMs = Math.min(Math.max(Number(filter.idleWindowMinutes ?? 30), 1), 24 * 60) * 60_000
+
+    interface ModelEventRow { occurred_at: string; subject: string; org: string; resource: string; trace_id: string; meters_json: string; cost_cents: number }
+    const costExpr = "COALESCE(CAST(json_extract(e.pricing_json, '$.cost_cents') AS INTEGER), 0)"
+    const modelRows = this.ctx.txnStore.sql<ModelEventRow & { cost_cents: number }>(
+      `SELECT e.occurred_at, e.subject, e.org, e.resource, e.trace_id, e.meters_json, ${costExpr} AS cost_cents FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ? AND e.resource LIKE 'model:%' ORDER BY e.subject, e.occurred_at`,
+      [from, to],
+    ).map((row) => ({ ...row, cost_cents: Number(row.cost_cents) }))
+    // 动作时间线（非模型事件）：按主体分组的升序时间戳 + trace 索引（trace 内有动作即视为有业务结果）
+    const actionRows = this.ctx.txnStore.sql<{ subject: string; occurred_at: string; trace_id: string }>(
+      "SELECT e.subject, e.occurred_at, e.trace_id FROM usage_events e WHERE e.occurred_at >= ? AND e.occurred_at < ? AND e.resource NOT LIKE 'model:%' ORDER BY e.subject, e.occurred_at",
+      [from, to],
+    )
+    const actionsBySubject = new Map<string, number[]>()
+    const tracesWithAction = new Set<string>()
+    for (const row of actionRows) {
+      const list = actionsBySubject.get(row.subject) ?? []
+      list.push(new Date(row.occurred_at).getTime())
+      actionsBySubject.set(row.subject, list)
+      if (row.trace_id) tracesWithAction.add(row.trace_id)
+    }
+    for (const list of actionsBySubject.values()) list.sort((a, b) => a - b)
+
+    const modelTotals = { events: modelRows.length, cost_cents: 0, tokens: 0 }
+    const idle = { events: 0, cost_cents: 0, tokens: 0 }
+    const byModel = new Map<string, { model: string; events: number; cost_cents: number; idle_events: number; idle_cost_cents: number }>()
+    const byOrg = new Map<string, { org: string; events: number; cost_cents: number; idle_events: number; idle_cost_cents: number }>()
+    const samples: FinOpsIdleAnalysis['samples'] = []
+    const meterTokens = (metersJson: string): number => {
+      try {
+        const meters = JSON.parse(metersJson) as Array<{ key: string; value: number }>
+        return meters.filter((m) => m.key.includes('tokens')).reduce((sum, m) => sum + (Number(m.value) || 0), 0)
+      } catch { return 0 }
+    }
+    for (const row of modelRows) {
+      const tokens = meterTokens(row.meters_json)
+      modelTotals.cost_cents += row.cost_cents
+      modelTotals.tokens += tokens
+      const model = row.resource.slice('model:'.length)
+      const modelBucket = byModel.get(model) ?? { model, events: 0, cost_cents: 0, idle_events: 0, idle_cost_cents: 0 }
+      modelBucket.events++
+      modelBucket.cost_cents += row.cost_cents
+      const orgBucket = byOrg.get(row.org) ?? { org: row.org, events: 0, cost_cents: 0, idle_events: 0, idle_cost_cents: 0 }
+      orgBucket.events++
+      orgBucket.cost_cents += row.cost_cents
+
+      const at = new Date(row.occurred_at).getTime()
+      const timeline = actionsBySubject.get(row.subject) ?? []
+      // 二分：主体在 [at, at+window] 内是否还有非模型动作（含边界：动作与调用同一时刻也算有后续）
+      let followUp = false
+      let lo = 0
+      let hi = timeline.length
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (timeline[mid]! < at) lo = mid + 1
+        else hi = mid
+      }
+      for (let i = lo; i < timeline.length && timeline[i]! <= at + idleWindowMs; i++) { followUp = true; break }
+      if (!followUp && row.trace_id && tracesWithAction.has(row.trace_id)) followUp = true
+      if (followUp) {
+        byModel.set(model, modelBucket)
+        byOrg.set(row.org, orgBucket)
+        continue
+      }
+      idle.events++
+      idle.cost_cents += row.cost_cents
+      idle.tokens += tokens
+      modelBucket.idle_events++
+      modelBucket.idle_cost_cents += row.cost_cents
+      orgBucket.idle_events++
+      orgBucket.idle_cost_cents += row.cost_cents
+      byModel.set(model, modelBucket)
+      byOrg.set(row.org, orgBucket)
+      if (samples.length < 20) {
+        samples.push({ occurred_at: row.occurred_at, subject: row.subject, org: row.org, resource: row.resource, cost_cents: row.cost_cents, tokens })
+      }
+    }
+    const share = modelTotals.cost_cents > 0 ? Math.round((idle.cost_cents / modelTotals.cost_cents) * 1000) / 10 : 0
+    const pick = <T extends { events: number }>(map: Map<string, T>): T[] => [...map.values()].sort((a, b) => b.idle_cost_cents - a.idle_cost_cents || b.events - a.events)
+    return {
+      ...(month !== undefined ? { month } : {}),
+      from,
+      to,
+      idleWindowMinutes: Math.round(idleWindowMs / 60_000),
+      totals: modelTotals,
+      idle: { ...idle, share_pct: share },
+      byModel: pick(byModel),
+      byOrg: pick(byOrg),
+      samples,
+    }
+  }
+
+  // -- 价格簿 ---------------------------------------------------------------
   priceBook(): Collection<PriceBookEntry> {
     return this.ctx.opsStorage.collection<PriceBookEntry>('usage:priceBook')
   }
@@ -858,11 +1095,67 @@ interface ReportRow {
   nonbillable_events: number
 }
 
+/** FinOps 成本穿透行（部门/模型维度 + 上月环比 + 部门行的 Top 模型拆分）。 */
+export interface FinOpsDimRow {
+  dimension: string
+  events: number
+  tokens: number
+  cost_cents: number
+  prev_cost_cents: number
+  /** 环比百分比：(本期−上期)/上期×100，保留 1 位小数；上期为 0 且本期非 0 时为 null（无可比基数）。 */
+  delta_pct: number | null
+  /** 部门行的 Top3 模型拆分（模型行无此字段）。 */
+  topModels?: Array<{ model: string; cost_cents: number; share: number }>
+}
+
+/** FinOps 成本穿透（CFO 视图 v1）聚合结果。 */
+export interface FinOpsCostPenetration {
+  month: string
+  from: string
+  to: string
+  prevFrom: string
+  prevTo: string
+  totals: { events: number; cost_cents: number; tokens: number; prev_cost_cents: number; delta_pct: number | null }
+  byOrg: FinOpsDimRow[]
+  byModel: FinOpsDimRow[]
+  /** org×model 成本交叉矩阵（Top8×Top8 + 「其他」行列；cells[org][model]，单位分）。 */
+  matrix: { orgs: string[]; models: string[]; cells: number[][] }
+  topSubjects: Array<{ subject: string; org: string; events: number; cost_cents: number }>
+}
+
+/** FinOps 空转检测 v1（近似口径：「无后续动作的模型调用」）聚合结果。 */
+export interface FinOpsIdleAnalysis {
+  month?: string
+  from: string
+  to: string
+  idleWindowMinutes: number
+  /** 窗口内模型调用全口径（分母）。 */
+  totals: { events: number; cost_cents: number; tokens: number }
+  /** 疑似空转汇总（share_pct = 空转成本占模型调用总成本比例）。 */
+  idle: { events: number; cost_cents: number; tokens: number; share_pct: number }
+  byModel: Array<{ model: string; events: number; cost_cents: number; idle_events: number; idle_cost_cents: number }>
+  byOrg: Array<{ org: string; events: number; cost_cents: number; idle_events: number; idle_cost_cents: number }>
+  /** 最近空转样本（≤20 条，供人工复核近似口径误报）。 */
+  samples: Array<{ occurred_at: string; subject: string; org: string; resource: string; cost_cents: number; tokens: number }>
+}
+
 /** 月度报表期间边界：[当月 1 日 00:00, 次月 1 日 00:00)。 */
 function periodBoundsIso(period: string): [string, string] {
   const [year, month] = period.split('-').map(Number)
   const next = month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`
   return [`${period}-01T00:00:00`, `${next}-01T00:00:00`]
+}
+
+/** 上一月期间边界（FinOps 环比分母窗口）。 */
+function prevMonthBoundsIso(period: string): [string, string] {
+  const [year, month] = period.split('-').map(Number)
+  const prev = month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, '0')}`
+  return periodBoundsIso(prev)
+}
+
+/** 当前月与上一月的边界（month 未显式指定时的环比口径）。 */
+function currentPrevMonthBoundsIso(): [string, string] {
+  return prevMonthBoundsIso(new Date().toISOString().slice(0, 7))
 }
 
 interface UsageRow {
