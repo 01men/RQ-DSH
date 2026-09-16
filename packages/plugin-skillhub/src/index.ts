@@ -5,7 +5,7 @@
  *                        → published(版本化上架)。
  * - 提交前置校验：格式/元数据完整性、恶意代码静态扫描、敏感信息检测。
  * - 两级审批：领域负责人（业务适用性）→ 平台管理员（安全合规）；
- *   高风险 Skill（外联/写文件）需安全团队加签。
+ *   高风险 Skill（外联/写文件）需安全团队加签；允许同一人依次通过两级（同人二次审批）。
  * - 版本不可变：新版本上架不覆盖旧版，支持弃用标记与强制下架。
  * - 下载/安装即登记依赖关系（接入 Agent 时自动回填关联 Skill 列表）。
  */
@@ -262,16 +262,10 @@ export class SkillHubService extends Service {
     }
     if (level === 'domain' && target.status !== 'pending_domain') throw new Error('领域审批已完成，当前等待安全审批')
     if (level === 'security' && target.status !== 'pending_security') throw new Error('高风险 Skill 才需要安全加签，当前等待领域审批')
-    // REL-03：两级审批四眼原则——security 加签人须与 domain 审批人不同账号，
-    // 否则同一人可连过两级直接让版本 approved
-    if (level === 'security') {
-      const domainApproval = target.approvals.find((item) => item.level === 'domain')
-      if (domainApproval && domainApproval.approverId === approver.id) {
-        throw new Error('安全加签须与领域审批人不同账号（两级审批不得同一人连过，REL-03）')
-      }
-    }
+    // 同人连审放开（原 REL-03 四眼原则已按业务要求取消）：允许同一审批人依次完成
+    // domain 与 security 两级（二次审批），不再强制换人；两级顺序与状态机不变。
     if (target.approvals.some((item) => item.level === level && item.approverId === approver.id)) {
-      throw new Error('同一审批人不可重复审批')
+      throw new Error('同一审批人不可重复审批同一级')
     }
     const approvals = [...target.approvals, { level, approverId: approver.id, approverName: approver.name, opinion, at: now() }]
     const needSecurity = skill.riskLevel === 'high'

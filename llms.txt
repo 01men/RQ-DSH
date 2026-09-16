@@ -6,10 +6,10 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 
 ## 核心能力（均为已实现功能）
 
-- 统一身份与访问管理（IAM）：多级组织树、角色/用户组、权限点矩阵、钉钉连接器定时自动同步、全员名册 API（`GET /api/iam/roster`，PII 最小化）
+- 统一身份与访问管理（IAM）：多级组织树、角色/用户组、权限点矩阵、钉钉连接器定时自动同步、全员名册 API（`GET /api/iam/roster`，PII 最小化）、应用组织架构同步（`GET /api/apps/:id/org-sync`，默认凭证自助复用平台组织模块，version 零载荷轮询）
 - 统一认证与 SSO：OIDC Provider（RS256/JWKS/PKCE S256/refresh 轮转/end_session/revoke）、应用上线门禁双点、owner 自助签发、钉钉免密登录
 - MCP 部署服务：草稿→验证→灰度→全量、版本不可变、一键回滚、令牌网关（权限组/Tool 粒度/只读约束）、熔断、P95 监控
-- Skill 市场：提交→静态扫描（恶意代码/密钥泄露自动驳回）→两级审批（security 加签与 domain 审批须不同账号，四眼原则）→版本化上架，Ed25519 契约验签，安装包可直传 NAS
+- Skill 市场：提交→静态扫描（恶意代码/密钥泄露自动驳回）→两级审批（允许同一人依次完成 domain 与 security 两级二次审批）→版本化上架，Ed25519 契约验签，安装包可直传 NAS
 - Agent 本体与 AI 应用本体：注册颁发机器凭证、on-behalf-of 令牌链、编排拓扑一图穿透、PV/UV/DAU 指标（主动上报 + 公开访客埋点 beacon）；自治分级（A0-A3）与 A2A 点名调用端点
 - 流程编排（flow-core）：TF 编排 + 步骤状态机、模板库 + contextPack、SLA 与进度、甘特时间轴（`/api/flow/*`，`flow.*` 事件入总线与面板 SSE 扇出）
 - 数据要素域：数据集登记、四维质量分、血缘反向追溯、指标字典口径仲裁

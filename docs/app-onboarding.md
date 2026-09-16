@@ -29,7 +29,10 @@
    注意：web/h5 形态应用未完成 SSO 签发无法上线（上线门禁），SSO 不是可选项。
    钉钉扫码等三方登录由平台登录页承接，应用不直接对接钉钉 SDK；钉钉组织通讯录由平台连接器
    定时自动同步（README「连接器定时自动同步」），应用按需消费即可，不必自己拉通讯录。
-   组织名册：人事/绩效类应用可经机器凭证拉取全员名册 GET /api/iam/roster
+   组织架构同步：应用内要做组织树/部门成员/负责人等组织功能时，凭默认机器凭证自助拉取
+   GET /api/apps/<appId>/org-sync（users[].id 即 sub 同一关联键；?ifNoneMatch=<version> 零载荷轮询变更；
+   无需管理员追加授权），字段契约与落地示例见 docs/app-org-sync.md。
+   组织名册：人事/绩效类应用需要 email 等更全字段时，可经机器凭证拉取全员名册 GET /api/iam/roster
    （需管理员为凭证追加 iam.roster.read scope；users[].id 即 sub 同一关联键、orgs[].leaderUserIds
    为部门负责人同步链），接入示例见 docs/app-sso-integration.md §十。
 

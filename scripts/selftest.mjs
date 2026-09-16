@@ -729,10 +729,10 @@ try {
   check('分配角色', assign.ok && assign.data.roleIds.length === 1)
   check('开发者角色默认含 agent.write（与 app.write 对称，注册/提报更新闭环）', devRole.permissions.includes('agent.write'))
 
-  // QA A-05 双人审批准备：第二平台管理员（与发起人不同账号）——自审自批已被服务端拦截
+  // 第二审批人账号（与发起人不同账号）：供异人审批/复核类断言使用（同人审批放开后非必需，保留覆盖双人路径）
   const superRole = roleList.data.roles.find((role) => role.code === 'super_admin')
   const approverCreate = await api('POST', '/api/iam/users', { token: admin, body: { username: 'approver02', displayName: '第二审批人', orgId: newOrg.data.id, password: 'Ybk@2026', roleIds: [superRole.id] } })
-  check('第二审批人账号就绪（QA A-05 双人审批）', approverCreate.ok && approverCreate.data.roleIds.length === 1)
+  check('第二审批人账号就绪', approverCreate.ok && approverCreate.data.roleIds.length === 1)
   const approverLogin = await api('POST', '/api/auth/login', { body: { username: 'approver02', password: 'Ybk@2026' } })
   check('第二审批人可登录', approverLogin.ok && typeof approverLogin.data.token === 'string')
   const approver = approverLogin.data.token
@@ -1995,6 +1995,40 @@ try {
   const rosterAudit = await api('GET', '/api/audit/logs?type=invoke&q=roster', { token: admin })
   check('名册拉取留痕（invoke 审计含 machine actor）', rosterAudit.ok && JSON.stringify(rosterAudit.data).includes('iam.roster.pull'))
 
+  // 应用组织架构同步（org-sync：默认凭证自助复用平台组织模块，2026-09-15）
+  section('应用组织架构同步（org-sync：绑定凭证自助拉平台组织树，version 轮询）')
+  const orgSyncApp = await api('POST', '/api/apps', { token: admin, body: { name: '组织同步验收应用', attrs: { description: 'org-sync 组织模块复用验收', appType: 'web', riskLevel: 'low', dataClass: 'internal' } } })
+  check('注册组织同步验收应用（自动带默认机器凭证）', orgSyncApp.ok && Boolean(orgSyncApp.data?.credential?.clientId), JSON.stringify(orgSyncApp.error))
+  const orgSyncAppId = orgSyncApp.data.app.id
+  const orgSyncCc = await api('POST', '/api/auth/client-credentials', { body: { clientId: orgSyncApp.data.credential.clientId, clientSecret: orgSyncApp.data.credential.clientSecret } })
+  const orgSync1 = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`, { token: orgSyncCc.data?.token })
+  check('应用默认凭证自助拉取组织快照 200（orgs+users+version）',
+    orgSync1.ok && Array.isArray(orgSync1.data.orgs) && Array.isArray(orgSync1.data.users) && /^[0-9a-f]{16}$/.test(orgSync1.data.version ?? ''), JSON.stringify(orgSync1.error ?? orgSync1.data).slice(0, 200))
+  const orgSyncText = orgSync1.ok ? JSON.stringify(orgSync1.data) : ''
+  check('org-sync PII 最小化（无 email/phone/口令/三方绑定）',
+    orgSyncText !== '' && !orgSyncText.includes('"email"') && !orgSyncText.includes('"phone"') && !orgSyncText.includes('passwordHash') && !orgSyncText.includes('"bindings"'))
+  check('org-sync 含部门负责人字段与成员组织归属（组织模块复用要素）',
+    orgSync1.ok && orgSync1.data.orgs.some((org) => Array.isArray(org.leaderUserIds)) && orgSync1.data.users.length > 0 && orgSync1.data.users.every((user) => Boolean(user.orgId)))
+  const orgSync2 = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`, { token: orgSyncCc.data?.token })
+  check('version 内容哈希幂等（同内容再拉 version 不变）', orgSync2.ok && orgSync2.data.version === orgSync1.data.version)
+  const orgSyncUnchanged = await api('GET', `/api/apps/${orgSyncAppId}/org-sync?ifNoneMatch=${orgSync1.data.version}`, { token: orgSyncCc.data?.token })
+  check('ifNoneMatch 命中返回 unchanged（零载荷轮询）', orgSyncUnchanged.ok && orgSyncUnchanged.data.unchanged === true && orgSyncUnchanged.data.orgs === undefined)
+  const orgSyncOrgCreate = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '同步验收临时部门' } })
+  check('平台新增组织成功（构造变更源）', orgSyncOrgCreate.ok, JSON.stringify(orgSyncOrgCreate.error))
+  const orgSync3 = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`, { token: orgSyncCc.data?.token })
+  check('组织变更后 version 变化且新组织入快照',
+    orgSync3.ok && orgSync3.data.version !== orgSync1.data.version && orgSync3.data.orgs.some((org) => org.name === '同步验收临时部门'))
+  const orgSyncStale = await api('GET', `/api/apps/${orgSyncAppId}/org-sync?ifNoneMatch=${orgSync1.data.version}`, { token: orgSyncCc.data?.token })
+  check('过期 ifNoneMatch 不命中（回落全量快照）', orgSyncStale.ok && orgSyncStale.data.unchanged === false && Array.isArray(orgSyncStale.data.orgs))
+  const orgSyncNoAuth = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`)
+  check('未认证拉取组织快照 401', orgSyncNoAuth.status === 401)
+  const orgSyncDenied = await api('GET', `/api/apps/${orgSyncAppId}/org-sync`, { token: rosterDeniedCc.data?.token })
+  check('无 app.read 的他应用凭证 403', orgSyncDenied.status === 403)
+  const orgSyncAudit = await api('GET', '/api/audit/logs?type=invoke&q=org-sync', { token: admin })
+  check('org-sync 拉取留痕（invoke 审计 app.org-sync.pull）', orgSyncAudit.ok && JSON.stringify(orgSyncAudit.data).includes('app.org-sync.pull'))
+  const orgSyncOrgDelete = await api('DELETE', `/api/iam/orgs/${orgSyncOrgCreate.data.id}`, { token: admin, body: {} })
+  check('验收临时组织清理成功', orgSyncOrgDelete.ok, JSON.stringify(orgSyncOrgDelete.error))
+
   mcpStub.close()
   ddStub.close()
 
@@ -2301,14 +2335,13 @@ try {
   })
   check('直达票据：伪造票据被拒', redeemForged.status === 400)
 
-  // L4 上线（QA A-05）：自审自批被服务端拦截——发起人自审被拒，第二审批人复核通过后自动执行
+  // L4 上线（2026-09-15 同人审批放开）：提交人与审批人允许同一账号——发起人自审直接通过并自动执行
+  // （原 QA A-05 自审自批拦截已按业务决策取消；approver 账号保留，供其余双人流程断言使用）
   const onlineRequest = await api('POST', `/api/agents/${selfAgent.id}/transition`, { token: admin, body: { action: 'online', note: '自测上线' } })
   check('上线生成 L4 审批单', onlineRequest.ok && onlineRequest.data.approval.status === 'pending')
 
-  const selfApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '自审通过', confirmed: true } })
-  check('发起人自审被拒（自审自批拦截，QA A-05）', !selfApprove.ok && /自审自批/.test(selfApprove.error?.message ?? ''), JSON.stringify(selfApprove.error ?? {}).slice(0, 160))
-  const dualApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: approver, body: { decision: 'approve', opinion: '第二审批人复核通过', confirmed: true } })
-  check('第二审批人通过后自动执行上线', dualApprove.ok && dualApprove.data.status === 'executed')
+  const selfApprove = await api('POST', `/api/approvals/${onlineRequest.data.approval.id}/decide`, { token: admin, body: { decision: 'approve', opinion: '自审通过（同人审批放开）', confirmed: true } })
+  check('发起人自审通过并自动执行上线（同人审批放开）', selfApprove.ok && selfApprove.data.status === 'executed', JSON.stringify(selfApprove.error ?? {}).slice(0, 160))
   const agentAfter = await api('GET', `/api/agents/${selfAgent.id}`, { token: admin })
   check('Agent 状态已上线', agentAfter.data.status === 'online')
 
@@ -3172,6 +3205,12 @@ try {
   check('票据一次性（重放 401）', ticketReplay.status === 401)
   const badTicket = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=nastk_bogus`)
   check('未知票据 401', badTicket.status === 401)
+  // 分享链接票据（mode=link，前端「复制下载链接」场景）：TTL 内可重复消费
+  const linkTicketResp = await api('POST', `/api/nas/${nasId}/fs/download-ticket`, { token: admin, body: { path: '/skillhub/selftest/a.zip', mode: 'link' } })
+  check('签发分享链接票据（mode=link，TTL 600s）', linkTicketResp.ok && linkTicketResp.data.expiresInSec === 600)
+  const linkFile1 = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=${encodeURIComponent(linkTicketResp.data.ticket)}`)
+  const linkFile2 = await fetch(`http://127.0.0.1:${PORT}/api/nas/${nasId}/fs/file?path=${encodeURIComponent('/skillhub/selftest/a.zip')}&ticket=${encodeURIComponent(linkTicketResp.data.ticket)}`)
+  check('链接票据 TTL 内可重复消费', linkFile1.ok && linkFile2.ok)
   const nasAudit = await api('GET', `/api/audit/logs?resourceId=${nasId}&limit=20`, { token: admin })
   check('写类文件操作审计留痕', (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.mkdir') && (nasAudit.data?.items ?? []).some((l) => l.action === 'nas.fs.upload'))
 

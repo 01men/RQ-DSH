@@ -7,6 +7,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
+import { createHash } from 'node:crypto'
 import {
   PlatformEvents, newId,
   type Collection, type RecordBase, type ResourceTypeSpec, type TopologyNode,
@@ -420,6 +421,63 @@ export class AppRegistryService extends Service {
     return clients[0]!
   }
 
+  // -- 组织架构同步（应用自助复用平台组织模块） -----------------------------
+
+  /**
+   * 组织架构快照（REST /api/apps/:id/org-sync，应用自助通道）：
+   * 接入应用凭自身绑定机器凭证（或 owner 身份）拉取平台组织树与在职成员，
+   * 在应用内复刻/关联平台组织架构功能（组织树、部门成员、负责人识别）。
+   * 关联键：users[].id 即 OIDC userinfo 的 sub，登录身份直接挂到部门/负责人。
+   * PII 最小化：不含手机号/邮箱/角色/三方绑定（更全字段走 /api/iam/roster，
+   * 须管理员追加 iam.roster.read）；已注销（deactivated）账号不出现。
+   * version 为内容哈希（排序后稳定）：组织/成员任一变更即变，
+   * 接入方以 ?ifNoneMatch= 轮询实现零载荷变更检测；快照即事实，变更后全量对齐覆盖本地副本。
+   */
+  orgSnapshot(appId: string, opts: { ifNoneMatch?: string } = {}): {
+    unchanged: boolean
+    version: string
+    generatedAt?: string
+    orgs?: Array<{ id: string; name: string; parentId: string | null; order: number; status: string; leaderUserIds: string[]; updatedAt: string }>
+    users?: Array<{ id: string; username: string; displayName: string; title: string; jobNumber: string; orgId: string; orgName: string; primaryOrgId?: string; status: string; accountType?: string; updatedAt: string }>
+  } {
+    if (!this.ctx.resourceCore.get('app', appId)) throw new Error(`应用不存在：${appId}`)
+    const orgNames = new Map(this.ctx.iam.orgs().all().map((org) => [org.id, org.name]))
+    const orgs = this.ctx.iam.orgs().all()
+      .map((org) => ({
+        id: org.id,
+        name: org.name,
+        parentId: org.parentId,
+        order: org.order,
+        status: org.status,
+        leaderUserIds: this.ctx.iam.leadersOf(org.id),
+        updatedAt: org.updatedAt,
+      }))
+      .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, 'zh-Hans-CN') || a.id.localeCompare(b.id))
+    const users = this.ctx.iam.users().all()
+      .filter((user) => user.status !== 'deactivated')
+      .map((user) => ({
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName,
+        title: user.title,
+        jobNumber: user.jobNumber ?? '',
+        orgId: user.orgId,
+        orgName: orgNames.get(user.orgId) ?? '',
+        ...(user.primaryOrgId !== undefined ? { primaryOrgId: user.primaryOrgId } : {}),
+        status: user.status,
+        ...(user.accountType !== undefined ? { accountType: user.accountType } : {}),
+        updatedAt: user.updatedAt,
+      }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh-Hans-CN') || a.id.localeCompare(b.id))
+    // 内容哈希（16 位足内网规模碰撞无虞）：含全部对外字段与 updatedAt，插入顺序不参与
+    const version = createHash('sha256')
+      .update(JSON.stringify({ orgs, users }))
+      .digest('hex')
+      .slice(0, 16)
+    if (opts.ifNoneMatch && opts.ifNoneMatch === version) return { unchanged: true, version }
+    return { unchanged: false, version, generatedAt: new Date().toISOString(), orgs, users }
+  }
+
   // -- 应用层指标 ---------------------------------------------------------
 
   /**
@@ -560,7 +618,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export const name = 'app'
-export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'oidc', 'audit']
+export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'authn', 'oidc', 'audit', 'iam']
 
 export function apply(ctx: Context) {
   const registry = new AppRegistryService(ctx)

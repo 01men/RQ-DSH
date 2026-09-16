@@ -741,10 +741,8 @@ export class AuditService extends Service {
     const approval = this.approvals().get(id)
     if (!approval) throw new Error(`审批单不存在：${id}`)
     if (approval.status !== 'pending') throw new Error(`审批单已处理（${approval.status}）`)
-    // QA A-05：提交人与审批人不得为同一账号（自审自批）——approve/reject 一并拦截
-    if (approverId && approverId === approval.requesterId) {
-      throw new Error('提交人与审批人不得为同一账号（自审自批拦截，QA A-05）：请交由其他审批人处理')
-    }
+    // 同人审批放开（原 QA A-05「提交人与审批人不得为同一账号」自审自批拦截已按业务决策取消，
+    // 2026-09-15）：提交人可自行通过/驳回自己的审批单，权限点（approval.decide）校验不变
     const isHighRisk = approval.riskLevel === 'high'
     if (decision === 'approve' && isHighRisk && options.confirmed !== true) {
       throw new Error('高风险审批通过需二次确认（confirmed=true），请在前端确认弹窗中复核后提交')
@@ -813,6 +811,19 @@ export class AuditService extends Service {
       approvalId: id, title: approval.title, approved: true, approverId, approverName,
     })
     return updated
+  }
+
+  /**
+   * 删除审批单（清理驳回单）：仅「已驳回」终态可删——驳回单未执行任何动作，删除只为
+   * 清理待办列表；pending/approved/executed/failed 单含执行事实，一律不可删（审计留痕不受影响）。
+   */
+  deleteApproval(id: string): void {
+    const approval = this.approvals().get(id)
+    if (!approval) throw new Error(`审批单不存在：${id}`)
+    if (approval.status !== 'rejected') {
+      throw new Error(`仅已驳回的审批单可删除，当前状态：${approval.status}`)
+    }
+    this.approvals().remove(id)
   }
 
   /**

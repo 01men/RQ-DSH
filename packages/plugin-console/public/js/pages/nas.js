@@ -4,7 +4,7 @@ import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openDrawer, openModal, confirmDialog,
   statusBadge, renderTable, collectForm, field, inputField, selectField, textareaField,
-  fmtTime, timeAgo, emptyState,
+  fmtTime, timeAgo, emptyState, copyText,
 } from '../ui.js'
 
 const NAS_STATES = [
@@ -497,9 +497,10 @@ function mountFsBrowser(host, nas, ctx) {
         { title: '大小', width: 100, render: (entry) => `<span class="col-num fs-12">${entry.isDir ? '—' : fmtBytes(entry.size)}</span>` },
         { title: '修改时间', width: 130, render: (entry) => `<span class="fs-12 text-4">${fmtEntryTime(entry.mtime)}</span>` },
         {
-          title: '操作', width: 190, render: (entry) => `
+          title: '操作', width: 230, render: (entry) => `
             <span class="flex" style="gap:4px">
-              ${!entry.isDir ? `<button class="btn btn-ghost btn-sm stop" data-download title="下载到本机">${icon('download', 12)}</button>` : ''}
+              ${!entry.isDir ? `<button class="btn btn-ghost btn-sm stop" data-download title="下载到本机">${icon('download', 12)}</button>
+              <button class="btn btn-ghost btn-sm stop" data-copylink title="复制下载链接">${icon('link', 12)}</button>` : ''}
               ${canWrite ? `<button class="btn btn-ghost btn-sm stop" data-rename title="重命名">${icon('edit', 12)}</button>` : ''}
               ${canWrite ? `<button class="btn btn-ghost btn-sm stop" data-delete title="删除" style="color:var(--danger)">${icon('trash', 12)}</button>` : ''}
             </span>`,
@@ -531,6 +532,19 @@ function mountFsBrowser(host, nas, ctx) {
           toast(`已开始下载 ${entry.name}`)
         } catch (error) { toast(error.message, 'error') }
         finally { downloadBtn.classList.remove('btn-loading') }
+      }
+      const copyLinkBtn = tr.querySelector('[data-copylink]')
+      if (copyLinkBtn) copyLinkBtn.onclick = async (e) => {
+        e.stopPropagation()
+        // 与 skill 包下载同一链路：链接打开即 attachment 流式下载；
+        // 票据为 10 分钟可复用的分享票据，避免一次性票据复制走后即刻失效
+        copyLinkBtn.classList.add('btn-loading')
+        try {
+          const { ticket } = await api.post(`/api/nas/${nas.id}/fs/download-ticket`, { path, mode: 'link' })
+          copyText(`${location.origin}/api/nas/${nas.id}/fs/file?path=${encodeURIComponent(path)}&ticket=${encodeURIComponent(ticket)}`)
+          toast('下载链接已复制，10 分钟内有效')
+        } catch (error) { toast(error.message, 'error') }
+        finally { copyLinkBtn.classList.remove('btn-loading') }
       }
       const renameBtn = tr.querySelector('[data-rename]')
       if (renameBtn) renameBtn.onclick = (e) => {

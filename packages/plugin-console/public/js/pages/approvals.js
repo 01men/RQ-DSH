@@ -1,7 +1,7 @@
 /** 审批中心：全平台 L4 高危操作汇聚（飞书审批式时间线 + IM 卡片语义）。 */
 import { api, session } from '../api.js'
 import { icon } from '../icons.js'
-import { h, $, $$, esc, toast, openDrawer, openModal, collectForm, field, textareaField, statusBadge, timeAgo, emptyState } from '../ui.js'
+import { h, $, $$, esc, toast, openDrawer, openModal, collectForm, field, textareaField, statusBadge, timeAgo, emptyState, confirmDialog } from '../ui.js'
 
 export async function renderApprovals(content, params, ctx) {
   const data = await api.get('/api/approvals')
@@ -13,7 +13,7 @@ export async function renderApprovals(content, params, ctx) {
     <div class="page-head">
       <div>
         <div class="page-title">审批中心</div>
-        <div class="page-desc">Skill 上架、Agent 上线、L4 高危操作（下线/吊销/删除）全平台汇聚；有审批权限即可单人通过。</div>
+        <div class="page-desc">Skill 上架、Agent 上线、L4 高危操作（下线/吊销/删除）全平台汇聚；有审批权限即可单人通过，已驳回单可删除清理。</div>
       </div>
     </div>
     <div class="tabs">
@@ -72,6 +72,10 @@ export async function renderApprovals(content, params, ctx) {
                 <button class="btn btn-danger-ghost btn-sm stop" data-reject="${esc(approval.id)}">驳回</button>
                 <button class="btn btn-primary btn-sm stop" data-approve="${esc(approval.id)}">通过</button>
               </div>` : ''}
+            ${approval.status === 'rejected' && session.can('approval.decide') ? `
+              <div style="flex-shrink:0">
+                <button class="btn btn-danger-ghost btn-sm stop" data-delete="${esc(approval.id)}">删除</button>
+              </div>` : ''}
           </div>
         </div>`)
       card.onclick = () => openApprovalDetail(approval.id, ctx)
@@ -79,6 +83,8 @@ export async function renderApprovals(content, params, ctx) {
       if (approveBtn) approveBtn.onclick = (e) => { e.stopPropagation(); openDecision(approval.id, 'approve', ctx, approval) }
       const rejectBtn = card.querySelector('[data-reject]')
       if (rejectBtn) rejectBtn.onclick = (e) => { e.stopPropagation(); openDecision(approval.id, 'reject', ctx, approval) }
+      const deleteBtn = card.querySelector('[data-delete]')
+      if (deleteBtn) deleteBtn.onclick = (e) => { e.stopPropagation(); deleteApproval(approval, ctx) }
       holder.appendChild(card)
     }
   }
@@ -108,7 +114,7 @@ async function openApprovalDetail(id, ctx) {
           <div class="timeline-item current">
             <div class="timeline-dot"></div>
             <div class="timeline-title">等待审批</div>
-            <div class="timeline-body">任意具有审批权限的管理员可处理（发起人本人不可审批）</div>
+            <div class="timeline-body">任意具有审批权限的成员可处理（提交人与审批人可为同一账号）</div>
           </div>` : `
           <div class="timeline-item ${approval.status === 'rejected' ? 'danger' : 'ok'}">
             <div class="timeline-dot"></div>
@@ -126,12 +132,30 @@ async function openApprovalDetail(id, ctx) {
       </div>`,
     foot: approval.status === 'pending' && session.can('approval.decide')
       ? `<button class="btn btn-danger-ghost" id="ap-reject">驳回</button><button class="btn btn-primary" id="ap-approve">通过并执行</button>`
-      : '',
+      : approval.status === 'rejected' && session.can('approval.decide')
+        ? `<button class="btn btn-danger-ghost" id="ap-delete">删除该驳回单</button>`
+        : '',
   })
   const approveBtn = drawer.el.querySelector('#ap-approve')
   if (approveBtn) approveBtn.onclick = () => { drawer.close(); openDecision(id, 'approve', ctx, approval) }
   const rejectBtn = drawer.el.querySelector('#ap-reject')
   if (rejectBtn) rejectBtn.onclick = () => { drawer.close(); openDecision(id, 'reject', ctx, approval) }
+  const drawerDeleteBtn = drawer.el.querySelector('#ap-delete')
+  if (drawerDeleteBtn) drawerDeleteBtn.onclick = () => { drawer.close(); deleteApproval(approval, ctx) }
+}
+
+/** 删除驳回审批单：仅清理已驳回单（不涉及已执行单与业务资产），服务端校验状态。 */
+async function deleteApproval(approval, ctx) {
+  const result = await confirmDialog({
+    title: `删除审批单 · ${approval.title}`, danger: true, confirmText: '确认删除',
+    message: '将删除该<b>已驳回</b>审批单（仅清理审批列表，不影响审计记录与业务资产），操作不可恢复。',
+  })
+  if (!result) return
+  try {
+    await api.delete(`/api/approvals/${approval.id}`)
+    toast('已删除驳回审批单')
+    ctx.rerender()
+  } catch (error) { toast(error.message, 'error') }
 }
 
 function openDecision(id, decision, ctx, approval) {

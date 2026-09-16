@@ -2196,13 +2196,13 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     return result
   })
 
-  /** 删除 Skill：仅已弃用/强制下架可删；被未归档 Agent 引用时拒绝；审计数据保留。 */
+  /** 删除 Skill：已弃用/强制下架/审批驳回可删；被未归档 Agent 引用时拒绝；审计数据保留。 */
   guarded('DELETE', '/api/skills/:id', 'skill.publish', (exchange) => {
     const id = exchange.params['id']!
     const skill = ctx.skillHub.skills().get(id)
     if (!skill) throw new Error(`Skill 不存在：${id}`)
-    if (!['deprecated', 'offline'].includes(skill.status)) {
-      throw new Error(`当前状态 ${skill.status} 不可删除，请先弃用该 Skill`)
+    if (!['deprecated', 'offline', 'rejected'].includes(skill.status)) {
+      throw new Error(`当前状态 ${skill.status} 不可删除（仅已弃用/强制下架/审批驳回可删）`)
     }
     const referencing = ctx.resourceCore.dependencies().find((record) => record.kind === 'skill' && record.toId === id)
       .map((record) => ctx.resourceCore.get('agent', record.fromId))
@@ -2481,12 +2481,18 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     return await ctx.nasRegistry.downloadFile(exchange.params['id']!, path, { id: info.userId ?? info.principalId, name: info.name })
   })
 
-  /** 一次性下载票据（15 秒 TTL）：浏览器 <a> 原生下载无需带 Bearer 头，大文件免内存 blob。 */
-  const downloadTickets = new Map<string, { nasId: string; path: string; userId?: string; principalId: string; userName: string; expiresAt: number }>()
+  /**
+   * 下载票据：mode=once（默认，15 秒一次性）——浏览器 <a> 原生下载无需带 Bearer 头，大文件免内存 blob；
+   * mode=link（10 分钟内可重复使用）——供「复制下载链接」把绝对地址贴到别处再打开，贴走时人尚未点击。
+   */
+  const LINK_TICKET_TTL_SEC = 600
+  const downloadTickets = new Map<string, { nasId: string; path: string; userId?: string; principalId: string; userName: string; expiresAt: number; once: boolean }>()
   guarded('POST', '/api/nas/:id/fs/download-ticket', 'nas.read', (exchange) => {
-    const { path } = body<{ path: string }>(exchange)
+    const { path, mode } = body<{ path: string; mode?: 'once' | 'link' }>(exchange)
     if (!path) throw new Error('缺少 path')
     const info = caller(exchange)
+    const once = mode !== 'link'
+    const ttlSec = once ? 15 : LINK_TICKET_TTL_SEC
     const ticket = `nastk_${newId('t')}`
     downloadTickets.set(ticket, {
       nasId: exchange.params['id']!,
@@ -2494,12 +2500,13 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
       ...(info.kind === 'human' && info.userId ? { userId: info.userId } : {}),
       principalId: info.principalId,
       userName: info.name,
-      expiresAt: Date.now() + 15_000,
+      expiresAt: Date.now() + ttlSec * 1000,
+      once,
     })
     // 清理过期票据
     for (const [key, value] of downloadTickets) if (value.expiresAt < Date.now()) downloadTickets.delete(key)
-    changeLog(exchange, 'nas.fs.download_ticket', 'nas', exchange.params['id']!, '', `${path}（一次性票据）`)
-    return { ticket, expiresInSec: 15 }
+    changeLog(exchange, 'nas.fs.download_ticket', 'nas', exchange.params['id']!, '', `${path}（${once ? '一次性票据' : `分享链接票据，${LINK_TICKET_TTL_SEC / 60} 分钟有效`}）`)
+    return { ticket, expiresInSec: ttlSec }
   })
 
   /**
@@ -2540,7 +2547,7 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
         exchange.fail(401, 'TICKET_INVALID', '下载票据缺失/过期（请重新发起下载）')
         return
       }
-      downloadTickets.delete(ticketStr) // 一次性消费
+      if (ticket.once) downloadTickets.delete(ticketStr) // 一次性票据即领即废；分享链接票据在 TTL 内可反复使用
       if (ticket.nasId !== exchange.params['id']!) {
         exchange.fail(403, 'FORBIDDEN', '下载票据与资产不匹配')
         return
@@ -3532,6 +3539,34 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     return ctx.appRegistry.metrics(id)
   })
 
+  // 组织架构同步（应用自助复用平台组织模块）：绑定本应用的机器凭证/owner 拉平台组织树+在职成员，
+  // 在应用内复刻平台组织架构功能；users[].id 即 SSO userinfo 的 sub。?ifNoneMatch=<version> 命中
+  // 返回 {unchanged:true} 零载荷轮询。PII 最小化（无手机号/邮箱）；更全字段走 /api/iam/roster
+  // （iam.roster.read，管理员追加）。批量组织数据出口，每次拉取记 invoke 审计（同 roster 口径）。
+  guarded('GET', '/api/apps/:id/org-sync', 'app.read', (exchange) => {
+    if (!assertAppOwner(exchange, exchange.params['id']!)) return
+    const id = exchange.params['id']!
+    const ifNoneMatch = exchange.query.get('ifNoneMatch') ?? undefined
+    const snapshot = ctx.appRegistry.orgSnapshot(id, { ...(ifNoneMatch ? { ifNoneMatch } : {}) })
+    const info = caller(exchange)
+    ctx.audit.record({
+      type: 'invoke',
+      actorType: info.kind === 'human' ? 'human' : 'machine',
+      actorId: info.userId ?? info.principalId,
+      actorName: info.name,
+      action: 'app.org-sync.pull',
+      resourceType: 'app',
+      resourceId: id,
+      resourceName: ctx.resourceCore.get('app', id)?.name ?? id,
+      result: 'ok',
+      detail: snapshot.unchanged
+        ? `unchanged version=${snapshot.version}`
+        : `orgs=${snapshot.orgs?.length ?? 0} users=${snapshot.users?.length ?? 0} version=${snapshot.version}`,
+      ...(info.actChain.length > 0 ? { actChain: info.actChain } : {}),
+    })
+    return snapshot
+  })
+
   guarded('POST', '/api/apps/:id/transition', 'app.write', (exchange) => {
     if (!assertAppOwner(exchange, exchange.params['id']!)) return
     const { action, note } = body<{ action: string; note?: string }>(exchange)
@@ -4117,6 +4152,16 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     return record
   })
 
+  /** 删除审批单：仅「已驳回」单可删（Skill/Agent/应用等各资产驳回单统一走此口清理）；审计数据保留。 */
+  guarded('DELETE', '/api/approvals/:id', 'approval.decide', (exchange) => {
+    const id = exchange.params['id']!
+    const record = ctx.audit.approvals().get(id)
+    if (!record) throw new Error(`审批单不存在：${id}`)
+    ctx.audit.deleteApproval(id)
+    changeLog(exchange, 'approval.delete', 'approval', id, record.title, `清理驳回审批单（kind=${record.kind}）`)
+    return { deleted: true }
+  })
+
   /** 审批 SLA 看板（WP-10）：≤2 工作日达成率可查（L2 审批周期指标口径）。 */
   guarded('GET', '/api/approvals/sla', 'approval.read', (exchange) => {
     const windowDays = Number(exchange.query.get('windowDays') ?? 30) || 30
@@ -4362,7 +4407,9 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
       const escapeHtml = (text: string) => text.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch] ?? ch)
       const files = readdirSync(docsDir).filter((name) => name.endsWith('.md')).sort()
       const items = files.map((name) => {
-        const hint = name === 'app-sso-integration.md' ? '（应用统一身份接入指南）' : ''
+      const hint = name === 'app-sso-integration.md' ? '（应用统一身份接入指南）'
+        : name === 'app-org-sync.md' ? '（应用组织架构同步指南）'
+        : name === 'app-rbac-guide.md' ? '（应用内权限（RBAC）构造指南）' : ''
         return `<li><a href="/docs/${encodeURIComponent(name)}">${escapeHtml(name)}</a>${hint}</li>`
       }).join('')
       exchange.res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
