@@ -23,9 +23,9 @@ import * as connect from '@dsh-ops/plugin-connect'
 import * as update from '@dsh-ops/plugin-update'
 import * as portal from '@dsh-ops/plugin-portal'
 import * as consolePlugin from '@dsh-ops/plugin-console'
-import * as panelCore from '@dsh-ops/plugin-panel-core'
+import * as panelCore from '@ybkk/plugin-panel-core'
 import * as flowCore from '@dsh-ops/plugin-flow-core'
-import * as dingtalkBridge from '@dsh-ops/plugin-dingtalk-bridge'
+import * as dingtalkBridge from '@ybkk/plugin-dingtalk-bridge'
 
 export interface BootOptions {
   dataDir: string
