@@ -39,6 +39,36 @@
       "kind": "endpoint_ghost",
       "key": "GET /api/portal/stats",
       "reason": "同 GET /api/portal：portal 单 handler 内部前缀分发，无字面量注册（OPT-P0-01，2026-09-12）"
+    },
+    {
+      "kind": "route_undeclared",
+      "key": "GET /rqcard/link",
+      "reason": "plugin-rq-card 无完整 manifest（宿主 P2-04 待补齐，整包 manifest_missing 豁免中）；/rqcard/link* 为 01门 link 向导路由（2026-09-11 可用性补环），销账条件：P2-04 补齐 rq-card manifest 后改正式声明并移除本组豁免"
+    },
+    {
+      "kind": "route_undeclared",
+      "key": "POST /rqcard/link/local",
+      "reason": "plugin-rq-card 无完整 manifest（宿主 P2-04 待补齐，整包 manifest_missing 豁免中）；/rqcard/link* 为 01门 link 向导路由（2026-09-11 可用性补环），销账条件：P2-04 补齐 rq-card manifest 后改正式声明并移除本组豁免"
+    },
+    {
+      "kind": "route_undeclared",
+      "key": "POST /rqcard/link/remote",
+      "reason": "plugin-rq-card 无完整 manifest（宿主 P2-04 待补齐，整包 manifest_missing 豁免中）；/rqcard/link* 为 01门 link 向导路由（2026-09-11 可用性补环），销账条件：P2-04 补齐 rq-card manifest 后改正式声明并移除本组豁免"
+    },
+    {
+      "kind": "route_undeclared",
+      "key": "POST /rqcard/link/reset",
+      "reason": "plugin-rq-card 无完整 manifest（宿主 P2-04 待补齐，整包 manifest_missing 豁免中）；/rqcard/link* 为 01门 link 向导路由（2026-09-11 可用性补环），销账条件：P2-04 补齐 rq-card manifest 后改正式声明并移除本组豁免"
+    },
+    {
+      "kind": "route_undeclared",
+      "key": "POST /rqcard/link/scan",
+      "reason": "plugin-rq-card 无完整 manifest（宿主 P2-04 待补齐，整包 manifest_missing 豁免中）；/rqcard/link* 为 01门 link 向导路由（2026-09-11 可用性补环），销账条件：P2-04 补齐 rq-card manifest 后改正式声明并移除本组豁免"
+    },
+    {
+      "kind": "route_undeclared",
+      "key": "GET /",
+      "reason": "01门根路径重定向（plugin-panel-core http.register GET /）；manifest 摘要语法不支持裸 \"/\" 路径字面量，销账条件：摘要语法支持根路径后改正式声明"
     }
   ]
 }

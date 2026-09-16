@@ -647,7 +647,7 @@ try {
     }
     check('patch 全部 entry 解析到本地模块并成功导入', broken.length === 0, broken.join(' | '))
 
-    // -- 2. 三链一致（plan-gate01 Phase 3 收缩后规则）：patch(6) id 集 ⊆ cordis.yml(22)；
+    // -- 2. 三链一致（plan-gate01 Phase 3 收缩后规则；2026-09-16 吸收上游 flow-core 后 21/23）：patch(6) id 集 ⊆ cordis.yml(23)；
     //        boot-all ↔ cordis.yml 服务面双射维持不变（防「加了包漏登记」）--
     const entryDir = (name) => {
       if (name.startsWith('@ybkk/gate-01/packages/')) return name.slice('@ybkk/gate-01/packages/'.length).split('/')[0]
@@ -665,19 +665,19 @@ try {
     const cordisDirs = cordisEntries.map((entry) => entryDir(String(entry?.name ?? ''))).filter(Boolean)
     const patchOnly = patchDirs.filter((dir) => !DSH_ONLY.has(dir) && !bootDirs.includes(dir))
     const patchNotInCordis = patchDirs.filter((dir) => !cordisDirs.includes(dir))
-    check('三链一致：patch(6) 服务面 ⊆ boot-all（dsh 专属条目豁免）且 ⊆ cordis.yml(22)',
+    check('三链一致：patch(6) 服务面 ⊆ boot-all（dsh 专属条目豁免）且 ⊆ cordis.yml(23)',
       patchOnly.length === 0 && patchNotInCordis.length === 0,
       `patchOnly=${patchOnly} patchNotInCordis=${patchNotInCordis}`)
     const cordisOnly = cordisDirs.filter((dir) => !DSH_ONLY.has(dir) && !bootDirs.includes(dir))
     const bootOnly = bootDirs.filter((dir) => !cordisDirs.includes(dir))
     check('三链一致：boot-all ↔ cordis.yml 服务面双射维持（dsh 专属条目豁免）',
-      cordisOnly.length === 0 && bootOnly.length === 0 && bootDirs.length === 20,
+      cordisOnly.length === 0 && bootOnly.length === 0 && bootDirs.length === 21,
       `cordisOnly=${cordisOnly} bootOnly=${bootOnly} bootCount=${bootDirs.length}`)
     const cordisIds = new Set(cordisEntries.map((entry) => entry?.id))
     const patchIds = new Set(patchEntries.map((entry) => entry?.id))
     const idMissing = [...patchIds].filter((id) => !cordisIds.has(id))
-    check('三链一致：patch(6) 插件 id 集 ⊆ cordis.yml(22)',
-      cordisEntries.length === 22 && idMissing.length === 0 && patchIds.size === 6,
+    check('三链一致：patch(6) 插件 id 集 ⊆ cordis.yml(23)',
+      cordisEntries.length === 23 && idMissing.length === 0 && patchIds.size === 6,
       `cordis=${cordisEntries.length} missing=${idMissing}`)
 
     // -- 3. rq-card 浏览器半 bundle 新鲜度（改 src/client 忘重建 = 过期装机包）--

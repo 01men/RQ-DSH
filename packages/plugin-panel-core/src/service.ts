@@ -959,7 +959,10 @@ export class PanelService extends Service {
   /** 审计落痕（IAW 交接 5-2）：任务/Agent 直调带 sceneCode 维度落审计时间线；失败不阻塞面板主链。 */
   private auditSafe(entry: Omit<AuditLogRecord, 'id' | 'createdAt' | 'updatedAt'>): void {
     try {
-      this.ctx.audit.record(entry)
+      // soft 读（plan-gate01 瘦身口径）：01门 5 键装态无 audit 面——缺席时静默跳过（审计面独立降级）；
+      // 全量形态正常落审计。不可写 this.ctx.audit：cordis 未 inject 的键访问即抛错，全量形态也会被吞。
+      const audit = this.ctx.reflect.get('audit', false)
+      audit?.record(entry)
     } catch { /* 审计面独立降级 */ }
   }
 

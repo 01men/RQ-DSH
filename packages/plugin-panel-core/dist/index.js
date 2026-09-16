@@ -256,6 +256,7 @@ function apply(ctx, config = {}) {
     if (!input.endpoint?.trim()) throw new Error("endpoint \u5FC5\u586B\uFF08OpenAI \u517C\u5BB9\u57FA\u5740\uFF1B\u672A\u914D\u7F6E\u4E0D\u53EF\u8C03\u7528\uFF0C\u7EDD\u4E0D\u9020\u5047\u56DE\u590D\uFF09");
     if (!Number.isFinite(input.listCentsPerKTokens) || (input.listCentsPerKTokens ?? -1) < 0) throw new Error("listCentsPerKTokens \u5FC5\u987B\u662F\u975E\u8D1F\u6570\uFF08\u6302\u724C\u4EF7\uFF0C\u5206/\u5343 tokens\uFF09");
     const status = input.status === "offline" ? "offline" : "online";
+    const dataClassLimit = input.dataClassLimit === "public" || input.dataClassLimit === "internal" || input.dataClassLimit === "secret" ? input.dataClassLimit : "internal";
     const existing = gateway.models().findOne((item) => item.slug === slug);
     const model = gateway.upsertModel({
       slug,
@@ -265,9 +266,10 @@ function apply(ctx, config = {}) {
       apiKey: input.apiKey?.trim() || existing?.apiKey || "env:MODEL_API_KEY",
       listCentsPerKTokens: input.listCentsPerKTokens,
       costCentsPerKTokens: input.costCentsPerKTokens ?? Math.floor(input.listCentsPerKTokens / 2),
-      status
+      status,
+      dataClassLimit
     });
-    changeLog(exchange, "panel.model.upsert", "model", model.id, model.slug, status === "online" ? "\u4E0A\u7EBF" : "\u4E0B\u7EBF");
+    changeLog(exchange, "panel.model.upsert", "model", model.id, model.slug, `${status === "online" ? "\u4E0A\u7EBF" : "\u4E0B\u7EBF"}\uFF0C\u5206\u7EA7\u4E0A\u9650=${dataClassLimit}`);
     return maskedModel(model);
   });
   guarded("DELETE", "/api/panel/models/:id", "panel.config.write", (exchange) => {
@@ -687,6 +689,8 @@ function apply(ctx, config = {}) {
     const info = caller(exchange);
     const approval = audit.createApproval({
       kind: "industry.activation",
+      // WP-10/L1（QA A-06）：L4 高危统一高风险——通过需二次确认 + 公司级终审标记
+      riskLevel: "high",
       title: `\u884C\u4E1A\u529F\u80FD\u5305\u6388\u6743\u6FC0\u6D3B\uFF1A${registry.name}\uFF08${code}\uFF09`,
       payload: { code, orgId, requestedBy: info.name, sub: registry.sub, graphLoaded: registry.graphLoaded },
       requesterId: info.userId ?? info.principalId,

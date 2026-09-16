@@ -191,11 +191,9 @@ function apply(ctx, config = {}) {
     return;
   }
   const redeemTicket = (ticket) => {
-    const tickets = entryTicketsAt();
-    if (!tickets || typeof tickets.redeem !== "function") {
-      throw new Error("\u8EAB\u4EFD\u9762\u672A\u5C31\u7EEA\uFF08entryTickets \u670D\u52A1\u5C1A\u672A\u88C5\u914D\uFF09\u2014\u2014\u8BF7\u7A0D\u540E\u91CD\u8BD5");
-    }
-    return tickets.redeem(ticket, "dsh-bridge");
+    const entryTickets = entryTicketsAt();
+    if (!entryTickets) throw new Error("entryTickets \u670D\u52A1\u672A\u5C31\u7EEA\uFF08\u88C5\u914D\u8FDB\u884C\u4E2D\uFF09\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5");
+    return entryTickets.redeem(ticket, "dsh-bridge");
   };
   const sameOrigin = (req) => {
     const origin = req.headers.origin;

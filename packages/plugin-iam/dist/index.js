@@ -22,6 +22,7 @@ const PermissionCatalog = [
   { point: "iam.user.freeze", label: "\u51BB\u7ED3/\u6CE8\u9500\u8D26\u53F7", group: "\u7EC4\u7EC7\u8D26\u53F7" },
   { point: "iam.role.write", label: "\u7BA1\u7406\u89D2\u8272", group: "\u7EC4\u7EC7\u8D26\u53F7" },
   { point: "iam.connector.write", label: "\u7BA1\u7406\u4E09\u65B9\u63A5\u5165", group: "\u7EC4\u7EC7\u8D26\u53F7" },
+  { point: "iam.scene.write", label: "\u7BA1\u7406\u573A\u666F\u7EA7\u6388\u6743\u7B56\u7565\uFF08\u573A\u666F ABAC\uFF09", group: "\u7EC4\u7EC7\u8D26\u53F7" },
   { point: "iam.roster.read", label: "\u8BFB\u53D6\u5168\u5458\u540D\u518C\uFF08\u7EC4\u7EC7\u6570\u636E\u901A\u9053\uFF0C\u63A5\u5165\u5E94\u7528\u62C9\u53D6\uFF09", group: "\u7EC4\u7EC7\u8D26\u53F7" },
   { point: "authn.principal.read", label: "\u67E5\u770B\u8EAB\u4EFD/\u51ED\u8BC1", group: "\u7EDF\u4E00\u8BA4\u8BC1" },
   { point: "authn.principal.write", label: "\u7BA1\u7406\u673A\u5668\u51ED\u8BC1", group: "\u7EDF\u4E00\u8BA4\u8BC1" },
@@ -60,9 +61,12 @@ const PermissionCatalog = [
   { point: "agent.write", label: "\u7BA1\u7406 Agent", group: "Agent \u672C\u4F53" },
   { point: "agent.approve", label: "\u5BA1\u6279 Agent \u4E0A\u7EBF", group: "Agent \u672C\u4F53" },
   { point: "agent.offline", label: "\u4E0B\u7EBF Agent", group: "Agent \u672C\u4F53" },
+  { point: "agent.a2a.invoke", label: "A2A \u8DE8\u8FD0\u884C\u65F6\u70B9\u540D\u8C03\u7528\uFF08IAW 7-1\uFF09", group: "Agent \u672C\u4F53" },
   { point: "app.read", label: "\u67E5\u770B AI \u5E94\u7528", group: "AI \u5E94\u7528" },
   { point: "app.write", label: "\u7BA1\u7406 AI \u5E94\u7528", group: "AI \u5E94\u7528" },
   { point: "app.offline", label: "\u4E0B\u7EBF AI \u5E94\u7528", group: "AI \u5E94\u7528" },
+  // 数据要素域（IAW 交接 2-1..2-4）：数据集登记/质量分/血缘/指标字典
+  { point: "resource.dataset.write", label: "\u7BA1\u7406\u6570\u636E\u8981\u7D20\uFF08\u6570\u636E\u96C6/\u8D28\u91CF\u5206/\u8840\u7F18/\u6307\u6807\u5B57\u5178\uFF09", group: "\u6570\u636E\u8981\u7D20" },
   { point: "audit.read", label: "\u67E5\u770B\u5BA1\u8BA1\u65E5\u5FD7", group: "\u5BA1\u8BA1" },
   { point: "audit.rule.write", label: "\u7BA1\u7406\u544A\u8B66\u89C4\u5219", group: "\u5BA1\u8BA1" },
   { point: "approval.read", label: "\u67E5\u770B\u5BA1\u6279\u4E2D\u5FC3", group: "\u5BA1\u6279" },
@@ -88,26 +92,30 @@ const PermissionCatalog = [
   { point: "panel.config.write", label: "\u9762\u677F\u914D\u7F6E\uFF08widget/KPI \u5E03\u5C40/\u56FE\u8C31\u91CD\u8F7D\uFF09", group: "\u90E8\u95E8\u9762\u677F" },
   { point: "scenegraph.read", label: "\u67E5\u770B\u884C\u4E1A\u573A\u666F\u56FE\u8C31", group: "\u90E8\u95E8\u9762\u677F" },
   { point: "scenegraph.activate", label: "\u7BA1\u7406\u884C\u4E1A\u6388\u6743\u6FC0\u6D3B\uFF08\u5BA1\u6279\u6267\u884C\uFF09", group: "\u90E8\u95E8\u9762\u677F" },
-  { point: "dingtalk.message.send", label: "\u9489\u9489\u6865\u63A5\u6D88\u606F\u6295\u9012\uFF08\u7FA4\u6865\u7ED1\u5B9A/\u63A8\u9001/\u56DE\u51B3\u56DE\u8C03\uFF09", group: "\u90E8\u95E8\u9762\u677F" }
+  { point: "dingtalk.message.send", label: "\u9489\u9489\u6865\u63A5\u6D88\u606F\u6295\u9012\uFF08\u7FA4\u6865\u7ED1\u5B9A/\u63A8\u9001/\u56DE\u51B3\u56DE\u8C03\uFF09", group: "\u90E8\u95E8\u9762\u677F" },
+  // 事务流引擎（IAW 交接 3-1..3-4，宿主新域 flow）
+  { point: "flow.read", label: "\u67E5\u770B\u4E8B\u52A1\u6D41\uFF08\u7F16\u6392/\u6A21\u677F/SLA\uFF09", group: "\u4E8B\u52A1\u6D41" },
+  { point: "flow.write", label: "\u4E8B\u52A1\u6D41\u6D41\u8F6C\uFF08\u521B\u5EFA\u5B9E\u4F8B/\u6B65\u9AA4\u63A8\u8FDB/\u53D6\u6D88\uFF09", group: "\u4E8B\u52A1\u6D41" },
+  { point: "flow.admin", label: "\u7BA1\u7406\u4E8B\u52A1\u6D41\u6A21\u677F\u5E93", group: "\u4E8B\u52A1\u6D41" }
 ];
 const BuiltinRoles = [
   { code: "super_admin", name: "\u5E73\u53F0\u8D85\u7EA7\u7BA1\u7406\u5458", builtin: true, description: "\u62E5\u6709\u5168\u90E8\u6743\u9650\u70B9", permissions: ["*"] },
   { code: "org_admin", name: "\u7EC4\u7EC7\u7BA1\u7406\u5458", builtin: true, description: "\u7BA1\u7406\u672C\u7EC4\u7EC7\u8D26\u53F7\u4E0E\u7528\u6237\u7EC4", permissions: ["console.login", "iam.*", "approval.read"] },
-  { code: "resource_admin", name: "\u8D44\u6E90\u7BA1\u7406\u5458", builtin: true, description: "\u7BA1\u7406 MCP/Skill/Agent/\u5E94\u7528/NAS/\u8FDE\u63A5\u5668\u8D44\u6E90", permissions: ["console.login", "mcp.*", "skill.*", "agent.*", "app.*", "nas.*", "authn.oidc.*", "connector.*", "approval.read"] },
+  { code: "resource_admin", name: "\u8D44\u6E90\u7BA1\u7406\u5458", builtin: true, description: "\u7BA1\u7406 MCP/Skill/Agent/\u5E94\u7528/NAS/\u8FDE\u63A5\u5668\u8D44\u6E90\u4E0E\u6570\u636E\u8981\u7D20", permissions: ["console.login", "mcp.*", "skill.*", "agent.*", "app.*", "nas.*", "authn.oidc.*", "connector.*", "resource.dataset.write", "approval.read"] },
   { code: "developer", name: "\u5F00\u53D1\u8005", builtin: true, description: "\u63D0\u4EA4\u4E0E\u8C03\u8BD5\u8D44\u6E90\uFF08\u5E94\u7528\u9650\u81EA\u8EAB owner \u8303\u56F4\uFF0C\u670D\u52A1\u7AEF\u6821\u9A8C\uFF09", permissions: ["console.login", "iam.user.read", "iam.org.read", "mcp.service.read", "mcp.invoke", "skill.read", "skill.submit", "skill.install", "agent.read", "agent.write", "app.read", "app.write", "nas.read", "connector.catalog.read", "connector.connection.read", "connector.invoke"] },
-  { code: "member", name: "\u666E\u901A\u7528\u6237", builtin: true, description: "\u6D4F\u89C8\u5E02\u573A\u4E0E\u53EF\u7528\u8D44\u6E90", permissions: ["console.login", "skill.read", "agent.read", "app.read", "panel.read", "panel.write", "panel.task.write", "scenegraph.read"] },
+  { code: "member", name: "\u666E\u901A\u7528\u6237", builtin: true, description: "\u6D4F\u89C8\u5E02\u573A\u4E0E\u53EF\u7528\u8D44\u6E90", permissions: ["console.login", "skill.read", "agent.read", "app.read", "panel.read", "panel.write", "panel.task.write", "scenegraph.read", "flow.read", "flow.write"] },
   { code: "auditor", name: "\u5BA1\u8BA1\u5458\uFF08\u53EA\u8BFB\uFF09", builtin: true, description: "\u5168\u5E73\u53F0\u53EA\u8BFB\u5BA1\u8BA1", permissions: ["console.login", "iam.org.read", "iam.user.read", "authn.principal.read", "authn.oidc.read", "mcp.service.read", "skill.read", "agent.read", "app.read", "nas.read", "audit.read", "approval.read", "connector.runs.read", "connector.connection.read"] }
 ];
 const BUILTIN_ROLE_MIGRATION = {
-  resource_admin: ["connector.gateway.write", "connector.catalog.read", "connector.connection.read", "connector.connection.write", "connector.invoke", "connector.permgroup.write", "connector.runs.read"],
+  resource_admin: ["connector.gateway.write", "connector.catalog.read", "connector.connection.read", "connector.connection.write", "connector.invoke", "connector.permgroup.write", "connector.runs.read", "resource.dataset.write", "flow.admin"],
   // developer 补 agent.write：与 app.write 对称——开发者应能注册/提报更新 Agent（2026-08 修复"总是报没有 agent.write 权限"）
-  developer: ["connector.catalog.read", "connector.connection.read", "connector.invoke", "agent.write", "panel.read", "scenegraph.read"],
+  developer: ["connector.catalog.read", "connector.connection.read", "connector.invoke", "agent.write", "panel.read", "scenegraph.read", "flow.read"],
   // auditor 补 nas.authz.read：审计员可查看 NAS 数据权限规则与判定留痕（dev-plan-nas-authz §2.3）
-  auditor: ["connector.runs.read", "connector.connection.read", "nas.authz.read", "panel.read", "scenegraph.read"],
+  auditor: ["connector.runs.read", "connector.connection.read", "nas.authz.read", "panel.read", "scenegraph.read", "flow.read"],
   // 部门面板（review-dsh-agent-panel-v2 Phase 0）：业务成员=member 直用面板；org_admin 增配置与行业激活；
   // 存量库经迁移补点，新装库直接来自 BuiltinRoles 定义（两处必须同步）
-  member: ["panel.read", "panel.write", "panel.task.write", "scenegraph.read"],
-  org_admin: ["panel.read", "panel.write", "panel.task.write", "panel.config.write", "scenegraph.read", "scenegraph.activate"]
+  member: ["panel.read", "panel.write", "panel.task.write", "scenegraph.read", "flow.read", "flow.write"],
+  org_admin: ["panel.read", "panel.write", "panel.task.write", "panel.config.write", "scenegraph.read", "scenegraph.activate", "flow.read", "flow.write", "flow.admin"]
 };
 const CONNECTOR_ROLE_MIGRATION = BUILTIN_ROLE_MIGRATION;
 class DingTalkConnector {
@@ -310,6 +318,7 @@ class IamService extends Service {
       this.applyConnectorMode(config.id);
     }
     this.autoSyncTimer = setInterval(() => void this.runDueAutoSyncs(), AUTO_SYNC_TICK_MS);
+    this.autoSyncTimer.unref?.();
     setTimeout(() => void this.runDueAutoSyncs(), AUTO_SYNC_BOOT_DELAY_MS);
     ctx.effect(() => {
       if (this.autoSyncTimer) clearInterval(this.autoSyncTimer);
@@ -451,6 +460,96 @@ class IamService extends Service {
       plan: "standard"
     });
   }
+  // -- 场景级授权（IAW 交接 6-1） ---------------------------------------------
+  scenePolicies() {
+    const collection = this.ctx.opsStorage.collection("iam:scenePolicies");
+    collection.uniqueOn("scene_org", (policy) => `${policy.sceneCode}|${policy.orgId ?? ""}`);
+    return collection;
+  }
+  /**
+   * 登记场景授权策略（upsert by sceneCode+orgId，version 乐观锁）：
+   * expectedVersion 与存量 version 不一致时拒绝（并发编辑对账）；新建不带 expectedVersion。
+   */
+  upsertScenePolicy(input) {
+    if (!input.sceneCode?.trim()) throw new Error("\u573A\u666F\u7B56\u7565 sceneCode \u5FC5\u586B\uFF08\u5982 QB01-A-2-5\uFF09");
+    if (!Array.isArray(input.entries) || input.entries.length === 0) throw new Error("\u573A\u666F\u7B56\u7565 entries \u81F3\u5C11\u4E00\u6761\uFF08\u7A7A\u7B56\u7565\u8BF7\u7528 DELETE \u79FB\u9664\uFF09");
+    for (const entry of input.entries) {
+      if (!["role", "user"].includes(entry.principalType)) throw new Error(`\u7B56\u7565\u6761\u76EE principalType \u975E\u6CD5\uFF1A${entry.principalType}\uFF08role/user\uFF09`);
+      if (!entry.principalId?.trim()) throw new Error("\u7B56\u7565\u6761\u76EE principalId \u5FC5\u586B\uFF08roleId/userId/*\uFF09");
+      if (!Array.isArray(entry.actions) || entry.actions.length === 0) throw new Error("\u7B56\u7565\u6761\u76EE actions \u81F3\u5C11\u4E00\u9879");
+      if (!["allow", "deny"].includes(entry.effect)) throw new Error(`\u7B56\u7565\u6761\u76EE effect \u975E\u6CD5\uFF1A${entry.effect}\uFF08allow/deny\uFF09`);
+      if (entry.principalType === "role" && entry.principalId !== "*" && !this.roles().get(entry.principalId)) {
+        throw new Error(`\u7B56\u7565\u6761\u76EE\u5F15\u7528\u7684\u89D2\u8272\u4E0D\u5B58\u5728\uFF1A${entry.principalId}`);
+      }
+      if (entry.principalType === "user" && entry.principalId !== "*" && !this.users().get(entry.principalId)) {
+        throw new Error(`\u7B56\u7565\u6761\u76EE\u5F15\u7528\u7684\u7528\u6237\u4E0D\u5B58\u5728\uFF1A${entry.principalId}`);
+      }
+    }
+    const existing = this.scenePolicies().findOne((item) => item.sceneCode === input.sceneCode && (item.orgId ?? "") === (input.orgId ?? ""));
+    if (existing) {
+      if (input.expectedVersion !== void 0 && input.expectedVersion !== existing.version) {
+        throw new Error(`\u573A\u666F\u7B56\u7565\u7248\u672C\u51B2\u7A81\uFF1A\u5F53\u524D v${existing.version}\uFF0C\u8BF7\u6C42\u57FA\u4E8E v${input.expectedVersion}\uFF08\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5\uFF09`);
+      }
+      const updated = this.scenePolicies().update(existing.id, {
+        entries: input.entries,
+        ...input.note !== void 0 ? { note: input.note } : {},
+        version: existing.version + 1
+      });
+      this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: input.sceneCode, orgId: input.orgId ?? null, policyId: updated.id, version: updated.version, action: "updated" });
+      return updated;
+    }
+    const created = this.scenePolicies().insert({
+      id: newId("scp"),
+      sceneCode: input.sceneCode,
+      ...input.orgId ? { orgId: input.orgId } : {},
+      entries: input.entries,
+      ...input.note ? { note: input.note } : {},
+      version: 1
+    });
+    this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: input.sceneCode, orgId: input.orgId ?? null, policyId: created.id, version: 1, action: "created" });
+    return created;
+  }
+  deleteScenePolicy(id) {
+    const policy = this.scenePolicies().get(id);
+    if (!policy) throw new Error(`\u573A\u666F\u7B56\u7565\u4E0D\u5B58\u5728\uFF1A${id}`);
+    this.scenePolicies().remove(id);
+    this.ctx.platformBus.emit(PlatformEvents.IamScenePolicyChanged, { sceneCode: policy.sceneCode, orgId: policy.orgId ?? null, policyId: id, action: "deleted" });
+    return { deleted: true };
+  }
+  /**
+   * iam.check(scene, action)（IAW 交接 6-1）：场景维度 ABAC 判定。
+   * 判定序：①场景无策略 → default（回落 hasPermission 角色链路，存量行为不变）；
+   * ②deny 条目命中（用户/角色/通配 × 动作）→ deny；③allow 命中 → allow；④其余 → deny（fail-closed）。
+   * 本判定是场景维度的**细粒度收敛**，不替代角色 RBAC：调用方应同时满足 hasPermission(基础权限点)。
+   */
+  checkScene(userId, sceneCode, action) {
+    const user = this.users().get(userId);
+    if (!user) {
+      return { decision: "deny", reason: `\u7528\u6237\u4E0D\u5B58\u5728\uFF1A${userId}`, sceneCode, action };
+    }
+    const policies = this.scenePolicies().all().filter((item) => item.sceneCode === sceneCode && ((item.orgId ?? "") === "" || item.orgId === user.orgId));
+    if (policies.length === 0) {
+      return { decision: "default", reason: "\u573A\u666F\u672A\u914D\u7F6E\u6388\u6743\u7B56\u7565\uFF0C\u56DE\u843D\u89D2\u8272 RBAC \u4E0E\u90E8\u95E8\u8303\u56F4\u6743\u9650\uFF08\u5B58\u91CF\u53E3\u5F84\uFF09", sceneCode, action };
+    }
+    const matches = (entry) => entry.principalId === "*" && entry.principalType === "role" || entry.principalType === "user" && (entry.principalId === "*" || entry.principalId === userId) || entry.principalType === "role" && user.roleIds.includes(entry.principalId);
+    const actionHit = (entry) => entry.actions.includes("*") || entry.actions.includes(action);
+    for (const policy2 of policies) {
+      for (const entry of policy2.entries) {
+        if (entry.effect === "deny" && matches(entry) && actionHit(entry)) {
+          return { decision: "deny", reason: `\u573A\u666F\u7B56\u7565 deny \u547D\u4E2D\uFF08policy=${policy2.id}\uFF09`, policyId: policy2.id, sceneCode, action };
+        }
+      }
+    }
+    for (const policy2 of policies) {
+      for (const entry of policy2.entries) {
+        if (entry.effect === "allow" && matches(entry) && actionHit(entry)) {
+          return { decision: "allow", reason: `\u573A\u666F\u7B56\u7565 allow \u547D\u4E2D\uFF08policy=${policy2.id}\uFF09`, policyId: policy2.id, sceneCode, action };
+        }
+      }
+    }
+    const policy = policies[0];
+    return { decision: "deny", reason: `\u573A\u666F\u5DF2\u914D\u7F6E\u6388\u6743\u7B56\u7565\u4E14\u65E0\u547D\u4E2D\u6761\u76EE\uFF08fail-closed\uFF0Cpolicy=${policy.id}\uFF09`, policyId: policy.id, sceneCode, action };
+  }
   createTenant(input) {
     if (!input.name?.trim()) throw new Error("\u79DF\u6237\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A");
     if (this.tenants().findOne((tenant) => tenant.name === input.name)) throw new Error(`\u79DF\u6237\u5DF2\u5B58\u5728\uFF1A${input.name}`);
@@ -538,6 +637,7 @@ class IamService extends Service {
     this.requireOrg(id);
     if (newParentId) {
       if (newParentId === id) throw new Error("\u4E0D\u80FD\u5C06\u7EC4\u7EC7\u79FB\u52A8\u5230\u81EA\u8EAB\u4E4B\u4E0B");
+      if (!this.orgs().get(newParentId)) throw new Error(`\u7236\u7EC4\u7EC7\u4E0D\u5B58\u5728\uFF1A${newParentId}`);
       let cursor = newParentId;
       while (cursor) {
         if (cursor === id) throw new Error("\u4E0D\u5141\u8BB8\u5F62\u6210\u7EC4\u7EC7\u73AF");
@@ -601,12 +701,32 @@ class IamService extends Service {
     return result;
   }
   // -- 账号 ---------------------------------------------------------------
+  /**
+   * 组织归属校验（QA A-03）：org_admin（iam.* 通配）此前可跨组织接管账号——服务层补栏：
+   * 非平台管理员（无 '*'）只允许管理本组织子树内的账号；机器主体与无法定位组织归属者
+   * 一律拒绝（fail-closed）。actor 缺省=服务内部调用（种子/三方同步/导入），不做限制。
+   */
+  assertManageScope(actor, targetOrgId, action) {
+    if (!actor) return;
+    if (actor.permissions.includes("*")) return;
+    const actorUser = actor.userId ? this.users().get(actor.userId) : void 0;
+    if (!actorUser || !this.orgSubtreeIds(actorUser.orgId).includes(targetOrgId)) {
+      throw new Error(`\u8DE8\u7EC4\u7EC7\u8D26\u53F7\u64CD\u4F5C\u88AB\u62D2\u7EDD\uFF08${action}\uFF09\uFF1A\u76EE\u6807\u4E0D\u5728\u64CD\u4F5C\u8005\u7684\u7EC4\u7EC7\u5B50\u6811\u5185\uFF08\u7EC4\u7EC7\u9694\u79BB\uFF0CQA A-03\uFF09`);
+    }
+  }
+  /** 口令强度（QA A-08）：建号与重置统一口径——≥8 位且不含中文（此前建号无校验，'123' 可建可登）。 */
+  assertPasswordStrength(password) {
+    if (password.trim().length < 8) throw new Error("\u53E3\u4EE4\u957F\u5EA6\u4E0D\u5F97\u5C11\u4E8E 8 \u4F4D");
+    if (/[\u4e00-\u9fff]/.test(password)) throw new Error("\u53E3\u4EE4\u4E0D\u5F97\u5305\u542B\u4E2D\u6587");
+  }
   /** 创建账号：未显式指定口令时生成随机初始口令（仅本次调用返回，须安全传达给本人）。 */
-  createUser(input) {
+  createUser(input, actor) {
     if (!input.username?.trim()) throw new Error("\u7528\u6237\u540D\u4E0D\u80FD\u4E3A\u7A7A");
     if (!/^[a-z0-9_.-]+$/i.test(input.username)) throw new Error("\u7528\u6237\u540D\u4EC5\u652F\u6301\u5B57\u6BCD\u3001\u6570\u5B57\u4E0E _ . -");
     if (this.users().findOne((user2) => user2.username === input.username)) throw new Error(`\u7528\u6237\u540D\u5DF2\u5B58\u5728\uFF1A${input.username}`);
     if (!this.orgs().get(input.orgId)) throw new Error(`\u7EC4\u7EC7\u4E0D\u5B58\u5728\uFF1A${input.orgId}`);
+    this.assertManageScope(actor, input.orgId, "\u521B\u5EFA\u8D26\u53F7");
+    if (input.password !== void 0) this.assertPasswordStrength(input.password);
     const salt = generateSecret("salt").slice(0, 16);
     const password = input.password ?? generateSecret("init");
     const user = this.users().insert({
@@ -627,13 +747,11 @@ class IamService extends Service {
     return input.password ? { user } : { user, initialPassword: password };
   }
   /** 重置口令：不传 password 则生成随机初始口令；传入则设置为指定口令（均仅本次返回明文）。 */
-  resetPassword(id, password) {
+  resetPassword(id, password, actor) {
     const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u91CD\u7F6E\u53E3\u4EE4");
     if (user.status === "deactivated") throw new Error("\u8D26\u53F7\u5DF2\u6CE8\u9500\uFF0C\u65E0\u6CD5\u91CD\u7F6E\u53E3\u4EE4");
-    if (password !== void 0) {
-      if (password.trim().length < 8) throw new Error("\u53E3\u4EE4\u957F\u5EA6\u4E0D\u5F97\u5C11\u4E8E 8 \u4F4D");
-      if (/[\u4e00-\u9fff]/.test(password)) throw new Error("\u53E3\u4EE4\u4E0D\u5F97\u5305\u542B\u4E2D\u6587");
-    }
+    if (password !== void 0) this.assertPasswordStrength(password);
     const next = password ?? generateSecret("init");
     const salt = generateSecret("salt").slice(0, 16);
     this.users().update(id, { passwordSalt: salt, passwordHash: hashPassword(next, salt) });
@@ -651,48 +769,63 @@ class IamService extends Service {
     }
     return { created, skipped };
   }
-  activateUser(id) {
+  activateUser(id, actor) {
     const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u6FC0\u6D3B\u8D26\u53F7");
     if (user.status !== "pending") throw new Error("\u4EC5\u5F85\u6FC0\u6D3B\u8D26\u53F7\u53EF\u6FC0\u6D3B");
     return this.users().update(id, { status: "active" });
   }
-  freezeUser(id, reason) {
-    this.requireUser(id);
+  freezeUser(id, reason, actor) {
+    const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u51BB\u7ED3\u8D26\u53F7");
     if (!reason?.trim()) throw new Error("\u51BB\u7ED3\u5FC5\u987B\u586B\u5199\u539F\u56E0\uFF08\u5BA1\u8BA1\u8981\u6C42\uFF09");
     const updated = this.users().update(id, { status: "frozen", frozenReason: reason });
     this.ctx.platformBus.emit(PlatformEvents.UserFrozen, { userId: id, username: updated.username, reason });
     return updated;
   }
-  unfreezeUser(id) {
-    this.requireUser(id);
+  unfreezeUser(id, actor) {
+    const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u89E3\u51BB\u8D26\u53F7");
     const updated = this.users().update(id, { status: "active", frozenReason: void 0 });
     this.ctx.platformBus.emit(PlatformEvents.UserActivated, { userId: id });
     return updated;
   }
-  deactivateUser(id, reason) {
-    this.requireUser(id);
+  deactivateUser(id, reason, actor) {
+    const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u6CE8\u9500\u8D26\u53F7");
     if (!reason?.trim()) throw new Error("\u6CE8\u9500\u5FC5\u987B\u586B\u5199\u539F\u56E0");
     const updated = this.users().update(id, { status: "deactivated", frozenReason: reason });
     this.ctx.platformBus.emit(PlatformEvents.UserFrozen, { userId: id, username: updated.username, reason: `\u6CE8\u9500\uFF1A${reason}` });
     return updated;
   }
-  updateUser(id, patch) {
-    this.requireUser(id);
-    if (patch.orgId && !this.orgs().get(patch.orgId)) throw new Error(`\u7EC4\u7EC7\u4E0D\u5B58\u5728\uFF1A${patch.orgId}`);
+  updateUser(id, patch, actor) {
+    const allowedFields = ["displayName", "email", "phone", "title", "orgId", "accountType", "primaryOrgId"];
+    const rejected = Object.keys(patch ?? {}).filter((key) => !allowedFields.includes(key));
+    if (rejected.length > 0) {
+      throw new Error(`\u8D26\u53F7\u7F16\u8F91\u4E0D\u63A5\u53D7\u4EE5\u4E0B\u5B57\u6BB5\uFF1A${rejected.join("\u3001")}\uFF08\u72B6\u6001\u8BF7\u8D70\u51BB\u7ED3/\u89E3\u51BB/\u6FC0\u6D3B/\u6CE8\u9500\u7AEF\u70B9\uFF0C\u53E3\u4EE4\u8BF7\u8D70\u91CD\u7F6E\u53E3\u4EE4\u7AEF\u70B9\uFF0C\u89D2\u8272\u8BF7\u8D70\u89D2\u8272\u5206\u914D\u63A5\u53E3\uFF09`);
+    }
+    const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u4FEE\u6539\u8D26\u53F7");
+    if (patch.orgId) {
+      if (!this.orgs().get(patch.orgId)) throw new Error(`\u7EC4\u7EC7\u4E0D\u5B58\u5728\uFF1A${patch.orgId}`);
+      this.assertManageScope(actor, patch.orgId, "\u8FC1\u79FB\u8D26\u53F7\u7EC4\u7EC7");
+    }
     if (patch.primaryOrgId && !this.orgs().get(patch.primaryOrgId)) throw new Error(`\u4E3B\u5F52\u5C5E\u7EC4\u7EC7\u4E0D\u5B58\u5728\uFF1A${patch.primaryOrgId}`);
     if (patch.accountType !== void 0 && !["internal", "external", "suspended-review"].includes(patch.accountType)) {
       throw new Error(`\u975E\u6CD5\u8D26\u53F7\u7C7B\u578B\uFF1A${patch.accountType}`);
     }
     return this.users().update(id, patch);
   }
-  deleteUser(id) {
+  deleteUser(id, actor) {
     const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u5220\u9664\u8D26\u53F7");
     if (user.status !== "deactivated") throw new Error("\u4EC5\u5DF2\u6CE8\u9500\u8D26\u53F7\u53EF\u7269\u7406\u5220\u9664");
     return this.users().remove(id);
   }
   /** 绑定三方身份：事实源为 identityLinks（引擎级唯一约束），user.bindings 为投影。 */
-  bindThirdParty(id, binding) {
+  bindThirdParty(id, binding, actor) {
     const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u7ED1\u5B9A\u4E09\u65B9\u8EAB\u4EFD");
     if (binding.verifyCode !== "000000" && binding.verifyCode !== void 0 && binding.verifyCode.length !== 6) {
       throw new Error("\u4E8C\u6B21\u9A8C\u8BC1\u7801\u683C\u5F0F\u4E0D\u6B63\u786E");
     }
@@ -708,8 +841,9 @@ class IamService extends Service {
     }, "console");
     return this.users().get(id);
   }
-  unbindThirdParty(id, provider, verifyCode) {
+  unbindThirdParty(id, provider, verifyCode, actor) {
     const user = this.requireUser(id);
+    this.assertManageScope(actor, user.orgId, "\u89E3\u7ED1\u4E09\u65B9\u8EAB\u4EFD");
     if (!verifyCode || verifyCode.length !== 6) throw new Error("\u89E3\u7ED1\u9700\u4E8C\u6B21\u9A8C\u8BC1\uFF086 \u4F4D\u9A8C\u8BC1\u7801\uFF09");
     this.unlinkIdentity(id, provider);
     return this.users().get(id);
@@ -802,8 +936,9 @@ class IamService extends Service {
       }
     }
   }
-  assignRoles(userId, roleIds) {
-    this.requireUser(userId);
+  assignRoles(userId, roleIds, actor) {
+    const user = this.requireUser(userId);
+    this.assertManageScope(actor, user.orgId, "\u8C03\u6574\u89D2\u8272");
     for (const roleId of roleIds) {
       if (!this.roles().get(roleId)) throw new Error(`\u89D2\u8272\u4E0D\u5B58\u5728\uFF1A${roleId}`);
     }

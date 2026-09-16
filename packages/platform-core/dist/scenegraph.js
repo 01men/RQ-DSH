@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Service } from "@deepseek-ai/cordis";
-const SCENE_TAGS = ["\u63D0\u8D28", "\u964D\u672C", "\u589E\u6548", "\u589E\u6536", "\u5B89\u5168", "\u73AF\u4FDD", "\u8282\u80FD", "\u65B0\u6A21\u5F0F"];
+const SCENE_TAGS = ["\u63D0\u8D28", "\u964D\u672C", "\u589E\u6548", "\u8282\u80FD", "\u65B0\u6A21\u5F0F", "\u589E\u6536", "\u5B89\u5168", "\u73AF\u4FDD"];
 const SCENE_ACTIVITIES = ["rd", "mfg", "scm", "svc", "mkt", "mgmt", "fin"];
 const ACTIVITY_LABELS = {
   rd: "\u7814\u53D1\u8BBE\u8BA1",

@@ -4,14 +4,19 @@ class ToolRuntimeLite extends Service {
   static provide = "tools";
   definitions = /* @__PURE__ */ new Map();
   guards = [];
+  interceptors = [];
   constructor(ctx) {
     super(ctx, "tools");
   }
   register(definition) {
+    for (const fn of this.interceptors) definition = fn(definition);
     const { name, output } = definition;
     if (typeof name !== "string" || !name) throw new TypeError(`[tools] \u5DE5\u5177\u540D\u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32`);
     if (output === void 0 || typeof output !== "object" || typeof output.render !== "function") {
       throw new TypeError(`\u5DE5\u5177 "${name}" \u5FC5\u987B\u58F0\u660E output { schema, render }`);
+    }
+    if (output.schema === void 0 || output.schema === null || typeof output.schema !== "object" || Array.isArray(output.schema)) {
+      throw new TypeError(`\u5DE5\u5177 "${name}" \u5FC5\u987B\u58F0\u660E output.schema\uFF08\u975E\u7A7A\u5BF9\u8C61\u6839\uFF0CJSON Schema\uFF09`);
     }
     if (this.definitions.has(name)) throw new Error(`[tools] \u5DE5\u5177\u540D\u91CD\u590D\uFF1A${name}`);
     this.definitions.set(name, definition);
@@ -28,6 +33,33 @@ class ToolRuntimeLite extends Service {
     return () => {
       const index = this.guards.indexOf(guard);
       if (index >= 0) this.guards.splice(index, 1);
+    };
+  }
+  /**
+   * 注册级拦截器（OPT-P1-03 正式扩展点）：此后所有 register 先经拦截链再入表。
+   * 供 connect 远程转发等横切能力挂在契约上，取代原型猴补丁。返回注销函数。
+   */
+  intercept(fn) {
+    if (typeof fn !== "function") throw new TypeError("[tools] intercept \u7684\u62E6\u622A\u5668\u5FC5\u987B\u662F\u51FD\u6570");
+    this.interceptors.push(fn);
+    return () => {
+      const index = this.interceptors.indexOf(fn);
+      if (index >= 0) this.interceptors.splice(index, 1);
+    };
+  }
+  /**
+   * 已注册工具的执行体包扎（OPT-P1-03 正式扩展点）：用 wrap 替换当前 execute，
+   * wrap 收到原执行体、返回新执行体。返回还原函数（按包扎时的现场逆向恢复）。
+   * 工具不存在抛 TypeError（不静默）。
+   */
+  decorate(name, wrap) {
+    const definition = this.definitions.get(name);
+    if (!definition) throw new Error(`[tools] decorate \u76EE\u6807\u5DE5\u5177\u4E0D\u5B58\u5728\uFF1A${name}`);
+    if (typeof wrap !== "function") throw new TypeError(`[tools] decorate \u7684 wrap \u5FC5\u987B\u662F\u51FD\u6570\uFF08\u5DE5\u5177 ${name}\uFF09`);
+    const previous = definition.execute;
+    definition.execute = wrap(previous);
+    return () => {
+      definition.execute = previous;
     };
   }
   schemas() {
