@@ -54,7 +54,9 @@ export function registerPlatformRoutes(ctx: Context, deps: PlatformRouteDeps): v
   http.register('GET', '/api/platform/bootstrap/detail', (exchange) => {
     const record = bootstrapCollection(ctx).get('singleton')
     if (!record) {
-      exchange.ok({ initialized: false, mode: null, orgName: null, seededAt: null, initialPasswordPending: false })
+      // 存量部署（升级前初始化的库）无首启登记：initialized=true + mode='legacy'，
+      // 不与「空库未初始化」混淆——功能上线前的库本来就已完成初始化
+      exchange.ok({ initialized: true, mode: 'legacy', orgName: null, seededAt: null, initialPasswordPending: false })
       return
     }
     exchange.ok({

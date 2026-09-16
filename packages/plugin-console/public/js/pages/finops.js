@@ -89,7 +89,7 @@ export async function renderFinops(content, params, { rerender }) {
                     <td class="col-num fs-12" style="text-align:right">${fmtNum(row.tokens)}</td>
                     <td class="col-num fs-12" style="text-align:right;font-weight:600">${fmtCost(row.cost_cents / 100)}</td>
                     <td class="col-num" style="text-align:right">${deltaBadge(row.delta_pct)}</td>
-                    <td class="fs-11 text-4">${(row.topModels ?? []).map((m) => `${esc(m.model)} ${m.share}%`).join(' · ') || '—'}</td>
+                    <td class="fs-11 text-4">${(row.topModels ?? []).map((m) => `<div class="mono" style="white-space:nowrap">${esc(m.model)} <span class="text-4">${m.share}%</span></div>`).join('') || '—'}</td>
                   </tr>`).join('') : emptyRow(6, `${penetration.month} 暂无计量数据——资产开始调用后成本自动累积`)}
               </tbody>
             </table>
