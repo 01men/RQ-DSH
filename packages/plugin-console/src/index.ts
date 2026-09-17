@@ -22,6 +22,8 @@ import { AgentRegistryService } from '../../plugin-agent/src/index.ts'
 import { RulesVersionConflictError } from '../../plugin-nas/src/authz.ts'
 import { seedAll } from './seed.ts'
 import { registerMarketRoutes } from './routes/market.ts'
+import { registerFinOpsRoutes } from './routes/finops.ts'
+import { registerPlatformRoutes } from './routes/platform.ts'
 
 export const name = 'console'
 export const inject = [
@@ -74,6 +76,8 @@ export const PUBLIC_PATHS = new Set([
   // main 侧 panel 自持登录面路由尚未合入——先行登记（无路由时请求照常 404），合入后即闭环。
   '/api/panel/auth/login',
   '/api/panel/auth/refresh',
+  // 首启 bootstrap 提示（M2）：登录页「初始口令待接管」横幅数据源；只回一个布尔（见 routes/platform.ts 泄露评估）
+  '/api/platform/bootstrap',
 ])
 
 /** 动态路径的公开前缀（OIDC 授权页查询：仅回显客户端名/scope，不泄露 redirect_uri）。 */
@@ -4058,6 +4062,12 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   // -- 第三方插件市场（v1.2）：已迁移 routes/market.ts（OPT-P1-01 首段） ------
   registerMarketRoutes(ctx, { http, guarded, body, changeLog, caller })
+
+  // -- FinOps CFO 视图（M2）：routes/finops.ts（新模式：新路由不再进 apply()） ------
+  registerFinOpsRoutes(ctx, { guarded })
+
+  // -- 平台级路由（M2 筑基）：routes/platform.ts（首启 bootstrap 状态） ------
+  registerPlatformRoutes(ctx, { http })
 
   // -- 用量透明月度报表（M0-3；J4 契约：docs/contract-j4-usage-report.md） ----------------
   // 部门/Agent/Skill 三维 tokens 聚合 + 零价快照口径；format=csv 自助导出（Excel 友好 BOM）。

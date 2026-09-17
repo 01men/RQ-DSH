@@ -367,6 +367,18 @@ export class AuditService extends Service {
       })
     })
 
+    // T2 收口（M2）：远程接入降级事件落审计——此前 connect.degraded 只到总线为止，
+    // audit 无订阅，「以为在管远端其实在管本机」类语义漂移在审计链上不可见（降级必须显式留痕）。
+    ctx.platformBus.on('connect.degraded', (payload) => {
+      const p = payload as { reason?: string; tool?: string; detail?: string; at?: string }
+      this.record({
+        type: 'change', actorType: 'system', actorId: 'connect', actorName: '远程接入',
+        action: 'connect.degraded', resourceType: 'connect', resourceId: p.tool ?? '-', resourceName: p.tool ?? '工具远程代理',
+        result: 'error',
+        detail: `reason=${p.reason ?? 'unknown'}${p.detail ? `；${p.detail}` : ''}`,
+      })
+    })
+
     // 计量管道消费（v1.2 第 2 步）：usage.recorded → 财务口径投影 + 真实成本归集。
     // 消费幂等由 usage 事件 idempotency_key 保障（at-least-once 投递 + 幂等消费）。
     ctx.usage.consume('audit', (event) => {

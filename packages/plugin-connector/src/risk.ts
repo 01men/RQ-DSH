@@ -13,7 +13,7 @@ export function rankOf(level: RiskLevel): number {
 }
 
 const READ_SCOPE = /(^|[:.])(read|readonly|profile|userinfo|email|public|view)([:.]|$)/i
-const ADMIN_SCOPE = /(admin|delete|destroy|revoke|invite|permission|role|org|billing|webhook.*(write|admin)|token)/i
+const ADMIN_SCOPE = /(admin|delete|destroy|revoke|invite|permission|role|org|webhook.*(write|admin)|token)/i
 
 const READ_NAME = /(^|[._])(list|get|search|fetch|query|top|read|find|browse)[._]?|get[A-Z_]/
 const ADMIN_NAME = /(delete|remove|destroy|revoke|suspend|ban|invite|permission|role|owner|transfer|admin)/i

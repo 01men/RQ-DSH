@@ -54,6 +54,12 @@ const PORT = 7311
 const BASE = `http://127.0.0.1:${PORT}`
 const DATA_DIR = join(process.cwd(), 'data-selftest')
 
+// 收尾阶段（stub close / 实例 SIGKILL 后）undici keep-alive 连接可能出现迟到的 rejection：
+// 记录但不让测试进程崩掉（崩了会吞掉汇总输出，2026-09-16 M2 实证）
+process.on('unhandledRejection', (reason) => {
+  console.error(`\x1b[33m[selftest] 未处理的 rejection（已忽略，不阻断汇总）:\x1b[0m ${String(reason?.cause ?? reason).slice(0, 200)}`)
+})
+
 const results = []
 let currentSection = ''
 function section(name) {
@@ -1241,7 +1247,106 @@ try {
     const orgTotals = await api('GET', '/api/usage/totals?principal=' + encodeURIComponent(`org:${tenantOrg.data.id}`), { token: admin })
     check('零价快照不污染总额（charge 恒 0）', orgTotals.ok && orgTotals.data.charge_cents === 0, JSON.stringify(orgTotals.data))
   }
+  section('FinOps 成本穿透（M2 CFO 视图：org×model 交叉 + 环比 + Top 主体）')
+  {
+    // FinOps 金额口径数据源：model:* 挂内部成本参考费率（10 分/千 tokens）——
+    // 默认价格簿无 model 规则（record 硬校验拒收），故全库 model 域事件 = 本节构造的 4 条，断言可精确
+    const priceUpsert = await api('PUT', '/api/usage/price-book', { token: admin, body: { pattern: 'model:*', meter_key: 'tokens', list_cents_per_unit: 0, cost_cents_per_unit: 10, units_per_step: 1000, tax_rate: 0, currency: 'CNY', rate_version: 'selftest-finops' } })
+    check('价格簿登记 model:*（内部成本 10 分/千 tokens）', priceUpsert.ok, JSON.stringify(priceUpsert.error))
+    const finOrg2 = await api('POST', '/api/iam/orgs', { token: admin, body: { name: 'FinOps 探针部' } })
+    check('FinOps 第二部门建组织（矩阵第二行）', finOrg2.ok && finOrg2.data.id, JSON.stringify(finOrg2.error))
+    const now = Date.now()
+    const at = (minutesAgo) => new Date(now - minutesAgo * 60_000).toISOString()
+    const finMonth = new Date(now).toISOString().slice(0, 7)
+    const probeSubject = 'user:finops-probe-a'
+    const recordModel = (resource, tokens, minutesAgo, idem, extra = {}) => api('POST', '/api/usage/record', { token: admin, body: {
+      org: tenantOrg.data.id, subject: probeSubject, principal: `org:${tenantOrg.data.id}`,
+      resource: `model:${resource}`, meters: [{ key: 'tokens', value: tokens, unit: 'token' }],
+      idempotency_key: `finops-${idem}`, occurred_at: at(minutesAgo), ...extra,
+    } })
+    // 空转判定矩阵（窗口 30 分钟，时间单位=分钟前）：evIdle@60 无后续动作=空转；evFollow@20 在
+    // [20, -10] 内有 evAct2@10=非空转；evTrace@55 超窗但同 trace_id 有 evTraceAct@1=非空转；
+    // evIdle2@10（agent 主体、另一部门）无动作=空转。model 域总成本 170 分、空转 70 分（41.2%）
+    const evIdle = await recordModel('selftest-a', 5000, 60, 'idle-001')
+    check('空转样本入账（model a / 5000 tokens → 50 分）', evIdle.ok && evIdle.data.pricing.cost_cents === 50, JSON.stringify(evIdle.error ?? evIdle.data.pricing))
+    const evTrace = await recordModel('selftest-b', 6000, 55, 'trace-001', { trace_id: 'finops-trace-1' })
+    const evFollow = await recordModel('selftest-a', 4000, 20, 'follow-001')
+    const evAct1 = await api('POST', '/api/usage/record', { token: admin, body: { org: tenantOrg.data.id, subject: probeSubject, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 1000, unit: 'token' }], idempotency_key: 'finops-act-001', occurred_at: at(28) } })
+    const evAct2 = await api('POST', '/api/usage/record', { token: admin, body: { org: tenantOrg.data.id, subject: probeSubject, principal: `org:${tenantOrg.data.id}`, resource: 'mcp:real-backend', meters: [{ key: 'tokens', value: 1000, unit: 'token' }], idempotency_key: 'finops-act-002', occurred_at: at(10) } })
+    const evTraceAct = await api('POST', '/api/usage/record', { token: admin, body: { org: tenantOrg.data.id, subject: probeSubject, principal: `org:${tenantOrg.data.id}`, resource: 'skill:finops-skill-1', meters: [{ key: 'calls', value: 1, unit: 'call' }], idempotency_key: 'finops-trace-act-001', occurred_at: at(1), trace_id: 'finops-trace-1' } })
+    const evIdle2 = await api('POST', '/api/usage/record', { token: admin, body: { org: finOrg2.data.id, subject: 'agent:finops-probe-b', principal: `org:${finOrg2.data.id}`, resource: 'model:selftest-b', meters: [{ key: 'tokens', value: 2000, unit: 'token' }], idempotency_key: 'finops-idle-002', occurred_at: at(10) } })
+    check('空转判定场景全部入账（4 model + 3 动作）', evFollow.ok && evAct1.ok && evAct2.ok && evTrace.ok && evTraceAct.ok && evIdle2.ok, JSON.stringify([evFollow.error, evAct1.error, evAct2.error, evTrace.error, evTraceAct.error, evIdle2.error].filter(Boolean)))
 
+    const finOverview = await api('GET', `/api/finops/overview?month=${finMonth}`, { token: admin })
+    check('FinOps overview 一次取全（penetration + idle）', finOverview.ok && Boolean(finOverview.data.penetration) && Boolean(finOverview.data.idle), JSON.stringify(finOverview.error))
+    const pen = finOverview.data?.penetration
+    check('穿透 totals 金额口径（全资源成本 ≥ model 域 170 分）', pen && pen.totals.cost_cents >= 170, JSON.stringify(pen?.totals))
+    // demo seed 带 28 天历史（可能跨上月）：环比断言用自洽验证（delta 与 cost/prev 复算一致），不假设基数为 0
+    check('穿透环比口径（delta_pct 与 cost/prev 复算自洽，prev=0 且 cur>0 时为 null）', pen && (() => {
+      const { cost_cents, prev_cost_cents, delta_pct } = pen.totals
+      const expected = prev_cost_cents === 0 ? (cost_cents === 0 ? 0 : null) : Math.round(((cost_cents - prev_cost_cents) / prev_cost_cents) * 1000) / 10
+      return delta_pct === expected
+    })(), JSON.stringify(pen?.totals))
+    check('部门维度含两个探针组织（byOrg 按成本降序）', pen && pen.byOrg.some((r) => r.dimension === tenantOrg.data.id) && pen.byOrg.some((r) => r.dimension === finOrg2.data.id), JSON.stringify(pen?.byOrg?.map((r) => r.dimension)))
+    check('模型维度精确两条（selftest-a 90 分 / selftest-b 80 分）', pen && JSON.stringify(pen.byModel.map((r) => `${r.dimension}:${r.cost_cents}`)) === JSON.stringify(['selftest-a:90', 'selftest-b:80']), JSON.stringify(pen?.byModel))
+    check('org×model 矩阵行列齐备（Top orgs/models + 「其他」行列）', pen && pen.matrix.orgs.length >= 2 && pen.matrix.models.length >= 2 && pen.matrix.cells.length === pen.matrix.orgs.length + 1 && pen.matrix.cells[0].length === pen.matrix.models.length + 1, JSON.stringify(pen?.matrix))
+    check('矩阵总计守恒（全格之和 = model 域成本合计 170 分）', pen && (() => {
+      const sumCells = pen.matrix.cells.flat().reduce((s, v) => s + v, 0)
+      return sumCells === pen.byModel.reduce((s, r) => s + r.cost_cents, 0)
+    })(), JSON.stringify(pen?.matrix?.cells))
+    check('Top 消耗主体（探针主体在列）', pen && pen.topSubjects.some((r) => r.subject === probeSubject), JSON.stringify(pen?.topSubjects))
+    const idle1 = finOverview.data?.idle
+    check('空转判定：恰好 2 条疑似空转（无后续动作的 model 调用）', idle1 && idle1.idle.events === 2, JSON.stringify(idle1))
+    check('空转成本精确（50+20=70 分，占 model 域 41.2%）', idle1 && idle1.idle.cost_cents === 70 && idle1.idle.share_pct === 41.2, JSON.stringify(idle1?.idle))
+    check('空转分模型拆分（selftest-a/b 各 1 条）', idle1 && idle1.byModel.length === 2 && idle1.byModel.every((r) => r.idle_events === 1), JSON.stringify(idle1?.byModel))
+    check('空转分部门拆分（两部门各 1 条）', idle1 && idle1.byOrg.length === 2 && idle1.byOrg.every((r) => r.idle_events === 1), JSON.stringify(idle1?.byOrg))
+    check('空转样本可复核（samples 含两条 + 时间/主体/模型齐备）', idle1 && idle1.samples.length === 2 && idle1.samples.every((s) => s.occurred_at && s.subject && s.resource), JSON.stringify(idle1?.samples))
+    const idleTight = await api('GET', `/api/finops/idle?month=${finMonth}&window=5`, { token: admin })
+    check('空转窗口参数生效（窗口收窄 5 分钟 → evFollow 亦成疑似，空转数上升）', idleTight.ok && idleTight.data.idleWindowMinutes === 5 && idleTight.data.idle.events >= 3, JSON.stringify({ w: idleTight.data?.idleWindowMinutes, idle: idleTight.data?.idle }))
+    const finDeniedProbe = await api('POST', '/api/iam/users', { token: admin, body: { username: 'finops_probe', displayName: 'FinOps 权限探针', orgId: tenantOrg.data.id, roleIds: [(await api('GET', '/api/iam/roles', { token: admin })).data.roles.find((r) => r.code === 'member').id] } })
+    const finProbeToken = (await api('POST', '/api/auth/login', { body: { username: 'finops_probe', password: finDeniedProbe.data?.initialPassword ?? 'Ybk@2026' } })).data?.token
+    const finDenied = await api('GET', '/api/finops/overview', { token: finProbeToken })
+    check('无 usage.read 访问 CFO 视图被拒（403）', finDenied.status === 403, String(finDenied.status))
+    const finCsv = await rawReq('GET', `/api/finops/report/monthly?month=${finMonth}&format=csv`, { headers: { authorization: `Bearer ${admin}` } })
+    check('FinOps CSV 导出（text/csv + BOM + 穿透/空转区块表头）', finCsv.status === 200 && (finCsv.headers['content-type'] ?? '').includes('text/csv') && finCsv.body.startsWith('\ufeff') && finCsv.body.includes('部门穿透') && finCsv.body.includes('空转检测'), JSON.stringify({ status: finCsv.status, head: finCsv.body.slice(0, 80) }))
+    const finBadMonth = await api('GET', '/api/finops/overview?month=2026-13', { token: admin })
+    check('非法月份参数被拒（400）', finBadMonth.status === 400, String(finBadMonth.status))
+  }
+  section('首启 bootstrap 状态（M2 部署产品化：上线三步走数据源）')
+  {
+    const bootAnon = await rawReq('GET', '/api/platform/bootstrap', { headers: {} })
+    const bootAnonBody = jsonBody(bootAnon)
+    check('bootstrap 公开端点可达（登录页提示数据源，匿名可读）', bootAnon.status === 200 && typeof bootAnonBody.data?.initialPasswordPending === 'boolean', JSON.stringify({ status: bootAnon.status, body: bootAnonBody }))
+    check('演示种子无初始口令待接管（DEMO 口令显式指定不落盘）', bootAnonBody.data?.initialPasswordPending === false, JSON.stringify(bootAnonBody))
+    const bootDetailAnon = await rawReq('GET', '/api/platform/bootstrap/detail', { headers: {} })
+    check('bootstrap detail 强制鉴权（匿名 401）', bootDetailAnon.status === 401, String(bootDetailAnon.status))
+    const bootDetail = await api('GET', '/api/platform/bootstrap/detail', { token: admin })
+    check('bootstrap detail 全量（demo 模式 + 根组织 + seededAt）', bootDetail.ok && bootDetail.data.initialized === true && bootDetail.data.mode === 'demo' && bootDetail.data.orgName === '元冰可集团' && Boolean(bootDetail.data.seededAt) && bootDetail.data.initialPasswordPending === false, JSON.stringify(bootDetail.data))
+  }
+  section('T2 远程接入降级审计接线（connect.degraded 落审计链）')
+  {
+    // 行为面（emit→审计落库）由 connect 客户端形态真实触发，隔离实例为 host 形态；
+    // 此处以接线完整性断言护航（双侧源码在位：emit 点 + audit 订阅点）
+    const auditSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-audit', 'src', 'index.ts'), 'utf8')
+    const connectSrc = readFileSync(join(process.cwd(), 'packages', 'plugin-connect', 'src', 'client.ts'), 'utf8')
+    const connectIdx = readFileSync(join(process.cwd(), 'packages', 'plugin-connect', 'src', 'index.ts'), 'utf8')
+    check('audit 已订阅 connect.degraded（T2 收口：降级显式留痕，不再只到总线为止）', auditSrc.includes("platformBus.on('connect.degraded'"))
+    check('connect 降级事件源在位（扩展点缺失 + 转发失败两条 fail-closed 路径均发事件）',
+      connectSrc.includes("emit('connect.degraded'") && connectIdx.includes("emit('connect.degraded'"))
+  }
+  section('T6 billing 残留防复发（集成面零 precheckCents）')
+  {
+    // 定制轨适配：runtime source 瘦身后无 cli/ 目录（663a8be），文件缺失时如实跳过该面扫描
+    // （本文件后段存在顶层 const existsSync 的 TDZ 遮蔽，此处按惯例段内动态导入别名）
+    const { existsSync: t6FileExists } = await import('node:fs')
+    const dshctlPath = join(process.cwd(), 'cli', 'dshctl.mjs')
+    const dshctl = t6FileExists(dshctlPath) ? readFileSync(dshctlPath, 'utf8') : ''
+    const connDoc = readFileSync(join(process.cwd(), 'docs', 'connector-integration.md'), 'utf8')
+    const connTools = readFileSync(join(process.cwd(), 'packages', 'plugin-connector', 'src', 'tools.ts'), 'utf8')
+    check('dshctl 用法文案无 precheckCents 残留（T6；定制轨无 cli/ 时天然满足）', !dshctl.includes('precheckCents'))
+    check('connector 集成文档无 precheckCents 示例（T6）', !connDoc.includes('precheckCents'))
+    check('connector 工具描述无计费预检/precheckCents 残留（T6，防误导集成方）', !connTools.includes('计费预检') && !connTools.includes('precheckCents'))
+  }
   section('behavior 事件管道（WP-03/D3：采集 / 鉴权 / 幂等）')
   {
     const anon = await api('POST', '/api/behavior/events', { body: { type: 'card.exposed' } })
@@ -3131,6 +3236,70 @@ try {
   check('Agent 工具 update_status 可用', updTool.ok && updTool.data.isError === false && updTool.data.value.currentVersion === rootPkgVersion)
   const updToolApply = await api('POST', '/api/tools/execute', { token: hrToken2, body: { name: 'update_apply', args: { reason: '越权尝试' } } })
   check('工具级权限拦截 update_apply（403）', updToolApply.status === 403)
+
+  // T5（M2）：发布清单签名验签——CLI 工具 e2e + 平台侧 verifyReleaseManifest 进程内最小装配 + settings 防呆
+  section('T5 发布清单验签（供应链校验：Ed25519 复用平台签名基建）')
+  {
+    const t5Keys = platformCore.generateEd25519KeyPair()
+    const badKeyReg = await api('POST', '/api/update/settings', { token: admin, body: { releasePublicKey: 'not-a-valid-key' } })
+    check('T5 公钥登记格式校验（非法内容登记即拒 400，不拖到升级时才炸）', badKeyReg.status === 400, JSON.stringify(badKeyReg.error))
+    const forceNoKey = await api('POST', '/api/update/settings', { token: admin, body: { requireSignedManifests: true } })
+    check('T5 未登记公钥开启强制验签被拒（防呆：开启即拒绝一切升级）', forceNoKey.status === 400, JSON.stringify(forceNoKey.error))
+    const keyReg = await api('POST', '/api/update/settings', { token: admin, body: { releasePublicKey: t5Keys.publicKeyBase64 } })
+    check('T5 公钥登记成功（status.releaseKeyConfigured=true）', keyReg.ok && keyReg.data.releaseKeyConfigured === true, JSON.stringify(keyReg.error ?? keyReg.data))
+    const forceOn = await api('POST', '/api/update/settings', { token: admin, body: { requireSignedManifests: true } })
+    check('T5 公钥在场后可开启强制验签（再关闭回落告警放行口径）', forceOn.ok && forceOn.data.requireSignedManifests === true, JSON.stringify(forceOn.error))
+    const forceOff = await api('POST', '/api/update/settings', { token: admin, body: { requireSignedManifests: false } })
+    check('T5 强制验签可关闭（默认告警放行，显式增强非静默降级）', forceOff.ok && forceOff.data.requireSignedManifests === false)
+
+    // 进程内最小装配（startHttp=false + 独立 dataDir）：直连 verifyReleaseManifest 验证判定路径。
+    // 每个 UpdateService 独立 Context（cordis 同一 ctx 二次 provide 同名服务即抛错）
+    let t5Seq = 0
+    const mkT5Service = async (options = {}, publicKey) => {
+      const c = new Context()
+      await c.plugin(platformCore, { dataDir: join(DATA_DIR, `t5-verify-${++t5Seq}`), startHttp: false })
+      update.ensureUpdateState(c, { autoCheck: false, intervalHours: 0 })
+      if (publicKey !== undefined) update.updateStateCollection(c).update('singleton', { releasePublicKey: publicKey })
+      return new update.UpdateService(c, { autoCheck: false, ...options })
+    }
+    const unset = await (await mkT5Service()).verifyReleaseManifest('a'.repeat(40))
+    check('T5 未登记公钥：checked=false 显式报未启用（不算失败，不静默）', unset.checked === false && /未登记/.test(unset.note), JSON.stringify(unset))
+    // 本地 stub rawBase：返回正确签名清单；另以篡改 commit / 伪造公钥覆盖失败路径
+    const goodCommit = 'b'.repeat(40)
+    const mkStub = (payload) => createServer((req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(payload)) })
+    const signed = (commit, pem) => platformCore.signEd25519(pem, commit)
+    const stubGood = mkStub({ algorithm: 'ed25519', version: '9.9.9', commit: goodCommit, signedAt: new Date().toISOString(), signature: signed(goodCommit, t5Keys.privateKeyPem) })
+    await new Promise((resolve) => stubGood.listen(0, '127.0.0.1', resolve))
+    const goodBase = `http://127.0.0.1:${stubGood.address().port}`
+    const svcGood = await mkT5Service({ rawBase: goodBase, apiBase: goodBase }, t5Keys.publicKeyBase64)
+    const good = await svcGood.verifyReleaseManifest(goodCommit)
+    check('T5 正确签名清单验签通过（verified=true）', good.checked === true && good.verified === true, JSON.stringify(good))
+    const wrongTarget = await svcGood.verifyReleaseManifest('c'.repeat(40))
+    check('T5 清单 commit 与升级目标不一致判失败（verified=false）', wrongTarget.checked === true && wrongTarget.verified === false && /不一致/.test(wrongTarget.note), JSON.stringify(wrongTarget))
+    const t5ForgedKeys = platformCore.generateEd25519KeyPair()
+    const svcForged = await mkT5Service({ rawBase: goodBase, apiBase: goodBase }, t5ForgedKeys.publicKeyBase64)
+    const forged = await svcForged.verifyReleaseManifest(goodCommit)
+    check('T5 伪造清单验签失败（签名与登记公钥不匹配）', forged.checked === true && forged.verified === false, JSON.stringify(forged))
+    stubGood.close()
+    // CLI 工具 e2e：生成密钥 → 生成清单 → 校验通过 → 篡改 commit 校验失败
+    const { execFileSync } = await import('node:child_process')
+    const { mkdtempSync } = await import('node:fs')
+    const { tmpdir } = await import('node:os')
+    const t5tmp = mkdtempSync(join(tmpdir(), 't5cli-'))
+    const keyPath = join(t5tmp, 'relkey.pem')
+    const genOut = execFileSync(process.execPath, ['scripts/release-manifest.mjs', '--generate-key', '--key-file', keyPath], { cwd: process.cwd(), encoding: 'utf8' })
+    const pubFromGen = /MCow[A-Za-z0-9+/=]+/.exec(genOut)?.[0] ?? ''
+    const manifestPath = join(t5tmp, 'release-manifest.json')
+    const t5Commit = 'd'.repeat(40)
+    execFileSync(process.execPath, ['scripts/release-manifest.mjs', '--key-file', keyPath, '--out', manifestPath, '--commit', t5Commit], { cwd: process.cwd(), encoding: 'utf8' })
+    const checkOk = execFileSync(process.execPath, ['scripts/release-manifest.mjs', '--check', '--out', manifestPath, '--pubkey', pubFromGen, '--commit', t5Commit], { cwd: process.cwd(), encoding: 'utf8' })
+    check('T5 CLI 发布工具 e2e（生成密钥 → 签清单 → 校验通过）', /校验通过/.test(String(checkOk)) && pubFromGen.length > 20, genOut.slice(0, 120))
+    let tamperFailed = false
+    try {
+      execFileSync(process.execPath, ['scripts/release-manifest.mjs', '--check', '--out', manifestPath, '--pubkey', pubFromGen, '--commit', 'e'.repeat(40)], { cwd: process.cwd(), encoding: 'utf8' })
+    } catch { tamperFailed = true }
+    check('T5 CLI 篡改检测（commit 不一致校验拒绝，exit≠0）', tamperFailed)
+  }
 
   // ================================================================ 远程 dsh 接入（接入码 → 机器凭证 → 工具代理）
   section('远程 dsh 接入（plugin-connect）')

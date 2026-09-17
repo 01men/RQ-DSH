@@ -20,10 +20,19 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import {
-  PlatformEvents, defineTool, platformVersionInfo, readRootVersion,
+  PlatformEvents, defineTool, platformVersionInfo, readRootVersion, verifyEd25519, isValidEd25519PublicKeyBase64,
   type Collection, type RecordBase,
 } from '../../platform-core/src/index.ts'
 import { readGitHead, runGit, runNpm } from './git.ts'
+
+/** 发布清单（scripts/release-manifest.mjs 产物，随仓库根发布）。 */
+interface ReleaseManifest {
+  algorithm: string
+  version: string
+  commit: string
+  signedAt: string
+  signature: string
+}
 
 // ---------------------------------------------------------------------------
 // 配置与环境覆盖
@@ -106,6 +115,14 @@ export interface UpdateStateRecord extends RecordBase {
   dismissedVersion: string | null
   /** OPT-P2-03：签名策略——true 时升级目标提交必须通过 git verify-commit（默认关闭，仓库签署化后开启）。 */
   requireSignedCommits?: boolean
+  /**
+   * T5（M2）：发布清单验签——平台发布方 Ed25519 公钥（SPKI DER base64）。
+   * 登记 + 提供脚本 scripts/release-manifest.mjs 生成的 release-manifest.json 后，升级按目标 commit
+   * 拉取清单验签；未登记时仅走 git verify-commit 路径（现状不变，显式增强而非静默降级）。
+   */
+  releasePublicKey?: string
+  /** T5（M2）：true 时发布清单验签失败/缺失即拒绝升级（fail-closed）；默认 false 只告警放行。 */
+  requireSignedManifests?: boolean
   /** OPT-P2-03：最近一次 apply 的回滚锚点（升级前 HEAD）。 */
   lastApplySnapshot?: string
   lastApplyPin?: string
@@ -187,6 +204,9 @@ export interface UpdateStatus {
   dismissed: boolean
   canApply: boolean
   nextCheckHint: string
+  /** T5（M2）：发布清单验签配置可见性（管理员判断供应链校验是否已启用）。 */
+  releaseKeyConfigured: boolean
+  requireSignedManifests: boolean
 }
 
 export class UpdateService extends Service {
@@ -282,6 +302,8 @@ export class UpdateService extends Service {
       nextCheckHint: state.autoCheck && state.intervalHours > 0
         ? `自动检查每 ${state.intervalHours}h 一次`
         : '自动检查已关闭，需手动检查',
+      releaseKeyConfigured: Boolean((state.releasePublicKey ?? '').trim()),
+      requireSignedManifests: state.requireSignedManifests === true,
     }
   }
 
@@ -415,6 +437,47 @@ export class UpdateService extends Service {
     }
   }
 
+  /** T5（M2）：发布清单强制策略（true=验签失败/缺失即拒绝升级，fail-closed）。 */
+  private requireSignedManifests(): boolean {
+    try {
+      return updateStateCollection(this.ctx).get(STATE_ID)?.requireSignedManifests === true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * T5（M2）：按升级目标 commit 拉取发布清单并 Ed25519 验签（复用平台签名基建，与市场五面验签同源）。
+   * 未登记公钥 → checked=false（显式说明未启用，不算失败）；已登记时任何不通过都返回 verified=false，
+   * 由 applyUpdate 按requireSignedManifests 决定拒绝或告警放行（放行时 note 随结果上报，绝不静默）。
+   */
+  async verifyReleaseManifest(targetResolved: string): Promise<{ checked: boolean; verified: boolean; note: string }> {
+    let publicKey = ''
+    try {
+      publicKey = (updateStateCollection(this.ctx).get(STATE_ID)?.releasePublicKey ?? '').trim()
+    } catch { /* 状态未就绪按未配置 */ }
+    if (!publicKey) {
+      return { checked: false, verified: false, note: '未登记 releasePublicKey：发布清单验签未启用（生成密钥：node scripts/release-manifest.mjs --generate-key）' }
+    }
+    const url = `${this.source.rawBase}/${this.source.repo}/${targetResolved}/release-manifest.json`
+    try {
+      const res = await fetch(url, {
+        headers: { accept: 'application/json', 'user-agent': `dsh-ops-update/${platformVersionInfo().version}` },
+        signal: AbortSignal.timeout(this.source.timeoutMs),
+      })
+      if (!res.ok) return { checked: true, verified: false, note: `发布清单不可达（HTTP ${res.status}）：${url}` }
+      const manifest = await res.json() as ReleaseManifest
+      if (manifest.algorithm !== 'ed25519') return { checked: true, verified: false, note: `清单签名算法异常：${String(manifest.algorithm)}` }
+      if (String(manifest.commit ?? '') !== targetResolved) {
+        return { checked: true, verified: false, note: `清单 commit ${String(manifest.commit ?? '').slice(0, 12)} 与升级目标 ${targetResolved.slice(0, 12)} 不一致` }
+      }
+      const verified = verifyEd25519(publicKey, String(manifest.commit), String(manifest.signature ?? ''))
+      return { checked: true, verified, note: verified ? '发布清单验签通过（Ed25519）' : '发布清单签名与登记公钥不匹配' }
+    } catch (error) {
+      return { checked: true, verified: false, note: `发布清单拉取失败：${error instanceof Error ? error.message : String(error)}` }
+    }
+  }
+
   /**
    * OPT-P2-03：一键回滚——git reset --hard 到最近一次 apply 登记的升级前 HEAD + npm install，
    * 审计留痕 + platform.update.rolled_back 事件；需重启进程生效。无可回滚快照即拒绝。
@@ -458,7 +521,7 @@ export class UpdateService extends Service {
     }
   }
 
-  setSettings(patch: { autoCheck?: boolean; intervalHours?: number; dismissedVersion?: string | null; requireSignedCommits?: boolean }): UpdateStatus {
+  setSettings(patch: { autoCheck?: boolean; intervalHours?: number; dismissedVersion?: string | null; requireSignedCommits?: boolean; releasePublicKey?: string; requireSignedManifests?: boolean }): UpdateStatus {
     const update: Partial<UpdateStateRecord> = {}
     if (typeof patch.autoCheck === 'boolean') update.autoCheck = patch.autoCheck
     if (patch.intervalHours !== undefined) {
@@ -470,6 +533,22 @@ export class UpdateService extends Service {
         : String(patch.dismissedVersion)
     }
     if (typeof patch.requireSignedCommits === 'boolean') update.requireSignedCommits = patch.requireSignedCommits
+    // T5（M2）：发布清单验签设置——公钥写入口格式校验（防呆：贴错内容升级时才炸不如登记时即拒）
+    if (patch.releasePublicKey !== undefined) {
+      const key = String(patch.releasePublicKey).trim()
+      if (key !== '' && !isValidEd25519PublicKeyBase64(key)) {
+        throw new Error('releasePublicKey 格式非法：应为 Ed25519 SPKI DER base64（生成：node scripts/release-manifest.mjs --generate-key）')
+      }
+      update.releasePublicKey = key
+    }
+    if (typeof patch.requireSignedManifests === 'boolean') {
+      // fail-closed 防呆：强制验签不能在没有公钥的情况下单独开启（开启即拒绝一切升级）
+      if (patch.requireSignedManifests === true) {
+        const existing = update.releasePublicKey ?? updateStateCollection(this.ctx).get(STATE_ID)?.releasePublicKey ?? ''
+        if (!existing.trim()) throw new Error('开启 requireSignedManifests 前必须先登记 releasePublicKey')
+      }
+      update.requireSignedManifests = patch.requireSignedManifests
+    }
     if (Object.keys(update).length > 0) updateStateCollection(this.ctx).update(STATE_ID, update)
     return this.status()
   }
@@ -490,6 +569,7 @@ export class UpdateService extends Service {
     let targetResolved = ''
     let signatureVerified: boolean | undefined
     let signatureNote = ''
+    let manifestCheck: Awaited<ReturnType<UpdateService['verifyReleaseManifest']>> | undefined
     if (info.installMode === 'source' && pin) {
       try {
         await runGit(info.rootDir, ['fetch', 'origin', '--tags', '--prune'])
@@ -506,6 +586,11 @@ export class UpdateService extends Service {
         if (this.requireSignedCommits()) {
           throw new Error(`目标提交签名校验未通过（requireSignedCommits=true，OPT-P2-03）：${signatureNote}`)
         }
+      }
+      // T5（M2）：发布清单验签（Ed25519）——登记 releasePublicKey 后启用；强制策略开启时任何不通过即拒绝
+      manifestCheck = await this.verifyReleaseManifest(targetResolved)
+      if (manifestCheck.checked && !manifestCheck.verified && this.requireSignedManifests()) {
+        throw new Error(`发布清单验签未通过（requireSignedManifests=true，T5）：${manifestCheck.note}`)
       }
     }
     const base = {
@@ -532,8 +617,9 @@ export class UpdateService extends Service {
         ok: true,
         supported: true,
         dryRun: true,
-        ...(pin ? { pin, targetResolved, signatureVerified, ...(signatureNote ? { signatureNote } : {}) } : { pin: '（dryRun 未指定；正式执行必须 pin，OPT-P2-03）' }),
+        ...(pin ? { pin, targetResolved, signatureVerified, ...(signatureNote ? { signatureNote } : {}), ...(manifestCheck ? { manifestCheck } : {}) } : { pin: '（dryRun 未指定；正式执行必须 pin，OPT-P2-03）' }),
         requireSignedCommits: this.requireSignedCommits(),
+        requireSignedManifests: this.requireSignedManifests(),
         steps: [
           `git fetch origin --tags + verify-commit（签名核验）+ git merge --ff-only（目录 ${info.rootDir}；脏工作区/分叉将安全失败）`,
           'npm install（依赖同步，package-lock 有变化时生效）',
@@ -597,6 +683,7 @@ export class UpdateService extends Service {
       targetResolved,
       signatureVerified,
       ...(signatureNote ? { signatureNote } : {}),
+      ...(manifestCheck ? { manifestCheck } : {}),
       rollbackTo,
       gitOutput: gitOutput.slice(0, 2000),
       ...(npmOutput ? { npmOutput: npmOutput.slice(0, 2000) } : {}),
@@ -671,8 +758,12 @@ export const updateApi = {
 
     http.register('POST', '/api/update/settings', (exchange) => {
       if (!requirePermission(exchange, 'platform.update.apply')) return
-      const input = (exchange.body ?? {}) as { autoCheck?: boolean; intervalHours?: number; dismissedVersion?: string | null }
-      exchange.ok(service.setSettings(input))
+      const input = (exchange.body ?? {}) as { autoCheck?: boolean; intervalHours?: number; dismissedVersion?: string | null; releasePublicKey?: string; requireSignedManifests?: boolean }
+      try {
+        exchange.ok(service.setSettings(input))
+      } catch (error) {
+        exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+      }
     }, { access: 'guarded', permission: 'platform.update.apply' })
 
     http.register('POST', '/api/update/apply', async (exchange) => {

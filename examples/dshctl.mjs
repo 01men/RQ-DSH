@@ -967,7 +967,7 @@ dshctl —— 企业 AI 资源平台 CLI（基于 DeepSeek Harness 一切皆插�
       if (group === 'perm-groups') {
         if (sub === 'create') {
           const file = argOf('--file')
-          if (!file) fail('用法：connector perm-groups create --file=@group.json（含 name/orgId/policies/subjects/rateLimitPerMin/precheckCents）')
+          if (!file) fail('用法：connector perm-groups create --file=@group.json（含 name/orgId/policies/subjects/rateLimitPerMin）')
           const payload = await jsonBodyFromFile(file)
           const data = await call('POST', '/api/connector/perm-groups', payload)
           ok(`权限组已创建：${data.id}（独立 oct_ 令牌按四数组全发语义镜像 policies）`)

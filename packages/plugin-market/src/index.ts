@@ -14,10 +14,14 @@
  * 开发者身份域（M2）：独立于内部员工 iam 域；Ed25519 发布者密钥对验签提交。
  * 签名对象 = 五面文件内容指纹（按文件名排序拼接的 SHA-256）。
  */
-import { createPrivateKey, createPublicKey, generateKeyPairSync, randomBytes, sign as edSign, verify as edVerify } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import { Service } from '@deepseek-ai/cordis'
 import { PlatformEvents, newId, parseYaml, sha256Hex, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
+// M2 筑基：Ed25519 验签基建抽升 platform-core（plugin-update 发布清单验签共用同一套）；
+// 此处按市场语境别名 re-export，dshctl 脚手架等既有引用不受影响。
+import { generateEd25519KeyPair, isValidEd25519PublicKeyBase64, signEd25519, verifyEd25519 } from '../../platform-core/src/index.ts'
+export { generateEd25519KeyPair as generateDeveloperKeyPair, signEd25519 as signFingerprint, verifyEd25519 as verifySignature }
 import * as marketTools from './tools.ts'
 
 // ---------------------------------------------------------------------------
@@ -191,30 +195,8 @@ export function parseManifest(files: Record<string, string>): PluginManifest {
   return manifest
 }
 
-/** Ed25519 验签：指纹必须由开发者登记公钥签出。 */
-export function verifySignature(publicKeyBase64: string, fingerprint: string, signatureBase64: string): boolean {
-  try {
-    const publicKey = createPublicKey({ key: Buffer.from(publicKeyBase64, 'base64'), format: 'der', type: 'spki' })
-    return edVerify(null, Buffer.from(fingerprint), publicKey, Buffer.from(signatureBase64, 'base64'))
-  } catch {
-    return false
-  }
-}
-
-/** 开发者密钥对生成（脚手架/门户自助用；私钥只在调用方持有）。 */
-export function generateDeveloperKeyPair(): { publicKeyBase64: string; privateKeyPem: string } {
-  const { publicKey, privateKey } = generateKeyPairSync('ed25519')
-  return {
-    publicKeyBase64: publicKey.export({ format: 'der', type: 'spki' }).toString('base64'),
-    privateKeyPem: privateKey.export({ format: 'pem', type: 'pkcs8' }).toString(),
-  }
-}
-
-/** 脚手架签名（dshctl plugin init 生成的 demo 私钥 → 对指纹签名）。 */
-export function signFingerprint(privateKeyPem: string, fingerprint: string): string {
-  const privateKey = createPrivateKey(privateKeyPem)
-  return edSign(null, Buffer.from(fingerprint), privateKey).toString('base64')
-}
+// Ed25519 验签/密钥/签名三件套已抽升 platform-core（M2 筑基，文件顶部 re-export），
+// plugin-update 发布清单验签与市场五面验签共用同一套基建。
 
 /** 能力 → 可消耗资源前缀（运行时对账 M5 的授权基线）。 */
 const CAPABILITY_RESOURCE_MAP: Record<string, string> = {
@@ -259,9 +241,7 @@ export class MarketService extends Service {
   registerDeveloper(input: { username: string; displayName: string; email: string; password: string; publicKey: string; company?: string; payoutAccount?: string }): { developer: DeveloperRecord; token: string } {
     if (!/^[a-z][a-z0-9_-]{2,31}$/.test(input.username)) throw new Error('开发者账号格式非法（^[a-z][a-z0-9_-]{2,31}$）')
     if (input.password.length < 8) throw new Error('密码至少 8 位')
-    try {
-      createPublicKey({ key: Buffer.from(input.publicKey, 'base64'), format: 'der', type: 'spki' })
-    } catch {
+    if (!isValidEd25519PublicKeyBase64(input.publicKey)) {
       throw new Error('发布者公钥格式非法（应为 Ed25519 SPKI DER base64）')
     }
     const credential = this.ctx.authn.createMachineCredential({
@@ -321,7 +301,7 @@ export class MarketService extends Service {
       throw new Error(`plugin.yaml publisher 必须为提交者账号（${developer.username}），收到 ${parsed.publisher}`)
     }
     const fingerprint = fingerprintOf(files)
-    if (!verifySignature(developer.publicKey, fingerprint, signature)) {
+    if (!verifyEd25519(developer.publicKey, fingerprint, signature)) {
       throw new Error('签名验签失败：五面指纹与发布者公钥签名不匹配')
     }
     const duplicate = this.submissions().findOne((item) => item.pluginId === parsed.id && item.version === parsed.version)
@@ -534,10 +514,13 @@ const OFFICIAL_PLUGINS: Array<{ id: string; name: string; description: string; t
 ]
 
 function seedOfficialPlugins(market: MarketService): void {
+  // ctx 必须取在 try 外：catch 也要用它记日志（曾因 ctx 定义在 try 内，种子一旦抛错
+  // catch 自身 ReferenceError 并把错误升级为 MarketService 构造失败——console 的 inject
+  // 随之缺失、插件被 cordis 静默挂起，实例 /api/health 404 且零日志，2026-09-16 M2 排障实证）
+  const ctx = market.ctx
   try {
-    const ctx = market.ctx
     if (market.submissions().count() > 0) return
-    const keys = generateDeveloperKeyPair()
+    const keys = generateEd25519KeyPair()
     let official = market.developers().findOne((item) => item.username === 'platform-official')
     if (!official) {
       official = market.registerDeveloper({
@@ -579,7 +562,7 @@ function seedOfficialPlugins(market: MarketService): void {
           '',
         ].join('\n'),
       }
-      const signature = signFingerprint(keys.privateKeyPem, fingerprintOf(files))
+      const signature = signEd25519(keys.privateKeyPem, fingerprintOf(files))
       const submission = market.submit(official, files, signature)
       market.approve(submission.id, 'platform-seed', '自营首批供给（M3：标杆场景打破供给空窗）')
     }

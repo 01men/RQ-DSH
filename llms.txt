@@ -27,8 +27,9 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - 流程编排（flow-core）：TF 编排 + 步骤状态机、模板库 + contextPack、SLA 与进度、甘特时间轴（`/api/flow/*`，`flow.*` 事件入总线与面板 SSE 扇出）
 - 数据要素域：数据集登记、四维质量分、血缘反向追溯、指标字典口径仲裁
 - 场景治理与协作：IAM 场景级授权（sceneCode，deny→allow→fail-closed）、审计证据锚点登记反查与场景维度时间线、通知中心持久化（since 增量 + 已读游标）
-- 平台工程加固：契约面 output.schema 强校验、审批执行能力令牌防冒充、事件总线持久化与重试/死信、平台自更新 pin/签名/回滚、连接器 ODD 声明块与 TOCTOU 执行侧快照校验、P95 尾延迟质量闸门与故障注入演练；入参校验收口（审批 decision/告警规则/应用指标/skill-storage 枚举）
+- 平台工程加固：契约面 output.schema 强校验、审批执行能力令牌防冒充、事件总线持久化与重试/死信、平台自更新 pin/签名/回滚、连接器 ODD 声明块与 TOCTOU 执行侧快照校验、P95 尾延迟质量闸门与故障注入演练；入参校验收口（审批 decision/告警规则/应用指标/skill-storage 枚举）；Ed25519 签名基建平台级抽升与发布清单验签（防篡改）
 - 用量计量：schema v1 幂等管道（死信重放/消费幂等）、零价快照价格簿、三方对账、能力漂移检测、成本穿透报表（单位 DAU 成本）；事件保留策略默认 730 天（`USAGE_RETENTION_DAYS`，0=永久，附清除运维口）
+- FinOps 报告 v1（CFO 视图）：成本穿透（部门×模型交叉矩阵 + 上月环比 + Top 消耗主体）、空转检测 v1（近似口径、页面显式标注需人工复核）、「财务视图」SPA 页（#/finops）与一键 CSV 导出（Excel 友好 UTF-8 BOM）
 - 模型接入网关：OpenAI 兼容真实转发（模型未配置 endpoint 时拒绝调用，不生成假 completion），实测 input/output tokens 计量；渠道治理（分级路由 / 渠道组降级链 / 预算熔断 / TTFT 遥测诚实缺列）
 - 审计与治理：四类审计日志、告警规则引擎、越权计数告警、L4 强制审批（上线/下线/下架/吊销，单人通过即执行、结果回写）；审批深化（高风险二次确认 fail-closed、公司级终审、SLA 看板）；HTTP 全响应安全头默认开启（nosniff/SAMEORIGIN/Referrer-Policy）
 - 连接器纳管：open-connector sidecar 作 SaaS 数据面（1,000+ Provider 目录、OAuth 代理、凭证保险库），平台侧双层授权镜像与计量对账
@@ -57,6 +58,7 @@ RongQi (ybkk-AIOS) is a self-hosted enterprise AI resource management platform: 
 - [IAW 缺口批次发布说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-11-iaw-batch.md)：flow-core 流程编排、数据要素域、模型渠道治理、Agent 自治与 A2A、场景级授权
 - [季度系统性测试报告](https://github.com/01men/ybkk-AIOS/blob/main/docs/qa-report-20260912-overview.md)：安全/计量/编排/市场四组详录与全链路、早高峰并发演练结论（2026-09-12）
 - [QA 优化批次交付说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-13-qa-fixes.md)：15 项安全与正确性修复、验证结论与防复发（2026-09-13）
+- [M2 迭代发布说明](https://github.com/01men/ybkk-AIOS/blob/main/docs/release-notes-2026-09-16-m2.md)：FinOps 报告 v1、首启体验产品化、技术债收尾与契约变更登记（2026-09-16）
 
 ## 边界与口径
 

@@ -29,6 +29,7 @@ export * from './plugin-ctx.ts'
 export * from './version.ts'
 export * from './behavior.ts'
 export * from './scenegraph.ts'
+export * from './signature.ts'
 
 export interface PlatformCoreConfig {
   dataDir?: string
