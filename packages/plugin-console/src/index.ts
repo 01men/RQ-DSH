@@ -2458,13 +2458,28 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
   guarded('POST', '/api/nas/:id/fs/rename', 'nas.write', async (exchange) => {
     const { path, newName } = body<{ path: string; newName: string }>(exchange)
     const info = caller(exchange)
-    return await ctx.nasRegistry.rename(exchange.params['id']!, path, newName, { id: info.userId ?? info.principalId, name: info.name })
+    const result = await ctx.nasRegistry.rename(exchange.params['id']!, path, newName, { id: info.userId ?? info.principalId, name: info.name })
+    // 所有权随重命名改写（含子树前缀）。
+    try {
+      const parent = path.split('/').filter(Boolean).slice(0, -1)
+      if (info.userId) ctx.nasAuthz.rewriteOwnershipFor(exchange.params['id']!, path, `/${[...parent, newName].filter(Boolean).join('/')}`)
+    } catch (error) {
+      ctx.logger('console').warn('文件所有权改写失败（不影响重命名）', error)
+    }
+    return result
   })
 
   guarded('POST', '/api/nas/:id/fs/delete', 'nas.write', async (exchange) => {
     const { paths } = body<{ paths: string[] }>(exchange)
     const info = caller(exchange)
-    return await ctx.nasRegistry.delete(exchange.params['id']!, Array.isArray(paths) ? paths : [paths], { id: info.userId ?? info.principalId, name: info.name })
+    const result = await ctx.nasRegistry.delete(exchange.params['id']!, Array.isArray(paths) ? paths : [paths], { id: info.userId ?? info.principalId, name: info.name })
+    // 所有权随删除移除（含子树）。
+    try {
+      if (info.userId) ctx.nasAuthz.removeOwnershipFor(exchange.params['id']!, Array.isArray(paths) ? paths : [paths])
+    } catch (error) {
+      ctx.logger('console').warn('文件所有权移除失败（不影响删除）', error)
+    }
+    return result
   })
 
   guarded('POST', '/api/nas/:id/fs/upload', 'nas.write', async (exchange) => {
@@ -2472,11 +2487,18 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     const info = caller(exchange)
     if (input.localFile && input.contentBase64) throw new Error('localFile 与 contentBase64 二选一')
     const buffer = input.contentBase64 !== undefined ? Buffer.from(input.contentBase64, 'base64') : undefined
-    return await ctx.nasRegistry.uploadFile(exchange.params['id']!, {
+    const result = await ctx.nasRegistry.uploadFile(exchange.params['id']!, {
       ...(buffer !== undefined ? { buffer } : { localFile: input.localFile }),
       destPath: input.destPath,
       actor: { id: info.userId ?? info.principalId, name: info.name },
     })
+    // 文件所有权（2026-09-17 新增）：上传成功即登记上传者（上传者对自有文档默认全权）。
+    try {
+      if (info.userId) ctx.nasAuthz.recordOwnership({ nasId: exchange.params['id']!, path: input.destPath, userId: info.userId, source: 'upload' })
+    } catch (error) {
+      ctx.logger('console').warn('文件所有权登记失败（不影响上传）', error)
+    }
+    return result
   })
 
   guarded('POST', '/api/nas/:id/fs/download', 'nas.read', async (exchange) => {
@@ -2735,8 +2757,57 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     }
   }, { access: 'guarded', permission: 'nas.authz.write,nas.authz.check' })
 
-  guarded('GET', '/api/nas/authz/decisions', 'nas.authz.read', (exchange) => {
-    const limit = Math.min(500, Number(exchange.query.get('limit') ?? 100))
+  /**
+   * 文件所有权登记（2026-09-17 新增，上传者对自有文档默认全权）：
+   * - POST /record：网关写类操作（fs_upload/fs_delete/fs_rename/fs_copy_move）成功后的登记/维护上报，
+   *   供 hermes/直连 MCP 客户端的操作同步所有权（控制台链路由 nasRegistry 原生维护，双路上报幂等）；
+   * - GET：排查/审计查询。
+   */
+  http.register('POST', '/api/nas/authz/ownership/record', async (exchange) => {
+    if (!requirePermission(exchange, 'nas.ownership.write')) return
+    const input = body<{ nasId: string; userId: string; tool: string; args?: { path?: string | string[]; folder_path?: string | string[]; dest_path?: string; local_file?: string; name?: string | string[]; dest_folder_path?: string; remove_src?: boolean } }>(exchange)
+    if (!input.nasId || !input.userId || !input.tool) {
+      exchange.fail(400, 'BAD_REQUEST', '缺少 nasId/userId/tool')
+      return
+    }
+    const listOf = (v: string | string[] | undefined): string[] => (Array.isArray(v) ? v : v ? [String(v)] : []).map(String).filter(Boolean)
+    const joinPosix = (dir: string, name: string): string => `/${[...dir.split('/'), ...name.split('/')].filter(Boolean).join('/')}`
+    try {
+      const args = input.args ?? {}
+      let result: unknown = { ignored: true, tool: input.tool }
+      if (input.tool === 'fs_upload' && args.dest_path && args.local_file) {
+        const filename = String(args.local_file).split('/').filter(Boolean).pop() ?? ''
+        result = ctx.nasAuthz.recordOwnership({ nasId: String(input.nasId), path: joinPosix(String(args.dest_path), filename), userId: String(input.userId), source: 'gateway:upload' })
+      } else if (input.tool === 'fs_delete') {
+        result = { removed: ctx.nasAuthz.removeOwnershipFor(String(input.nasId), listOf(args.path)) }
+      } else if (input.tool === 'fs_rename' && listOf(args.path).length > 0) {
+        const paths = listOf(args.path)
+        const names = listOf(args.name)
+        result = { rewritten: paths.map((p, i) => ctx.nasAuthz.rewriteOwnershipFor(String(input.nasId), p, joinPosix(p.split('/').slice(0, -1).join('/'), names[i] ?? ''))).reduce((a, b) => a + b, 0) }
+      } else if (input.tool === 'fs_copy_move' && args.dest_folder_path) {
+        const moving = args.remove_src === true
+        let touched = 0
+        for (const p of listOf(args.path)) {
+          const dest = joinPosix(String(args.dest_folder_path), p.split('/').filter(Boolean).pop() ?? '')
+          if (moving) touched += ctx.nasAuthz.rewriteOwnershipFor(String(input.nasId), p, dest)
+          else if (ctx.nasAuthz.recordOwnership({ nasId: String(input.nasId), path: dest, userId: String(input.userId), source: 'gateway:copy' })) touched++
+        }
+        result = { touched }
+      }
+      exchange.ok(result)
+    } catch (error) {
+      exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+    }
+  }, { access: 'guarded', permission: 'nas.ownership.write' })
+
+  guarded('GET', '/api/nas/authz/ownership', 'nas.authz.read', (exchange) => {
+    const nasId = exchange.query.get('nasId') ?? undefined
+    const userId = exchange.query.get('userId') ?? undefined
+    const path = exchange.query.get('path') ?? undefined
+    return { items: ctx.nasAuthz.listOwnership({ ...(nasId ? { nasId } : {}), ...(userId ? { userId } : {}), ...(path ? { path } : {}) }) }
+  })
+
+  guarded('GET', '/api/nas/authz/decisions', 'nas.authz.read', (exchange) => {    const limit = Math.min(500, Number(exchange.query.get('limit') ?? 100))
     const decision = exchange.query.get('decision')
     const nasId = exchange.query.get('nasId')
     const userId = exchange.query.get('userId')

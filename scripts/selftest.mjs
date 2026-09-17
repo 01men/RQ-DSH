@@ -3146,7 +3146,7 @@ try {
     const u = (id, orgId, extra = {}) => ({ id, displayName: id, orgId, ...extra })
     const run = (user, paths, op, opt = {}) => engineCheck(
       { userId: user.id, nasId: opt.nasId ?? 'en1', paths, op, now, ...(opt.override !== undefined ? { override: opt.override } : {}) },
-      { orgIndex: idx, user, nas: opt.nas ?? nas1, rules: opt.rules ?? baseRules, cGroupHits: opt.cGroupHits ?? [] },
+      { orgIndex: idx, user, nas: opt.nas ?? nas1, rules: opt.rules ?? baseRules, cGroupHits: opt.cGroupHits ?? [], ...(opt.ownedPaths ? { ownedPaths: opt.ownedPaths } : {}) },
     )
     const inScope = '/智造平台/生产部/总装12线/a.txt'
 
@@ -3199,6 +3199,14 @@ try {
       && run(u('e_z', 'eo7'), ['/'], 'read').decision === 'deny'
       && run(u('e_y', 'eo7'), ['/'], 'read').decision === 'allow',
       JSON.stringify({ mRootRead: run(u('e_m', 'eo3'), ['/'], 'read').decision, mRootWrite: run(u('e_m', 'eo3'), ['/'], 'write').decision, yRootRead: run(u('e_y', 'eo7'), ['/'], 'read').decision, zRootRead: run(u('e_z', 'eo7'), ['/'], 'read').decision }))
+    check('作用域祖先链只读列举（2026-09-17 拍板）：深层子树成员可逐级下钻到自己的目录，兄弟子树/越界仍拒、写祖先仍拒',
+      run(u('e_m', 'eo3'), ['/智造平台'], 'read').decision === 'allow'
+      && run(u('e_m', 'eo3'), ['/智造平台/生产部'], 'read').reasons.some((r) => r.includes('ancestor-listing'))
+      && run(u('e_m', 'eo3'), ['/智造平台/生产部'], 'write').decision === 'deny'
+      && run(u('e_m', 'eo3'), ['/智造平台/品质部'], 'read').decision === 'deny'
+      && run(u('e_m', 'eo3'), ['/智造平台/生产部/质检线'], 'read').decision === 'deny'
+      && run(u('e_m', 'eo3'), ['/智造平台/生产部/总装12线'], 'read').decision === 'allow',
+      JSON.stringify({ dept: run(u('e_m', 'eo3'), ['/智造平台/生产部'], 'read').decision, sibling: run(u('e_m', 'eo3'), ['/智造平台/品质部'], 'read').decision }))
     check('负责人悬空检测：质检线在列', findVacantLeaderOrgs(idx, { withUserOrgIds: new Set(['eo3', 'eo4']) }).some((o) => o.id === 'eo4'))
 
     // 判定序：显式 deny > 显式 allow > 角色矩阵 > 默认 deny
@@ -3219,6 +3227,22 @@ try {
     check('M 矩阵：写文件放行/改结构删除分享管理拒绝',
       run(u('e_m', 'eo3'), [inScope], 'write').decision === 'allow'
       && ['modify', 'delete', 'share', 'admin'].every((op) => run(u('e_m', 'eo3'), [inScope], op).decision === 'deny'))
+    check('文件所有权（2026-09-17 新增）：上传者对自有文档全权（M 可删/改自己的文件），admin 不随所有权，精确路径外不命中',
+      run(u('e_m', 'eo3'), [inScope], 'delete', { ownedPaths: [inScope] }).decision === 'allow'
+      && run(u('e_m', 'eo3'), [inScope], 'delete', { ownedPaths: [inScope] }).reasons.some((r) => r.includes('owner.allow'))
+      && run(u('e_m', 'eo3'), [inScope], 'modify', { ownedPaths: [inScope] }).decision === 'allow'
+      && run(u('e_m', 'eo3'), [inScope], 'share', { ownedPaths: [inScope] }).decision === 'allow'
+      && run(u('e_m', 'eo3'), [inScope], 'admin', { ownedPaths: [inScope] }).decision === 'deny'
+      && run(u('e_m', 'eo3'), [inScope], 'delete', { ownedPaths: ['/智造平台/生产部/质检线/别人的.txt'] }).decision === 'deny'
+      && run(u('e_m', 'eo3'), [inScope + '/子路径.txt'], 'delete', { ownedPaths: [inScope] }).decision === 'deny')
+    check('文件所有权：显式 deny 仍压过所有权（判定序②不变）',
+      (() => {
+        const rules = { ...baseRules, observeOnly: false, exceptions: [{ id: 'ex_owner_deny', effect: 'deny', nasId: 'en1', path: '/智造平台/生产部/总装12线/*', ops: ['delete'], note: '治理封禁' }] }
+        return run(u('e_m', 'eo3'), [inScope], 'delete', { rules, ownedPaths: [inScope] }).decision === 'deny'
+          && run(u('e_m', 'eo3'), [inScope], 'delete', { rules, ownedPaths: [inScope] }).ruleId === 'ex_owner_deny'
+      })())
+    check('文件所有权：全量降级只读（G3）仍会压过所有权写类放行',
+      run(u('e_m', 'eo3'), [inScope], 'delete', { rules: { ...baseRules, observeOnly: false, degradeAllToReadonly: true }, ownedPaths: [inScope] }).decision === 'deny')
     check('矩阵一致性：内置矩阵 M 行与判定一致',
       Object.entries(MATRIX_DEFAULT.M).every(([op, allow]) => (run(u('e_m', 'eo3'), [inScope], op).decision === 'allow') === allow))
 
@@ -3316,10 +3340,33 @@ try {
     body: { contentBase64: Buffer.from('PK\x03\x04selftest-file', 'latin1').toString('base64'), destPath: '/skillhub/selftest/a.zip' },
   })
   check('上传文件（平台 staging → 网关 fs_upload 侧读盘）', nasUpload.ok && nasGwUploads.some((u) => u.destPath === '/skillhub/selftest' && u.filename === 'a.zip' && u.magic === 'PK'))
+  const adminUserId = adminLogin.data.user?.id
+  const ownList = await api('GET', `/api/nas/authz/ownership?nasId=${nasId}&path=${encodeURIComponent('/skillhub/selftest/a.zip')}`, { token: admin })
+  // 所有权探针用户：挂三级组织链（depth 3 → M 角色，无特殊账号态），隔离于演示种子组织
+  const ownRootOrg = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '所有权测试事业部' } })
+  const ownMidOrg = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '所有权测试部门', parentId: ownRootOrg.data.id } })
+  const ownLeafOrg = await api('POST', '/api/iam/orgs', { token: admin, body: { name: '所有权测试班组', parentId: ownMidOrg.data.id } })
+  const ownUserCreate = await api('POST', '/api/iam/users', { token: admin, body: { username: 'ownertest', displayName: '所有权测试员', orgId: ownLeafOrg.data.id, password: 'Ybk@2026' } })
+  const memberUid = ownUserCreate.ok ? ownUserCreate.data.id : register.data.user.id
+  const ownProbe = await api('POST', '/api/nas/authz/ownership/record', { token: admin, body: { nasId, userId: memberUid, tool: 'fs_upload', args: { dest_path: '/skillhub/selftest', local_file: '/tmp/stage/成员上传.bin' } } })
+  check('文件所有权登记（服务层）：上传成功即登记上传者 + 网关上报可登记成员', ownList.ok && ownList.data.items.length === 1 && ownList.data.items[0].userId === adminUserId && ownList.data.items[0].source === 'upload'
+    && ownProbe.ok && !ownProbe.data.ignored,
+    JSON.stringify({ list: ownList.error ?? ownList.data, probe: ownProbe.error ?? ownProbe.data }))
+  const ownDelCheck = await api('POST', '/api/nas/authz/check', { token: admin, body: { nasId, userId: memberUid, paths: ['/skillhub/selftest/成员上传.bin'], op: 'delete' } })
+  check('文件所有权判定（服务层）：上传者删除自有文档放行（owner.allow，优先于作用域/矩阵）',
+    ownDelCheck.ok && ownDelCheck.data.decision === 'allow' && ownDelCheck.data.reasons.some((r) => r.includes('owner.allow')),
+    JSON.stringify(ownDelCheck.error ?? ownDelCheck.data?.reasons))
+  const ownOtherDel = await api('POST', '/api/nas/authz/check', { token: admin, body: { nasId, userId: memberUid, paths: ['/skillhub/selftest/a.zip'], op: 'delete' } })
+  check('文件所有权不外溢：非本人上传的文件所有权判定不命中（admin 上传的文件对成员仍按矩阵/作用域）',
+    ownOtherDel.ok && ownOtherDel.data.reasons.every((r) => !r.includes('owner.allow')),
+    JSON.stringify(ownOtherDel.error ?? ownOtherDel.data?.reasons))
   const nasSearch = await api('POST', `/api/nas/${nasId}/fs/search`, { token: admin, body: { pattern: 'report', path: '/skillhub' } })
   check('检索文件（fs_search：folder_path 字符串）', nasSearch.ok && JSON.stringify(nasSearch.data).includes('report'))
   const nasDelete = await api('POST', `/api/nas/${nasId}/fs/delete`, { token: admin, body: { paths: ['/skillhub/selftest/a.zip'] } })
   check('删除文件（fs_delete：path 数组）', nasDelete.ok && nasGwCalls.some((c) => c.name === 'fs_delete' && Array.isArray(c.args.path) && c.args.path[0] === '/skillhub/selftest/a.zip'))
+  const ownListAfterDel = await api('GET', `/api/nas/authz/ownership?nasId=${nasId}&path=${encodeURIComponent('/skillhub/selftest/a.zip')}`, { token: admin })
+  check('文件所有权随删除移除（生命周期维护）', ownListAfterDel.ok && ownListAfterDel.data.items.length === 0,
+    JSON.stringify(ownListAfterDel.error ?? ownListAfterDel.data))
 
   // 真实网关契约：fs_list 用 folder_path 字符串
   const nasFilesCheck = nasGwCalls.find((c) => c.name === 'fs_list' && c.args.folder_path === '/skillhub')
