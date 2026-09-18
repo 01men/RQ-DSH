@@ -608,4 +608,4 @@ PV 同日累加与 UV/DAU 取最大、成本穿透恒等、技能热力矩阵、
 
 ---
 
-> 最近更新：2026-09-17 · M2 迭代交付——FinOps 报告 v1（CFO 视图：成本穿透部门×模型交叉矩阵、空转检测 v1（近似口径、页面标注需人工复核）、「财务视图」SPA 页 + 一键 CSV 导出）、首启体验产品化（上线三步走引导 + 部署可执行 checklist）、Ed25519 签名基建平台级抽升与发布清单验签工具（[docs/release-notes-2026-09-16-m2.md](docs/release-notes-2026-09-16-m2.md)）。此前：2026-09-15 · 审批逻辑调整——Skill 两级审批允许同一人依次完成（同人二次审批）、审批中心提交人与审批人允许同一账号（自审自批拦截取消，权限点与高风险二次确认不变）、审批驳回支持删除（[docs/release-notes-2026-09-15-approval-relax.md](docs/release-notes-2026-09-15-approval-relax.md)）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
+> 最近更新：2026-09-18 · NAS 文件所有权跟踪接入数据权限——上传登记/重命名改写/删除移除（含子树前缀），判定引擎与清单同步扩展。此前：2026-09-17 · M2 迭代交付——FinOps 报告 v1（CFO 视图：成本穿透部门×模型交叉矩阵、空转检测 v1（近似口径、页面标注需人工复核）、「财务视图」SPA 页 + 一键 CSV 导出）、首启体验产品化（上线三步走引导 + 部署可执行 checklist）、Ed25519 签名基建平台级抽升与发布清单验签工具（[docs/release-notes-2026-09-16-m2.md](docs/release-notes-2026-09-16-m2.md)）。产品能力口径以 [docs/release-notes-2026-09-09-m0.md](docs/release-notes-2026-09-09-m0.md) 为准。
