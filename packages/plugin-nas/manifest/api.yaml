@@ -11,6 +11,7 @@ endpoints:
   - GET /api/nas/authz/scope · GET /api/nas/authz/rules · PUT /api/nas/authz/rules · POST /api/nas/authz/rules/import（授权规则面）
   - POST /api/nas/authz/check（单点鉴权自查） · POST /api/nas/authz/exceptions · GET /api/nas/authz/exceptions（例外登记/清单）
   - GET /api/nas/authz/decisions（判定留痕查询） · POST /api/nas/authz/reconcile · POST /api/nas/authz/leader-vacancy-scan（对账与主例外巡检）
+  - POST /api/nas/authz/ownership/record（网关写类操作成功后的所有权登记/维护上报，nas.ownership.write） · GET /api/nas/authz/ownership（所有权查询，nas.authz.read）
 tools:
   - nas_list
   - nas_get

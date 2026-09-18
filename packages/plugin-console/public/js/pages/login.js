@@ -51,6 +51,11 @@ export function renderLogin(app) {
       <div class="login-panel">
         <h2 id="login-title">登录控制台</h2>
         <div class="sub" id="login-sub">使用钉钉扫码或平台账号登录</div>
+        <div id="login-bootstrap-hint" class="muted-box mb-14" style="display:none;gap:8px;border-color:#fcd34d;background:#fffbeb">
+          ${icon('info', 15)}
+          <span class="fs-12">首次部署提示：平台管理员 <b>admin</b> 的初始口令在服务器 <b>data/admin-initial-password.txt</b> 文件中。
+          登录后请<b>立即修改口令并删除该文件</b>（操作指引见 docs/deploy-enterprise.md 部署清单）。</span>
+        </div>
         <div class="segmented" style="margin-bottom:24px" id="login-tabs">
           <span class="segmented-item" data-tab="dingtalk">钉钉扫码</span>
           <span class="segmented-item active" data-tab="password">账号密码</span>
@@ -124,6 +129,11 @@ export function renderLogin(app) {
 
   // 登录前换宿主（docs/frontend-host-switching.md）：#/connections 无会话可用（独立形态渲染）
   $('#login-conn-link').onclick = () => { location.hash = '#/connections' }
+
+  // 首启部署提示（M2）：初始口令文件仍在服务器时展示「上线三步走」横幅；公开端点只回一个布尔
+  void api.get('/api/platform/bootstrap').then((data) => {
+    if (data?.initialPasswordPending) $('#login-bootstrap-hint').style.display = 'flex'
+  }).catch(() => { /* 端点不可达不阻塞登录 */ })
 
   const tabPassword = $('#login-form-password')
   const tabDing = $('#login-form-dingtalk')

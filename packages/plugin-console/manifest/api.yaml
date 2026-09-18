@@ -10,6 +10,11 @@ endpoints:
   - GET /api/assets/benefit（成本穿透：内部成本参考 + 单位 DAU 成本，零价快照口径） · GET /api/assets/retire-reasons（下架分析：弃用/下线原因聚合）
   - GET /api/skills/usage-heatmap（技能热力图：skill × 日 使用矩阵）
   - GET /api/usage/report/monthly（J4 月度用量报表：部门/Agent/Skill tokens 三维聚合；format=csv 自助导出）
+  - GET /api/finops/overview?month=YYYY-MM&window=分钟（usage.read；M2 CFO 视图：成本穿透 org×model+环比 + 空转检测一次取全）
+  - GET /api/finops/idle?month=YYYY-MM&window=分钟（usage.read；空转检测独立查询，近似口径「无后续动作调用」）
+  - GET /api/finops/report/monthly?month=YYYY-MM[&format=csv]（usage.read；CFO 成本报表，CSV 为 Excel 友好 BOM）
+  - GET /api/platform/bootstrap（公开；首启状态：仅回 initialPasswordPending 布尔，登录页部署提示用）
+  - GET /api/platform/bootstrap/detail（authenticated；首启状态全量：mode/orgName/seededAt/口令文件路径）
   - POST /api/usage/retention/purge（usage.admin；保留策略手动巡检，body.days 可临时收紧窗口，0=跳过）
   - GET /api/usage/summary?window=today|month&org=&subject=（panel.read；IAW 4-1 成本摘要+预算进度，非 usage.read 主体强制收敛自身组织）
   - GET /api/usage/feedback-stats?days=7|30|90|all（panel.read；IAW 4-2 产出采纳率聚合）

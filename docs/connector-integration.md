@@ -441,7 +441,7 @@ cat > pg.json <<'JSON'
 {"name":"dev-read-only","orgId":"ORG_ID",
  "policies":{"hackernews":{"allowedActions":["hackernews.*"],"riskCap":"read","constraints":{"readOnly":true}}},
  "subjects":[{"type":"user_group","id":"USER_GROUP_ID"}],
- "rateLimitPerMin":60,"precheckCents":0}
+ "rateLimitPerMin":60}
 JSON
 dshctl connector perm-groups create --file=@pg.json
 dshctl connector tokens                                # 台账可见 ocTokenId + 快照哈希（无令牌值）

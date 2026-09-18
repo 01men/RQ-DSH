@@ -16,7 +16,7 @@ import { Service } from '@deepseek-ai/cordis'
 import { newId, type Collection, type RecordBase } from '../../platform-core/src/index.ts'
 import {
   AUTHZ_OPS, HIGH_RISK_OPS,
-  buildOrgIndex, check as engineCheck, deriveRole, deriveScope, effectiveMatrix,
+  buildOrgIndex, check as engineCheck, deriveRole, deriveScope, effectiveMatrix, normalizePath,
   findVacantLeaderOrgs, nearestLeaderOrg, reconcileOrgDirs,
   type AuthzException, type AuthzOp, type AuthzRole, type EngineDecision,
   type EngineNas, type EngineUser, type OrgIndex,
@@ -68,6 +68,21 @@ export class RulesVersionConflictError extends Error {
     this.name = 'RulesVersionConflictError'
     this.currentVersion = currentVersion
   }
+}
+
+/**
+ * 文件所有权登记（2026-09-17 新增）：上传者对自有文档默认全权（判定序 ③b）。
+ * 仅登记文件精确路径（目录不登记，避免建目录者获得子树删权）；删除/重命名/移动随生命周期维护。
+ */
+export interface NasOwnershipRecord extends RecordBase {
+  nasId: string
+  path: string
+  userId: string
+  userName?: string
+  /** 登记来源：upload=平台上传链路、gateway:upload/gateway:copy=网关上报（hermes/直连 MCP） */
+  source: string
+  createdAt: string
+  updatedAt: string
 }
 
 const DENIED_ALERT_WINDOW_MS = 10 * 60_000
@@ -130,6 +145,98 @@ export class NasAuthzService extends Service {
 
   decisions(): Collection<AuthzDecisionRecord> {
     return this.ctx.opsStorage.collection<AuthzDecisionRecord>('nas:authzDecisions')
+  }
+
+  ownershipCollection(): Collection<NasOwnershipRecord> {
+    return this.ctx.opsStorage.collection<NasOwnershipRecord>('nas:ownership')
+  }
+
+  // -- 文件所有权（上传者默认全权，2026-09-17 新增） -------------------------
+
+  /** 登记所有权（上传/复制成功后调用）：按 (nasId, path) upsert，最后写入者持有。用户不可解析则忽略（匿名/机器写不登记）。 */
+  recordOwnership(input: { nasId: string; path: string; userId: string; source?: string }): NasOwnershipRecord | undefined {
+    const user = this.resolveUser(input.userId)
+    if (!user) return undefined
+    const nas = this.nasDescriptor(input.nasId)
+    const nasId = nas?.id ?? input.nasId
+    let path: string
+    try {
+      path = normalizePath(input.path)
+    } catch {
+      return undefined
+    }
+    const existing = this.ownershipCollection().findOne((item) => item.nasId === nasId && item.path === path)
+    const now = new Date().toISOString()
+    if (existing) {
+      const updated: NasOwnershipRecord = { ...existing, userId: user.id, userName: user.displayName, source: input.source ?? existing.source, createdAt: now, updatedAt: now }
+      this.ownershipCollection().update(existing.id, updated)
+      return updated
+    }
+    return this.ownershipCollection().insert({ id: newId('own'), nasId, path, userId: user.id, userName: user.displayName, source: input.source ?? 'upload', createdAt: now, updatedAt: now })
+  }
+
+  /** 移除所有权（删除成功后调用，含子树）。返回移除条数。 */
+  removeOwnershipFor(nasIdInput: string, paths: string[]): number {
+    const nas = this.nasDescriptor(nasIdInput)
+    const nasId = nas?.id ?? nasIdInput
+    const targets = paths.map((p) => { try { return normalizePath(p) } catch { return '' } }).filter(Boolean)
+    if (targets.length === 0) return 0
+    let removed = 0
+    for (const record of this.ownershipCollection().find((item) => item.nasId === nasId)) {
+      if (targets.some((target) => record.path === target || record.path.startsWith(`${target}/`))) {
+        this.ownershipCollection().remove(record.id)
+        removed++
+      }
+    }
+    return removed
+  }
+
+  /** 改写所有权路径（重命名/移动成功后调用，含子树前缀改写）。返回改写条数。 */
+  rewriteOwnershipFor(nasIdInput: string, fromPath: string, toPath: string): number {
+    const nas = this.nasDescriptor(nasIdInput)
+    const nasId = nas?.id ?? nasIdInput
+    let from: string
+    let to: string
+    try {
+      from = normalizePath(fromPath)
+      to = normalizePath(toPath)
+    } catch {
+      return 0
+    }
+    let rewritten = 0
+    for (const record of this.ownershipCollection().find((item) => item.nasId === nasId)) {
+      if (record.path === from || record.path.startsWith(`${from}/`)) {
+        this.ownershipCollection().update(record.id, { ...record, path: `${to}${record.path.slice(from.length)}`, updatedAt: new Date().toISOString() })
+        rewritten++
+      }
+    }
+    return rewritten
+  }
+
+  listOwnership(filter?: { nasId?: string; userId?: string; path?: string }): NasOwnershipRecord[] {
+    return this.ownershipCollection().find((item) => {
+      if (filter?.nasId && item.nasId !== filter.nasId) return false
+      if (filter?.userId && item.userId !== filter.userId) return false
+      if (filter?.path) {
+        try {
+          return item.path === normalizePath(filter.path)
+        } catch {
+          return false
+        }
+      }
+      return true
+    })
+  }
+
+  /** check 用：请求用户在这些路径上持有的所有权（精确路径匹配，身份经平台/钉钉双解析）。 */
+  private ownedPathsFor(nasIdInput: string, rawUserId: string, paths: string[]): string[] {
+    const user = this.resolveUser(rawUserId)
+    if (!user) return []
+    const nas = this.nasDescriptor(nasIdInput)
+    const nasId = nas?.id ?? nasIdInput
+    const wanted = new Set(paths.map((p) => { try { return normalizePath(p) } catch { return '' } }).filter(Boolean))
+    if (wanted.size === 0) return []
+    return this.ownershipCollection().find((item) => item.nasId === nasId && item.userId === user.id && wanted.has(item.path)).map((item) => item.path)
   }
 
   // -- 规则 -----------------------------------------------------------------
@@ -271,6 +378,7 @@ export class NasAuthzService extends Service {
     // 保证例外/规则的 nasId 按键一致命中（否则 IP 字面量 ≠ 资产 ID，显式授权永不生效）。
     const canonicalNasId = nas?.id ?? input.nasId
     const orgIndex = this.orgIndex()
+    const ownedPaths = this.ownedPathsFor(canonicalNasId, input.userId, paths)
     const engineUser: EngineUser | undefined = user
       ? { id: user.id, displayName: user.displayName, orgId: user.orgId, ...(user.primaryOrgId !== undefined ? { primaryOrgId: user.primaryOrgId } : {}), ...(user.accountType !== undefined ? { accountType: user.accountType } : {}), status: user.status }
       : undefined
@@ -282,6 +390,7 @@ export class NasAuthzService extends Service {
         ...(nas !== undefined ? { nas } : {}),
         rules,
         cGroupHits: this.cGroupHits(user?.id ?? input.userId, rules.cGroups),
+        ...(ownedPaths.length > 0 ? { ownedPaths: ownedPaths } : {}),
       },
     )
     const enriched = { ...decision, ...(user ? { userName: user.displayName } : {}), ...(nas?.name ? { nasName: nas.name } : {}) }

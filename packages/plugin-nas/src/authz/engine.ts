@@ -7,6 +7,7 @@
  *   ① 账号特殊规则（外部/可疑/挂根/未落班组/兼任只读）
  *   ② 资源级显式 deny（nasId+path 尾通配，可带 userIds）
  *   ③ 资源级显式 allow（C 跨域白名单、临时授权，可设 expiresAt）
+ *      ③b 文件所有权（2026-09-17 新增）：上传者对自有文档默认全权（admin 除外，显式 deny 仍优先）
  *   ④ 角色矩阵 MATRIX[role][op] × 作用域边界
  *   ⑤ 默认 deny
  * - selftest 直接单测本模块（引擎分层约束 O8）。
@@ -364,6 +365,8 @@ export interface EngineCheckContext {
   rules: Pick<AuthzRulesSnapshot, 'version' | 'matrixOverrides' | 'exceptions' | 'cGroups' | 'externalReadPaths' | 'observeOnly' | 'degradeAllToReadonly'>
   /** 命中的 C 关联动态用户组 id（Service 层按规则解析后传入，引擎不做 IO）。 */
   cGroupHits: string[]
+  /** 请求用户持有的文件所有权路径（精确路径，Service 层从所有权登记解析后传入；2026-09-17 新增）。 */
+  ownedPaths?: string[]
 }
 
 const OP_LABEL: Record<AuthzOp, string> = {
@@ -442,8 +445,13 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
     ...led,
     prefixes: deriveScope({ ...user, primaryOrgId: led.orgId }, ctx.nas, ctx.orgIndex).prefixes,
   })).filter((led) => led.prefixes.length > 0)
-  // 主作用域未命中锚点不提前拒绝：跨分支领导作用域仍可能命中（反之才全 deny）
-  if (scope.via === 'none' && leaderScopes.length === 0) {
+  // 主作用域未命中锚点不提前拒绝：跨分支领导作用域仍可能命中（反之才全 deny）；
+  // 全部请求路径均为请求用户自有文档（所有权 ③b）时同样不提前拒绝——所有权独立于组织作用域，
+  // 用户调岗/锚点调整后仍保有其上传文档的所有权（显式 deny 与 G3 降级依旧优先）。
+  const ownedPaths = ctx.ownedPaths ?? []
+  const normalizedInputs = input.paths.map((p) => { try { return normalizePath(p) } catch { return '' } })
+  const allOwned = input.op !== 'admin' && normalizedInputs.length > 0 && normalizedInputs.every((p) => ownedPaths.includes(p))
+  if (scope.via === 'none' && leaderScopes.length === 0 && !allOwned) {
     return denyAll([`nas.no-scope：未命中该 NAS 的接入组织锚点（${scope.reason}）`])
   }
   base.scope = scope.via === 'none' ? [] : [...scope.prefixes]
@@ -457,11 +465,18 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
   const secondaryPrefixes = secondaryScope && secondaryScope.via !== 'none' ? secondaryScope.prefixes : []
   if (secondaryPrefixes.length > 0) base.scope = [...base.scope, ...secondaryPrefixes]
 
-  // 根目录只读列举（B 语义，2026-09-03 拍板）：在本 NAS 有任一作用域（主/跨分支领导/兼任挂靠）的用户，
-  // 放行对 NAS 根路径本身的只读操作（列目录/查元信息）——否则子树作用域用户浏览文件第一步列根即被拒。
-  // 显式 deny 例外仍优先（判定序②不变）；写类与根下越界路径不受影响；无任何作用域用户照常全拒。
+  // 作用域祖先链只读列举（B 语义；2026-09-03 拍板根目录版，2026-09-17 拍板扩展到全祖先链）：
+  // 在本 NAS 有任一作用域（主/跨分支领导/兼任挂靠）的用户，放行对「任一作用域前缀的祖先目录
+  // （含 NAS 根）」的只读操作（列目录/查元信息）——否则深层子树作用域用户在文件浏览器里
+  // 无法逐级下钻到自己的目录（每一步的父目录都越界）。祖先链只读放行的信息增量与根目录
+  // 列举一致（仅暴露目录名层级，不暴露子树内容）；显式 deny 例外仍优先（判定序②不变）；
+  // 写类与作用域外平级/越界路径不受影响；无任何作用域用户照常全拒。
   const nasRoot = normalizePath(ctx.nas!.rootPath || '/')
-  const rootListingAllowed = scope.via !== 'none' || leaderScopes.length > 0 || secondaryPrefixes.length > 0
+  const ancestorPrefixes = [
+    ...(scope.via === 'none' ? [] : scope.prefixes),
+    ...leaderScopes.flatMap((led) => led.prefixes),
+    ...secondaryPrefixes,
+  ]
 
   const verdicts: EnginePathVerdict[] = input.paths.map((rawPath) => {
     const path = normalizePath(rawPath)
@@ -485,9 +500,18 @@ export function check(input: EngineCheckInput, ctx: EngineCheckContext): EngineD
     if (allowHit) {
       return { path, decision: 'allow', reasons: [`exception.allow：命中显式授权规则 ${allowHit.id}${allowHit.expiresAt ? `（${allowHit.expiresAt} 到期）` : ''}${allowHit.note ? `（${allowHit.note}）` : ''}`], ruleId: allowHit.id }
     }
-    // 根目录只读列举（B 语义）：判定序在显式例外之后、作用域边界之前
-    if (rootListingAllowed && !WRITE_OPS.has(input.op) && path === nasRoot) {
-      return { path, decision: 'allow', reasons: ['org.root-listing：本 NAS 作用域内用户的根目录只读列举放行'] }
+    // ③b 文件所有权（2026-09-17 新增）：上传者对自有文档默认全权（admin 为平台权限点，不随所有权）。
+    // 登记仅覆盖文件精确路径（目录不登记，避免建目录者获得子树删权）；显式 deny 仍优先（判定序②）；
+    // allow 后仍受 finalize 的全量降级只读（G3）约束。
+    if (input.op !== 'admin' && ctx.ownedPaths?.includes(path)) {
+      return { path, decision: 'allow', reasons: [`owner.allow：文件上传者对自有文档默认放行「${OP_LABEL[input.op]}」`] }
+    }
+    // 作用域祖先链只读列举：判定序在显式例外之后、作用域边界之前（NAS 根为祖先链特例，reason 沿用 root-listing）
+    const onAncestorChain = ancestorPrefixes.some((prefix) => pathWithin(prefix, path))
+    if (ancestorPrefixes.length > 0 && !WRITE_OPS.has(input.op) && onAncestorChain) {
+      return path === nasRoot
+        ? { path, decision: 'allow', reasons: ['org.root-listing：本 NAS 作用域内用户的根目录只读列举放行'] }
+        : { path, decision: 'allow', reasons: ['org.ancestor-listing：作用域祖先目录只读列举放行（浏览逐级下钻）'] }
     }
 
     // ④ 角色矩阵 × 作用域边界（主作用域 / 跨分支领导层 / 兼任只读层 / C 跨域只读层）

@@ -18,6 +18,7 @@ export * from "./plugin-ctx.js";
 export * from "./version.js";
 export * from "./behavior.js";
 export * from "./scenegraph.js";
+export * from "./signature.js";
 const name = "platform-core";
 async function apply(ctx, config = {}) {
   const storage = new StorageService(ctx, { dataDir: config.dataDir });
