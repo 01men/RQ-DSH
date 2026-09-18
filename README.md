@@ -6,7 +6,7 @@
 > 经本机代理接入（浏览器零跨域），登录在宿主侧完成。定制轨范围：一线面板/看板（plugin-panel-core）、
 > 执行卡（plugin-rq-card）、钉钉桥（plugin-dingtalk-bridge）、scenegraphs 业务数据。宿主平台主仓库见
 > [01men/ybkk-AIOS](https://github.com/01men/ybkk-AIOS)（本分支经 merge 吸收上游 main，下文为宿主平台说明）。
-> 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md)。产品介绍单页：[产品.html](产品.html)——slogan「让每个 Agent，立刻进入生产一线」；含五空间 / 14 行业图谱 / 宿主底座（榕器 AIOS 六类资产 + 身份/权限/计量/审计四支柱）/ 四通道安装 / 场景 / 联系（电话与微信）/ FAQ。
+> 产品定版：[docs/plan-gate01.md](docs/plan-gate01.md)。产品介绍单页：[产品.html](产品.html)——首屏 slogan「AI 会做事，管得住才算数」；版式借鉴 agent-git.com 设计语言（暖白底 / 墨黑字 / 品牌黄强调 / 大气层光晕 hero / 编号章节），内容仍为治理层定位：两张装机卡（终端命令 + Agent 提示词，各带一键复制）/ 四通道安装 / 市场数据带 / CIO·CTO·CFO 三决策者 / 前台×底座架构图（六类资产 + 四支柱）/ 四场景 tabs / 交付与定价 / 三阶段路线 / FAQ / 联系（电话与微信，含悬浮微信卡）。**单文件自包含**：零外部 CSS/JS/字体依赖，内网与私有化环境可离线打开。测试环境 `http://mdzx.fun:8801/product.html`（及 `/%E4%BA%A7%E5%93%81.html`、`/产品.html`）。
 > 现状（2026-09-12）：**行业 AI 工作台（IAW）v1.0** 已落地——五空间信息架构、14 行业图谱包
 > （packages/platform-core/scenegraphs/）与 14 行业主题引擎、未激活行业只读演示预览；钉钉设备流登录
 > （面板代发起，未登录/未绑定自动弹激活指令）；npm 通道已实发布 **@ybkk/gate-01@1.2.1**
