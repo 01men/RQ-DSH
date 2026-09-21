@@ -3567,6 +3567,145 @@ try {
     && JSON.stringify(byStaffId.data.scope) === JSON.stringify(byPlatform.data.scope),
     JSON.stringify(byStaffId.data))
 
+  // —— 签名分享链接（2026-09-21「NAS 下载链接签名化」：docs-20260921 设计清单断言面）——
+  // 档位/策略/永久显式（决策②③）+ 独立长期密钥（决策①）+ 取流三关（签名→吊销→权限复核）。
+  // 旧链路（mode=once 一次性 / mode=link 600s）断言在上方文件全链段，行为不变即不回归。
+  const slPath = '/元冰可集团/技术中心/AI 平台部/分享目标.bin' // mock 网关对任意路径落盘固定字节
+  const slReq = (link) => fetch(link.startsWith('http') ? link : `http://127.0.0.1:${PORT}${link}`)
+
+  const slDefault = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath } })
+  check('share-link 默认档 24 小时（决策②：不传 ttlSec/permanent → 86400 且绝不产生永久链接）',
+    slDefault.ok && slDefault.data.expiresInSec === 86400 && slDefault.data.permanent === false && !!slDefault.data.expiresAt,
+    JSON.stringify(slDefault.error ?? slDefault.data))
+
+  const sl1h = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, ttlSec: 3600 } })
+  const sl7d = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, ttlSec: 604800 } })
+  const sl30d = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, ttlSec: 2592000 } })
+  check('显式档位 1h/7d/30d 签发', sl1h.ok && sl1h.data.expiresInSec === 3600 && sl7d.ok && sl7d.data.expiresInSec === 604800 && sl30d.ok && sl30d.data.expiresInSec === 2592000,
+    JSON.stringify({ sl1h: sl1h.error, sl7d: sl7d.error, sl30d: sl30d.error }))
+
+  const slOver = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, ttlSec: 9999999 } })
+  check('TTL 超策略上限 400 TTL_EXCEEDS_POLICY（明确拒绝，不回落到上限）', slOver.status === 400 && slOver.error?.code === 'TTL_EXCEEDS_POLICY',
+    JSON.stringify(slOver.error))
+
+  const slPermOff = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, permanent: true } })
+  check('永久档策略默认关（决策③：allowPermanent=false 时持 nas.authz.write 也 403，策略开关优先于权限点）',
+    slPermOff.status === 403 && slPermOff.error?.code === 'PERMANENT_DISABLED_BY_POLICY', JSON.stringify(slPermOff.error))
+
+  const slConflict = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, permanent: true, ttlSec: 3600 } })
+  check('permanent 与 ttlSec 互斥（400，语义歧义不猜测）', slConflict.status === 400 && slConflict.error?.code === 'PERMANENT_TTL_CONFLICT',
+    JSON.stringify(slConflict.error))
+
+  // 有效取流（免 Bearer）+ 使用计数/清单面（含 keyId 留痕）
+  const slUse1 = await slReq(sl1h.data.url)
+  const slUse2 = await slReq(sl1h.data.url)
+  const slUseBytes = slUse1.ok ? Buffer.from(await slUse1.arrayBuffer()).toString('utf8') : ''
+  const slList = await api('GET', `/api/nas/${nasId}/fs/share-links`, { token: admin })
+  check('签名链接取流（免 Bearer 直下 bytes）+ 使用计数/清单可见（keyId 留痕）',
+    slUse1.ok && slUse2.ok && slUseBytes === 'selftest-download-bytes'
+      && (slList.data?.items ?? []).some((item) => item.id === sl1h.data.jti && item.useCount === 2 && !!item.keyId),
+    JSON.stringify({ s1: slUse1.status, s2: slUse2.status, list: slList.error ?? slList.data?.items?.length }))
+
+  // 签名关：篡改 path/exp（含过去时刻）/sub/jti 任一字段 → 401
+  const tamper = (mutate) => {
+    const u = new URL(sl1h.data.url)
+    mutate(u.searchParams)
+    return u.toString()
+  }
+  const tPath = await slReq(tamper((p) => p.set('path', '/元冰可集团/技术中心/前端部/别的.bin')))
+  const tExpPast = await slReq(tamper((p) => p.set('exp', '1000000')))
+  const tSub = await slReq(tamper((p) => p.set('sub', 'user_forge')))
+  const tJti = await slReq(tamper((p) => p.set('jti', 'nsl_forge')))
+  check('签名关：篡改 path/exp/sub/jti 任一字段 401', tPath.status === 401 && tExpPast.status === 401 && tSub.status === 401 && tJti.status === 401,
+    JSON.stringify({ tPath: tPath.status, tExp: tExpPast.status, tSub: tSub.status, tJti: tJti.status }))
+
+  // 签发员夹具：持 nas.read/nas.write 而无 nas.authz.write（永久越权断言 + 复核身份）
+  const slRole = await api('POST', '/api/iam/roles', { token: admin, body: { name: '分享链接签发自测', code: 'sharelink_selftest', description: 'selftest share-link', permissions: ['nas.read', 'nas.write'] } })
+  const slUserCreate = await api('POST', '/api/iam/users', { token: admin, body: { username: 'sharelink_issuer', displayName: '链接签发员', orgId: orgAiId, password: 'Ybk@2026', roleIds: slRole.ok ? [slRole.data.id] : [] } })
+  const slIssuerLogin = await api('POST', '/api/auth/login', { body: { username: 'sharelink_issuer', password: 'Ybk@2026' } })
+  const slIssuer = slIssuerLogin.data?.token
+  const slIssuerUid = slUserCreate.data?.id
+  check('签发员夹具就绪（nas.write 持有、无 nas.authz.write，挂 元冰可集团 组织链）', slRole.ok && slUserCreate.ok && !!slIssuer, JSON.stringify({ role: slRole.error, user: slUserCreate.error, login: slIssuerLogin.error }))
+
+  // 策略面：开启永久档（决策③第二步前置；put 走 AuthzRules 乐观锁）
+  const polOn = await api('PUT', '/api/nas/authz/share-link-policy', { token: admin, body: { allowPermanent: true } })
+  check('策略面开启 allowPermanent（PUT share-link-policy）', polOn.ok && polOn.data.allowPermanent === true, JSON.stringify(polOn.error ?? polOn.data))
+
+  const slPermNoAuthz = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: slIssuer, body: { path: slPath, permanent: true } })
+  check('永久越权 403 PERMANENT_REQUIRES_AUTHZ_WRITE（策略已开但无 nas.authz.write）',
+    slPermNoAuthz.status === 403 && slPermNoAuthz.error?.code === 'PERMANENT_REQUIRES_AUTHZ_WRITE', JSON.stringify(slPermNoAuthz.error))
+
+  const slPerm = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, permanent: true } })
+  check('永久链接签发（策略开启后）：exp=0 + expiresAt=null + 档位标注「永久」',
+    slPerm.ok && slPerm.data.permanent === true && slPerm.data.expiresAt === null && slPerm.data.url.includes('exp=0') && slPerm.data.ttlLabel === '永久',
+    JSON.stringify(slPerm.error ?? slPerm.data))
+
+  // 机器身份签发拒绝（明确错误，不静默降级）
+  const slMachRole = await api('POST', '/api/iam/roles', { token: admin, body: { name: '分享链接机器自测', code: 'sharelink_machine_selftest', description: 'selftest', permissions: ['nas.read', 'nas.write'] } })
+  const slMachCred = await api('POST', '/api/authn/principals', { token: admin, body: { name: 'sharelink-machine', refType: 'external', roleIds: slMachRole.ok ? [slMachRole.data.id] : [], scopes: [] } })
+  const slMachLogin = await api('POST', '/api/auth/client-credentials', { body: { clientId: slMachCred.data?.clientId, clientSecret: slMachCred.data?.clientSecret } })
+  const slMachIssue = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: slMachLogin.data?.token, body: { path: slPath, ttlSec: 3600 } })
+  check('机器身份签发拒绝（403 MACHINE_ISSUANCE_UNSUPPORTED，收紧而非放宽）',
+    slMachIssue.status === 403 && slMachIssue.error?.code === 'MACHINE_ISSUANCE_UNSUPPORTED', JSON.stringify(slMachIssue.error))
+
+  // 决策①：独立长期密钥与令牌密钥隔离——轮换令牌签名密钥后，未过期 share-link 仍可取流
+  const rotateAuthn = await api('POST', '/api/authn/rotate-secret', { token: admin })
+  const slAfterRotate = await slReq(slDefault.data.url)
+  check('独立密钥隔离（决策①）：轮换令牌签名密钥后 share-link 仍可取流',
+    rotateAuthn.ok && slAfterRotate.ok, JSON.stringify({ rotate: rotateAuthn.error, stream: slAfterRotate.status }))
+
+  // 长期密钥显式轮换（决策① (a) 永久退役集合）：旧链接凭退役密钥仍可取流，新签发 keyId 更替
+  const slPreRotate = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, ttlSec: 3600 } })
+  const slRotate = await api('POST', '/api/nas/authz/share-link-secret/rotate', { token: admin, body: { note: 'selftest 轮换' } })
+  const slPreStream = await slReq(slPreRotate.data.url)
+  const slPostRotate = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, ttlSec: 3600 } })
+  const slKeyList = await api('GET', `/api/nas/${nasId}/fs/share-links`, { token: admin })
+  const slKeyOf = (jti) => (slKeyList.data?.items ?? []).find((item) => item.id === jti)?.keyId
+  check('长期密钥轮换（决策① (a)）：旧链接凭退役密钥仍可取流，新签发 keyId 更替',
+    slRotate.ok && slPreStream.ok && slPostRotate.ok && !!slKeyOf(slPreRotate.data.jti) && slKeyOf(slPreRotate.data.jti) !== slKeyOf(slPostRotate.data.jti),
+    JSON.stringify({ rotate: slRotate.error, stream: slPreStream.status, keyA: slKeyOf(slPreRotate.data?.jti), keyB: slKeyOf(slPostRotate.data?.jti) }))
+
+  // 吊销即时生效 + 重复吊销幂等
+  const slRevokeTarget = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: admin, body: { path: slPath, ttlSec: 3600 } })
+  const slRevokePre = await slReq(slRevokeTarget.data.url)
+  const slRevoke = await api('POST', `/api/nas/${nasId}/fs/share-links/${slRevokeTarget.data.jti}/revoke`, { token: admin, body: { reason: 'selftest 吊销' } })
+  const slRevokePost = await slReq(slRevokeTarget.data.url)
+  const slRevokeAgain = await api('POST', `/api/nas/${nasId}/fs/share-links/${slRevokeTarget.data.jti}/revoke`, { token: admin, body: {} })
+  check('吊销即时生效（吊销前 200 → 吊销后 401）且重复吊销幂等 200',
+    slRevokePre.ok && slRevoke.ok && slRevokePost.status === 401 && slRevokeAgain.ok && slRevokeAgain.data.alreadyRevoked === true,
+    JSON.stringify({ pre: slRevokePre.status, post: slRevokePost.status, revoke: slRevoke.error, again: slRevokeAgain.error ?? slRevokeAgain.data }))
+
+  // 批量吊销（按签发者）：「某人离职 → 一次性吊销其全部链接」场景
+  const slBatch1 = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: slIssuer, body: { path: slPath, ttlSec: 3600 } })
+  const slBatch2 = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: slIssuer, body: { path: slPath, ttlSec: 3600 } })
+  const slBatch = await api('POST', `/api/nas/${nasId}/fs/share-links/revoke`, { token: admin, body: { userId: slIssuerUid, reason: 'selftest 离职场景' } })
+  const slBatch1Post = await slReq(slBatch1.data.url)
+  const slBatch2Post = await slReq(slBatch2.data.url)
+  check('批量吊销（按签发者，离职场景）：两条链接一并失效',
+    slBatch1.ok && slBatch2.ok && slBatch.ok && slBatch.data.revoked >= 2 && slBatch1Post.status === 401 && slBatch2Post.status === 401,
+    JSON.stringify({ revoked: slBatch.data?.revoked, e1: slBatch1Post.status, e2: slBatch2Post.status, err: slBatch.error }))
+
+  // 权限复核关（核心增量）：签发者数据权限回收（显式 deny 例外命中）后，原链接取流 403 且产生判定留痕
+  const slRecheck = await api('POST', `/api/nas/${nasId}/fs/share-link`, { token: slIssuer, body: { path: slPath, ttlSec: 3600 } })
+  const slRecheckPre = await slReq(slRecheck.data.url)
+  const slDenyExc = await api('POST', '/api/nas/authz/exceptions', { token: admin, body: { effect: 'deny', nasId, path: slPath, ops: ['download'], userIds: [slIssuerUid], note: 'selftest 复核关：签发者数据权限回收' } })
+  const slRecheckPost = await slReq(slRecheck.data.url)
+  const slDecisionTrail = await api('GET', `/api/nas/authz/decisions?userId=${slIssuerUid}&op=download&limit=10`, { token: admin })
+  check('权限复核（核心增量）：签发者数据权限回收后原链接 403 且产生 nas.authz.decision 留痕',
+    slRecheck.ok && slRecheckPre.ok && slDenyExc.ok && slRecheckPost.status === 403
+      && (slDecisionTrail.data?.items ?? []).some((item) => item.decision === 'deny' && item.op === 'download' && item.caller === 'nas.share-link'),
+    JSON.stringify({ pre: slRecheckPre.status, post: slRecheckPost.status, exc: slDenyExc.error, trail: slDecisionTrail.error ?? slDecisionTrail.data?.items?.[0] }))
+  // 残留说明：deny 例外按 merge-only 语义无法经 API 移除；其作用域锁死在
+  // slIssuerUid × slPath × download，与后续任何夹具/断言无交集，留在规则里无害。
+
+  // 收尾：永久链接可吊销 + 策略回关 allowPermanent=false（决策③ A1 起步姿态）
+  const slPermRevoke = await api('POST', `/api/nas/${nasId}/fs/share-links/${slPerm.data.jti}/revoke`, { token: admin, body: { reason: 'selftest 收尾：永久档清场' } })
+  const slPermPost = await slReq(slPerm.data.url)
+  const polOff = await api('PUT', '/api/nas/authz/share-link-policy', { token: admin, body: { allowPermanent: false } })
+  check('永久链接可吊销（吊销后 401）+ 策略回关 allowPermanent=false（决策③ A1 起步姿态）',
+    slPermRevoke.ok && slPermPost.status === 401 && polOff.ok && polOff.data.allowPermanent === false,
+    JSON.stringify({ post: slPermPost.status, revoke: slPermRevoke.error, pol: polOff.error }))
+
   // 负责人映射走 userid 口径（钉钉 dept_manager_userid_list 是 userid，经 userid 链反查平台 userId）
   const orgsForLeaders = (await api('GET', '/api/iam/orgs', { token: admin })).data
   check('部门负责人随同步映射（managerRemoteIds userid 口径 → identityLinks 反查）',

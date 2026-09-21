@@ -26,6 +26,17 @@ import {
 // 数据模型
 // ---------------------------------------------------------------------------
 
+/**
+ * 签名分享链接档位策略（2026-09-21 决策 ②③；挂在规则单例上与数据权限治理面同源）。
+ * 缺省字段由 NasShareLinkService.policy() 按默认值兜底：上限 30 天 / 永久默认关 /
+ * 永久限 nas.authz.write。
+ */
+export interface ShareLinkPolicy {
+  maxTtlSec: number
+  allowPermanent: boolean
+  permanentPermission: string
+}
+
 /** 规则配置单例（nas:authzRules；version 乐观锁，PUT 携带 ifVersion）。 */
 export interface AuthzRulesRecord extends RecordBase {
   id: 'singleton'
@@ -39,6 +50,7 @@ export interface AuthzRulesRecord extends RecordBase {
   externalReadPaths: Array<{ nasId: string; path: string }>
   observeOnly: boolean
   degradeAllToReadonly: boolean
+  shareLinkPolicy?: ShareLinkPolicy
   updatedBy?: string
 }
 
@@ -253,6 +265,7 @@ export class NasAuthzService extends Service {
       externalReadPaths: [],
       observeOnly: true,
       degradeAllToReadonly: false,
+      shareLinkPolicy: { maxTtlSec: 2592000, allowPermanent: false, permanentPermission: 'nas.authz.write' },
     })
   }
 
@@ -268,6 +281,7 @@ export class NasAuthzService extends Service {
     externalReadPaths?: Array<{ nasId: string; path: string }>
     observeOnly?: boolean
     degradeAllToReadonly?: boolean
+    shareLinkPolicy?: ShareLinkPolicy
   }, ifVersion: number, actor: string): AuthzRulesRecord {
     const current = this.getRules()
     if (typeof ifVersion !== 'number' || ifVersion !== current.version) {
@@ -287,6 +301,7 @@ export class NasAuthzService extends Service {
       ...(patch.externalReadPaths !== undefined ? { externalReadPaths: patch.externalReadPaths } : {}),
       ...(patch.observeOnly !== undefined ? { observeOnly: patch.observeOnly } : {}),
       ...(patch.degradeAllToReadonly !== undefined ? { degradeAllToReadonly: patch.degradeAllToReadonly } : {}),
+      ...(patch.shareLinkPolicy !== undefined ? { shareLinkPolicy: patch.shareLinkPolicy } : {}),
       updatedBy: actor,
     }
     next.version = current.version + 1
