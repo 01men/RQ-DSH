@@ -766,6 +766,10 @@ async function openShareLinkModal(nas, path, entry) {
   try { policy = await api.get('/api/nas/authz/share-link-policy') } catch { policy = null }
   const canAuthzWrite = session.can('nas.authz.write')
   const permanentReason = !canAuthzWrite ? '需 nas.authz.write 权限' : (policy && !policy.allowPermanent ? '管理员未开启永久档位' : '')
+  // 档位开关在「NAS 数据权限」治理页；有权限的管理员给一条直达路径（无权限者只说明原因）
+  const permanentHint = permanentReason && canAuthzWrite
+    ? `${permanentReason}，可在「数据权限 → 分享链接档位」中开启`
+    : permanentReason
   const modal = openModal({
     title: `复制下载链接 · ${entry.name}`,
     body: `
@@ -776,15 +780,15 @@ async function openShareLinkModal(nas, path, entry) {
         <span class="chip active" data-t="24h" style="cursor:pointer">24 小时</span>
         <span class="chip" data-t="7d" style="cursor:pointer">7 天</span>
         <span class="chip" data-t="30d" style="cursor:pointer">30 天</span>
-        <span class="chip" data-t="permanent" style="cursor:pointer;${permanentReason ? 'opacity:.45' : ''}" ${permanentReason ? `title="${esc(permanentReason)}"` : ''}>永久${permanentReason ? `（${esc(permanentReason)}）` : ''}</span>
+        <span class="chip" data-t="permanent" style="cursor:pointer;${permanentReason ? 'opacity:.45' : ''}" ${permanentHint ? `title="${esc(permanentHint)}"` : ''}>永久${permanentReason ? `（${esc(permanentReason)}）` : ''}</span>
       </div>
-      <div class="fs-11 text-4" style="margin-top:8px">默认 24 小时；30 天与永久为显式选择——永久链接在权限回收前长期有效，签发前请确认文件适合长期分享。</div>`,
+      <div class="fs-11 text-4" style="margin-top:8px">默认 24 小时；30 天与永久为显式选择——永久链接在权限回收前长期有效，签发前请确认文件适合长期分享。${permanentHint ? `<br><span style="color:var(--warn)">${esc(permanentHint)}</span>` : ''}</div>`,
     foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>复制链接</button>',
   })
   let tier = '24h'
   modal.body.querySelectorAll('#share-tier .chip').forEach((chip) => {
     chip.onclick = () => {
-      if (chip.dataset.t === 'permanent' && permanentReason) return toast(permanentReason, 'error')
+      if (chip.dataset.t === 'permanent' && permanentReason) return toast(permanentHint, 'error')
       modal.body.querySelectorAll('#share-tier .chip').forEach((c) => c.classList.remove('active'))
       chip.classList.add('active')
       tier = chip.dataset.t
