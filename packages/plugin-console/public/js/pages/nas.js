@@ -470,6 +470,7 @@ function mountFsBrowser(host, nas, ctx) {
         ${canWrite && currentPath ? `<button class="btn btn-default btn-sm" id="fs-mkdir">${icon('plus', 13)}新建文件夹</button>` : ''}
         ${canWrite && currentPath ? `<button class="btn btn-default btn-sm" id="fs-upload">${icon('arrowUp', 13)}上传</button>` : ''}
         <button class="btn btn-default btn-sm" id="fs-search">${icon('search', 13)}搜索</button>
+        ${session.can('nas.authz.read') ? `<button class="btn btn-default btn-sm" id="fs-links">${icon('link', 13)}链接管理</button>` : ''}
         <button class="btn btn-ghost btn-sm" id="fs-reload" title="刷新">${icon('refresh', 13)}</button>
       </div>
       <div id="fs-table"></div>`
@@ -478,6 +479,8 @@ function mountFsBrowser(host, nas, ctx) {
     })
     host.querySelector('#fs-reload').onclick = () => void load()
     host.querySelector('#fs-search').onclick = () => openSearch()
+    const linksBtn = host.querySelector('#fs-links')
+    if (linksBtn) linksBtn.onclick = () => void openShareLinksManager(nas)
     const mkdirBtn = host.querySelector('#fs-mkdir')
     if (mkdirBtn) mkdirBtn.onclick = () => openMkdir()
     const uploadBtn = host.querySelector('#fs-upload')
@@ -534,17 +537,11 @@ function mountFsBrowser(host, nas, ctx) {
         finally { downloadBtn.classList.remove('btn-loading') }
       }
       const copyLinkBtn = tr.querySelector('[data-copylink]')
-      if (copyLinkBtn) copyLinkBtn.onclick = async (e) => {
+      if (copyLinkBtn) copyLinkBtn.onclick = (e) => {
         e.stopPropagation()
-        // 与 skill 包下载同一链路：链接打开即 attachment 流式下载；
-        // 票据为 10 分钟可复用的分享票据，避免一次性票据复制走后即刻失效
-        copyLinkBtn.classList.add('btn-loading')
-        try {
-          const { ticket } = await api.post(`/api/nas/${nas.id}/fs/download-ticket`, { path, mode: 'link' })
-          copyText(`${location.origin}/api/nas/${nas.id}/fs/file?path=${encodeURIComponent(path)}&ticket=${encodeURIComponent(ticket)}`)
-          toast('下载链接已复制，10 分钟内有效')
-        } catch (error) { toast(error.message, 'error') }
-        finally { copyLinkBtn.classList.remove('btn-loading') }
+        // 签名分享链接（2026-09-21 改造）：有效期可选（1 小时 / 24 小时默认 / 7 天 / 30 天 / 永久），
+        // 取流时以签发者身份实时复核数据权限，链接可在「链接管理」中随时吊销
+        void openShareLinkModal(nas, path, entry)
       }
       const renameBtn = tr.querySelector('[data-rename]')
       if (renameBtn) renameBtn.onclick = (e) => {
@@ -758,6 +755,133 @@ function mountFsBrowser(host, nas, ctx) {
   }
 
   void load()
+}
+
+// ---------- 签名分享链接：有效期选择（2026-09-21 改造）+ 链接管理 ----------
+const SHARE_TIER_TTL = { '1h': 3600, '24h': 86400, '7d': 604800, '30d': 2592000 }
+
+async function openShareLinkModal(nas, path, entry) {
+  // 永久选项显隐依据：权限点（本地判断）+ 策略开关（服务端权威，取不到时交给服务端拒绝）
+  let policy = null
+  try { policy = await api.get('/api/nas/authz/share-link-policy') } catch { policy = null }
+  const canAuthzWrite = session.can('nas.authz.write')
+  const permanentReason = !canAuthzWrite ? '需 nas.authz.write 权限' : (policy && !policy.allowPermanent ? '管理员未开启永久档位' : '')
+  // 档位开关在「NAS 数据权限」治理页；有权限的管理员给一条直达路径（无权限者只说明原因）
+  const permanentHint = permanentReason && canAuthzWrite
+    ? `${permanentReason}，可在「数据权限 → 分享链接档位」中开启`
+    : permanentReason
+  const modal = openModal({
+    title: `复制下载链接 · ${entry.name}`,
+    body: `
+      <div class="form-hint mb-14">链接可贴到聊天/邮件等任意场景，打开即下载（无需登录）；取流时按<b>签发人当时的数据权限</b>实时复核，权限回收后链接即失效，也可在「链接管理」中随时吊销。</div>
+      <div class="form-label">有效期</div>
+      <div class="chips" id="share-tier" style="flex-wrap:wrap">
+        <span class="chip" data-t="1h" style="cursor:pointer">1 小时</span>
+        <span class="chip active" data-t="24h" style="cursor:pointer">24 小时</span>
+        <span class="chip" data-t="7d" style="cursor:pointer">7 天</span>
+        <span class="chip" data-t="30d" style="cursor:pointer">30 天</span>
+        <span class="chip" data-t="permanent" style="cursor:pointer;${permanentReason ? 'opacity:.45' : ''}" ${permanentHint ? `title="${esc(permanentHint)}"` : ''}>永久${permanentReason ? `（${esc(permanentReason)}）` : ''}</span>
+      </div>
+      <div class="fs-11 text-4" style="margin-top:8px">默认 24 小时；30 天与永久为显式选择——永久链接在权限回收前长期有效，签发前请确认文件适合长期分享。${permanentHint ? `<br><span style="color:var(--warn)">${esc(permanentHint)}</span>` : ''}</div>`,
+    foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>复制链接</button>',
+  })
+  let tier = '24h'
+  modal.body.querySelectorAll('#share-tier .chip').forEach((chip) => {
+    chip.onclick = () => {
+      if (chip.dataset.t === 'permanent' && permanentReason) return toast(permanentHint, 'error')
+      modal.body.querySelectorAll('#share-tier .chip').forEach((c) => c.classList.remove('active'))
+      chip.classList.add('active')
+      tier = chip.dataset.t
+    }
+  })
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async (e) => {
+    const btn = e.currentTarget
+    if (tier === 'permanent') {
+      const ok = await confirmDialog({
+        title: '签发永久链接', danger: true, confirmText: '确认签发',
+        message: `永久链接在<b>权限回收或手动吊销前长期有效</b>，被转发即等同于交付文件本身，请确认此文件适合长期分享。<br><span class="fs-12 text-3">签发后可在 NAS 文件浏览 →「链接管理」中随时吊销。</span>`,
+      })
+      if (!ok) return
+    }
+    btn.classList.add('btn-loading')
+    try {
+      const result = tier === 'permanent'
+        ? await api.post(`/api/nas/${nas.id}/fs/share-link`, { path, permanent: true })
+        : await api.post(`/api/nas/${nas.id}/fs/share-link`, { path, ttlSec: SHARE_TIER_TTL[tier] })
+      copyText(result.url)
+      toast(tier === 'permanent' ? '下载链接已复制，永久有效（可在链接管理中吊销）' : `下载链接已复制，${result.ttlLabel}内有效`)
+      modal.close()
+    } catch (error) { toast(error.message, 'error') }
+    finally { btn.classList.remove('btn-loading') }
+  }
+}
+
+async function openShareLinksManager(nas) {
+  const canRevoke = session.can('nas.authz.write')
+  const modal = openModal({
+    title: `链接管理 · ${nas.name}`, wide: true,
+    body: '<div id="share-links-list"><div class="fs-12 text-4" style="padding:12px 0">加载中…</div></div>',
+    foot: '<button class="btn btn-default" data-cancel>关闭</button>',
+  })
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  const load = async () => {
+    const host = modal.body.querySelector('#share-links-list')
+    try {
+      const result = await api.get(`/api/nas/${nas.id}/fs/share-links` + api.qs({ includeRevoked: '1' }))
+      const items = result.items ?? []
+      host.innerHTML = ''
+      if (!items.length) {
+        host.innerHTML = '<div class="muted-box">尚未签发分享链接：在文件浏览中点击文件的「复制下载链接」即可签发。</div>'
+        return
+      }
+      host.appendChild(renderTable({
+        columns: [
+          { title: '文件', render: (item) => `<span class="mono fs-12" style="word-break:break-all">${esc(item.path)}</span>` },
+          { title: '签发人', width: 100, render: (item) => `<span class="fs-12">${esc(item.userName)}</span>` },
+          { title: '状态 / 有效期', width: 170, render: (item) => shareStatusBadge(item) },
+          { title: '使用', width: 60, render: (item) => `<span class="col-num fs-12">${item.useCount}</span>` },
+          { title: '签发时间', width: 110, render: (item) => `<span class="fs-12 text-4">${timeAgo(item.createdAt)}</span>` },
+          { title: '', width: 80, render: (item) => (!item.revokedAt && canRevoke
+            ? `<button class="btn btn-ghost btn-sm stop" data-revoke="${esc(item.id)}" style="color:var(--danger)">吊销</button>` : '') },
+        ],
+        rows: items,
+        rowKey: (item) => item.id,
+        empty: '没有分享链接',
+      }))
+      host.querySelectorAll('[data-revoke]').forEach((btn) => {
+        btn.onclick = async () => {
+          const ok = await confirmDialog({
+            title: '吊销分享链接', danger: true, confirmText: '确认吊销',
+            message: '吊销后该链接立即失效（访问被拒绝），操作实时生效并写入审计日志。',
+          })
+          if (!ok) return
+          try {
+            await api.post(`/api/nas/${nas.id}/fs/share-links/${btn.dataset.revoke}/revoke`, {})
+            toast('已吊销')
+            void load()
+          } catch (error) { toast(error.message, 'error') }
+        }
+      })
+    } catch (error) {
+      host.innerHTML = `<div class="muted-box" style="color:var(--danger)">${esc(error.message)}</div>`
+    }
+  }
+  void load()
+}
+
+function shareStatusBadge(item) {
+  if (item.revokedAt) return `<span class="badge badge-danger no-dot">已吊销</span><span class="fs-11 text-4" style="margin-left:4px">${timeAgo(item.revokedAt)}</span>`
+  if (item.status === 'expired') return '<span class="badge badge-muted no-dot">已过期</span>'
+  if (item.expiresAt === null) return '<span class="badge badge-warn no-dot">永久有效</span>'
+  return `<span class="badge badge-ok no-dot">有效</span><span class="fs-11 text-4" style="margin-left:4px">剩 ${shareRemaining(item.remainingSec)}</span>`
+}
+
+function shareRemaining(sec) {
+  if (sec === null) return '永久'
+  if (sec >= 86400) return `${Math.floor(sec / 86400)} 天 ${Math.floor((sec % 86400) / 3600)} 时`
+  if (sec >= 3600) return `${Math.floor(sec / 3600)} 时 ${Math.floor((sec % 3600) / 60)} 分`
+  return `${Math.max(1, Math.floor(sec / 60))} 分`
 }
 
 // ---------- helpers ----------

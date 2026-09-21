@@ -20,6 +20,7 @@ import { ProviderAuthError } from '../../plugin-iam/src/providers.ts'
 import { AppRegistryService } from '../../plugin-app/src/index.ts'
 import { AgentRegistryService } from '../../plugin-agent/src/index.ts'
 import { RulesVersionConflictError } from '../../plugin-nas/src/authz.ts'
+import { ShareLinkError, SHARE_LINK_TTL_PRESETS } from '../../plugin-nas/src/share-link.ts'
 import { seedAll } from './seed.ts'
 import { registerMarketRoutes } from './routes/market.ts'
 import { registerFinOpsRoutes } from './routes/finops.ts'
@@ -29,7 +30,7 @@ export const name = 'console'
 export const inject = [
   'httpServer', 'opsStorage', 'platformBus', 'tools',
   'iam', 'authn', 'oidc', 'entryTickets', 'audit', 'usage', 'market', 'modelGateway',
-  'mcpRegistry', 'nasRegistry', 'nasAuthz', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
+  'mcpRegistry', 'nasRegistry', 'nasAuthz', 'nasShareLinks', 'skillHub', 'resourceCore', 'agentRegistry', 'appRegistry', 'update',
   'connectorHub',
 ]
 
@@ -171,8 +172,12 @@ export function apply(ctx: Context) {
 
   // -- 鉴权中间件 ---------------------------------------------------------
   http.use((exchange) => {
-    const ticketDownload = /^\/api\/nas\/[^/]+\/fs\/file$/.test(exchange.path) && Boolean(exchange.query.get('ticket'))
-    if (!exchange.path.startsWith('/api/') || PUBLIC_PATHS.has(exchange.path) || PUBLIC_PATH_PREFIXES.some((prefix) => exchange.path.startsWith(prefix)) || ticketDownload) return
+    // 取流自校验通道：?ticket=（一次性/10 分钟票据）与 ?sig=（签名分享链接，exp/sub/jti/sig 四参）——
+    // 两者都是「URL 即凭证」，免 Bearer 头；真实性在 GET /fs/file 处理器内逐关验证（fail-closed）
+    const nasFileStream = /^\/api\/nas\/[^/]+\/fs\/file$/.test(exchange.path)
+    const ticketDownload = nasFileStream && Boolean(exchange.query.get('ticket'))
+    const signedLinkDownload = nasFileStream && Boolean(exchange.query.get('sig'))
+    if (!exchange.path.startsWith('/api/') || PUBLIC_PATHS.has(exchange.path) || PUBLIC_PATH_PREFIXES.some((prefix) => exchange.path.startsWith(prefix)) || ticketDownload || signedLinkDownload) return
     const header = String(exchange.headers['authorization'] ?? '')
     if (!header.startsWith('Bearer ')) {
       exchange.fail(401, 'UNAUTHORIZED', '缺少 Bearer 令牌，请先登录')
@@ -2509,7 +2514,8 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
 
   /**
    * 下载票据：mode=once（默认，15 秒一次性）——浏览器 <a> 原生下载无需带 Bearer 头，大文件免内存 blob；
-   * mode=link（10 分钟内可重复使用）——供「复制下载链接」把绝对地址贴到别处再打开，贴走时人尚未点击。
+   * mode=link（10 分钟内可重复使用）——遗留通道（2026-09-21 起前端「复制下载链接」切换到
+   * POST /fs/share-link 签名链接，档位可选；本端点行为不变，过渡期并存，自测断言不回归）。
    */
   const LINK_TICKET_TTL_SEC = 600
   const downloadTickets = new Map<string, { nasId: string; path: string; userId?: string; principalId: string; userName: string; expiresAt: number; once: boolean }>()
@@ -2535,9 +2541,153 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
     return { ticket, expiresInSec: ttlSec }
   })
 
+  // -- NAS 签名分享链接（docs-20260921 设计清单：HMAC 长效/永久 + 权限复核 + 可吊销）----------
+  // 档位 1h / 24h（默认）/ 7d / 30d / 永久；签名用独立长期密钥（不随令牌密钥轮换），
+  // 重启不失效；取流三关 = 签名 → 吊销 → 权限复核（见 GET /fs/file 的 ?sig= 分支）。
+  http.register('POST', '/api/nas/:id/fs/share-link', async (exchange) => {
+    if (!requirePermission(exchange, 'nas.write')) return
+    const input = body<{ path?: string; ttlSec?: number; permanent?: boolean; note?: string }>(exchange)
+    if (!input.path) {
+      exchange.fail(400, 'BAD_REQUEST', '缺少 path')
+      return
+    }
+    const info = caller(exchange)
+    try {
+      const issued = ctx.nasShareLinks.issue({
+        nasId: exchange.params['id']!,
+        path: String(input.path),
+        issuer: { principalId: info.principalId, ...(info.userId ? { userId: info.userId } : {}), userName: info.name },
+        ...(input.ttlSec !== undefined ? { ttlSec: Number(input.ttlSec) } : {}),
+        ...(input.permanent !== undefined ? { permanent: input.permanent === true } : {}),
+        ...(input.note ? { note: String(input.note) } : {}),
+        hasPermanentPermission: info.permissions.includes('*') || info.permissions.includes('nas.authz.write'),
+      })
+      const permanent = issued.record.expiresAt === null
+      const query = `path=${encodeURIComponent(issued.record.path)}&exp=${issued.exp}&sub=${encodeURIComponent(issued.sub)}&jti=${encodeURIComponent(issued.record.id)}&sig=${encodeURIComponent(issued.sig)}`
+      const url = `${requestOrigin(exchange) ?? ''}/api/nas/${exchange.params['id']}/fs/file?${query}`
+      // 永久链接必须在审计 detail 写「永久」（决策 ②：显式可审，不留歧义）
+      changeLog(exchange, 'nas.fs.share_link', 'nas', exchange.params['id']!, '', `${issued.record.path}（${issued.ttlLabel}）`)
+      exchange.ok({
+        url,
+        jti: issued.record.id,
+        expiresAt: issued.record.expiresAt,
+        expiresInSec: issued.ttlSec,
+        tier: issued.tier,
+        ttlLabel: issued.ttlLabel,
+        permanent,
+      })
+    } catch (error) {
+      if (error instanceof ShareLinkError) {
+        exchange.fail(error.httpStatus, error.code, error.message)
+        return
+      }
+      exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+    }
+  }, { access: 'guarded', permission: 'nas.write' })
+
+  guarded('GET', '/api/nas/:id/fs/share-links', 'nas.authz.read', (exchange) => {
+    const userId = exchange.query.get('userId') ?? undefined
+    const path = exchange.query.get('path') ?? undefined
+    const includeRevoked = exchange.query.get('includeRevoked') === '1'
+    return { items: ctx.nasShareLinks.list({ nasId: exchange.params['id']!, ...(userId ? { userId } : {}), ...(path ? { path } : {}), includeRevoked }) }
+  })
+
+  http.register('POST', '/api/nas/:id/fs/share-links/:jti/revoke', async (exchange) => {
+    if (!requirePermission(exchange, 'nas.authz.write')) return
+    const reason = String(body<{ reason?: string }>(exchange).reason ?? '')
+    try {
+      const result = ctx.nasShareLinks.revoke(exchange.params['jti']!, caller(exchange).name, reason)
+      changeLog(exchange, 'nas.fs.share_link_revoke', 'nas', exchange.params['id']!, '',
+        `${result.record.path}（${result.alreadyRevoked ? '已是吊销态，幂等返回' : `吊销人 ${caller(exchange).name}${reason ? `，事由：${reason}` : ''}`}）`)
+      exchange.ok({ ...result.record, alreadyRevoked: result.alreadyRevoked })
+    } catch (error) {
+      if (error instanceof ShareLinkError) {
+        exchange.fail(error.httpStatus, error.code, error.message)
+        return
+      }
+      exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+    }
+  }, { access: 'guarded', permission: 'nas.authz.write' })
+
+  http.register('POST', '/api/nas/:id/fs/share-links/revoke', async (exchange) => {
+    if (!requirePermission(exchange, 'nas.authz.write')) return
+    const input = body<{ userId?: string; path?: string; all?: boolean; reason?: string }>(exchange)
+    try {
+      const result = ctx.nasShareLinks.revokeBatch({
+        nasId: exchange.params['id']!,
+        ...(input.userId ? { userId: String(input.userId) } : {}),
+        ...(input.path ? { path: String(input.path) } : {}),
+        ...(input.all !== undefined ? { all: input.all === true } : {}),
+      }, caller(exchange).name, String(input.reason ?? ''))
+      const scope = input.all === true ? '全部链接' : input.userId ? `签发者 ${input.userId}` : `路径 ${input.path}`
+      changeLog(exchange, 'nas.fs.share_link_revoke', 'nas', exchange.params['id']!, '', `批量吊销 ${scope}：${result.count} 条`)
+      exchange.ok({ revoked: result.count })
+    } catch (error) {
+      if (error instanceof ShareLinkError) {
+        exchange.fail(error.httpStatus, error.code, error.message)
+        return
+      }
+      exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+    }
+  }, { access: 'guarded', permission: 'nas.authz.write' })
+
+  guarded('GET', '/api/nas/authz/share-link-policy', 'nas.authz.read', () => {
+    const rules = ctx.nasAuthz.getRules()
+    return {
+      ...ctx.nasShareLinks.policy(),
+      version: rules.version,
+      presets: SHARE_LINK_TTL_PRESETS,
+      secret: ctx.nasShareLinks.secretStatus(),
+    }
+  })
+
+  http.register('PUT', '/api/nas/authz/share-link-policy', async (exchange) => {
+    if (!requirePermission(exchange, 'nas.authz.write')) return
+    const input = body<{ maxTtlSec?: number; allowPermanent?: boolean; permanentPermission?: string; ifVersion?: number }>(exchange)
+    try {
+      const saved = ctx.nasShareLinks.updatePolicy({
+        ...(input.maxTtlSec !== undefined ? { maxTtlSec: Number(input.maxTtlSec) } : {}),
+        ...(input.allowPermanent !== undefined ? { allowPermanent: input.allowPermanent === true } : {}),
+        ...(input.permanentPermission !== undefined ? { permanentPermission: String(input.permanentPermission) } : {}),
+      }, input.ifVersion !== undefined ? Number(input.ifVersion) : undefined, caller(exchange).name)
+      // 放权动作显式留痕（决策 ③：allowPermanent 的翻转属授权升级，必须可审）
+      changeLog(exchange, 'nas.authz.share_link_policy', 'nas_authz_rules', 'singleton', 'NAS 分享链接档位策略',
+        `maxTtlSec=${saved.maxTtlSec} allowPermanent=${saved.allowPermanent} permanentPermission=${saved.permanentPermission}`)
+      exchange.ok(saved)
+    } catch (error) {
+      if (error instanceof RulesVersionConflictError) {
+        exchange.fail(409, 'VERSION_CONFLICT', error.message, { currentVersion: error.currentVersion })
+        return
+      }
+      if (error instanceof ShareLinkError) {
+        exchange.fail(error.httpStatus, error.code, error.message)
+        return
+      }
+      exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+    }
+  }, { access: 'guarded', permission: 'nas.authz.write' })
+
+  http.register('POST', '/api/nas/authz/share-link-secret/rotate', async (exchange) => {
+    if (!requirePermission(exchange, 'nas.authz.write')) return
+    const note = String(body<{ note?: string }>(exchange).note ?? '')
+    try {
+      const result = ctx.nasShareLinks.rotateSecret(note || undefined)
+      changeLog(exchange, 'nas.authz.share_link_secret_rotate', 'nas_authz_rules', 'singleton', 'NAS 分享链接签名密钥',
+        `新密钥 ${result.keyId}；退役 ${result.retiredKeyId ?? '-'}（永久保留验签，已发链接不失效）`)
+      exchange.ok(result)
+    } catch (error) {
+      if (error instanceof ShareLinkError) {
+        exchange.fail(error.httpStatus, error.code, error.message)
+        return
+      }
+      exchange.fail(400, 'BAD_REQUEST', error instanceof Error ? error.message : String(error))
+    }
+  }, { access: 'guarded', permission: 'nas.authz.write' })
+
   /**
    * 流式文件下载（浏览器端真正拿到文件）：先调 downloadFile 让网关落盘到 staging，
-   * 再以 attachment 头 + content-disposition 触发浏览器保存。鉴权：Bearer 或一次性票据。
+   * 再以 attachment 头 + content-disposition 触发浏览器保存。
+   * 鉴权三通道：Bearer 令牌 / 一次性票据 ?ticket= / 签名分享链接 ?sig=（exp/sub/jti/sig）。
    * query: path=/share/file, inline=1 表示预览（inline）而非下载（attachment）。
    */
   http.register('GET', '/api/nas/:id/fs/file', async (exchange) => {
@@ -2564,6 +2714,37 @@ else if(nx&&/^https?:\\/\\/(localhost|127\\.|10\\.|192\\.168\\.|172\\.(1[6-9]|2[
         })
         exchange.fail(403, 'FORBIDDEN', '缺少权限点 nas.read')
         return
+      }
+    } else if (exchange.query.get('sig')) {
+      // 签名分享链接（docs-20260921 设计清单 §2.2）：三关 fail-closed——
+      // ① 签名关（独立长期密钥 + exp 过期判定，exp=0 为永久）；
+      // ② 吊销关（jti 指向 nas:shareLinks 签发记录，已吊销/记录缺失即拒）；
+      // ③ 权限复核关（以签发者身份实时 nasAuthz.check op='download'，票据只是「身份+文件」封装）。
+      // 复核失败不消耗链接（可重复尝试），每次判定由 nasAuthz 自带留痕（deny 全量落痕）。
+      const verdict = ctx.nasShareLinks.verifyStreamAccess({
+        nasId: exchange.params['id']!,
+        path: exchange.query.get('path') ?? '',
+        exp: exchange.query.get('exp') ?? '',
+        sub: exchange.query.get('sub') ?? '',
+        jti: exchange.query.get('jti') ?? '',
+        sig: String(exchange.query.get('sig')),
+      })
+      if (verdict.outcome === 'invalid') {
+        exchange.fail(401, 'SHARE_LINK_INVALID', `下载链接无效：${verdict.reason}（请重新获取分享链接）`)
+        return
+      }
+      if (verdict.outcome === 'forbidden') {
+        exchange.fail(403, 'FORBIDDEN', `下载链接权限复核未通过：${verdict.reasons.join('；')}`)
+        return
+      }
+      ctx.nasShareLinks.recordUse(verdict.record.id)
+      info = {
+        kind: 'human',
+        principalId: verdict.record.principalId,
+        userId: verdict.record.userId,
+        name: verdict.record.userName,
+        permissions: ['nas.read'],
+        actChain: [],
       }
     } else {
       const ticketStr = exchange.query.get('ticket') ?? ''

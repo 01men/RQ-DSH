@@ -20,6 +20,7 @@ import type { ResourceEntity } from '../../plugin-resource-core/src/index.ts'
 import { NasMcpClient, type McpToolInfo } from './client.ts'
 import { NAS_TYPE_SPEC } from './schema.ts'
 import { NasAuthzService } from './authz.ts'
+import { NasShareLinkService } from './share-link.ts'
 import * as nasTools from './tools.ts'
 
 // ---------------------------------------------------------------------------
@@ -549,5 +550,6 @@ export const inject = ['opsStorage', 'platformBus', 'resourceCore', 'audit', 'us
 export function apply(ctx: Context) {
   ctx.plugin(NasRegistryService)
   ctx.plugin(NasAuthzService)
+  ctx.plugin(NasShareLinkService)
   ctx.plugin(nasTools)
 }

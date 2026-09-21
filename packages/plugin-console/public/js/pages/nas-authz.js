@@ -4,7 +4,7 @@ import { icon } from '../icons.js'
 import {
   h, $, $$, esc, toast, openModal, openDrawer, confirmDialog, selectField,
   searchableSelectField, multiSelectField, mountSearchableSelects,
-  renderTable, inputField, textareaField, timeAgo, emptyState,
+  renderTable, inputField, textareaField, timeAgo, emptyState, collectForm, field,
 } from '../ui.js'
 
 const OPS = ['read', 'download', 'write', 'modify', 'delete', 'share', 'admin']
@@ -19,6 +19,7 @@ const MATRIX_DEFAULT = {
 }
 
 let rules = null
+let shareLinkPolicy = null
 let nasList = []
 let groupNames = new Map()
 let orgList = []
@@ -47,18 +48,20 @@ export async function renderNasAuthz(content) {
 }
 
 async function loadAll() {
-  const [rulesResp, nasResp, groupsResp, orgsResp, usersResp] = await Promise.all([
+  const [rulesResp, nasResp, groupsResp, orgsResp, usersResp, policyResp] = await Promise.all([
     api.get('/api/nas/authz/rules'),
     api.get('/api/nas').catch(() => ({ items: [] })),
     api.get('/api/iam/groups').catch(() => ({ groups: [] })),
     api.get('/api/iam/orgs').catch(() => []),
     api.get('/api/iam/users').catch(() => ({ users: [] })),
+    api.get('/api/nas/authz/share-link-policy').catch(() => null),
   ])
   rules = rulesResp
   nasList = nasResp.items ?? []
   groupNames = new Map((groupsResp.groups ?? []).map((group) => [group.id, group.name]))
   orgList = Array.isArray(orgsResp) ? orgsResp : (orgsResp.orgs ?? [])
   userList = usersResp.users ?? []
+  shareLinkPolicy = policyResp
 }
 
 /** 组织下拉选项：value=orgId（改名不漂移），label=完整路径。 */
@@ -92,6 +95,7 @@ function renderBody() {
       <div class="card az-card" id="az-matrix"></div>
     </div>
     <div class="card az-card az-mt" id="az-exceptions"></div>
+    <div class="card az-card az-mt" id="az-share-link"></div>
     <div class="az-grid2 az-mt">
       <div class="card az-card" id="az-cgroups"></div>
       <div class="card az-card" id="az-anchors"></div>
@@ -101,6 +105,7 @@ function renderBody() {
   renderGates()
   renderMatrix()
   renderExceptions()
+  renderShareLink()
   renderCGroups()
   renderAnchors()
   renderDecisions()
@@ -147,6 +152,127 @@ function renderGates() {
       }
     }
   })
+}
+
+// -- 分享链接档位策略（签名分享链接的有效期上限与永久档开关） --------------------
+
+const TIER_LABEL = { '1h': '1 小时', '24h': '24 小时', '7d': '7 天', '30d': '30 天' }
+
+function renderShareLink() {
+  const holder = $('#az-share-link')
+  if (!holder) return
+  // 无 nas.authz.read 时策略读不到：该组只读展示缺席原因，不硬编码猜测
+  if (!shareLinkPolicy) {
+    holder.innerHTML = `
+      <div class="az-card-head">
+        <div class="az-grow">
+          <div class="az-card-title">分享链接档位</div>
+          <div class="az-card-sub">需要 nas.authz.read 权限查看</div>
+        </div>
+      </div>`
+    return
+  }
+  const policy = shareLinkPolicy
+  const canWrite = session.can('nas.authz.write')
+  const maxTtlDays = Math.round(policy.maxTtlSec / 86400)
+  const presets = (policy.presets ?? []).map((item) => item.label).join(' / ')
+  const secret = policy.secret ?? {}
+  const keyState = secret.available
+    ? `<span class="badge no-dot badge-ok">可用</span><code class="az-uid">${esc(secret.keyId ?? '')}</code>`
+    : `<span class="badge no-dot badge-danger">不可用</span><span class="az-reason">${esc(secret.error ?? '未加载')}</span>`
+  holder.innerHTML = `
+    <div class="az-card-head">
+      <div class="az-grow">
+        <div class="az-card-title">分享链接档位</div>
+        <div class="az-card-sub">NAS「复制下载链接」的有效期策略：上限与永久档开关。档位 ${esc(presets)}；不在档位内的值为自定义时长（须显式传 ttlSec）。</div>
+      </div>
+      <span class="badge no-dot ${policy.allowPermanent ? 'badge-warn' : 'badge-muted'}">${policy.allowPermanent ? '永久档已开启' : '永久档已关闭'}</span>
+    </div>
+    <div class="az-gate ${policy.allowPermanent ? 'on' : ''}">
+      <div class="az-grow">
+        <div class="az-gate-name">永久档位 allowPermanent</div>
+        <div class="az-gate-desc">关闭时前端「永久」选项置灰并提示「管理员未开启永久档位」，服务端同时拒绝签发（策略开关优先于权限点）。开启后须持 ${esc(policy.permanentPermission)} 才能签发永久链接。</div>
+      </div>
+      <button class="btn btn-sm ${canWrite ? (policy.allowPermanent ? 'btn-warning' : 'btn-default') : 'btn-default'}" id="az-sl-toggle" ${canWrite ? '' : 'disabled title="需要 nas.authz.write 权限"'}>${policy.allowPermanent ? '点击关闭' : '点击开启'}</button>
+    </div>
+    <div class="az-gate">
+      <div class="az-grow">
+        <div class="az-gate-name">有效期上限 maxTtlSec</div>
+        <div class="az-gate-desc">签发时 ttlSec 超过此值会被明确拒绝（不回落到上限）。当前 ${maxTtlDays} 天（${policy.maxTtlSec} 秒）。</div>
+      </div>
+      <button class="btn btn-sm btn-default" id="az-sl-max" ${canWrite ? '' : 'disabled title="需要 nas.authz.write 权限"'}>调整上限</button>
+    </div>
+    <div class="az-gate">
+      <div class="az-grow">
+        <div class="az-gate-name">签发资格 permanentPermission</div>
+        <div class="az-gate-desc">可签发永久链接的权限点。当前：<code class="az-uid">${esc(policy.permanentPermission)}</code>（改小会放宽放权面，务必谨慎）。</div>
+      </div>
+      <button class="btn btn-sm btn-default" id="az-sl-perm" ${canWrite ? '' : 'disabled title="需要 nas.authz.write 权限"'}>调整权限点</button>
+    </div>
+    <div class="az-gate">
+      <div class="az-grow">
+        <div class="az-gate-name">独立签名密钥</div>
+        <div class="az-gate-desc">与登录令牌密钥隔离，轮换不影响已发出的链接（旧钥永久保留验签，退役 ${secret.retiredCount ?? 0} 份）。密钥文件不可读时拒绝签发（fail-closed）。</div>
+      </div>
+      <div class="flex" style="gap:6px;align-items:center">${keyState}<button class="btn btn-sm btn-default" id="az-sl-rotate" ${canWrite ? '' : 'disabled title="需要 nas.authz.write 权限"'}>轮换</button></div>
+    </div>
+    <div class="az-card-sub az-meta">永久链接在权限回收或手动吊销前长期有效；每次取流实时复核签发人数据权限，可在 NAS 文件浏览「链接管理」中吊销。放权动作（开启永久档/调整权限点）经 changeLog 留痕。</div>`
+
+  $('#az-sl-toggle').onclick = async () => {
+    const next = !policy.allowPermanent
+    if (next) {
+      const confirmed = await confirmDialog({
+        title: '开启永久档位', danger: true, confirmText: '确认开启',
+        message: `开启后，持 <code>${esc(policy.permanentPermission)}</code> 的用户可签发<b>永久有效</b>的下载链接（权限回收或吊销前长期可用）。按 A0–A3 阶梯，建议先以关闭态运行观测证据再放开。确认开启？`,
+      })
+      if (!confirmed) return
+    }
+    try {
+      await api.put('/api/nas/authz/share-link-policy', { allowPermanent: next })
+      toast(`永久档已${next ? '开启' : '关闭'}`, 'success')
+      shareLinkPolicy = await api.get('/api/nas/authz/share-link-policy').catch(() => shareLinkPolicy)
+      renderBody()
+    } catch (error) { toast(error.message, 'error') }
+  }
+  $('#az-sl-max').onclick = () => openShareLinkPolicyEditor('maxTtlSec')
+  $('#az-sl-perm').onclick = () => openShareLinkPolicyEditor('permanentPermission')
+  $('#az-sl-rotate').onclick = async () => {
+    const confirmed = await confirmDialog({
+      title: '轮换签名密钥', requireReason: true, danger: true, confirmText: '确认轮换',
+      message: '轮换后新签发的链接用新密钥；<b>旧密钥永久保留验签</b>，已发出的链接不受影响。密钥材料泄露时请轮换，并配合吊销收敛。',
+    })
+    if (!confirmed) return
+    try {
+      const result = await api.post('/api/nas/authz/share-link-secret/rotate', { note: confirmed.reason })
+      toast(`已轮换：新密钥 ${result.keyId}，退役 ${result.retiredCount} 份`)
+      shareLinkPolicy = await api.get('/api/nas/authz/share-link-policy').catch(() => shareLinkPolicy)
+      renderBody()
+    } catch (error) { toast(error.message, 'error') }
+  }
+}
+
+function openShareLinkPolicyEditor(fieldKey) {
+  const policy = shareLinkPolicy
+  const isMax = fieldKey === 'maxTtlSec'
+  const modal = openModal({
+    title: isMax ? '调整有效期上限' : '调整签发资格',
+    body: isMax
+      ? `${field('上限（天）', inputField('value', { value: String(Math.round(policy.maxTtlSec / 86400)) }), { required: true, hint: '签名链接可设置的最长有效期；超过即拒绝签发（不回落）。默认 30 天。' })}`
+      : `${field('权限点', inputField('value', { value: policy.permanentPermission }), { required: true, hint: '可签发永久链接的权限点。默认 nas.authz.write（管理员级）。' })}`,
+    foot: '<button class="btn btn-default" data-cancel>取消</button><button class="btn btn-primary" data-ok>保存</button>',
+  })
+  modal.el.querySelector('[data-cancel]').onclick = () => modal.close()
+  modal.el.querySelector('[data-ok]').onclick = async () => {
+    const raw = collectForm(modal.body).value
+    if (!raw) return toast('请填写值', 'error')
+    try {
+      await api.put('/api/nas/authz/share-link-policy', isMax ? { maxTtlSec: Math.round(Number(raw) * 86400) } : { permanentPermission: String(raw).trim() })
+      toast('已保存')
+      modal.close()
+      shareLinkPolicy = await api.get('/api/nas/authz/share-link-policy').catch(() => shareLinkPolicy)
+      renderBody()
+    } catch (error) { toast(error.message, 'error') }
+  }
 }
 
 // -- 操作矩阵 ---------------------------------------------------------------

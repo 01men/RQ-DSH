@@ -5,8 +5,11 @@ endpoints:
   - GET/POST /api/nas · GET/PATCH/DELETE /api/nas/:id · POST /api/nas/import（mcpServers JSON 一键纳管）
   - POST /api/nas/:id/transition|health|sync-tools
   - GET /api/nas/:id/fs（?path= 子目录定位） · GET /api/nas/:id/fs/info
-  - GET /api/nas/:id/fs/file?path=&inline=（流式文件下载：浏览器拿到 bytes + content-disposition attachment|inline）
-  - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download|upload-many（经网关 fs_* 工具） · POST /api/nas/:id/fs/download-ticket（下载票据：浏览器持票直连网关取流）
+  - GET /api/nas/:id/fs/file?path=&inline=（流式文件下载：Bearer / 一次性票据 ?ticket= / 签名分享链接 ?exp=&sub=&jti=&sig= 三通道，浏览器拿到 bytes + content-disposition attachment|inline）
+  - POST /api/nas/:id/fs/search|mkdir|rename|delete|upload|download|upload-many（经网关 fs_* 工具） · POST /api/nas/:id/fs/download-ticket（下载票据：mode=once 15 秒一次性 | mode=link 10 分钟可复用，遗留通道）
+  - POST /api/nas/:id/fs/share-link（签发签名分享链接，档位 1h、24h 默认、7d、30d、永久；永久须显式传参且需 nas.authz.write 加策略开启，签名用独立长期密钥，取流三关=签名→吊销→权限复核）
+  - GET /api/nas/:id/fs/share-links（签名链接清单，含状态/剩余有效期/使用计数） · POST /api/nas/:id/fs/share-links/:jti/revoke（吊销单条，幂等） · POST /api/nas/:id/fs/share-links/revoke（批量吊销：按签发者 userId / 按 path / all）
+  - GET/PUT /api/nas/authz/share-link-policy（档位策略：maxTtlSec 默认 30 天 / allowPermanent 默认 false / permanentPermission 默认 nas.authz.write） · POST /api/nas/authz/share-link-secret/rotate（独立长期密钥轮换，旧钥永久退役保留验签，已发链接不失效）
   - GET/PUT /api/skill-storage（Skill 包存储后端：local | 已纳管 NAS 资产）
   - GET /api/nas/authz/scope · GET /api/nas/authz/rules · PUT /api/nas/authz/rules · POST /api/nas/authz/rules/import（授权规则面）
   - POST /api/nas/authz/check（单点鉴权自查） · POST /api/nas/authz/exceptions · GET /api/nas/authz/exceptions（例外登记/清单）
