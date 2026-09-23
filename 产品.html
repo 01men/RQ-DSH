@@ -457,6 +457,27 @@ footer{margin-top:88px;padding:52px 0 40px;border-top:1px solid var(--rule);back
   .final .fcmd{font-size:12px;padding:12px 14px}
   footer{margin-top:64px}
 }
+/* ---------- 资产实况 ---------- */
+.alab-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:44px}
+.alab-card{background:var(--surface);border:1px solid var(--rule);border-radius:16px;padding:20px;box-shadow:var(--shadow-card);display:flex;flex-direction:column;gap:12px}
+.alab-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.alab-type{font-size:12px;font-weight:800;letter-spacing:.08em;color:var(--brand)}
+.alab-state{font-size:11px;font-weight:700;border-radius:999px;padding:3px 10px;border:1px solid #bfe3cc;color:#0a7a3d;background:#ecfaf1;white-space:nowrap}
+.alab-state.wait{border-color:#eadfb8;color:#8a6d1a;background:#fdf8e7}
+.alab-card h3{font-size:16.5px;font-weight:800;margin:0}
+.alab-card h3 i{font-style:normal;color:var(--brand)}
+.alab-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.alab-list li{font-size:12.5px;color:var(--text-dim);line-height:1.6;padding-left:14px;position:relative}
+.alab-list li::before{content:"";position:absolute;left:0;top:7px;width:5px;height:5px;border-radius:50%;background:var(--brand)}
+.alab-list li b{color:var(--text);font-weight:700}
+.alab-chains{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:26px}
+.alab-chain{font-size:12px;font-weight:700;color:var(--text);border:1px solid var(--rule-strong);border-radius:999px;padding:6px 14px;background:var(--bg-sunken)}
+.alab-chain i{font-style:normal;color:var(--brand);font-weight:800;margin-right:5px}
+.alab-link{color:var(--brand);font-weight:700;text-decoration:none;border-bottom:1px solid rgba(21,84,232,.35)}
+.alab-link:hover{border-bottom-color:var(--brand)}
+.alab-note{font-size:12px;color:var(--text-dim);text-align:center;margin-top:22px;line-height:1.8;max-width:860px;margin-left:auto;margin-right:auto}
+@media (max-width:960px){.alab-grid{grid-template-columns:repeat(2,1fr)}}
+@media (max-width:620px){.alab-grid{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -477,6 +498,7 @@ footer{margin-top:88px;padding:52px 0 40px;border-top:1px solid var(--rule);back
       <a href="#roles">给谁用</a>
       <a href="#arch">产品架构</a>
       <a href="#scenarios">场景价值</a>
+      <a href="#assets">资产实况</a>
       <a href="#delivery">交付与定价</a>
       <a href="#faq">常见问题</a>
       <a href="#contact">联系</a>
@@ -495,7 +517,7 @@ footer{margin-top:88px;padding:52px 0 40px;border-top:1px solid var(--rule);back
 </div>
 <div class="mobile-menu" id="mobileMenu">
   <a href="#home">首页</a><a href="#why">为什么是现在</a><a href="#roles">给谁用</a><a href="#arch">产品架构</a>
-  <a href="#scenarios">场景价值</a><a href="#delivery">交付与定价</a><a href="#faq">常见问题</a><a href="#contact">联系</a>
+  <a href="#scenarios">场景价值</a><a href="#assets">资产实况</a><a href="#delivery">交付与定价</a><a href="#faq">常见问题</a><a href="#contact">联系</a>
   <a href="https://github.com/01men/RQ-DSH" target="_blank" rel="noopener">GitHub</a>
 </div>
 
@@ -753,11 +775,91 @@ footer{margin-top:88px;padding:52px 0 40px;border-top:1px solid var(--rule);back
   </div>
 </section>
 
-<!-- ================= 03 · 交付与定价 ================= -->
+<!-- ================= 03 · 资产实况 ================= -->
+<section class="sec" id="assets">
+  <div class="wrap">
+    <div class="sec-head center" data-reveal>
+      <div class="kicker">03 · 资产实况</div>
+      <h2>28 项企业场景资产，演示环境在线可查</h2>
+      <p class="lead">对标企业数智化「十大价值链」与制造业 AI 四类资产（数据 / 模型 / 工具 / 协作），全部经平台正规流程登记——审批、上架、上线全链路留痕。<a class="alab-link" href="http://mdzx.fun:8801/" target="_blank" rel="noopener">打开演示环境逐项查验 →</a></p>
+    </div>
+    <div class="alab-grid">
+      <div class="alab-card" data-reveal>
+        <div class="alab-top"><span class="alab-type">工具资产 · MCP 服务</span><span class="alab-state">10 项在线</span></div>
+        <h3>十大价值链<i>工具集</i></h3>
+        <ul class="alab-list">
+          <li><b>S2P 采购</b> / L2C 营销 / HRM 人力 / EAM 设备 / P2M 生产各一套工具服务</li>
+          <li><b>P2C 项目</b> / R2R 财务 / TES 费控 / TRM 资金 / CLM 合同，共 30 个只读工具</li>
+          <li>验证 → 灰度部署上线，权限组统一授权给场景 Agent</li>
+        </ul>
+      </div>
+      <div class="alab-card" data-reveal>
+        <div class="alab-top"><span class="alab-type">技能资产 · Skill 市场</span><span class="alab-state">6 项已上架</span></div>
+        <h3>一线岗位<i>即用技能</i></h3>
+        <ul class="alab-list">
+          <li><b>供应商比价分析报告</b> · <b>客户线索评分与跟进话术</b></li>
+          <li><b>设备故障诊断问答</b> · <b>质检缺陷判定助手</b></li>
+          <li><b>费用单据合规审查</b> · <b>合同风险条款审查</b>——两级审批上架，静态扫描把关</li>
+        </ul>
+      </div>
+      <div class="alab-card" data-reveal>
+        <div class="alab-top"><span class="alab-type">协作资产 · Agent</span><span class="alab-state">5 项在线</span></div>
+        <h3>部门级<i>数字员工</i></h3>
+        <ul class="alab-list">
+          <li><b>采购管家</b> · <b>营销获客助手</b> · <b>设备运维专员</b></li>
+          <li><b>经营分析顾问</b> · <b>员工服务管家</b></li>
+          <li>机器凭证 + 免登通道，L4 上线审批单逐张可查</li>
+        </ul>
+      </div>
+      <div class="alab-card" data-reveal>
+        <div class="alab-top"><span class="alab-type">协作资产 · AI 应用</span><span class="alab-state">4 项在线</span></div>
+        <h3>场景<i>应用门户</i></h3>
+        <ul class="alab-list">
+          <li><b>智慧采购工作台</b> · <b>设备健康驾驶舱</b></li>
+          <li><b>经营数据看板</b> · <b>员工自助服务</b></li>
+          <li>SSO 门禁签发 OIDC 客户端，编排对应 Agent 与渠道发布</li>
+        </ul>
+      </div>
+      <div class="alab-card" data-reveal>
+        <div class="alab-top"><span class="alab-type">模型资产 · 模型路由</span><span class="alab-state wait">2 项待接入</span></div>
+        <h3>统一<i>模型底座</i></h3>
+        <ul class="alab-list">
+          <li><b>DeepSeek-V3 通用推理</b>：经营问答、报告生成、多轮对话底座</li>
+          <li><b>Qwen2.5-VL 视觉质检</b>：外观缺陷检测、表计读数</li>
+          <li>登记在册、诚实标注「待接入」——不伪装可调用</li>
+        </ul>
+      </div>
+      <div class="alab-card" data-reveal>
+        <div class="alab-top"><span class="alab-type">数据资产 · NAS 存储</span><span class="alab-state wait">1 项待接入</span></div>
+        <h3>制造知识库<i>文档网关</i></h3>
+        <ul class="alab-list">
+          <li>维修手册 / 工艺文档 / 质量标准 / 制度文件统一存储</li>
+          <li>RBAC 数据权限：默认拒绝、按真实身份记账</li>
+          <li>补全真实网关接入信息后探活上线</li>
+        </ul>
+      </div>
+    </div>
+    <div class="alab-chains" data-reveal>
+      <span class="alab-chain"><i>S2P</i>采购寻源到付款</span>
+      <span class="alab-chain"><i>L2C</i>营销线索到收款</span>
+      <span class="alab-chain"><i>HRM</i>人力资源全周期</span>
+      <span class="alab-chain"><i>EAM</i>设备资产全流程</span>
+      <span class="alab-chain"><i>P2M</i>生产计划到成本</span>
+      <span class="alab-chain"><i>P2C</i>项目管理到成本</span>
+      <span class="alab-chain"><i>R2R</i>财务核算到报告</span>
+      <span class="alab-chain"><i>TES</i>商旅费控到共享</span>
+      <span class="alab-chain"><i>TRM</i>资金流动性管理</span>
+      <span class="alab-chain"><i>CLM</i>合同全生命周期</span>
+    </div>
+    <p class="alab-note" data-reveal>口径说明：以上为演示环境实况快照（2026-09-23 登记，非任何客户数据）。MCP 服务采用演示传输层（不伪装真实可调用）；模型与 NAS 诚实标注「待接入」，接入即转在线。价值链口径参考用友 BIP 场景图谱，四类 AI 资产口径参考制造业 AI 落地方法论。</p>
+  </div>
+</section>
+
+<!-- ================= 04 · 交付与定价 ================= -->
 <section class="sec" id="delivery">
   <div class="wrap">
     <div class="sec-head center" data-reveal>
-      <div class="kicker">03 · 交付与定价</div>
+      <div class="kicker">04 · 交付与定价</div>
       <h2>半天上线，按用到的部分付费</h2>
       <p class="lead">不接超过两周的定制——产品化的意思就是：今天签约，明天它就在你的钉钉里干活。</p>
     </div>
